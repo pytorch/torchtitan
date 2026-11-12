@@ -1,0 +1,613 @@
+{
+ "models": {
+  "llama3_8b": {
+   "num_opportunities": 33,
+   "num_real": 32,
+   "num_not_real": 1,
+   "recall": {
+    "total_real_saving_ms": 118.06,
+    "num_real": 32,
+    "eager": 0.954,
+    "graph": 0.9463
+   },
+   "recall_excl_t3": {
+    "total_real_saving_ms": 90.34,
+    "num_real": 20,
+    "eager": 0.988,
+    "graph": 0.942
+   },
+   "recall_excl_comm": {
+    "total_real_saving_ms": 84.61,
+    "num_real": 24,
+    "eager": 0.9358,
+    "graph": 0.9756
+   },
+   "recall_excl_t3_comm": {
+    "total_real_saving_ms": 56.88,
+    "num_real": 12,
+    "eager": 0.9809,
+    "graph": 0.9831
+   },
+   "eager": {
+    "num_cards": 27,
+    "cards_in_real_share": 1.0,
+    "claimed_gap_ms": 203.37,
+    "covered_real_saving_ms": 112.63,
+    "covered_over_claimed": 0.5538
+   },
+   "graph": {
+    "num_cards": 28,
+    "cards_in_real_share": 0.9643,
+    "claimed_gap_ms": 224.76,
+    "covered_real_saving_ms": 111.72,
+    "covered_over_claimed": 0.497
+   },
+   "unique": {
+    "eager": {
+     "count": 5,
+     "saving_ms": 6.11,
+     "items": [
+      {
+       "id": "O-31",
+       "title": "FSDP all-gather copy-out for the backward re-gather: unpack + w13 re-layout in one pass",
+       "category": "communication-glue",
+       "tier": "T2",
+       "saving_ms": 2.4796,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-12",
+       "title": "Attention-backward preprocess (rowsum dO*O, zero-fills) folded into the wo dgrad GEMM epilogue",
+       "category": "attention-glue",
+       "tier": "T3",
+       "saving_ms": 1.1044,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-28",
+       "title": "FSDP all-gather copy-in for the backward re-gather: cast + copy in one pass",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 1.0423,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-29",
+       "title": "Reuse the forward's bf16 all-gather input for the backward re-gather (no second cast)",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 0.7563,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-33",
+       "title": "Varlen attention metadata (cu_seqlens) built from positions in one kernel",
+       "category": "attention-glue",
+       "tier": "T2",
+       "saving_ms": 0.7234,
+       "coverage_graph": 0.0
+      }
+     ]
+    },
+    "graph": {
+     "count": 1,
+     "saving_ms": 4.34,
+     "items": [
+      {
+       "id": "O-32",
+       "title": "Weight unpack folded into GEMM operand loads (GEMMs read the rank-chunked gather buffer)",
+       "category": "gemm-adjacent",
+       "tier": "T3",
+       "saving_ms": 4.3431,
+       "coverage_eager": 0.0
+      }
+     ]
+    }
+   },
+   "by_category_ms": {
+    "activation": {
+     "saving_ms": 35.83,
+     "eager": 34.75,
+     "graph": 35.83
+    },
+    "communication-glue": {
+     "saving_ms": 33.45,
+     "eager": 33.45,
+     "graph": 29.18
+    },
+    "gemm-adjacent": {
+     "saving_ms": 23.57,
+     "eager": 19.22,
+     "graph": 23.57
+    },
+    "rope": {
+     "saving_ms": 9.52,
+     "eager": 9.52,
+     "graph": 9.28
+    },
+    "loss": {
+     "saving_ms": 8.33,
+     "eager": 8.33,
+     "graph": 8.33
+    },
+    "attention-glue": {
+     "saving_ms": 4.23,
+     "eager": 4.23,
+     "graph": 2.4
+    },
+    "norm": {
+     "saving_ms": 3.13,
+     "eager": 3.13,
+     "graph": 3.13
+    }
+   }
+  },
+  "qwen3_30b": {
+   "num_opportunities": 41,
+   "num_real": 38,
+   "num_not_real": 3,
+   "recall": {
+    "total_real_saving_ms": 369.06,
+    "num_real": 38,
+    "eager": 0.9922,
+    "graph": 0.9021
+   },
+   "recall_excl_t3": {
+    "total_real_saving_ms": 340.2,
+    "num_real": 30,
+    "eager": 0.9917,
+    "graph": 0.9509
+   },
+   "recall_excl_comm": {
+    "total_real_saving_ms": 361.09,
+    "num_real": 34,
+    "eager": 0.9968,
+    "graph": 0.9023
+   },
+   "recall_excl_t3_comm": {
+    "total_real_saving_ms": 332.23,
+    "num_real": 26,
+    "eager": 0.9967,
+    "graph": 0.9523
+   },
+   "eager": {
+    "num_cards": 34,
+    "cards_in_real_share": 0.9706,
+    "claimed_gap_ms": 749.26,
+    "covered_real_saving_ms": 366.2,
+    "covered_over_claimed": 0.4887
+   },
+   "graph": {
+    "num_cards": 21,
+    "cards_in_real_share": 1.0,
+    "claimed_gap_ms": 329.59,
+    "covered_real_saving_ms": 332.94,
+    "covered_over_claimed": 1.0102
+   },
+   "unique": {
+    "eager": {
+     "count": 7,
+     "saving_ms": 39.4,
+     "items": [
+      {
+       "id": "O-32",
+       "title": "Expert weight prep per unshard: fp32->bf16 cast, size-1 group copy-in/out, MXFP8 32x32 quantize, operand copies -> one kernel",
+       "category": "weight-prep",
+       "tier": "T1",
+       "saving_ms": 14.415,
+       "coverage_graph": 0.24
+      },
+      {
+       "id": "O-10",
+       "title": "wo dgrad GEMM epilogue computes the FA backward preprocess rowsum(dO*O) and issues the accumulator zero-fills",
+       "category": "attention-glue",
+       "tier": "T3",
+       "saving_ms": 9.955,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-33",
+       "title": "Per-layer dense-parameter FSDP unshard glue + wqkv/wo MXFP8 32x32 weight quantize (forward and backward re-unshard)",
+       "category": "weight-prep",
+       "tier": "T1",
+       "saving_ms": 4.721,
+       "coverage_graph": 0.4
+      },
+      {
+       "id": "O-09",
+       "title": "Fold the flash-attention backward postprocess (fp32 dq/dk/dv accumulators -> bf16) into the glue kernel",
+       "category": "attention-glue",
+       "tier": "T3",
+       "saving_ms": 4.484,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-04",
+       "title": "wqkv MXFP8 GEMM epilogue emits normalized, rotated q/k and contiguous v (qkv never materialized)",
+       "category": "gemm-adjacent",
+       "tier": "T3",
+       "saving_ms": 3.66,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-34",
+       "title": "Root FSDP groups (tok_embeddings, norm+lm_head): unshard copy-in/copy-out and reduce-scatter pack + post-RS fp32 cast",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 1.233,
+       "coverage_graph": 0.3
+      },
+      {
+       "id": "O-14",
+       "title": "Residual add in the wo MXFP8 GEMM epilogue (increment over O-13)",
+       "category": "gemm-adjacent",
+       "tier": "T3",
+       "saving_ms": 0.931,
+       "coverage_graph": 0.0
+      }
+     ]
+    },
+    "graph": {
+     "count": 6,
+     "saving_ms": 3.48,
+     "items": [
+      {
+       "id": "O-35",
+       "title": "Per-layer dense-parameter reduce-scatter glue: bucket pack + post-RS fp32 casts (7 per layer) + param.grad clones",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 1.983,
+       "coverage_eager": 0.3
+      },
+      {
+       "id": "O-23",
+       "title": "Fuse attention_norm backward + residual add into the next MoE's broadcast-and-scale (dy not re-read)",
+       "category": "moe-dispatch-combine",
+       "tier": "T1",
+       "saving_ms": 0.858,
+       "coverage_eager": 0.0
+      },
+      {
+       "id": "O-37",
+       "title": "LM-head weight-grad post-RS fp32 cast fused with the chunk accumulation",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 0.311,
+       "coverage_eager": 0.0
+      },
+      {
+       "id": "O-28",
+       "title": "Fuse the router backward with the hi/mid/lo split (fp32 gate gradient never reaches HBM)",
+       "category": "router",
+       "tier": "T1",
+       "saving_ms": 0.233,
+       "coverage_eager": 0.0
+      },
+      {
+       "id": "O-40",
+       "title": "LM-head dgrad written directly into the hidden-gradient slices (drop zero-fill + 8 copies)",
+       "category": "gemm-adjacent",
+       "tier": "T3",
+       "saving_ms": 0.078,
+       "coverage_eager": 0.3
+      },
+      {
+       "id": "O-20",
+       "title": "Embedding gather fused into layer-0 attention_norm + quantize (increment over O-17)",
+       "category": "norm",
+       "tier": "T1",
+       "saving_ms": 0.019,
+       "coverage_eager": 0.0
+      }
+     ]
+    }
+   },
+   "by_category_ms": {
+    "rope": {
+     "saving_ms": 196.49,
+     "eager": 196.49,
+     "graph": 196.49
+    },
+    "attention-glue": {
+     "saving_ms": 34.17,
+     "eager": 34.17,
+     "graph": 19.73
+    },
+    "loss": {
+     "saving_ms": 32.39,
+     "eager": 32.39,
+     "graph": 32.39
+    },
+    "router": {
+     "saving_ms": 29.5,
+     "eager": 29.27,
+     "graph": 29.5
+    },
+    "moe-dispatch-combine": {
+     "saving_ms": 20.91,
+     "eager": 20.05,
+     "graph": 18.86
+    },
+    "weight-prep": {
+     "saving_ms": 19.14,
+     "eager": 19.14,
+     "graph": 5.35
+    },
+    "quantization": {
+     "saving_ms": 12.28,
+     "eager": 12.28,
+     "graph": 12.28
+    },
+    "gemm-adjacent": {
+     "saving_ms": 8.46,
+     "eager": 8.41,
+     "graph": 3.49
+    },
+    "communication-glue": {
+     "saving_ms": 7.97,
+     "eager": 6.27,
+     "graph": 7.11
+    },
+    "norm": {
+     "saving_ms": 7.34,
+     "eager": 7.32,
+     "graph": 7.32
+    },
+    "other": {
+     "saving_ms": 0.42,
+     "eager": 0.42,
+     "graph": 0.42
+    }
+   }
+  },
+  "dsv3": {
+   "num_opportunities": 47,
+   "num_real": 47,
+   "num_not_real": 0,
+   "recall": {
+    "total_real_saving_ms": 218.93,
+    "num_real": 47,
+    "eager": 0.9082,
+    "graph": 0.7166
+   },
+   "recall_excl_t3": {
+    "total_real_saving_ms": 185.45,
+    "num_real": 37,
+    "eager": 0.9604,
+    "graph": 0.7227
+   },
+   "recall_excl_comm": {
+    "total_real_saving_ms": 181.71,
+    "num_real": 41,
+    "eager": 0.9238,
+    "graph": 0.678
+   },
+   "recall_excl_t3_comm": {
+    "total_real_saving_ms": 148.22,
+    "num_real": 31,
+    "eager": 0.9926,
+    "graph": 0.6769
+   },
+   "eager": {
+    "num_cards": 31,
+    "cards_in_real_share": 1.0,
+    "claimed_gap_ms": 164.46,
+    "covered_real_saving_ms": 198.84,
+    "covered_over_claimed": 1.209
+   },
+   "graph": {
+    "num_cards": 33,
+    "cards_in_real_share": 1.0,
+    "claimed_gap_ms": 149.34,
+    "covered_real_saving_ms": 156.89,
+    "covered_over_claimed": 1.0505
+   },
+   "unique": {
+    "eager": {
+     "count": 9,
+     "saving_ms": 62.51,
+     "items": [
+      {
+       "id": "O-45",
+       "title": "Quantize straight into the persistent MXFP8 operand storage (drop the temp -> persistent copy_ and the dim-1 clone)",
+       "category": "weight-prep",
+       "tier": "T0",
+       "saving_ms": 23.651,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-44",
+       "title": "FSDP backward re-unshard copy-out fused with MXFP8 weight quantization",
+       "category": "weight-prep",
+       "tier": "T1",
+       "saving_ms": 22.881,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-30",
+       "title": "Routed-expert backward broadcast_and_scale folded into the expert GEMMs (no [T,K,D] dx materialisation)",
+       "category": "moe-dispatch-combine",
+       "tier": "T3",
+       "saving_ms": 8.718,
+       "coverage_graph": 0.15
+      },
+      {
+       "id": "O-42",
+       "title": "FSDP backward re-unshard all-gather copy-in (same cast + pack)",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 2.549,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-18",
+       "title": "Dist-MoE grouped-GEMM prepare kernels folded into the GEMM prologue",
+       "category": "gemm-adjacent",
+       "tier": "T3",
+       "saving_ms": 2.033,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-10",
+       "title": "Flash-attention forward epilogue writes the MXFP8 copy of O (removes the O re-read)",
+       "category": "attention-glue",
+       "tier": "T3",
+       "saving_ms": 1.183,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-40",
+       "title": "tok_embeddings lookup from the all-gather buffer (skip the full-table copy-out)",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 0.547,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-03",
+       "title": "Cross: MoE combine/residual kernel also does the next block's RMSNorm (residual stream not re-read)",
+       "category": "residual",
+       "tier": "T1",
+       "saving_ms": 0.492,
+       "coverage_graph": 0.0
+      },
+      {
+       "id": "O-13",
+       "title": "RoPE position bound check done once per step instead of per layer",
+       "category": "rope",
+       "tier": "T0",
+       "saving_ms": 0.458,
+       "coverage_graph": 0.0
+      }
+     ]
+    },
+    "graph": {
+     "count": 5,
+     "saving_ms": 19.66,
+     "items": [
+      {
+       "id": "O-31",
+       "title": "Flash-attention backward preprocess (rowsum(dO*O), dQaccum zero) in the wo dgrad GEMM epilogue",
+       "category": "attention-glue",
+       "tier": "T3",
+       "saving_ms": 6.644,
+       "coverage_eager": 0.0
+      },
+      {
+       "id": "O-47",
+       "title": "Reduce-scatter output cast to fp32 written directly into param.grad (no per-parameter casts + clone)",
+       "category": "communication-glue",
+       "tier": "T0",
+       "saving_ms": 6.248,
+       "coverage_eager": 0.0
+      },
+      {
+       "id": "O-33",
+       "title": "Cross: produce wq_b's MXFP8 dY straight from flash-attention's fp32 dQ accumulator (replaces the dQ postprocess)",
+       "category": "attention-glue",
+       "tier": "T3",
+       "saving_ms": 4.604,
+       "coverage_eager": 0.0
+      },
+      {
+       "id": "O-26",
+       "title": "Router gate weight-gradient: three wgrad GEMMs accumulated in one GEMM, no stacked-weight copy",
+       "category": "gemm-adjacent",
+       "tier": "T3",
+       "saving_ms": 2.01,
+       "coverage_eager": 0.25
+      },
+      {
+       "id": "O-23",
+       "title": "Cross-entropy forward and backward in a single pass over the logits",
+       "category": "loss",
+       "tier": "T1",
+       "saving_ms": 0.153,
+       "coverage_eager": 0.0
+      }
+     ]
+    }
+   },
+   "by_category_ms": {
+    "weight-prep": {
+     "saving_ms": 70.24,
+     "eager": 70.24,
+     "graph": 23.71
+    },
+    "communication-glue": {
+     "saving_ms": 37.22,
+     "eager": 30.98,
+     "graph": 33.69
+    },
+    "router": {
+     "saving_ms": 30.2,
+     "eager": 30.2,
+     "graph": 30.2
+    },
+    "attention-glue": {
+     "saving_ms": 18.94,
+     "eager": 7.69,
+     "graph": 17.76
+    },
+    "norm": {
+     "saving_ms": 17.45,
+     "eager": 17.45,
+     "graph": 17.45
+    },
+    "moe-dispatch-combine": {
+     "saving_ms": 15.94,
+     "eager": 15.0,
+     "graph": 8.14
+    },
+    "rope": {
+     "saving_ms": 8.94,
+     "eager": 8.94,
+     "graph": 8.48
+    },
+    "quantization": {
+     "saving_ms": 6.67,
+     "eager": 6.67,
+     "graph": 6.64
+    },
+    "gemm-adjacent": {
+     "saving_ms": 4.04,
+     "eager": 2.54,
+     "graph": 2.01
+    },
+    "loss": {
+     "saving_ms": 3.88,
+     "eager": 3.73,
+     "graph": 3.88
+    },
+    "activation": {
+     "saving_ms": 2.43,
+     "eager": 2.43,
+     "graph": 2.43
+    },
+    "horizontal": {
+     "saving_ms": 2.21,
+     "eager": 2.21,
+     "graph": 2.21
+    },
+    "residual": {
+     "saving_ms": 0.49,
+     "eager": 0.49,
+     "graph": 0.0
+    },
+    "other": {
+     "saving_ms": 0.28,
+     "eager": 0.28,
+     "graph": 0.28
+    }
+   }
+  }
+ },
+ "decision": {
+  "recall_excl_t3_diff_graph_minus_eager": {
+   "llama3_8b": -0.04600000000000004,
+   "qwen3_30b": -0.04080000000000006,
+   "dsv3": -0.23770000000000002
+  },
+  "call": "inconclusive"
+ }
+}

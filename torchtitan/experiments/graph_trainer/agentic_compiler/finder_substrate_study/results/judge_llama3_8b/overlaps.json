@@ -1,0 +1,997 @@
+[
+ {
+  "cards": [
+   "C-5925",
+   "C-4671"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.w13/mm",
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-5925",
+   "C-8256"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-5925",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-5925",
+   "C-7770"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-5925",
+   "C-9122"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-9878",
+   "C-6419"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.wo/mm",
+   "forward/layers.*.feed_forward.w2/mm",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9878",
+   "C-7074"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9878",
+   "C-4343"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9878",
+   "C-8256"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-9878",
+   "C-6623"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9878",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7435",
+   "C-2844"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-7435",
+   "C-6148"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/cat",
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-7435",
+   "C-6097"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-7435",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-5114"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-9181"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-2535"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-9529"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-2562"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-5602"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-6083"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone"
+  ]
+ },
+ {
+  "cards": [
+   "C-3937",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone",
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-3593",
+   "C-7034"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention_norm/_fused_rms_norm_backward",
+   "backward/layers.*.ffn_norm/_fused_rms_norm_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-3808",
+   "C-2560"
+  ],
+  "shared_keys": [
+   "backward/lm_head/_chunk_cat",
+   "backward/lm_head/addmm"
+  ]
+ },
+ {
+  "cards": [
+   "C-3808",
+   "C-5541"
+  ],
+  "shared_keys": [
+   "backward/lm_head/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-3808",
+   "C-6983"
+  ],
+  "shared_keys": [
+   "backward/lm_head/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-3808",
+   "C-8340"
+  ],
+  "shared_keys": [
+   "backward/lm_head/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-5114",
+   "C-9393"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.inner_attention/torch_attn._varlen_attn_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-5114",
+   "C-2535"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear/cat",
+   "backward/layers.*.attention.rope/_to_copy",
+   "backward/layers.*.attention.rope/clone",
+   "backward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-5114",
+   "C-6083"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear/cat",
+   "backward/layers.*.attention.rope/_to_copy",
+   "backward/layers.*.attention.rope/clone",
+   "backward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-5114",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone"
+  ]
+ },
+ {
+  "cards": [
+   "C-6658",
+   "C-8884"
+  ],
+  "shared_keys": [
+   "backward/layers.*/_foreach_copy_",
+   "forward/layers.*/_foreach_copy_"
+  ]
+ },
+ {
+  "cards": [
+   "C-9181",
+   "C-9529"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear/clone",
+   "forward/layers.*.attention.rope/_to_copy",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-9181",
+   "C-2562"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear/clone",
+   "forward/layers.*.attention.rope/_to_copy",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-9181",
+   "C-5602"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear/clone",
+   "forward/layers.*.attention.rope/_to_copy",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-9181",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-2595",
+   "C-8340"
+  ],
+  "shared_keys": [
+   "backward/loss/_log_softmax_backward_data",
+   "backward/loss/_to_copy",
+   "backward/loss/div",
+   "backward/loss/nll_loss_backward",
+   "forward/loss/_log_softmax",
+   "forward/loss/_to_copy",
+   "forward/loss/add",
+   "forward/loss/clone",
+   "forward/loss/div",
+   "forward/loss/new_zeros",
+   "forward/loss/nll_loss_forward",
+   "forward/loss/ones_like"
+  ]
+ },
+ {
+  "cards": [
+   "C-2844",
+   "C-6148"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-2844",
+   "C-6097"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward",
+   "backward/layers.*.feed_forward/stack"
+  ]
+ },
+ {
+  "cards": [
+   "C-2844",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward",
+   "backward/layers.*.feed_forward/stack"
+  ]
+ },
+ {
+  "cards": [
+   "C-4671",
+   "C-8256"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-4671",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-4671",
+   "C-7770"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-4671",
+   "C-9122"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-6419",
+   "C-7074"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-6419",
+   "C-4343"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-6419",
+   "C-8256"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-6419",
+   "C-6623"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-6419",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9736",
+   "C-6650"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/split_with_sizes_copy",
+   "forward/layers.*.feed_forward.w13/cat"
+  ]
+ },
+ {
+  "cards": [
+   "C-5259",
+   "C-2399"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention_norm/_fused_rms_norm",
+   "forward/tok_embeddings/embedding"
+  ]
+ },
+ {
+  "cards": [
+   "C-5259",
+   "C-6623"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention_norm/_fused_rms_norm"
+  ]
+ },
+ {
+  "cards": [
+   "C-5259",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention_norm/_fused_rms_norm"
+  ]
+ },
+ {
+  "cards": [
+   "C-6957",
+   "C-5541"
+  ],
+  "shared_keys": [
+   "backward//_log_softmax_backward_data",
+   "backward//_to_copy",
+   "backward//div",
+   "backward//nll_loss_backward",
+   "backward//zero_",
+   "forward//_log_softmax",
+   "forward//_to_copy",
+   "forward//add",
+   "forward//div",
+   "forward//new_zeros",
+   "forward//nll_loss_forward",
+   "forward//ones_like"
+  ]
+ },
+ {
+  "cards": [
+   "C-6957",
+   "C-5810"
+  ],
+  "shared_keys": [
+   "forward//_to_copy"
+  ]
+ },
+ {
+  "cards": [
+   "C-6358",
+   "C-3987"
+  ],
+  "shared_keys": [
+   "backward/norm/_to_copy"
+  ]
+ },
+ {
+  "cards": [
+   "C-2399",
+   "C-6623"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention_norm/_fused_rms_norm"
+  ]
+ },
+ {
+  "cards": [
+   "C-2399",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention_norm/_fused_rms_norm"
+  ]
+ },
+ {
+  "cards": [
+   "C-7074",
+   "C-4343"
+  ],
+  "shared_keys": [
+   "forward/layers.*.ffn_norm/_fused_rms_norm",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7074",
+   "C-6623"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7074",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-6460",
+   "C-7328"
+  ],
+  "shared_keys": [
+   "backward/layers.*/cat"
+  ]
+ },
+ {
+  "cards": [
+   "C-6460",
+   "C-9095"
+  ],
+  "shared_keys": [
+   "backward/layers.*/cat"
+  ]
+ },
+ {
+  "cards": [
+   "C-6148",
+   "C-6097"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.w2/mm",
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-6148",
+   "C-9095"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-6148",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-6148",
+   "C-1135"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-2535",
+   "C-6083"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear/cat",
+   "backward/layers.*.attention.rope/_to_copy",
+   "backward/layers.*.attention.rope/clone",
+   "backward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-2535",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone"
+  ]
+ },
+ {
+  "cards": [
+   "C-6097",
+   "C-9095"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-6097",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward/mul",
+   "backward/layers.*.feed_forward/silu_backward",
+   "backward/layers.*.feed_forward/stack"
+  ]
+ },
+ {
+  "cards": [
+   "C-6097",
+   "C-1135"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-7328",
+   "C-9095"
+  ],
+  "shared_keys": [
+   "backward/layers.*/_chunk_cat",
+   "backward/layers.*/cat"
+  ]
+ },
+ {
+  "cards": [
+   "C-4343",
+   "C-6623"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-4343",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9095",
+   "C-1135"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/mm",
+   "backward/layers.*.attention.wo/mm",
+   "backward/layers.*.feed_forward.w13/mm",
+   "backward/layers.*.feed_forward.w2/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-9055",
+   "C-1135"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/_to_copy",
+   "backward/layers.*.attention.qkv_linear.wqkv/bucketing._pre_bucket_reduce_scatter",
+   "backward/layers.*.attention.wo/_to_copy",
+   "backward/layers.*.attention_norm/_to_copy",
+   "backward/layers.*.feed_forward.w13/_to_copy",
+   "backward/layers.*.feed_forward.w13/cat",
+   "backward/layers.*.feed_forward.w2/_to_copy",
+   "backward/layers.*.ffn_norm/_to_copy"
+  ]
+ },
+ {
+  "cards": [
+   "C-5541",
+   "C-6983"
+  ],
+  "shared_keys": [
+   "backward/lm_head/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-5541",
+   "C-8340"
+  ],
+  "shared_keys": [
+   "backward/lm_head/mm",
+   "forward/lm_head/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-5541",
+   "C-5810"
+  ],
+  "shared_keys": [
+   "forward//_to_copy"
+  ]
+ },
+ {
+  "cards": [
+   "C-8256",
+   "C-9264"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-8256",
+   "C-7770"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-8256",
+   "C-9122"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-3987",
+   "C-7034"
+  ],
+  "shared_keys": [
+   "backward/norm/_fused_rms_norm_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9529",
+   "C-2562"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/mm",
+   "forward/layers.*.attention.qkv_linear/clone",
+   "forward/layers.*.attention.rope/_to_copy",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-9529",
+   "C-5602"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear/clone",
+   "forward/layers.*.attention.rope/_assert_async",
+   "forward/layers.*.attention.rope/_to_copy",
+   "forward/layers.*.attention.rope/all",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/le",
+   "forward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-9529",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/_assert_async",
+   "forward/layers.*.attention.rope/all",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/le"
+  ]
+ },
+ {
+  "cards": [
+   "C-9264",
+   "C-7770"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-9264",
+   "C-9122"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-7174",
+   "C-5781"
+  ],
+  "shared_keys": [
+   "backward/tok_embeddings/embedding_dense_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-2562",
+   "C-5602"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear/clone",
+   "forward/layers.*.attention.rope/_to_copy",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul"
+  ]
+ },
+ {
+  "cards": [
+   "C-2562",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/index"
+  ]
+ },
+ {
+  "cards": [
+   "C-7770",
+   "C-9122"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward/mul",
+   "forward/layers.*.feed_forward/silu"
+  ]
+ },
+ {
+  "cards": [
+   "C-6983",
+   "C-8340"
+  ],
+  "shared_keys": [
+   "backward/lm_head/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-5602",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/_assert_async",
+   "forward/layers.*.attention.rope/all",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/le"
+  ]
+ },
+ {
+  "cards": [
+   "C-6623",
+   "C-6438"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention_norm/_fused_rms_norm",
+   "forward/layers.*/add",
+   "forward/norm/_fused_rms_norm"
+  ]
+ },
+ {
+  "cards": [
+   "C-6083",
+   "C-6152"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/clone"
+  ]
+ }
+]

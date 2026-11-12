@@ -1,0 +1,19 @@
+{
+ "gpu": "NVIDIA GB300",
+ "torch": "2.16.0a0+git3c53c6f",
+ "hbm_copy_gbps": 6921.257833704666,
+ "hbm_read_gbps": 6262.825230519291,
+ "bf16_gemm_tflops": {
+  "8192x7168x7168": 1929.535827814471,
+  "16384x4096x4096": 1922.8211828781261,
+  "32768x2048x7168": 1817.0108552588285
+ },
+ "bf16_gemm_tflops_max": 1929.535827814471,
+ "mxfp8_gemm_tflops": {
+  "8192x7168x7168": 3615.3916130837497,
+  "16384x4096x4096": 3542.182631415772,
+  "32768x2048x7168": 3344.38723482103
+ },
+ "mxfp8_gemm_tflops_max": 3615.3916130837497,
+ "note": "Random-data rates. Ideal time = max(bytes / hbm_copy_gbps, flops / GEMM peak). Low-entropy data (fake-PG runs) can make GEMMs faster than these peaks."
+}

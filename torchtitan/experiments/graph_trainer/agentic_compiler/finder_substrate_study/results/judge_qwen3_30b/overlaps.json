@@ -1,0 +1,1098 @@
+[
+ {
+  "cards": [
+   "C-2144",
+   "C-5618"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/mul",
+   "backward/layers.*.attention.rope/neg",
+   "backward/layers.*.attention.rope/slice_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-2144",
+   "C-7296"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.rope/add_",
+   "backward/layers.*.attention.rope/mul",
+   "backward/layers.*.attention.rope/neg",
+   "backward/layers.*.attention.rope/slice_backward",
+   "backward/layers.*.attention.rope/to"
+  ]
+ },
+ {
+  "cards": [
+   "C-8290",
+   "C-8332"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.triton_mx_block_rearrange",
+   "forward/layers.*.attention_norm/_fused_rms_norm"
+  ]
+ },
+ {
+  "cards": [
+   "C-8290",
+   "C-9374"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-8290",
+   "C-4533"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-7541",
+   "C-6450"
+  ],
+  "shared_keys": [
+   "backward//clone"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-9827"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-4698"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.wo/torchao.mxfp8_quantize",
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward",
+   "backward/layers.*.ffn_norm/_fused_rms_norm_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-1212"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-2351"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward",
+   "backward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-3845"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.wo/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-7359"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.wo/torchao.mxfp8_quantize",
+   "backward/layers.*.attention.wo/torchao.triton_mx_block_rearrange"
+  ]
+ },
+ {
+  "cards": [
+   "C-1422",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9827",
+   "C-4698"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9827",
+   "C-1212"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9827",
+   "C-2351"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9827",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1552",
+   "C-8332"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1552",
+   "C-7280"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1552",
+   "C-9374"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1552",
+   "C-5765"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1552",
+   "C-9922"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1552",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-4953",
+   "C-1835"
+  ],
+  "shared_keys": [
+   "backward/loss/_to_copy"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-3331"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-3721"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-1212"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-2351"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-8981"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-4174"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-3845"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.wo/torchao.mxfp8_quantize",
+   "backward/layers.*.attention.wo/triton.triton_scale_swizzle"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-7359"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.wo/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-4698",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-7280"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-9374"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-9768"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-5765"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-9922"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-4533"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-8332",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-3331",
+   "C-3721"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-3331",
+   "C-5560"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/__lshift__",
+   "backward/layers.*.feed_forward.router.gate/cat",
+   "backward/layers.*.feed_forward.router.gate/sub"
+  ]
+ },
+ {
+  "cards": [
+   "C-3331",
+   "C-8981"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-3331",
+   "C-4174"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_",
+   "backward/layers.*.feed_forward.router.gate/to"
+  ]
+ },
+ {
+  "cards": [
+   "C-3721",
+   "C-8981"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-3721",
+   "C-4174"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_",
+   "backward/layers.*.feed_forward.router.gate/mm"
+  ]
+ },
+ {
+  "cards": [
+   "C-5490",
+   "C-9447"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.wo/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-7500",
+   "C-3653"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/masked_fill",
+   "forward/layers.*.feed_forward.router.aux_loss/add_",
+   "forward/layers.*.feed_forward.router.aux_loss/bitwise_not",
+   "forward/layers.*.feed_forward.router.aux_loss/clamp_min",
+   "forward/layers.*.feed_forward.router.aux_loss/clone",
+   "forward/layers.*.feed_forward.router.aux_loss/div",
+   "forward/layers.*.feed_forward.router.aux_loss/linalg_vector_norm",
+   "forward/layers.*.feed_forward.router.aux_loss/mul",
+   "forward/layers.*.feed_forward.router.aux_loss/reciprocal",
+   "forward/layers.*.feed_forward.router.aux_loss/sum",
+   "forward/layers.*.feed_forward.router/add",
+   "forward/layers.*.feed_forward.router/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-7500",
+   "C-3535"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.router.aux_loss/add_",
+   "forward/layers.*.feed_forward.router.aux_loss/bitwise_not",
+   "forward/layers.*.feed_forward.router.aux_loss/clamp_min",
+   "forward/layers.*.feed_forward.router.aux_loss/clone",
+   "forward/layers.*.feed_forward.router.aux_loss/div",
+   "forward/layers.*.feed_forward.router.aux_loss/linalg_vector_norm",
+   "forward/layers.*.feed_forward.router.aux_loss/mul",
+   "forward/layers.*.feed_forward.router.aux_loss/reciprocal",
+   "forward/layers.*.feed_forward.router.aux_loss/sum",
+   "forward/layers.*.feed_forward.router.aux_loss/to"
+  ]
+ },
+ {
+  "cards": [
+   "C-2902",
+   "C-3972"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/_assert_async",
+   "forward/layers.*.attention.rope/add",
+   "forward/layers.*.attention.rope/all",
+   "forward/layers.*.attention.rope/cat",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/le",
+   "forward/layers.*.attention.rope/mul",
+   "forward/layers.*.attention.rope/neg",
+   "forward/layers.*.attention.rope/to",
+   "forward/layers.*.attention.rope/type_as"
+  ]
+ },
+ {
+  "cards": [
+   "C-2902",
+   "C-4735"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/_assert_async",
+   "forward/layers.*.attention.rope/add",
+   "forward/layers.*.attention.rope/all",
+   "forward/layers.*.attention.rope/cat",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/le",
+   "forward/layers.*.attention.rope/mul",
+   "forward/layers.*.attention.rope/neg",
+   "forward/layers.*.attention.rope/to",
+   "forward/layers.*.attention.rope/type_as"
+  ]
+ },
+ {
+  "cards": [
+   "C-2902",
+   "C-1704"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/add",
+   "forward/layers.*.attention.rope/cat",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul",
+   "forward/layers.*.attention.rope/neg"
+  ]
+ },
+ {
+  "cards": [
+   "C-5560",
+   "C-8981"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/_to_copy"
+  ]
+ },
+ {
+  "cards": [
+   "C-5560",
+   "C-3535"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.aux_loss/div",
+   "backward/layers.*.feed_forward.router.aux_loss/gt",
+   "backward/layers.*.feed_forward.router.aux_loss/mul",
+   "backward/layers.*.feed_forward.router.aux_loss/neg",
+   "backward/layers.*.feed_forward.router.aux_loss/ones_like",
+   "backward/layers.*.feed_forward.router.aux_loss/scalar_tensor",
+   "backward/layers.*.feed_forward.router.aux_loss/sgn",
+   "backward/layers.*.feed_forward.router.aux_loss/sum",
+   "backward/layers.*.feed_forward.router.aux_loss/where"
+  ]
+ },
+ {
+  "cards": [
+   "C-5560",
+   "C-4049"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/masked_fill",
+   "backward/layers.*.feed_forward.router.aux_loss/div",
+   "backward/layers.*.feed_forward.router.aux_loss/gt",
+   "backward/layers.*.feed_forward.router.aux_loss/mul",
+   "backward/layers.*.feed_forward.router.aux_loss/neg",
+   "backward/layers.*.feed_forward.router.aux_loss/ones_like",
+   "backward/layers.*.feed_forward.router.aux_loss/scalar_tensor",
+   "backward/layers.*.feed_forward.router.aux_loss/sgn",
+   "backward/layers.*.feed_forward.router.aux_loss/sum",
+   "backward/layers.*.feed_forward.router.aux_loss/where",
+   "backward/layers.*.feed_forward.router/_softmax_backward_data",
+   "backward/layers.*.feed_forward.router/div"
+  ]
+ },
+ {
+  "cards": [
+   "C-6771",
+   "C-4730"
+  ],
+  "shared_keys": [
+   "backward/layers.*/copy_",
+   "backward/layers.*/to",
+   "forward/layers.*/copy_",
+   "forward/layers.*/to"
+  ]
+ },
+ {
+  "cards": [
+   "C-6771",
+   "C-6432"
+  ],
+  "shared_keys": [
+   "backward/layers.*/copy_",
+   "backward/layers.*/to"
+  ]
+ },
+ {
+  "cards": [
+   "C-1212",
+   "C-2351"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-1212",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-2480",
+   "C-3972"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.k_norm/rms_norm",
+   "forward/layers.*.attention.q_norm/rms_norm",
+   "forward/layers.*.attention.qkv_linear/contiguous",
+   "forward/layers.*.attention.qkv_linear/reshape"
+  ]
+ },
+ {
+  "cards": [
+   "C-2480",
+   "C-4735"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.k_norm/rms_norm",
+   "forward/layers.*.attention.q_norm/rms_norm",
+   "forward/layers.*.attention.qkv_linear/contiguous",
+   "forward/layers.*.attention.qkv_linear/reshape"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-9374"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-9768"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-5765"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-9922"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-4533"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7280",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9374",
+   "C-9768"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9374",
+   "C-5765"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9374",
+   "C-9922"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9374",
+   "C-4533"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "forward/layers.*.attention.qkv_linear.wqkv/triton.triton_scale_swizzle",
+   "forward/layers.*.attention_norm/rms_norm",
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9374",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9374",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-3475",
+   "C-5562"
+  ],
+  "shared_keys": [
+   "backward//_log_softmax_backward_data",
+   "backward//copy_",
+   "backward//div",
+   "backward//nll_loss_backward",
+   "backward//ones_like",
+   "backward//to",
+   "forward//add",
+   "forward//cross_entropy_loss",
+   "forward//div",
+   "forward//new_zeros",
+   "forward//ones_like",
+   "forward//to"
+  ]
+ },
+ {
+  "cards": [
+   "C-5618",
+   "C-7296"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.k_norm/_fused_rms_norm_backward",
+   "backward/layers.*.attention.q_norm/_fused_rms_norm_backward",
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "backward/layers.*.attention.qkv_linear/cat",
+   "backward/layers.*.attention.rope/mul",
+   "backward/layers.*.attention.rope/neg",
+   "backward/layers.*.attention.rope/slice_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-5618",
+   "C-8971"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.k_norm/_fused_rms_norm_backward",
+   "backward/layers.*.attention.q_norm/_fused_rms_norm_backward",
+   "backward/layers.*.attention.qkv_linear/cat"
+  ]
+ },
+ {
+  "cards": [
+   "C-5618",
+   "C-3845"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-5618",
+   "C-7359"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.triton_mx_block_rearrange"
+  ]
+ },
+ {
+  "cards": [
+   "C-3972",
+   "C-4735"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.k_norm/rms_norm",
+   "forward/layers.*.attention.q_norm/rms_norm",
+   "forward/layers.*.attention.qkv_linear/contiguous",
+   "forward/layers.*.attention.qkv_linear/reshape",
+   "forward/layers.*.attention.rope/_assert_async",
+   "forward/layers.*.attention.rope/add",
+   "forward/layers.*.attention.rope/all",
+   "forward/layers.*.attention.rope/cat",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/le",
+   "forward/layers.*.attention.rope/mul",
+   "forward/layers.*.attention.rope/neg"
+  ]
+ },
+ {
+  "cards": [
+   "C-3972",
+   "C-1704"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/add",
+   "forward/layers.*.attention.rope/cat",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul",
+   "forward/layers.*.attention.rope/neg"
+  ]
+ },
+ {
+  "cards": [
+   "C-2351",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "backward/norm/_fused_rms_norm_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-2351",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-2351",
+   "C-3415"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention_norm/_fused_rms_norm_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-9768",
+   "C-5765"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9768",
+   "C-4533"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-9768",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-7967",
+   "C-7296"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.inner_attention/torch_attn._varlen_attn_backward"
+  ]
+ },
+ {
+  "cards": [
+   "C-4730",
+   "C-6432"
+  ],
+  "shared_keys": [
+   "backward/layers.*/copy_",
+   "backward/layers.*/to"
+  ]
+ },
+ {
+  "cards": [
+   "C-8981",
+   "C-4174"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.gate/add_"
+  ]
+ },
+ {
+  "cards": [
+   "C-5765",
+   "C-9922"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-5765",
+   "C-4533"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-5765",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-5765",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-3653",
+   "C-3535"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.router.aux_loss/add_",
+   "forward/layers.*.feed_forward.router.aux_loss/bitwise_not",
+   "forward/layers.*.feed_forward.router.aux_loss/clamp_min",
+   "forward/layers.*.feed_forward.router.aux_loss/clone",
+   "forward/layers.*.feed_forward.router.aux_loss/div",
+   "forward/layers.*.feed_forward.router.aux_loss/linalg_vector_norm",
+   "forward/layers.*.feed_forward.router.aux_loss/mul",
+   "forward/layers.*.feed_forward.router.aux_loss/reciprocal",
+   "forward/layers.*.feed_forward.router.aux_loss/sum"
+  ]
+ },
+ {
+  "cards": [
+   "C-3535",
+   "C-4049"
+  ],
+  "shared_keys": [
+   "backward/layers.*.feed_forward.router.aux_loss/add_",
+   "backward/layers.*.feed_forward.router.aux_loss/div",
+   "backward/layers.*.feed_forward.router.aux_loss/gt",
+   "backward/layers.*.feed_forward.router.aux_loss/mul",
+   "backward/layers.*.feed_forward.router.aux_loss/neg",
+   "backward/layers.*.feed_forward.router.aux_loss/ones_like",
+   "backward/layers.*.feed_forward.router.aux_loss/scalar_tensor",
+   "backward/layers.*.feed_forward.router.aux_loss/sgn",
+   "backward/layers.*.feed_forward.router.aux_loss/sum",
+   "backward/layers.*.feed_forward.router.aux_loss/where"
+  ]
+ },
+ {
+  "cards": [
+   "C-9922",
+   "C-9301"
+  ],
+  "shared_keys": [
+   "forward/layers.*.feed_forward.routed_experts/dist_moe.block_scaled_forward"
+  ]
+ },
+ {
+  "cards": [
+   "C-4735",
+   "C-1704"
+  ],
+  "shared_keys": [
+   "forward/layers.*.attention.rope/add",
+   "forward/layers.*.attention.rope/cat",
+   "forward/layers.*.attention.rope/index",
+   "forward/layers.*.attention.rope/mul",
+   "forward/layers.*.attention.rope/neg"
+  ]
+ },
+ {
+  "cards": [
+   "C-7296",
+   "C-8971"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.k_norm/_fused_rms_norm_backward",
+   "backward/layers.*.attention.q_norm/_fused_rms_norm_backward",
+   "backward/layers.*.attention.qkv_linear/cat"
+  ]
+ },
+ {
+  "cards": [
+   "C-7296",
+   "C-3845"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "backward/layers.*.attention.qkv_linear.wqkv/triton.triton_scale_swizzle"
+  ]
+ },
+ {
+  "cards": [
+   "C-7296",
+   "C-7359"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize"
+  ]
+ },
+ {
+  "cards": [
+   "C-4533",
+   "C-9390"
+  ],
+  "shared_keys": [
+   "forward/layers.*/add"
+  ]
+ },
+ {
+  "cards": [
+   "C-3845",
+   "C-7359"
+  ],
+  "shared_keys": [
+   "backward/layers.*.attention.qkv_linear.wqkv/torchao.mxfp8_quantize",
+   "backward/layers.*.attention.wo/torchao.mxfp8_quantize"
+  ]
+ }
+]

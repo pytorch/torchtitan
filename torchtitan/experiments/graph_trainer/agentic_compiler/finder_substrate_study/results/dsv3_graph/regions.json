@@ -1,0 +1,4155 @@
+{
+ "setup": {
+  "command": "torchtitan_recipes.models.deepseek_v3.deepseek_v3_671b_dist_moe_mxfp8 under GraphTrainer (aot joint fwd+bwd graph, memory_policy='none', regional inductor with no regions, custom codegen), FSDP 256 x EP 64, no PP/TP/CP, 4096 tokens/microbatch, 1 microbatch, deterministic, fake process group (rank 0), profiled step 10 after 3 warmup steps",
+  "gpu": "NVIDIA GB300",
+  "hbm_gbps": 6921.257833704666,
+  "gemm_tflops_used": {
+   "mxfp8": 3615.3916130837497,
+   "bf16": 1929.535827814471
+  }
+ },
+ "step_budget": {
+  "step_gpu_busy_ms": 577.483,
+  "step_gpu_idle_ms": 931980.0,
+  "forward_backward_busy_ms": 540.37,
+  "attributed_pct": 100.0,
+  "by_category_ms": {
+   "gemm": 127.32,
+   "attention": 89.017,
+   "communication": 90.275,
+   "memory_bound_glue": 233.758,
+   "optimizer": 31.767,
+   "other": 5.346
+  },
+  "step_wall_ms": 932557.5,
+  "forward_backward_idle_ms": 931618.2,
+  "attributed_to_graph_node_pct": 99.12
+ },
+ "regions": [
+  {
+   "id": "R-01",
+   "title": "FSDP reduce-scatter copy-in: shard-interleave cat of w13 grads + bucket pack",
+   "description": "Before each layer's gradient reduce-scatter, every weight gradient is chunked along its shard axis and copied into one flat bf16 bucket; the dim-1-sharded w13 gradients ([2, 2048|18432, 7168]) are first re-laid out by a 256-input cat into [512, 8|72, 7168] and then packed again.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "communication-glue",
+    "horizontal"
+   ],
+   "fusion_kind": "multi-tensor copy / layout pack",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "bucketing._pre_bucket_reduce_scatter"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "bucketing._pre_bucket_reduce_scatter"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.shared_experts.w13",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "cat"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.w13",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "cat"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "norm",
+     "layers": "all",
+     "ops": [
+      "bucketing._pre_bucket_reduce_scatter"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "tok_embeddings",
+     "layers": "all",
+     "ops": [
+      "bucketing._pre_bucket_reduce_scatter"
+     ]
+    }
+   ],
+   "source": "torchtitan/experiments/graph_trainer/simple_fsdp.py:366 (Shard redistribute backward, w13 interleave cat); bucketing._pre_bucket_reduce_scatter from joint_transformer_block_bucketing_reordering_pass",
+   "kernels_per_instance": 7.7,
+   "instances_per_step": 63,
+   "shapes_dtypes": "grads bf16 (e.g. wq_b [24576,1536], wo [7168,16384], experts [4,2,2048,7168]+[4,7168,2048]); w13 grad [2,2048,7168]->[512,8,7168] (dense [2,18432,7168]->[512,72,7168]); bucket bf16 [234M] (attn+shared) / [176M] (experts) / [585M] (dense)",
+   "external_bytes_per_instance": 1738218024,
+   "measured_us_per_instance": 641.22,
+   "measured_ms_total": 40.397,
+   "ideal_us_per_instance": 251.14,
+   "ideal_ms_total": 15.822,
+   "gap_ms_total": 24.575,
+   "gap_pct_of_step": 4.26,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "Pure copies into fixed offsets; any order of writes gives identical bytes.",
+   "dataflow": "Each wgrad GEMM output and norm-weight grad is read once by chunk_cat and written once into the reduce-scatter input bucket; the w13 grad is read and rewritten twice (cat, then chunk_cat). A single multi-tensor pack kernel that applies the dim-1 shard interleave while packing reads each grad once and writes the bucket once.",
+   "blockers": "Bucketing pass (bucketing._pre_bucket_reduce_scatter) and DTensor redistribute own the layout; the dim-1 interleave comes from Shard(1) placement of w13. Further step (T3): let wgrad GEMMs write straight into bucket offsets.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "The 256-input CatArrayBatchedCopy is the slowest piece: 184 us (shared w13) and 922 us (dense w13) per layer vs 17/153 us of bytes. [working id C3]"
+  },
+  {
+   "id": "R-02",
+   "title": "FSDP all-gather copy-out fused with MXFP8 weight quantization",
+   "description": "After each layer's parameter all-gather, the gathered bf16 bucket is split into per-parameter bf16 weights (plus a cat for dim-1-sharded w13), and then every linear weight is re-read to produce MXFP8 data and 32x32 block scales (expert weights through a separate quantizer).",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "communication-glue",
+    "cross-module",
+    "horizontal"
+   ],
+   "fusion_kind": "copy-out + quantize (producer-consumer)",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.inner_attention.wkv_b",
+     "layers": "all",
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wo",
+     "layers": "all",
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "split_with_sizes_copy",
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_b",
+     "layers": "all",
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.prepare_mxfp8_weight",
+      "split_with_sizes_copy"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.shared_experts.w13",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "cat",
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.shared_experts.w2",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.w13",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "cat",
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.w2",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "lm_head",
+     "layers": "all",
+     "ops": [
+      "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "norm",
+     "layers": "all",
+     "ops": [
+      "split_with_sizes_copy"
+     ]
+    }
+   ],
+   "source": "simple_fsdp.py:268-366",
+   "kernels_per_instance": 14.4,
+   "instances_per_step": 63,
+   "shapes_dtypes": "gathered bucket bf16 [256, 915520] / [4, 44040192] (experts) / [256, 2284608] (dense); weights e.g. wo [7168,16384], wkv_b [32768,512], experts [4,4096,7168] -> fp8 e4m3 + e8m0 scales",
+   "external_bytes_per_instance": 2119564109,
+   "measured_us_per_instance": 558.79,
+   "measured_ms_total": 35.204,
+   "ideal_us_per_instance": 306.24,
+   "ideal_ms_total": 19.293,
+   "gap_ms_total": 15.911,
+   "gap_pct_of_step": 2.76,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Block amax is a max-reduction (order-insensitive, exact), so a fused kernel can be bitwise identical; layout of the swizzled scales must match.",
+   "dataflow": "split_with_sizes_copy writes every unsharded bf16 weight, which is consumed only by the weight quantizer (except norm weights and the bf16 router gate). Quantizing straight from the gathered buffer removes one bf16 write+read of every weight.",
+   "blockers": "Copy-out belongs to the FSDP bucketing pass; weight quantization belongs to the MXFP8 linear (torchao) and dist_moe.prepare_mxfp8_weight; the gathered layout is shard-major (256 x shard) so the quantizer must read 32x32 tiles across shard boundaries.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-16"
+   ],
+   "notes": "Instances: 61 layers + embedding/norm/lm_head buckets. [working id C2]"
+  },
+  {
+   "id": "R-03",
+   "title": "MoE router forward: sigmoid + bias + group-limited top-k + normalize + expert counts",
+   "description": "Per MoE layer, the router turns gate logits [4096,256] fp32 into 8 expert ids and weights per token via sigmoid, bias add, group top-2 sums, top-4 groups, masked top-8, gather, normalization and route scaling, then counts tokens per expert; about 28 small kernels including three top-k calls.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module",
+    "cross-module"
+   ],
+   "fusion_kind": "selection / top-k chain",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "masked_fill"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.router",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "add",
+      "add_",
+      "bitwise_and",
+      "bitwise_not",
+      "div",
+      "gather",
+      "masked_fill",
+      "mul",
+      "ones_like",
+      "scatter_",
+      "sigmoid",
+      "sum",
+      "topk",
+      "zeros_like"
+     ]
+    }
+   ],
+   "source": "moe.py:257-314; routed_experts.py:195-196",
+   "kernels_per_instance": 28.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "logits fp32 [4096,256] -> view [4096,8,32]; topk [4096,8,32]k2, [4096,8]k4, [4096,256]k8; ids int64 [4096,8], weights fp32 [4096,8], counts [256]",
+   "external_bytes_per_instance": 10246144,
+   "measured_us_per_instance": 254.92,
+   "measured_ms_total": 14.785,
+   "ideal_us_per_instance": 1.48,
+   "ideal_ms_total": 0.086,
+   "gap_ms_total": 14.699,
+   "gap_pct_of_step": 2.55,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "Top-k tie-breaking and index order must match torch.topk; the per-expert count is an integer reduction (exact).",
+   "dataflow": "All ops consume the same [4096,256] score row of a token; a one-CTA-per-token-block kernel can do sigmoid, bias, group selection, final top-8, gather, normalization and the masked_fill of padded rows in registers and write only ids, weights, the selection mask and counts.",
+   "blockers": "Must reproduce torch.topk ordering bitwise; the per-expert count update (add_ into a buffer) needs an atomic-free reduction for determinism.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-11",
+    "R-18"
+   ],
+   "notes": "The gate GEMM (bf16 x bf16 -> fp32, 17 us vs 9.6 us) could additionally take sigmoid + bias as an epilogue (T3). [working id F10]"
+  },
+  {
+   "id": "R-04",
+   "title": "MoE router + aux-loss backward and gate-grad hi/mid/lo split",
+   "description": "Per MoE layer, the backward of the routing weights (normalize, gather), of the load-balance aux loss and of the sigmoid produces the gate-logit gradient [4096,256] fp32, which is then split into hi/mid/lo bf16 parts and concatenated for the 3-way bf16 router-gate GEMMs; about 70 small kernels including a 31-kernel deterministic scatter_add.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module",
+    "cross-module"
+   ],
+   "fusion_kind": "pointwise + scatter chain",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "masked_fill"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.router",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "add",
+      "div",
+      "mul",
+      "neg",
+      "new_zeros",
+      "scatter_add",
+      "sigmoid_backward",
+      "sum"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.router.aux_loss",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "add",
+      "div",
+      "gt",
+      "mul",
+      "neg",
+      "ones_like",
+      "scalar_tensor",
+      "sgn",
+      "sum",
+      "where"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.router.gate",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "__lshift__",
+      "_to_copy",
+      "cat",
+      "sub"
+     ]
+    }
+   ],
+   "source": "hi_mid_lo_linear.py:117; local_compile.py:96; moe.py:257-607; routed_experts.py:196",
+   "kernels_per_instance": 70.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "grad weights fp32 [4096,8]; scores fp32 [4096,256]; scatter_add [4096,8]->[4096,256]; hi/mid/lo bf16 [4096,256] x3 -> cat [4096,768]",
+   "external_bytes_per_instance": 15246344,
+   "measured_us_per_instance": 206.76,
+   "measured_ms_total": 11.992,
+   "ideal_us_per_instance": 2.2,
+   "ideal_ms_total": 0.128,
+   "gap_ms_total": 11.864,
+   "gap_pct_of_step": 2.05,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "scatter_add order (deterministic mode) must be reproduced; with only 8 distinct columns per row and no duplicate indices per row, a per-row scatter is collision-free and therefore order-independent.",
+   "dataflow": "Everything is per-token over a 256-wide row: grad of the 8 selected weights -> scatter into 256 columns -> add aux-loss grad -> sigmoid_backward -> split into three bf16 terms written directly into the [4096,768] GEMM operand.",
+   "blockers": "Deterministic scatter_add launches a sort-based path (31 kernels); aux-loss pieces come from separate functions; the hi/mid/lo split uses int16 bit tricks saved from forward.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-20"
+   ],
+   "notes": "[working id R7]"
+  },
+  {
+   "id": "R-05",
+   "title": "ffn_norm backward block: grad sum + top-k reduce + RMSNorm backward + residual add + wo dY quantize",
+   "description": "Per layer, the gradient of the ffn_norm output is the sum of the router-gate, routed-expert (top-k reduced over 8 routes) and shared-expert input gradients; it feeds RMSNorm backward, whose input gradient is added to the residual gradient and then quantized to MXFP8 for the wo backward GEMMs.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction + pointwise chain -> quantize",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wo",
+     "layers": "all",
+     "ops": [
+      "add",
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.ffn_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm_backward",
+      "add"
+     ]
+    }
+   ],
+   "source": "_blockscaled.py:4377; linear.py:129; nn_modules.py:155",
+   "kernels_per_instance": 8.9,
+   "instances_per_step": 61,
+   "shapes_dtypes": "route grads bf16 [4096,8,7168] -> [4096,7168]; 3x bf16 [4096,7168] grads; rstd fp32 [4096,1]; norm weight [7168]; fp8 [4096,7168] x2 + scales",
+   "external_bytes_per_instance": 798346592,
+   "measured_us_per_instance": 230.82,
+   "measured_ms_total": 14.08,
+   "ideal_us_per_instance": 115.35,
+   "ideal_ms_total": 7.036,
+   "gap_ms_total": 7.044,
+   "gap_pct_of_step": 1.22,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Sum over K routes and the RMSNorm row/column reductions must keep their order; the separate bf16 roundings of each add must be reproduced.",
+   "dataflow": "reduce_from_topk -> add -> add -> rms_norm_backward (+ weight-grad column reduction kernel) -> add residual grad -> mxfp8_quantize -> scale swizzle; every intermediate [4096,7168] tensor has exactly one consumer inside the chain.",
+   "blockers": "reduce_from_topk lives inside dist_moe.block_scaled_backward; the RMSNorm weight-grad needs a cross-token reduction (second kernel today).",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-17"
+   ],
+   "notes": "Dense layers (0-2) have only rms bwd + residual add + quantize. [working id B3]"
+  },
+  {
+   "id": "R-06",
+   "title": "Attention dQ postprocess + q RoPE backward + wq_b dY MXFP8 quantize",
+   "description": "The attention backward accumulates dQ in fp32 [4096,128,192] and a postprocess kernel converts it to bf16; RoPE backward is then applied in place on the rope part, and the result is re-read to quantize it to MXFP8 for the wq_b backward GEMMs.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "producer-consumer (cast -> rope -> quantize)",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention",
+     "layers": "all",
+     "ops": [
+      "torchtitan.fused_mla_q_rope_"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.inner_attention.inner_attention",
+     "layers": "all",
+     "ops": [
+      "torch_attn._varlen_attn_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wq_b",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "attention.py:457; fused_mla.py:847; linear.py:129",
+   "kernels_per_instance": 5.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "dQaccum fp32 [4096,128,192] -> dq bf16 [4096,128,192] -> fp8 [4096,24576] x2 + e8m0 [4096,768]",
+   "external_bytes_per_instance": 611352576,
+   "measured_us_per_instance": 202.84,
+   "measured_ms_total": 12.373,
+   "ideal_us_per_instance": 88.33,
+   "ideal_ms_total": 5.388,
+   "gap_ms_total": 6.985,
+   "gap_pct_of_step": 1.21,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Pointwise cast and rotation plus exact amax; the dQ accumulation itself is untouched.",
+   "dataflow": "Postprocess writes dq bf16 (201 MB), q_rope_ reads/writes it, quantize reads it again; one kernel reading the fp32 accumulator and writing fp8 rowwise+colwise removes three bf16 passes.",
+   "blockers": "The postprocess kernel is internal to the flash-attention backward (torch_attn._varlen_attn_backward); needs a hook to replace its epilogue or to expose dQaccum.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-07"
+   ],
+   "notes": "[working id B5]"
+  },
+  {
+   "id": "R-07",
+   "title": "Attention-backward preprocess (rowsum(dO*O), dQaccum zero) in wo dgrad GEMM epilogue",
+   "description": "The flash-attention backward preprocess re-reads the attention output O and its gradient dO [4096,128,128] to compute the per-row dot product and zero the fp32 dQ accumulator; dO is produced by the wo dgrad GEMM immediately before.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "gemm-adjacent",
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.inner_attention.inner_attention",
+     "layers": "all",
+     "ops": [
+      "torch_attn._varlen_attn_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wo",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    }
+   ],
+   "source": "attention.py:457; linear.py:129",
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "wo dgrad: fp8 [4096,7168] x [7168,16384] -> dO bf16 [4096,16384]; O bf16 [4096,128,128]; dpsum fp32 [128,4096]; dQaccum fp32 [4096,128,192]",
+   "external_bytes_per_instance": 826671104,
+   "measured_us_per_instance": 375.02,
+   "measured_ms_total": 22.876,
+   "ideal_us_per_instance": 266.1,
+   "ideal_ms_total": 16.232,
+   "gap_ms_total": 6.644,
+   "gap_pct_of_step": 1.15,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "Needs the GEMM; the row dot product over head_dim=128 must use the preprocess's fp32 summation order.",
+   "dataflow": "Each GEMM output tile holds dO for complete head rows (128 columns = one head), so the epilogue can load the matching O tile and emit rowsum(dO*O) per (token, head) while storing dO.",
+   "blockers": "cuBLAS (nvjet) GEMM has no custom epilogue; flash-attention owns the preprocess and its layout of dpsum/LSE; zeroing dQaccum is still needed unless the main kernel initializes it.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-06",
+    "R-05"
+   ],
+   "notes": "Ideal is GEMM-compute bound (266 us), so the preprocess bytes hide under the GEMM in the fused form; measured GEMM is slightly faster than the random-data peak (low-entropy fake-PG data). [working id G1]"
+  },
+  {
+   "id": "R-08",
+   "title": "MLA kv backward + wkv_b dY MXFP8 quantize",
+   "description": "The attention backward's dK [4096,128,192] and dV [4096,128,128] are re-packed into the wkv_b output gradient [4096,128,256] plus the summed k_pe gradient [4096,64], and that gradient is then re-read to quantize it to MXFP8 (both orientations) with a separate scale-swizzle kernel.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "producer-consumer (pointwise/reduce -> quantize)",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.inner_attention",
+     "layers": "all",
+     "ops": [
+      "torchtitan.fused_mla_kv_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.inner_attention.wkv_b",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "fused_mla.py:903; linear.py:129",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "dK bf16 [4096,128,192], dV bf16 [4096,128,128] -> dkv bf16 [4096,32768] -> fp8 [4096,32768] x2 + e8m0 [4096,1024]",
+   "external_bytes_per_instance": 613974016,
+   "measured_us_per_instance": 195.3,
+   "measured_ms_total": 11.914,
+   "ideal_us_per_instance": 88.71,
+   "ideal_ms_total": 5.411,
+   "gap_ms_total": 6.502,
+   "gap_pct_of_step": 1.13,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "k_pe grad is a sum over 128 heads (order must match fused_mla_kv_backward); quantization amax is exact.",
+   "dataflow": "fused_mla_kv_backward writes the bf16 [4096,32768] tensor that only the quantizer reads; quantizing in the same kernel removes a 268 MB write+read per layer.",
+   "blockers": "Two custom kernels from different owners (fused MLA override, torchao mxfp8_quantize); the quantizer needs 32-row blocks for the colwise orientation, so the fused kernel must tile 32 tokens x 32 features.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "[working id B6]"
+  },
+  {
+   "id": "R-09",
+   "title": "Reduce-scatter output cast to fp32 + param.grad clone",
+   "description": "After each layer's reduce-scatter, every gradient shard is cast from bf16 to fp32 by its own kernel (848 casts), and after the step's backward the runtime clones each fp32 gradient again to initialize param.grad (848 copies).",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "communication-glue",
+    "horizontal"
+   ],
+   "fusion_kind": "multi-tensor cast / copy",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*",
+     "layers": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "_to_copy"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "tok_embeddings",
+     "layers": "all",
+     "ops": [
+      "_to_copy"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "norm",
+     "layers": "all",
+     "ops": [
+      "_to_copy"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "",
+     "layers": "all",
+     "ops": [
+      "clone",
+      "copy_"
+     ]
+    }
+   ],
+   "source": "torchtitan/experiments/graph_trainer/simple_fsdp.py:366 (gradient cast to fp32 param dtype); graph_pp/runner.py:531 + common_utils.py:303-326 (param.grad clone)",
+   "kernels_per_instance": 26.9,
+   "instances_per_step": 63,
+   "shapes_dtypes": "per-param shards bf16 -> fp32, e.g. [6,7168], [96,1536], [28,16384], [1,2,2048,7168]; 848 tensors",
+   "external_bytes_per_instance": 249669031,
+   "measured_us_per_instance": 135.26,
+   "measured_ms_total": 8.521,
+   "ideal_us_per_instance": 36.07,
+   "ideal_ms_total": 2.273,
+   "gap_ms_total": 6.249,
+   "gap_pct_of_step": 1.08,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "Casts and copies only.",
+   "dataflow": "Each reduce-scatter output shard is read once and written as fp32; the clone then reads and writes it again. A single multi-tensor kernel per bucket can cast directly into the param.grad storage.",
+   "blockers": "The casts are graph outputs (one per parameter); the clone is done outside the graph by the gradient-accumulation helper (clone_grads_to_initialize_param_grad).",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "Per-layer split of the post-graph clones is not attributed (they run after the graph); their 4.76 ms is added to the region total. [working id C4]"
+  },
+  {
+   "id": "R-10",
+   "title": "Colwise re-quantization of saved bf16 linear inputs in backward",
+   "description": "For the linears whose inputs are saved in bf16 (wq_a, wkv_a, wq_b, wo, w13, lm_head), the backward re-reads the saved activation to quantize it along tokens for the weight-gradient GEMM; the attention_norm output is quantized twice (for wq_a and wkv_a).",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "forward-backward",
+    "horizontal"
+   ],
+   "fusion_kind": "quantize (fold into forward)",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wo",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wq_b",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.shared_experts.w13",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.w13",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "lm_head",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "linear.py:129",
+   "kernels_per_instance": 9.9,
+   "instances_per_step": 62,
+   "shapes_dtypes": "bf16 [4096,7168] x2 (same tensor), [4096,1536], [4096,16384], [4096,7168] -> fp8 colwise + e8m0 [K,128]",
+   "external_bytes_per_instance": 164329405,
+   "measured_us_per_instance": 101.64,
+   "measured_ms_total": 6.302,
+   "ideal_us_per_instance": 23.74,
+   "ideal_ms_total": 1.472,
+   "gap_ms_total": 4.83,
+   "gap_pct_of_step": 0.84,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Exact amax; the forward quantizer can emit the colwise copy from the same 32x32 tile.",
+   "dataflow": "The forward quantize kernels (F2/F3/F4/F6) already read these tensors; emitting the colwise fp8 copy there costs only its write and removes the backward read (and the duplicate wq_a/wkv_a pass).",
+   "blockers": "Changes what is saved for backward (fp8 colwise instead of bf16) -- the bf16 copy may still be needed by other consumers (router gate, aux loss); torchao's saved-format choice (306 bf16 vs 122 mxfp8 linears).",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-21",
+    "R-23",
+    "R-31",
+    "R-30"
+   ],
+   "notes": "Ideal counts only the colwise fp8 write + scales (the marginal cost when folded into the forward quantize). [working id B10]"
+  },
+  {
+   "id": "R-11",
+   "title": "Router aux-loss forward statistics",
+   "description": "Per MoE layer, the load-balance auxiliary loss converts the selection mask to fp32, sums it over tokens, L2-normalizes the scores, sums them over tokens and combines them into a scalar loss term; about 23 kernels, most on [4096,256] or scalars.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module",
+    "horizontal"
+   ],
+   "fusion_kind": "reduction chain",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.router.aux_loss",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "_to_copy",
+      "add_",
+      "bitwise_not",
+      "clamp_min",
+      "div",
+      "linalg_vector_norm",
+      "mul",
+      "reciprocal",
+      "sum"
+     ]
+    }
+   ],
+   "source": "local_compile.py:96; moe.py:598-607",
+   "kernels_per_instance": 23.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "mask bool [4096,256] -> fp32; scores fp32 [4096,256]; column sums [256]; scalars",
+   "external_bytes_per_instance": 5284884,
+   "measured_us_per_instance": 70.09,
+   "measured_ms_total": 4.065,
+   "ideal_us_per_instance": 0.76,
+   "ideal_ms_total": 0.044,
+   "gap_ms_total": 4.021,
+   "gap_pct_of_step": 0.7,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Column sums over 4096 tokens and norms must keep the reduction order (2-kernel split reductions today).",
+   "dataflow": "Reads the same sigmoid scores and selection mask that the router (F10) already holds; can be computed as a by-product of the routing kernel with a second-stage column reduction.",
+   "blockers": "Separate function boundary from the router; cross-token column reductions need a two-pass or ordered reduction for determinism.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-03"
+   ],
+   "notes": "[working id F11]"
+  },
+  {
+   "id": "R-12",
+   "title": "q RoPE as wq_b GEMM epilogue",
+   "description": "The wq_b GEMM writes q [4096,128,192] in bf16 and a separate kernel reads it back to apply RoPE to the last 64 dims of every head and rewrite the whole tensor.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "gemm-adjacent",
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention",
+     "layers": "all",
+     "ops": [
+      "torchtitan.fused_mla_q_rope"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_b",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    }
+   ],
+   "source": "fused_mla.py:847; linear.py:174",
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "fp8 [4096,1536] x [1536,24576] -> bf16 [4096,24576] = [4096,128,192]; freqs fp32 [4096,32,2]",
+   "external_bytes_per_instance": 247824384,
+   "measured_us_per_instance": 150.77,
+   "measured_ms_total": 9.197,
+   "ideal_us_per_instance": 85.53,
+   "ideal_ms_total": 5.218,
+   "gap_ms_total": 3.979,
+   "gap_pct_of_step": 0.69,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "Needs the GEMM; the rotation is pointwise in fp32 and can match bitwise.",
+   "dataflow": "RoPE pairs (2 adjacent features) lie inside one output tile row, so the epilogue can rotate before the store.",
+   "blockers": "cuBLAS nvjet kernels have no custom epilogue; needs a CUTLASS/CuTe MXFP8 GEMM with an epilogue visitor.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "fused_mla_q_rope alone runs at roofline (58 us); the gap is the extra bf16 round trip. [working id F8]"
+  },
+  {
+   "id": "R-13",
+   "title": "Fused cross-entropy forward + backward with lm_head dY quantize",
+   "description": "The lm_head logits [4096,129280] bf16 are upcast to fp32, log-softmaxed and gathered for the loss, then in backward the fp32 softmax gradient is rebuilt, cast back to bf16 and quantized to MXFP8 for the lm_head backward GEMMs.",
+   "phases": [
+    "forward",
+    "backward"
+   ],
+   "scope": [
+    "forward-backward",
+    "cross-module"
+   ],
+   "fusion_kind": "online-softmax reduction + pointwise",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "lm_head",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "loss",
+     "layers": "all",
+     "ops": [
+      "_log_softmax_backward_data",
+      "_to_copy",
+      "div",
+      "nll_loss_backward"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "",
+     "layers": "all",
+     "ops": [
+      "ones_like"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "loss",
+     "layers": "all",
+     "ops": [
+      "_log_softmax",
+      "_to_copy",
+      "div",
+      "nll_loss_forward"
+     ]
+    }
+   ],
+   "source": "linear.py:129; local_compile.py:96",
+   "kernels_per_instance": 13.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "logits bf16 [4096,129280] -> fp32 (2.1 GB) -> log_softmax fp32; grad fp32 -> bf16 -> fp8 [4096,129280] + scales",
+   "external_bytes_per_instance": 2151251980,
+   "measured_us_per_instance": 4192.64,
+   "measured_ms_total": 4.193,
+   "ideal_us_per_instance": 310.82,
+   "ideal_ms_total": 0.311,
+   "gap_ms_total": 3.882,
+   "gap_pct_of_step": 0.67,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Max and sum-exp reductions over the vocabulary must follow the same order; one fused kernel can do fwd and bwd because the loss gradient is a known constant scale.",
+   "dataflow": "Forward needs per-row max/LSE and the target logit; backward needs softmax - onehot. Reading the bf16 logits once can produce the loss, and the fp8 gradient in the same pass.",
+   "blockers": "Loss function boundary and the autograd split between forward and backward; the grad scale (1/num_tokens) must be known at forward time.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "Single instance; 4.2 ms measured vs 0.31 ms of bytes. [working id L1]"
+  },
+  {
+   "id": "R-14",
+   "title": "attention_norm backward + residual-grad add (layer boundary)",
+   "description": "Per layer, the wq_a and wkv_a input gradients are added, fed through attention_norm's RMSNorm backward (two kernels), and the result is added to the residual gradient to form the previous layer's output gradient.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module",
+    "cross-layer"
+   ],
+   "fusion_kind": "reduction + pointwise chain",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm_backward",
+      "add"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59
+     ],
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.w2",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "tok_embeddings",
+     "layers": "all",
+     "ops": [
+      "add"
+     ]
+    }
+   ],
+   "source": "nn_modules.py:155",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 62,
+   "shapes_dtypes": "bf16 [4096,7168] x4 inputs (two dX, residual grad, saved input), rstd fp32 [4096,1], weight [7168]",
+   "external_bytes_per_instance": 291752134,
+   "measured_us_per_instance": 94.88,
+   "measured_ms_total": 5.882,
+   "ideal_us_per_instance": 42.15,
+   "ideal_ms_total": 2.613,
+   "gap_ms_total": 3.269,
+   "gap_pct_of_step": 0.57,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm row reduction and weight-grad column reduction order; separate bf16 rounding of each add.",
+   "dataflow": "add(dX_wq_a, dX_wkv_a) -> rms_norm_backward -> add(residual grad) -> previous layer's output gradient; each intermediate has one consumer.",
+   "blockers": "The weight-grad column reduction across 4096 tokens needs a second pass or ordered cross-CTA reduction.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-17",
+    "R-22"
+   ],
+   "notes": "Instance 61 is the final norm (no residual add); instance 0's add feeds the embedding backward. Concatenating wq_a/wkv_a dgrad (G2) would remove the first add. [working id B1]"
+  },
+  {
+   "id": "R-15",
+   "title": "MoE top-k combine + shared-expert add + residual add",
+   "description": "Per MoE layer, the routed-expert outputs [4096,8,7168] are weighted and summed over the 8 routes, then added to the shared-expert output and to the residual stream as three separate passes over [4096,7168].",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction + pointwise chain",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_forward"
+     ]
+    }
+   ],
+   "source": "_blockscaled.py:4377; model.py:64; moe.py:821",
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "route-wise bf16 [4096,8,7168] (470 MB), weights fp32 [4096,8], shared out bf16 [4096,7168], residual bf16 [4096,7168] -> layer output bf16 [4096,7168]",
+   "external_bytes_per_instance": 646316032,
+   "measured_us_per_instance": 146.85,
+   "measured_ms_total": 8.517,
+   "ideal_us_per_instance": 93.38,
+   "ideal_ms_total": 5.416,
+   "gap_ms_total": 3.101,
+   "gap_pct_of_step": 0.54,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "fp32 accumulation over K=8 in the library's order, then two bf16-rounded adds that must be reproduced separately.",
+   "dataflow": "scale_and_sum writes y [4096,7168] that only add_44 reads; add_44's output is read only by add_45; the layer output then feeds the next attention_norm (F2) and the residual.",
+   "blockers": "The combine runs inside dist_moe.block_scaled_forward after an EP barrier; adding the shared output requires passing it into the library or exposing the combine buffer.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-21"
+   ],
+   "notes": "Chaining with the next layer's attention_norm + quantize (F2) gives a cross-layer region. [working id F1]"
+  },
+  {
+   "id": "R-16",
+   "title": "FSDP all-gather copy-in with fp32->bf16 cast and pad",
+   "description": "Before each layer's parameter all-gather, the fp32 parameter shards are cast to bf16 and packed into the all-gather input buffer by a multi-tensor kernel, while unevenly sharded parameters (e.g. wkv_a's [3,7168] shard) take a separate cast + pad pair.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "communication-glue",
+    "horizontal"
+   ],
+   "fusion_kind": "multi-tensor cast / pack",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "_to_copy",
+      "constant_pad_nd"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "bucketing._pre_bucket_all_gather"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "bucketing._pre_bucket_all_gather"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "norm",
+     "layers": "all",
+     "ops": [
+      "bucketing._pre_bucket_all_gather"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "tok_embeddings",
+     "layers": "all",
+     "ops": [
+      "bucketing._pre_bucket_all_gather"
+     ]
+    }
+   ],
+   "source": "simple_fsdp.py:366",
+   "kernels_per_instance": 4.9,
+   "instances_per_step": 62,
+   "shapes_dtypes": "fp32 shards e.g. [6,7168], [96,1536], [1,2,2048,7168] -> bf16 bucket shard [915520] / [44040192] / [2284608]",
+   "external_bytes_per_instance": 253695951,
+   "measured_us_per_instance": 78.94,
+   "measured_ms_total": 4.894,
+   "ideal_us_per_instance": 36.65,
+   "ideal_ms_total": 2.273,
+   "gap_ms_total": 2.622,
+   "gap_pct_of_step": 0.45,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "Casts and copies only.",
+   "dataflow": "The odd-shaped shard is cast and padded into a temporary and then copied again into the bucket; folding it into the multi-tensor copy-in removes two kernels per layer; small buckets are launch-bound.",
+   "blockers": "Padding is decided by DTensor/simple_fsdp for uneven shards; the bucketing pass owns the copy-in.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-02"
+   ],
+   "notes": "[working id C1]"
+  },
+  {
+   "id": "R-17",
+   "title": "Layer-output gradient: routed-expert broadcast-and-scale + shared w2 dY quantize",
+   "description": "Per layer, the layer-output gradient [4096,7168] is read by two consumers: dist_moe broadcasts it to the 8 routes scaled by the routing weights (also computing the routing-weight gradient against the saved route outputs), and the shared-expert w2 backward quantizes it to MXFP8.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "horizontal",
+    "cross-module"
+   ],
+   "fusion_kind": "sibling consumers of one input",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.shared_experts.w2",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.w2",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "_blockscaled.py:4377; linear.py:129",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "dy bf16 [4096,7168]; saved route outputs bf16 [4096,8,7168]; grad routes bf16 [4096,8,7168]; fp8 [4096,7168] x2 + scales",
+   "external_bytes_per_instance": 1012842764,
+   "measured_us_per_instance": 188.58,
+   "measured_ms_total": 11.503,
+   "ideal_us_per_instance": 146.34,
+   "ideal_ms_total": 8.927,
+   "gap_ms_total": 2.577,
+   "gap_pct_of_step": 0.45,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Routing-weight gradient is a dot product over D=7168 (order must match); amax exact.",
+   "dataflow": "Both consumers read the same dy rows; one kernel can load dy once, quantize it and emit the scaled route gradients.",
+   "blockers": "One consumer is inside dist_moe.block_scaled_backward (after recompute and barriers), the other is the torchao quantizer.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-14",
+    "R-05"
+   ],
+   "notes": "The [4096,8,7168] read+write dominates the bytes; dense layers only have the quantize. [working id B2]"
+  },
+  {
+   "id": "R-18",
+   "title": "dist_moe routing metadata and plan kernels",
+   "description": "Inside each routed-expert forward and backward, small kernels split the 8 routes per token by destination rank, build prefix sums and per-expert counts, gather metadata and build the forward/backward GEMM plans.",
+   "phases": [
+    "forward",
+    "backward"
+   ],
+   "scope": [
+    "forward-backward",
+    "communication-glue"
+   ],
+   "fusion_kind": "histogram / prefix-sum metadata",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_backward"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_forward"
+     ]
+    }
+   ],
+   "source": "_blockscaled.py:4377",
+   "kernels_per_instance": 8.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "expert ids int64 [4096,8], weights fp32 [4096,8], per-rank/expert counts and offsets (KB-sized)",
+   "external_bytes_per_instance": 655360,
+   "measured_us_per_instance": 41.17,
+   "measured_ms_total": 2.388,
+   "ideal_us_per_instance": 0.09,
+   "ideal_ms_total": 0.005,
+   "gap_ms_total": 2.383,
+   "gap_pct_of_step": 0.41,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "Prefix sums and slot assignment define the order of routed rows, which downstream data placement depends on.",
+   "dataflow": "All kernels consume only the [4096,8] routing ids/weights produced by the router (F10); the backward plan recomputes information known from the forward plan.",
+   "blockers": "Library-internal (dist_moe); plan kernels are split by EP barrier points; backward plan could be cached from forward.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-03"
+   ],
+   "notes": "Launch-bound: ~41 us per layer for <1 MB of data. [working id F13]"
+  },
+  {
+   "id": "R-19",
+   "title": "k RoPE / k-v split as wkv_b GEMM epilogue",
+   "description": "The wkv_b GEMM writes [4096,128,256] bf16 (k_nope|v per head), and a separate kernel reads it back with k_pe [4096,64] to build k [4096,128,192] (with RoPE on the shared k_pe broadcast to all heads) and v.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "gemm-adjacent",
+    "cross-module"
+   ],
+   "fusion_kind": "GEMM epilogue",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.inner_attention",
+     "layers": "all",
+     "ops": [
+      "torchtitan.fused_mla_k_rope"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.inner_attention.wkv_b",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    }
+   ],
+   "source": "fused_mla.py:903; linear.py:174",
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "fp8 [4096,512] x [512,32768] -> bf16 [4096,32768]; k_pe bf16 [4096,64]; outputs k bf16 [4096,128,192], v [4096,128,128]",
+   "external_bytes_per_instance": 490831872,
+   "measured_us_per_instance": 109.97,
+   "measured_ms_total": 6.708,
+   "ideal_us_per_instance": 70.92,
+   "ideal_ms_total": 4.326,
+   "gap_ms_total": 2.382,
+   "gap_pct_of_step": 0.41,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "Needs the GEMM; RoPE and copies are pointwise.",
+   "dataflow": "Each output tile row is one token's (k_nope, v) for a head; the epilogue can write k_nope into k, append rotated k_pe and write v directly.",
+   "blockers": "cuBLAS nvjet GEMM without custom epilogue; output split into two tensors with different strides.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "[working id F9]"
+  },
+  {
+   "id": "R-20",
+   "title": "Router gate backward GEMM operand packing and fp32 weight-grad accumulation",
+   "description": "The 3-term (hi/mid/lo) bf16 router-gate backward replicates the [256,7168] gate weight three times for the input-gradient GEMM and runs three weight-gradient GEMMs whose fp32 outputs are accumulated by two adds and cast to bf16.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "gemm-adjacent",
+    "intra-module"
+   ],
+   "fusion_kind": "GEMM prologue/epilogue",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.router.gate",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "_to_copy",
+      "add_",
+      "cat",
+      "mm"
+     ]
+    }
+   ],
+   "source": "hi_mid_lo_linear.py:117",
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "W bf16 [256,7168] x3 -> [768,7168]; dW: 3x (bf16 [256,4096] x [4096,7168] -> fp32 [256,7168]), adds, fp32->bf16",
+   "external_bytes_per_instance": 83361792,
+   "measured_us_per_instance": 58.04,
+   "measured_ms_total": 3.366,
+   "ideal_us_per_instance": 23.37,
+   "ideal_ms_total": 1.356,
+   "gap_ms_total": 2.01,
+   "gap_pct_of_step": 0.35,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "Accumulating the three products in the GEMM epilogue (beta=1) keeps the same fp32 add order; a single K-concatenated GEMM would not be bitwise identical.",
+   "dataflow": "cat_313 output only feeds one GEMM; mm outputs only feed the add_ chain; the final cast only feeds the gradient output.",
+   "blockers": "aten.mm.dtype has no accumulate-into epilogue; replicated-weight cat is an artifact of expressing the 3-way split as one GEMM.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-04"
+   ],
+   "notes": "[working id R8]"
+  },
+  {
+   "id": "R-21",
+   "title": "attention_norm + duplicate MXFP8 quantize for wq_a / wkv_a",
+   "description": "Per layer, attention_norm normalizes the residual stream [4096,7168] and the normalized tensor is then quantized to MXFP8 twice (once for wq_a and once for wkv_a, identical results), each followed by a scale-swizzle kernel; dense layers also add the previous layer's MLP residual first, and layer 0 starts from the embedding gather.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module",
+    "horizontal",
+    "cross-layer"
+   ],
+   "fusion_kind": "producer-consumer (norm -> quantize) + dedupe",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "tok_embeddings",
+     "layers": "all",
+     "ops": [
+      "embedding"
+     ]
+    }
+   ],
+   "source": "embedding.py:41; linear.py:162-168; model.py:64; nn_modules.py:155",
+   "kernels_per_instance": 5.1,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,7168] -> rstd fp32 [4096,1], normed bf16 [4096,7168], fp8 [4096,7168] + e8m0 [4096,224]",
+   "external_bytes_per_instance": 214185715,
+   "measured_us_per_instance": 61.78,
+   "measured_ms_total": 3.769,
+   "ideal_us_per_instance": 30.95,
+   "ideal_ms_total": 1.888,
+   "gap_ms_total": 1.881,
+   "gap_pct_of_step": 0.33,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm row reduction order; exact amax.",
+   "dataflow": "norm output -> two identical rowwise quantizations -> two swizzles; one kernel can normalize, quantize once, and write swizzled scales (plus the colwise copy, see B10).",
+   "blockers": "Norm (aten _fused_rms_norm) and quantize (torchao) are separate custom ops inside different modules; the two linears do not know they share an input.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-15",
+    "R-10",
+    "R-22"
+   ],
+   "notes": "[working id F2]"
+  },
+  {
+   "id": "R-22",
+   "title": "wq_a / wkv_a sibling GEMMs on the same normed input",
+   "description": "wq_a [7168->1536] and wkv_a [7168->576] both consume the same quantized attention_norm output, and in backward both produce input gradients that are summed; the N=576 GEMM runs at half its roofline.",
+   "phases": [
+    "forward",
+    "backward"
+   ],
+   "scope": [
+    "horizontal",
+    "gemm-adjacent"
+   ],
+   "fusion_kind": "horizontal GEMM concatenation",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "_scaled_mm_v2"
+     ]
+    }
+   ],
+   "source": "linear.py:129-174",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "fp8 [4096,7168] x [7168,1536] and x [7168,576] (fwd); [4096,1536] x [1536,7168] + [4096,576] x [576,7168] (dgrad)",
+   "external_bytes_per_instance": 220340224,
+   "measured_us_per_instance": 96.61,
+   "measured_ms_total": 5.893,
+   "ideal_us_per_instance": 68.61,
+   "ideal_ms_total": 4.185,
+   "gap_ms_total": 1.708,
+   "gap_pct_of_step": 0.3,
+   "bitwise_tier": "T3",
+   "bitwise_notes": "Concatenating N in forward is bitwise identical per output column; concatenating K in dgrad changes the fp32 accumulation (sum of two GEMMs + bf16 add today).",
+   "dataflow": "Forward: one GEMM with N=2112 reads the activation once. Backward: [dq_a | dkv_a] x [Wq_a ; Wkv_a] gives dX directly and removes the add in B1.",
+   "blockers": "Two separate MXFP8Linear modules with separate FSDP parameters; weight concatenation needs a fused parameter or a grouped GEMM.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-21",
+    "R-14"
+   ],
+   "notes": "[working id G2]"
+  },
+  {
+   "id": "R-23",
+   "title": "Attention residual add + ffn_norm + w13 MXFP8 quantize",
+   "description": "Per layer, the wo output is added to the residual stream, normalized by ffn_norm, and the normalized tensor is quantized to MXFP8 for the shared-expert (or dense) w13 GEMM with a separate scale swizzle.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "pointwise + reduction -> quantize",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*",
+     "layers": "all",
+     "ops": [
+      "add"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.shared_experts.w13",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.w13",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.ffn_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm"
+     ]
+    }
+   ],
+   "source": "linear.py:162-168; model.py:53; nn_modules.py:155",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,7168] x2 -> h bf16 [4096,7168], normed bf16, rstd fp32, fp8 [4096,7168] + e8m0 [4096,224]",
+   "external_bytes_per_instance": 265189376,
+   "measured_us_per_instance": 65.25,
+   "measured_ms_total": 3.98,
+   "ideal_us_per_instance": 38.32,
+   "ideal_ms_total": 2.337,
+   "gap_ms_total": 1.643,
+   "gap_pct_of_step": 0.28,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm reduction order; the add's bf16 rounding must precede the norm.",
+   "dataflow": "add -> rms_norm -> quantize -> swizzle; h and the normed tensor are still needed (residual, router, routed experts, backward).",
+   "blockers": "Three different op owners (aten add, aten fused rms norm, torchao quantize); the add could alternatively become the wo GEMM epilogue (T3).",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-10"
+   ],
+   "notes": "[working id F3]"
+  },
+  {
+   "id": "R-24",
+   "title": "SwiGLU backward + w13 dY MXFP8 quantize",
+   "description": "Per layer, the SwiGLU backward produces the w13 output gradient [4096,2,2048] (dense: [4096,2,18432]) in bf16, which is re-read to quantize it to MXFP8 for the w13 backward GEMMs.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "producer-consumer (pointwise -> quantize)",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchtitan.silu_and_mul_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.shared_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchtitan.silu_and_mul_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.shared_experts.w13",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.w13",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "feed_forward.py:75; linear.py:129",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,2048] + [4096,2,2048] -> [4096,4096] -> fp8 x2 + e8m0 (dense: [4096,36864])",
+   "external_bytes_per_instance": 118351569,
+   "measured_us_per_instance": 42.41,
+   "measured_ms_total": 2.587,
+   "ideal_us_per_instance": 17.1,
+   "ideal_ms_total": 1.043,
+   "gap_ms_total": 1.544,
+   "gap_pct_of_step": 0.27,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Pointwise SwiGLU grad; exact amax.",
+   "dataflow": "silu_and_mul_backward output has a single consumer (the quantizer).",
+   "blockers": "Custom op (torchtitan.silu_and_mul_backward) and torchao quantizer are separate kernels.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "[working id B9]"
+  },
+  {
+   "id": "R-25",
+   "title": "kv_norm backward + k_pe grad cat + wkv_a dY quantize",
+   "description": "Per layer, kv_norm's RMSNorm backward (three kernels on [4096,512]) produces the compressed-kv gradient, which is concatenated with the k_pe gradient [4096,64] into [4096,576] and quantized to MXFP8 for the wkv_a backward GEMMs.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction + concat -> quantize",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention",
+     "layers": "all",
+     "ops": [
+      "cat"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.kv_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wkv_a",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "fused_mla.py:1069; linear.py:129; nn_modules.py:155",
+   "kernels_per_instance": 7.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,512] grads + [4096,64] -> [4096,576] -> fp8 x2 + e8m0 [4096,18|20]",
+   "external_bytes_per_instance": 13813760,
+   "measured_us_per_instance": 24.82,
+   "measured_ms_total": 1.514,
+   "ideal_us_per_instance": 2.0,
+   "ideal_ms_total": 0.122,
+   "gap_ms_total": 1.392,
+   "gap_pct_of_step": 0.24,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm reductions; exact amax.",
+   "dataflow": "rms bwd output and k_pe grad only feed the cat, which only feeds the quantizer; one kernel can write the concatenated fp8 tensor.",
+   "blockers": "The k_pe gradient comes from fused_mla_kv_backward (B6); the strided [4096,576]->[4096,512] slice forces an extra copy kernel in the norm backward.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-08"
+   ],
+   "notes": "Small tensors: launch-bound (7 kernels, 25 us vs 2 us of bytes). [working id B7]"
+  },
+  {
+   "id": "R-26",
+   "title": "dist_moe dispatch-buffer copies and activation save/restore",
+   "description": "Per MoE layer, the routed-expert forward copies the normalized tokens [4096,7168] into the dispatch buffer and again into an activation buffer for backward recompute; the backward copies them back into the dispatch buffer before recomputing the expert forward.",
+   "phases": [
+    "forward",
+    "backward"
+   ],
+   "scope": [
+    "forward-backward",
+    "communication-glue",
+    "horizontal"
+   ],
+   "fusion_kind": "copy elimination",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_backward"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.routed_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "dist_moe.block_scaled_forward"
+     ]
+    }
+   ],
+   "source": "_blockscaled.py:4377",
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 58,
+   "shapes_dtypes": "bf16 [4096,7168] (58.7 MB) per copy",
+   "external_bytes_per_instance": 234881024,
+   "measured_us_per_instance": 57.26,
+   "measured_ms_total": 3.321,
+   "ideal_us_per_instance": 33.94,
+   "ideal_ms_total": 1.968,
+   "gap_ms_total": 1.353,
+   "gap_pct_of_step": 0.23,
+   "bitwise_tier": "T0",
+   "bitwise_notes": "Copies only.",
+   "dataflow": "The forward copies read the same input (ffn_norm output, which the graph already keeps alive for the shared experts and router backward); the backward restore re-creates data that is still resident.",
+   "blockers": "Library-internal: dist_moe keeps its own activation buffer for recompute decisions made on device; the dispatch buffer must be in symmetric memory.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "Ideal keeps one forward dispatch copy and the backward restore. [working id F12]"
+  },
+  {
+   "id": "R-27",
+   "title": "q_norm backward + wq_a dY quantize",
+   "description": "Per layer, q_norm's RMSNorm backward (two kernels on [4096,1536]) produces the wq_a output gradient, which is re-read to quantize it to MXFP8 for the wq_a backward GEMMs.",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction -> quantize",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.q_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm_backward"
+     ]
+    },
+    {
+     "phase": "backward",
+     "module": "layers.*.attention.wq_a",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "linear.py:129; nn_modules.py:155",
+   "kernels_per_instance": 5.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,1536] x2, rstd fp32 [4096,1] -> fp8 [4096,1536] x2 + e8m0 [4096,48]",
+   "external_bytes_per_instance": 38164480,
+   "measured_us_per_instance": 24.2,
+   "measured_ms_total": 1.476,
+   "ideal_us_per_instance": 5.51,
+   "ideal_ms_total": 0.336,
+   "gap_ms_total": 1.14,
+   "gap_pct_of_step": 0.2,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm reductions; exact amax.",
+   "dataflow": "rms bwd output has a single consumer (quantize).",
+   "blockers": "Separate op owners; weight-grad column reduction needs a second pass.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "Launch-bound. [working id B8]"
+  },
+  {
+   "id": "R-28",
+   "title": "SwiGLU + w2 MXFP8 quantize",
+   "description": "Per layer, silu_and_mul turns the w13 output [4096,2,2048] (dense: [4096,2,18432]) into [4096,2048] bf16, which is re-read to quantize it to MXFP8 (both orientations) for the w2 GEMM.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "producer-consumer (pointwise -> quantize)",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchtitan.silu_and_mul"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.shared_experts",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchtitan.silu_and_mul"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.shared_experts.w2",
+     "layers": [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.feed_forward.w2",
+     "layers": [
+      0,
+      1,
+      2
+     ],
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "feed_forward.py:75; linear.py:162-170",
+   "kernels_per_instance": 4.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,4096] -> [4096,2048] -> fp8 x2 + e8m0 (dense [4096,36864] -> [4096,18432])",
+   "external_bytes_per_instance": 70864828,
+   "measured_us_per_instance": 27.23,
+   "measured_ms_total": 1.661,
+   "ideal_us_per_instance": 10.24,
+   "ideal_ms_total": 0.625,
+   "gap_ms_total": 1.037,
+   "gap_pct_of_step": 0.18,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Pointwise; exact amax.",
+   "dataflow": "silu_and_mul output only feeds the quantizer (and is not otherwise saved, since the fp8 colwise copy is saved for backward).",
+   "blockers": "Custom op + torchao quantizer.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "[working id F7]"
+  },
+  {
+   "id": "R-29",
+   "title": "kv_norm (strided slice) + wkv_b MXFP8 quantize",
+   "description": "Per layer, kv_norm normalizes the first 512 columns of the wkv_a output [4096,576] (a strided slice that costs an extra copy kernel), and the result is quantized to MXFP8 in both orientations with two scale-swizzle kernels.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction -> quantize",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.inner_attention.wkv_b",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.kv_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm"
+     ]
+    }
+   ],
+   "source": "linear.py:162-170; nn_modules.py:155",
+   "kernels_per_instance": 5.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,576] slice -> [4096,512] -> fp8 x2 + e8m0 [4096,16], [512,128]",
+   "external_bytes_per_instance": 8537088,
+   "measured_us_per_instance": 13.87,
+   "measured_ms_total": 0.846,
+   "ideal_us_per_instance": 1.23,
+   "ideal_ms_total": 0.075,
+   "gap_ms_total": 0.771,
+   "gap_pct_of_step": 0.13,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm reduction order; exact amax.",
+   "dataflow": "Slice copy -> norm -> quantize -> 2 swizzles; all on a 4 MB tensor.",
+   "blockers": "aten fused RMSNorm requires a contiguous input; separate torchao quantizer.",
+   "evidence": "measured",
+   "overlaps_with": [],
+   "notes": "Launch-bound. [working id F5]"
+  },
+  {
+   "id": "R-30",
+   "title": "Attention output MXFP8 quantize + scale swizzle",
+   "description": "Per layer, the attention output [4096,128,128] bf16 is re-read and quantized to MXFP8 for the wo GEMM, and its scales are swizzled by a separate kernel.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "quantize + layout",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wo",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "linear.py:162-168",
+   "kernels_per_instance": 2.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,16384] -> fp8 [4096,16384] + e8m0 [4096,512]",
+   "external_bytes_per_instance": 203423744,
+   "measured_us_per_instance": 39.03,
+   "measured_ms_total": 2.381,
+   "ideal_us_per_instance": 29.39,
+   "ideal_ms_total": 1.793,
+   "gap_ms_total": 0.588,
+   "gap_pct_of_step": 0.1,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "Exact amax; swizzle is a fixed permutation.",
+   "dataflow": "The swizzle reads only the quantizer's scale output; folding it removes one kernel. Further (T3): quantize in the attention forward epilogue.",
+   "blockers": "torchao quantizer and swizzle are separate ops; attention epilogue belongs to flash-attention.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-10"
+   ],
+   "notes": "[working id F6]"
+  },
+  {
+   "id": "R-31",
+   "title": "q_norm + wq_b MXFP8 quantize",
+   "description": "Per layer, q_norm normalizes the wq_a output [4096,1536] and the result is quantized to MXFP8 for the wq_b GEMM with a separate scale swizzle.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction -> quantize",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.q_norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "layers.*.attention.wq_b",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    }
+   ],
+   "source": "linear.py:162-168; nn_modules.py:155",
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 61,
+   "shapes_dtypes": "bf16 [4096,1536] -> fp8 [4096,1536] + e8m0 [4096,48]",
+   "external_bytes_per_instance": 31673344,
+   "measured_us_per_instance": 11.93,
+   "measured_ms_total": 0.728,
+   "ideal_us_per_instance": 4.58,
+   "ideal_ms_total": 0.279,
+   "gap_ms_total": 0.449,
+   "gap_pct_of_step": 0.08,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm reduction; exact amax.",
+   "dataflow": "norm output feeds the quantizer and is saved for backward (re-quantized in B10).",
+   "blockers": "Separate op owners.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-10"
+   ],
+   "notes": "Launch-bound. [working id F4]"
+  },
+  {
+   "id": "R-32",
+   "title": "Embedding dense backward",
+   "description": "The token-embedding backward accumulates the [4096,7168] input gradient into a [129280,7168] bf16 table gradient with the deterministic sort-based path (21 kernels).",
+   "phases": [
+    "backward"
+   ],
+   "scope": [
+    "intra-module"
+   ],
+   "fusion_kind": "index accumulate",
+   "footprint": [
+    {
+     "phase": "backward",
+     "module": "tok_embeddings",
+     "layers": "all",
+     "ops": [
+      "embedding_dense_backward"
+     ]
+    }
+   ],
+   "source": "embedding.py:41",
+   "kernels_per_instance": 21.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "grad bf16 [4096,7168], ids int64 [4096] -> bf16 [129280,7168]",
+   "external_bytes_per_instance": 1912111104,
+   "measured_us_per_instance": 558.92,
+   "measured_ms_total": 0.559,
+   "ideal_us_per_instance": 276.27,
+   "ideal_ms_total": 0.276,
+   "gap_ms_total": 0.283,
+   "gap_pct_of_step": 0.05,
+   "bitwise_tier": "T2",
+   "bitwise_notes": "Accumulation order for repeated token ids must match the deterministic implementation.",
+   "dataflow": "Zero-fill of the table and the segment-sum can be one pass that also writes straight into the reduce-scatter bucket.",
+   "blockers": "Deterministic mode forces sort + segment reduction.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-01"
+   ],
+   "notes": "Single instance. [working id L2]"
+  },
+  {
+   "id": "R-33",
+   "title": "Final norm + lm_head input MXFP8 quantize",
+   "description": "The final RMSNorm output [4096,7168] is re-read to quantize it for the lm_head GEMM, with a separate scale swizzle.",
+   "phases": [
+    "forward"
+   ],
+   "scope": [
+    "cross-module"
+   ],
+   "fusion_kind": "reduction -> quantize",
+   "footprint": [
+    {
+     "phase": "forward",
+     "module": "lm_head",
+     "layers": "all",
+     "ops": [
+      "torchao.mxfp8_quantize",
+      "torchao.triton_mx_block_rearrange"
+     ]
+    },
+    {
+     "phase": "forward",
+     "module": "norm",
+     "layers": "all",
+     "ops": [
+      "_fused_rms_norm"
+     ]
+    }
+   ],
+   "source": "linear.py:162-168; nn_modules.py:155",
+   "kernels_per_instance": 3.0,
+   "instances_per_step": 1,
+   "shapes_dtypes": "bf16 [4096,7168] -> fp8 + e8m0 [4096,224]",
+   "external_bytes_per_instance": 147748864,
+   "measured_us_per_instance": 41.57,
+   "measured_ms_total": 0.042,
+   "ideal_us_per_instance": 21.35,
+   "ideal_ms_total": 0.021,
+   "gap_ms_total": 0.02,
+   "gap_pct_of_step": 0.0,
+   "bitwise_tier": "T1",
+   "bitwise_notes": "RMSNorm reduction; exact amax.",
+   "dataflow": "Same pattern as F2 for the head.",
+   "blockers": "Separate op owners.",
+   "evidence": "measured",
+   "overlaps_with": [
+    "R-15"
+   ],
+   "notes": "Single instance. [working id L3]"
+  }
+ ],
+ "no_opportunity": [
+  {
+   "what": "dist_moe zero-fill of the [4096,8,7168] bf16 peer-scatter buffers (3 x 470 MB memsets per MoE layer, forward combine buffer and backward dispatch/combine buffers)",
+   "time_ms": 12.488,
+   "reason": "Fake-process-group artifact: dist_moe zeroes the local buffer only when the symmetric-memory handle is fake (rows owned by other virtual ranks have no writer). A real run has one physical writer per row and launches no memset, so there is nothing to fuse."
+  },
+  {
+   "what": "Memsets inside the flash-attention forward/backward ops (dpsum/LSE/semaphore init)",
+   "time_ms": 0.26,
+   "reason": "Attention-internal fixed-size initialization (< 5 us per call); counted under attention, no external dataflow to fuse."
+  },
+  {
+   "what": "Communication emulation kernels under c10d / _c10d_functional ops (all-gather copies, reduce-scatter)",
+   "time_ms": 90.275,
+   "reason": "Stand-ins for collectives in the fake-PG run; excluded from compute and regions by the task rules (their surrounding pack/unpack glue is in the communication-glue regions)."
+  },
+  {
+   "what": "Optimizer step (AdamW multi-tensor kernels, including 12.3 ms of the previous step's optimizer tail that executes at the start of the profiled window)",
+   "time_ms": 31.767,
+   "reason": "Out of scope: after backward."
+  },
+  {
+   "what": "Post-backward gradient-norm clipping and loss bookkeeping (foreach norms, scalars)",
+   "time_ms": 5.346,
+   "reason": "Out of scope: after backward."
+  }
+ ]
+}

@@ -1,0 +1,92 @@
+{
+ "llama3_8b": {
+  "eager": {
+   "categories_ms": {
+    "GEMM": 188.07,
+    "attention": 22.41,
+    "communication (fake-PG emulation)": 11.92,
+    "glue: memcpy / memset": 2.22,
+    "glue: multi_tensor_apply": 11.65,
+    "glue: other kernels": 119.49,
+    "glue: sort + indexing_backward": 0.68
+   },
+   "step_ms_excl_comm": 344.53,
+   "glue_ms": 134.04,
+   "glue_ms_excl_optimizer": 122.39
+  },
+  "graph": {
+   "categories_ms": {
+    "GEMM": 189.3,
+    "attention": 22.96,
+    "communication (fake-PG emulation)": 7.28,
+    "glue: memcpy / memset": 5.52,
+    "glue: multi_tensor_apply": 13.32,
+    "glue: other kernels": 121.2,
+    "glue: sort + indexing_backward": 0.71
+   },
+   "step_ms_excl_comm": 353.01,
+   "glue_ms": 140.75,
+   "glue_ms_excl_optimizer": 127.43
+  }
+ },
+ "qwen3_30b": {
+  "eager": {
+   "categories_ms": {
+    "GEMM": 319.08,
+    "attention": 155.74,
+    "communication (fake-PG emulation)": 5.95,
+    "glue: memcpy / memset": 49.47,
+    "glue: multi_tensor_apply": 57.98,
+    "glue: other kernels": 396.69,
+    "glue: sort + indexing_backward": 7.06
+   },
+   "step_ms_excl_comm": 986.02,
+   "glue_ms": 511.2,
+   "glue_ms_excl_optimizer": 453.22
+  },
+  "graph": {
+   "categories_ms": {
+    "GEMM": 319.02,
+    "attention": 155.77,
+    "communication (fake-PG emulation)": 3.26,
+    "glue: memcpy / memset": 44.15,
+    "glue: multi_tensor_apply": 56.59,
+    "glue: other kernels": 384.82,
+    "glue: sort + indexing_backward": 7.06
+   },
+   "step_ms_excl_comm": 967.4,
+   "glue_ms": 492.61,
+   "glue_ms_excl_optimizer": 436.02
+  }
+ },
+ "dsv3": {
+  "eager": {
+   "categories_ms": {
+    "GEMM": 126.33,
+    "attention": 88.76,
+    "communication (fake-PG emulation)": 178.71,
+    "glue: memcpy / memset": 35.45,
+    "glue: multi_tensor_apply": 41.96,
+    "glue: other kernels": 249.95,
+    "glue: sort + indexing_backward": 4.12
+   },
+   "step_ms_excl_comm": 546.57,
+   "glue_ms": 331.48,
+   "glue_ms_excl_optimizer": 289.52
+  },
+  "graph": {
+   "categories_ms": {
+    "GEMM": 127.32,
+    "attention": 88.76,
+    "communication (fake-PG emulation)": 90.29,
+    "glue: memcpy / memset": 20.42,
+    "glue: multi_tensor_apply": 40.25,
+    "glue: other kernels": 206.33,
+    "glue: sort + indexing_backward": 4.11
+   },
+   "step_ms_excl_comm": 487.19,
+   "glue_ms": 271.11,
+   "glue_ms_excl_optimizer": 230.86
+  }
+ }
+}

@@ -1,0 +1,11 @@
+
+== q235: glue 472.0 -> 172.4 ms
+  optimizer step / foreach (multi_tensor_apply)         9.4 ->      7.6  (   -1.8)
+  deterministic index ops + sorts                       5.6 ->      0.7  (   -4.9)
+  FSDP copy-in / copy-out, bucket packs, cats          89.7 ->     10.7  (  -79.0)
+  memset / memcpy                                      46.4 ->     28.2  (  -18.2)
+  MXFP8 quantize / scale swizzle                       29.3 ->      9.1  (  -20.3)
+  Dist-MoE / MoE glue kernels (triton)                 47.9 ->     47.8  (   -0.1)
+  RoPE / norm kernels                                  25.2 ->      0.1  (  -25.1)
+  loop's fused kernels                                  0.0 ->     47.3  (  +47.3)
+  other elementwise / reduction / copy                218.6 ->     21.0  ( -197.6)

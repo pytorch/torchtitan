@@ -1,0 +1,1355 @@
+{
+ "opportunities": [
+  {
+   "id": "O-01",
+   "title": "attention_norm + single MXFP8 quantize shared by wq_a/wkv_a (plus dense-layer residual add / layer-0 embedding)",
+   "ops_summary": "forward / layers.*.attention_norm _fused_rms_norm; layers.*.attention.wq_a and .wkv_a mxfp8_quantize + scale swizzle (duplicate pair); layers.0-2 MLP residual add; tok_embeddings embedding (61 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 2.408,
+   "saving_basis": "measured 3.769 ms (C-6651; C-7968 minus C-6773 minus C-1508 gives a consistent 3.744). Fused ideal per layer: read x 58.72 MB, write normed bf16 58.72 (wq_a/wkv_a save bf16 input), fp8 29.36, scales 0.92 = 147.7 MB -> 21.3 us x61; dense-layer adds +117.4 MB x3; layer 0 writes h0 +58.7 MB. Ideal 1.361 ms.",
+   "cards": [
+    {
+     "card": "C-6651",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7968",
+     "coverage": 1.0,
+     "note": "covered inside its cross-layer kernel"
+    },
+    {
+     "card": "C-2076",
+     "coverage": 0.3,
+     "note": "only states the duplicate wq_a/wkv_a quantization; sharing it removes one quantize+swizzle but not the norm re-read"
+    }
+   ],
+   "notes": "C-6651's ideal (214 MB/inst) overcounts bytes; recomputed. If O-19 is adopted, the bf16 normed write could also be dropped (~0.52 ms more), but no card proposes that."
+  },
+  {
+   "id": "O-02",
+   "title": "MoE output combine: top-k scale_and_sum + shared-expert add + residual add",
+   "ops_summary": "forward / layers.3-60.feed_forward.routed_experts scale_and_sum (inside dist_moe.block_scaled_forward), layers.*.feed_forward add (shared), layers.* add (residual) (58 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "moe-dispatch-combine",
+   "saving_ms": 3.103,
+   "saving_basis": "measured 8.517 ms (C-6773). Fused ideal: read route outputs [4096,8,7168] bf16 469.76 MB + scores 0.13 + shared 58.72 + residual 58.72, write layer output 58.72 = 646.1 MB -> 93.3 us x58 = 5.414 ms.",
+   "cards": [
+    {
+     "card": "C-6773",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7968",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Combine runs inside Dist-MoE after the EP barrier; needs the shared output passed into the library or the combine buffer exposed."
+  },
+  {
+   "id": "O-03",
+   "title": "Cross: MoE combine/residual kernel also does the next block's RMSNorm (residual stream not re-read)",
+   "ops_summary": "forward / boundary between layers.L feed_forward combine/residual add and layers.L+1.attention_norm (or final norm) (58 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "residual",
+   "saving_ms": 0.492,
+   "saving_basis": "extra over O-01 + O-02 + O-04: the norm no longer re-reads the 58.72 MB residual stream: 58 x 8.48 us. C-7968's fused ideal (6.305 ms) equals O-01 + O-02 + O-04 ideals minus this.",
+   "cards": [
+    {
+     "card": "C-7968",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Crosses the block and FSDP-unit boundary (next block's pre-forward hook fires in between); norm weight of the next block must be available."
+  },
+  {
+   "id": "O-04",
+   "title": "Final norm + lm_head input MXFP8 quantize",
+   "ops_summary": "forward / norm _fused_rms_norm; lm_head mxfp8_quantize + swizzle (1 instance)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 0.021,
+   "saving_basis": "measured 0.042 ms (C-1508); fused ideal 147.7 MB -> 0.021 ms.",
+   "cards": [
+    {
+     "card": "C-1508",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7968",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-05",
+   "title": "Attention residual add + ffn_norm + w13 MXFP8 quantize",
+   "ops_summary": "forward / layers.* add (attention residual), layers.*.ffn_norm _fused_rms_norm, layers.*.feed_forward.(shared_experts.)w13 mxfp8_quantize + swizzle (61 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 1.509,
+   "saving_basis": "measured 3.846 ms (C-2099; C-4713 reports 3.980, used the smaller). Ideal: read residual + wo output, write h, normed bf16 (saved; read by router/dispatch), fp8 + scales = 265.2 MB -> 38.3 us x61 = 2.337 ms.",
+   "cards": [
+    {
+     "card": "C-2099",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4713",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-06",
+   "title": "q_norm + wq_b MXFP8 quantize",
+   "ops_summary": "forward / layers.*.attention.q_norm _fused_rms_norm; layers.*.attention.wq_b mxfp8_quantize + swizzle (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 0.445,
+   "saving_basis": "measured 0.724 ms (C-3934; C-9717 0.728). Ideal: read 12.58 MB, write normed bf16 12.58 (wq_b saves bf16), fp8 6.29, scales 0.2 = 31.65 MB -> 4.57 us x61 = 0.279 ms.",
+   "cards": [
+    {
+     "card": "C-3934",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9717",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Launch-bound small tensors."
+  },
+  {
+   "id": "O-07",
+   "title": "kv_norm on the strided slice (no contiguous clone) + wkv_b rowwise/colwise MXFP8 quantize",
+   "ops_summary": "forward / layers.*.attention.kv_norm clone + _fused_rms_norm; layers.*.attention.inner_attention.wkv_b mxfp8_quantize + 2 swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 0.768,
+   "saving_basis": "measured 0.843 ms (C-6538; C-8154 0.846). Ideal: read slice 4.19 MB, write fp8 rowwise+colwise 4.19 + scales 0.13 = 8.52 MB -> 1.23 us x61 = 0.075 ms (normed bf16 not needed: wkv_b saves MXFP8).",
+   "cards": [
+    {
+     "card": "C-6538",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-8154",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Launch-bound; a real kernel will not reach 1.2 us, so the achievable saving is somewhat lower."
+  },
+  {
+   "id": "O-08",
+   "title": "SwiGLU forward + w2 MXFP8 quantize (rowwise + colwise)",
+   "ops_summary": "forward / layers.*.feed_forward(.shared_experts) silu_and_mul; .w2 mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "activation",
+   "saving_ms": 1.023,
+   "saving_basis": "measured 1.648 ms (C-1293; C-9464 1.661). Ideal: shared read h13 33.55 MB, write fp8 x2 16.78 + scales 0.52 = 50.9 MB; dense 457.7 MB. Total 0.625 ms.",
+   "cards": [
+    {
+     "card": "C-1293",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9464",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "h has no consumer besides the quantizer (w2 saves MXFP8)."
+  },
+  {
+   "id": "O-09",
+   "title": "wo input MXFP8 quantize + scale swizzle in one kernel",
+   "ops_summary": "forward / layers.*.attention.wo mxfp8_quantize + scale swizzle (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "quantization",
+   "saving_ms": 0.508,
+   "saving_basis": "measured 2.301 ms (C-5649; C-3838 2.381, used smaller). Standalone fused ideal: read O 134.22 MB, write fp8 67.11 + scales 2.10 = 203.4 MB -> 29.4 us x61 = 1.793 ms.",
+   "cards": [
+    {
+     "card": "C-3838",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5649",
+     "coverage": 1.0,
+     "note": "its epilogue design subsumes this"
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-10",
+   "title": "Flash-attention forward epilogue writes the MXFP8 copy of O (removes the O re-read)",
+   "ops_summary": "forward / layers.*.attention.inner_attention flash-attn forward epilogue + wo input quantize (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "attention-glue",
+   "saving_ms": 1.183,
+   "saving_basis": "extra over O-09: the quantizer's read of O (134.22 MB) disappears; epilogue only writes fp8 + scales (69.2 MB -> 10.0 us). 61 x 19.4 us.",
+   "cards": [
+    {
+     "card": "C-5649",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Requires changing the external FA4 CuTe kernel epilogue; head dim 128 covers whole 32-element blocks."
+  },
+  {
+   "id": "O-11",
+   "title": "q RoPE applied in the wq_b GEMM epilogue",
+   "ops_summary": "forward / layers.*.attention torchtitan.fused_mla_q_rope (out-of-place full q copy) folded into layers.*.attention.wq_b _scaled_mm_v2 (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "rope",
+   "saving_ms": 3.589,
+   "saving_basis": "removes the q rope kernel (measured 3.589 ms, C-7365). wq_b GEMM is compute-bound (309 GFLOP -> 85.5 us vs 35.8 us of bytes), so the epilogue rotation adds ~0. C-1332's 3.979 also counts the GEMM's own gap to peak (~0.39 ms), which fusion does not remove.",
+   "cards": [
+    {
+     "card": "C-7365",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1332",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "cuBLAS nvjet has no custom epilogue; needs a CUTLASS/CuTe MXFP8 GEMM."
+  },
+  {
+   "id": "O-12",
+   "title": "MLA K assembly (k_nope copy + rotated k_pe broadcast) in the wkv_b GEMM epilogue",
+   "ops_summary": "forward / layers.*.attention.inner_attention torchtitan.fused_mla_k_rope folded into .wkv_b _scaled_mm_v2 (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "rope",
+   "saving_ms": 2.498,
+   "saving_basis": "k rope kernel measured 3.094 ms (C-5475). wkv_b GEMM is memory-bound (287.9 MB -> 41.6 us); writing K [4096,128,192] + V separately instead of kv adds 67.1 MB (+k_pe 0.5) -> +9.77 us per layer. Saving (50.72 - 9.77) x 61.",
+   "cards": [
+    {
+     "card": "C-5475",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7582",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "C-7582's fused ideal (490.8 MB) keeps the full kv write and its gap includes the GEMM's own inefficiency (~1.1 ms); recomputed. V stops being a free view."
+  },
+  {
+   "id": "O-13",
+   "title": "RoPE position bound check done once per step instead of per layer",
+   "ops_summary": "forward / layers.*.attention le + all + _assert_async on the same positions tensor (61 x 3 kernels)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "rope",
+   "saving_ms": 0.458,
+   "saving_basis": "measured 0.459 ms (C-8742); replacement ideal ~0 (537 bytes).",
+   "cards": [
+    {
+     "card": "C-8742",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Cross-layer dedupe rather than a fusion of different ops; verified positions is the same tensor for every layer (fused_mla.py forward, rope.py _maybe_check_max_pos)."
+  },
+  {
+   "id": "O-14",
+   "title": "MoE router forward in one row-wise kernel (sigmoid, bias, group top-k, top-8, gather/normalize, routing map, counts)",
+   "ops_summary": "forward / layers.3-60.feed_forward.router sigmoid, add, topk x3, scatter_, masked_fill, gather, sum/div/mul, ones_like, zeros_like, add_ (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "router",
+   "saving_ms": 14.357,
+   "saving_basis": "router-only measured 14.439 ms = C-9469 (18.504) minus C-9256 aux-loss (4.065); C-7457 reports 14.785 including the routed_experts padding masked_fills, used the smaller. Ideal: logits fp32 4.19 MB in; scores 4.19, map 1.05, ids/weights 0.39 out = 9.8 MB -> 1.42 us x58 = 0.082 ms.",
+   "cards": [
+    {
+     "card": "C-9469",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7457",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Three torch.topk calls (~72 us each) dominate. Must reproduce topk tie-breaking/order. A real kernel will be launch/latency bound (~10 us), still ~95% of the gap."
+  },
+  {
+   "id": "O-15",
+   "title": "Router load-balance aux-loss forward statistics in one kernel",
+   "ops_summary": "forward / layers.3-60.feed_forward.router.aux_loss _to_copy, sum, linalg_vector_norm, clamp_min, div, reciprocal, mul, add_, bitwise_not (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "router",
+   "saving_ms": 4.021,
+   "saving_basis": "measured 4.065 ms (C-9256). Ideal: read mask 1.05 MB + scores 4.19 MB -> 0.76 us x58 = 0.044 ms.",
+   "cards": [
+    {
+     "card": "C-9469",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9256",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Fusing it into the router kernel (C-9469) saves only the 5.2 MB re-read (~0.04 ms more); not recorded separately. Column sums need an ordered second pass for determinism."
+  },
+  {
+   "id": "O-16",
+   "title": "Dist-MoE routing metadata / GEMM-plan kernels and padding glue (forward and backward)",
+   "ops_summary": "forward / layers.3-60.feed_forward.routed_experts dispatch_routing_split/prefix/combine, dist_gather_metadata, blockscaled_forward_plan, padding masked_fill x2, cat, clone; backward / blockscaled_backward_plan (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "moe-dispatch-combine",
+   "saving_ms": 2.763,
+   "saving_basis": "measured 2.388 ms planning (C-2793) + 0.381 ms masked_fill/cat/clone (union of C-4525 and C-2777, 6.090, minus C-2793 + C-8100, 5.709). Ideal ~0.005 ms (KB-sized metadata). Backward plan alone ~0.342 ms (C-2777 minus one copy).",
+   "cards": [
+    {
+     "card": "C-2793",
+     "coverage": 0.86,
+     "note": "planning kernels fwd+bwd"
+    },
+    {
+     "card": "C-4525",
+     "coverage": 0.88,
+     "note": "forward planning + padding glue"
+    },
+    {
+     "card": "C-2777",
+     "coverage": 0.12,
+     "note": "backward plan folded into the copy"
+    },
+    {
+     "card": "C-7457",
+     "coverage": 0.07,
+     "note": "folds the two padding masked_fills into the router kernel"
+    }
+   ],
+   "notes": "Planning is split by EP barrier points (cross-rank metadata gather), so at least one kernel per barrier phase remains; the roofline ideal ignores that launch floor. Backward plan can be cached from forward."
+  },
+  {
+   "id": "O-17",
+   "title": "Dist-MoE activation save/restore copies (drop the redundant activation-buffer copy)",
+   "ops_summary": "forward / routed_experts copy_routing_and_dispatch (x -> dispatch buffer), copy_dispatch_to_activation; backward / copy_activation_to_dispatch (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "moe-dispatch-combine",
+   "saving_ms": 1.353,
+   "saving_basis": "measured 3.321 ms (C-8100, 3 copies of 58.7 MB). Ideal keeps the forward and backward symmetric-buffer copies (2 x 117.4 MB) and aliases the activation save to the resident ffn_norm output: 33.9 us x58 = 1.968 ms.",
+   "cards": [
+    {
+     "card": "C-8100",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4525",
+     "coverage": 0.55,
+     "note": "reads x once for both forward copies but still writes the activation copy"
+    },
+    {
+     "card": "C-2777",
+     "coverage": 0.09,
+     "note": "only brings the backward copy to roofline (per-layer buffers alternative not costed)"
+    }
+   ],
+   "notes": "Library-internal; dispatch buffer must live in symmetric memory. Fake-PG copies may not reflect real EP traffic."
+  },
+  {
+   "id": "O-18",
+   "title": "Dist-MoE grouped-GEMM prepare kernels folded into the GEMM prologue",
+   "ops_summary": "forward + backward / routed_experts cute *_prepare_* kernels before each fprop/dgrad/wgrad grouped GEMM (2 fwd + ~6 bwd per layer, 58 layers)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 2.033,
+   "saving_basis": "measured 2.033 ms (C-8973); prologue cost ~0 (metadata only).",
+   "cards": [
+    {
+     "card": "C-8973",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Unverifiable from the repo (Dist-MoE kernels are external); if a prepare kernel publishes state to peers before the dispatch GEMM starts, folding it needs an in-kernel cross-rank ordering and the saving shrinks."
+  },
+  {
+   "id": "O-19",
+   "title": "Emit the colwise MXFP8 copy of bf16-saved linear inputs in the forward quantize (no backward requantize)",
+   "ops_summary": "backward / layers.*.attention.{wq_a,wkv_a,wq_b,wo}, feed_forward.(shared_experts.)w13, lm_head colwise mxfp8_quantize + swizzle of the saved bf16 input; replaced by a colwise output of the forward quantizer (62)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "quantization",
+   "saving_ms": 5.097,
+   "saving_basis": "measured 6.302 ms (C-9441; C-2076 reports 7.112 including ~0.8 ms beyond the backward requant, used the smaller). Ideal = extra colwise writes in forward (input read is shared): per layer fp8 29.36 (attention_norm out, shared by wq_a/wkv_a) + 29.36 (ffn_norm out) + 6.29 (q_norm out) + 67.11 (O) + scales 4.13 = 136.25 MB; lm_head 30.3 MB -> 1.205 ms.",
+   "cards": [
+    {
+     "card": "C-9441",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-2076",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Changes the saved-activation format: saves memory for attention_norm/q_norm/lm_head inputs, costs ~4 GB extra for O and ffn_norm output whose bf16 stays alive for FA backward / router gate. The recipe keeps bf16 for these on purpose."
+  },
+  {
+   "id": "O-20",
+   "title": "Horizontal GEMM fusion of wq_a and wkv_a (forward N-concat, dgrad K-concat)",
+   "ops_summary": "forward + backward / layers.*.attention.wq_a and .wkv_a _scaled_mm_v2 fprop and dgrad (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "horizontal",
+   "saving_ms": 1.688,
+   "saving_basis": "measured 5.873 ms (C-5923; C-9619 5.893). Fused ideal: N=2112 fprop and K=2112 dgrad, each 124 GFLOP -> 34.3 us at MXFP8 peak (bytes 62-83 MB, 9-12 us): 68.6 us x61 = 4.185 ms.",
+   "cards": [
+    {
+     "card": "C-5923",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9619",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "The saving is GEMM efficiency (N=576 GEMM runs at half its roofline); a merged GEMM will not reach peak, so this is an upper bound. Forward concat is bitwise; the K-concat dgrad changes accumulation order. Needs a stacked parameter or grouped GEMM."
+  },
+  {
+   "id": "O-21",
+   "title": "Cross: merged wq_a/wkv_a dgrad removes the second partial-gradient read in attention_norm backward",
+   "ops_summary": "backward / layers.*.attention.wq_a add (dX sum) absorbed by the K-concat dgrad (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "horizontal",
+   "saving_ms": 0.518,
+   "saving_basis": "extra over O-20 + O-28: the fused attention_norm-backward kernel reads one dX instead of two (58.72 MB) -> 8.48 us x61.",
+   "cards": [
+    {
+     "card": "C-5923",
+     "coverage": 1.0,
+     "note": "states the add disappears"
+    },
+    {
+     "card": "C-9619",
+     "coverage": 1.0,
+     "note": "states the add in the norm backward disappears"
+    }
+   ],
+   "notes": "Only with the non-bitwise K-concat dgrad; a grouped GEMM with a fused bf16 add keeps the read."
+  },
+  {
+   "id": "O-22",
+   "title": "Fused cross-entropy (forward keeps LSE; backward writes MXFP8 dlogits for lm_head)",
+   "ops_summary": "forward / loss _to_copy fp32, _log_softmax, nll_loss_forward, div, ones_like; backward / nll_loss_backward, _log_softmax_backward_data, _to_copy bf16, div; lm_head dY mxfp8_quantize + swizzles (1)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "loss",
+   "saving_ms": 3.729,
+   "saving_basis": "measured 4.193 ms (both cards). Ideal two-kernel form: read bf16 logits [4096,129280] (1059 MB) in forward and again in backward, write fp8 rowwise+colwise 1059 MB + scales 33 MB = 3210 MB -> 0.464 ms.",
+   "cards": [
+    {
+     "card": "C-9228",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5399",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Removes the 2.1 GB fp32 copies and saved log_softmax. Crosses the loss/model boundary and lm_head's MXFP8 autograd Function."
+  },
+  {
+   "id": "O-23",
+   "title": "Cross-entropy forward and backward in a single pass over the logits",
+   "ops_summary": "same ops as O-22; the backward is computed in the forward kernel (1)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "loss",
+   "saving_ms": 0.153,
+   "saving_basis": "extra over O-22: logits are read once instead of twice (1059 MB) -> 0.153 ms (fused ideal 0.311 ms).",
+   "cards": [
+    {
+     "card": "C-5399",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Needs the loss-gradient scale known at forward time and stores fp8 dlogits from forward to backward."
+  },
+  {
+   "id": "O-24",
+   "title": "Router + aux-loss backward to the gate-logit gradient in one row-wise kernel",
+   "ops_summary": "backward / layers.3-60.feed_forward.routed_experts masked_fill; router mul/div/sum/neg/gather_backward (sort-based scatter_add)/add_/sigmoid_backward; router.aux_loss where/sgn/gt/mul/div/sum/... (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "router",
+   "saving_ms": 10.366,
+   "saving_basis": "measured 10.448 ms (C-5502); C-1640's 11.992 also includes the hi/mid/lo split. Ideal: d topk scores + scores fp32 + map in, d logits fp32 out ~9.8 MB -> 1.42 us x58 = 0.082 ms.",
+   "cards": [
+    {
+     "card": "C-5502",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1640",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Top-k ids are unique per row, so the deterministic sort-based scatter_add becomes a direct store with identical bits."
+  },
+  {
+   "id": "O-25",
+   "title": "HiMidLo split of the gate-logit gradient written directly into the stacked bf16 GEMM operand",
+   "ops_summary": "backward / layers.3-60.feed_forward.router.gate _to_copy, __lshift__, sub (x2), cat -> [4096,768] (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "router",
+   "saving_ms": 1.456,
+   "saving_basis": "measured 1.544 ms = C-1640 (11.992) minus C-5502 (10.448). Ideal: read fp32 [4096,256] 4.19 MB, write bf16 [4096,768] 6.29 MB -> 1.51 us x58 = 0.088 ms.",
+   "cards": [
+    {
+     "card": "C-1640",
+     "coverage": 1.0,
+     "note": "also fuses it with O-24 (saves a further ~0.07 ms, not recorded)"
+    },
+    {
+     "card": "C-1260",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Exact bit manipulation."
+  },
+  {
+   "id": "O-26",
+   "title": "Router gate weight-gradient: three wgrad GEMMs accumulated in one GEMM, no stacked-weight copy",
+   "ops_summary": "backward / layers.3-60.feed_forward.router.gate cat (weight x3), mm x3 (wgrad), add_ x2, _to_copy (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 2.01,
+   "saving_basis": "measured 3.366 ms (C-9194). Fused ideal: one bf16 GEMM computing the three [256,7168] products while reading x once, 45.1 GFLOP -> 23.4 us x58 = 1.356 ms.",
+   "cards": [
+    {
+     "card": "C-9194",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1260",
+     "coverage": 0.25,
+     "note": "GEMM beta=1 accumulation removes the add_/cast kernels but keeps three GEMMs each reading x"
+    }
+   ],
+   "notes": "Includes GEMM efficiency (three small memory-bound GEMMs -> one); bitwise only if each product keeps its K order and the sums keep ((d1+d2)+d3)."
+  },
+  {
+   "id": "O-27",
+   "title": "ffn_norm backward block: routed K-sum + shared/gate dX adds + RMSNorm backward + residual add + wo dY MXFP8 quantize",
+   "ops_summary": "backward / routed_experts scale_and_sum (K-reduce) + add, router.gate add_, ffn_norm _fused_rms_norm_backward + add_, attention.wo dY mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 6.761,
+   "saving_basis": "measured 13.794 ms (C-9958; C-1217 14.080, used smaller). Ideal per MoE layer: read per-slot dX 469.76 MB + shared dX, gate dX, h, residual grad (4 x 58.72), write dh bf16 58.72 + fp8 x2 58.72 + scales 1.84 = 823.9 MB -> 119.0 us x58; dense layers 295.4 MB x3. Ideal 7.033 ms.",
+   "cards": [
+    {
+     "card": "C-1217",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9958",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Needs a custom backward for the whole MoE block (partials come from Dist-MoE, MXFP8 linear and HiMidLo linear autograd ops); weight-grad column partials need a second small pass."
+  },
+  {
+   "id": "O-28",
+   "title": "attention_norm backward block: wq_a+wkv_a dX sum + RMSNorm backward + residual-gradient add",
+   "ops_summary": "backward / layers.*.attention.wq_a add, attention_norm _fused_rms_norm_backward (2 kernels) + add_, norm _fused_rms_norm_backward (62)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 3.269,
+   "saving_basis": "measured 5.882 ms (C-7467). Ideal: read 2 dX + x + residual grad, write dx = 293.6 MB -> 42.4 us x61, plus final norm 176 MB. Ideal 2.613 ms.",
+   "cards": [
+    {
+     "card": "C-7467",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1047",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-29",
+   "title": "w2 dY MXFP8 quantize fused into a kernel that already holds dy",
+   "ops_summary": "backward / layers.*.feed_forward.(shared_experts.)w2 dY mxfp8_quantize + 2 swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "quantization",
+   "saving_ms": 1.06,
+   "saving_basis": "measured 1.594 ms = C-1047 (7.476) minus C-7467 (5.882); C-1543 minus C-4163 gives 1.799, used the smaller. Ideal: only the fp8 rowwise+colwise writes (60.6 MB -> 8.75 us) x61 = 0.534 ms; dy is read by the producer (attention_norm backward, C-1047) or by broadcast_and_scale (C-1543).",
+   "cards": [
+    {
+     "card": "C-1047",
+     "coverage": 1.0,
+     "note": "producer-side (cross-layer)"
+    },
+    {
+     "card": "C-1543",
+     "coverage": 0.98,
+     "note": "consumer-side; the 3 dense layers keep a standalone quantize"
+    }
+   ],
+   "notes": "C-1047 and C-1543 are alternatives for the same dy read; only one can be realised. C-1047 crosses the block/FSDP-unit boundary."
+  },
+  {
+   "id": "O-30",
+   "title": "Routed-expert backward broadcast_and_scale folded into the expert GEMMs (no [T,K,D] dx materialisation)",
+   "ops_summary": "backward / layers.3-60.feed_forward.routed_experts triton broadcast_and_scale (dx = dy*score, dscore = <dy,x>) (58)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "moe-dispatch-combine",
+   "saving_ms": 8.718,
+   "saving_basis": "measured 9.704 ms (C-4163). Ideal: dy read by the recompute-fprop epilogue (dscore) and by the dgrad operand load (2 x 58.72 MB) -> 17.0 us x58 = 0.986 ms (both GEMMs are compute-bound, so this is an upper bound on the added cost).",
+   "cards": [
+    {
+     "card": "C-4163",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1543",
+     "coverage": 0.15,
+     "note": "keeps broadcast_and_scale, only brings it to roofline (998.5 MB per layer)"
+    }
+   ],
+   "notes": "Dist-MoE owns the kernels; dscore is a D=7168 reduction across N-tiles (ordered partials needed); in real EP the expert rank needs the source token's dy over symmetric memory; dx must be quantized in the prologue. Fake-PG GEMM times are not representative."
+  },
+  {
+   "id": "O-31",
+   "title": "Flash-attention backward preprocess (rowsum(dO*O), dQaccum zero) in the wo dgrad GEMM epilogue",
+   "ops_summary": "backward / layers.*.attention.wo dgrad _scaled_mm_v2 + preprocess kernels inside torch_attn._varlen_attn_backward (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "attention-glue",
+   "saving_ms": 6.644,
+   "saving_basis": "measured 22.876 ms GEMM + preprocess (C-5659). wo dgrad is compute-bound: 962 GFLOP -> 266.1 us; the epilogue's extra O read (134 MB) and dQaccum zeroing (403 MB) fit under it. Fused ideal 16.232 ms.",
+   "cards": [
+    {
+     "card": "C-5659",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Upper bound: the saving also absorbs the GEMM's own gap to peak, which cannot be separated from the card's numbers (at most ~0.7 ms, since the preprocess alone needs >= 97 us per layer). cuBLAS has no custom epilogue; FA owns the dpsum layout."
+  },
+  {
+   "id": "O-32",
+   "title": "q RoPE backward + wq_b dY MXFP8 quantize in one pass",
+   "ops_summary": "backward / layers.*.attention torchtitan.fused_mla_q_rope_ (in place), layers.*.attention.wq_b dY mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "rope",
+   "saving_ms": 2.39,
+   "saving_basis": "measured 5.994 ms (C-7143). Ideal: read dq bf16 201.3 MB, write fp8 x2 201.3 + scales 6.3 = 408.9 MB -> 59.1 us x61 = 3.604 ms.",
+   "cards": [
+    {
+     "card": "C-7143",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4192",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-33",
+   "title": "Cross: produce wq_b's MXFP8 dY straight from flash-attention's fp32 dQ accumulator (replaces the dQ postprocess)",
+   "ops_summary": "backward / layers.*.attention.inner_attention.inner_attention torch_attn._varlen_attn_backward dQ postprocess (fp32 -> bf16), fused with O-32 (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "attention-glue",
+   "saving_ms": 4.604,
+   "saving_basis": "C-4192 union measured 12.373 ms, so the postprocess is 6.379 ms. Fused ideal: read dQaccum fp32 402.65 MB, write fp8 x2 201.3 + scales 6.3 = 610.3 MB -> 88.2 us x61 = 5.379 ms. Extra over O-32 = union saving minus O-32 saving.",
+   "cards": [
+    {
+     "card": "C-4192",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Needs a hook into the attention backward to replace its postprocess (attention epilogue); arithmetic is pointwise so bitwise is achievable (round to bf16 first). C-7143 mentions this only as a further step."
+  },
+  {
+   "id": "O-34",
+   "title": "MLA KV backward pack + wkv_b dY MXFP8 quantize",
+   "ops_summary": "backward / layers.*.attention.inner_attention torchtitan.fused_mla_kv_backward, .wkv_b dY mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "attention-glue",
+   "saving_ms": 6.512,
+   "saving_basis": "measured 11.914 ms (C-9444; C-2330 11.934). Ideal: read dK 201.3 + dV 134.2 MB, write fp8 x2 268.4 + scales 8.4 + dk_pe 0.5 = 612.9 MB -> 88.6 us x61 = 5.402 ms.",
+   "cards": [
+    {
+     "card": "C-2330",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9444",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Kernel must tile 32 tokens x 32 features for the colwise scales."
+  },
+  {
+   "id": "O-35",
+   "title": "kv_norm backward + k_pe-gradient cat + wkv_a dY MXFP8 quantize",
+   "ops_summary": "backward / layers.*.attention.kv_norm clone + _fused_rms_norm_backward, attention cat, .wkv_a dY mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 1.266,
+   "saving_basis": "measured 1.387 ms (C-5641; C-5526 1.514). Ideal 13.8 MB -> 2.0 us x61 = 0.121 ms.",
+   "cards": [
+    {
+     "card": "C-5641",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5526",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Launch-bound."
+  },
+  {
+   "id": "O-36",
+   "title": "q_norm backward + wq_a dY MXFP8 quantize",
+   "ops_summary": "backward / layers.*.attention.q_norm _fused_rms_norm_backward, .wq_a dY mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 1.003,
+   "saving_basis": "measured 1.339 ms (C-7974; C-5686 1.476). Ideal: read 2 x 12.58 MB, write fp8 x2 12.58 + scales 0.4 = 38.1 MB -> 5.5 us x61 = 0.336 ms.",
+   "cards": [
+    {
+     "card": "C-7974",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5686",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-37",
+   "title": "SwiGLU backward + w13 dY MXFP8 quantize",
+   "ops_summary": "backward / layers.*.feed_forward(.shared_experts) silu_and_mul_backward, .w13 dY mxfp8_quantize + swizzles (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "activation",
+   "saving_ms": 1.407,
+   "saving_basis": "measured 2.450 ms (C-2289; C-3040 2.587). Ideal: shared 84.9 MB, dense 764.4 MB -> 1.043 ms.",
+   "cards": [
+    {
+     "card": "C-2289",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-3040",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-38",
+   "title": "Embedding dense backward as one zero-fill + scatter pass",
+   "ops_summary": "backward / tok_embeddings embedding_dense_backward (memset + sort + segment reduce, 21 kernels) (1)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "other",
+   "saving_ms": 0.283,
+   "saving_basis": "measured 0.559 ms (C-2589). Ideal: zero-fill the 1853 MB table + read 58.7 MB grad -> 0.276 ms.",
+   "cards": [
+    {
+     "card": "C-2589",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9549",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Duplicate token ids must keep the deterministic accumulation order."
+  },
+  {
+   "id": "O-39",
+   "title": "Embedding backward written straight into the reduce-scatter buffer (no table chunk_cat)",
+   "ops_summary": "backward / tok_embeddings _chunk_cat / reduce-scatter copy-in of the [129280,7168] gradient (1)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "communication-glue",
+   "saving_ms": 0.868,
+   "saving_basis": "chunk_cat measured 0.868 ms = C-9549 (1.427) minus C-2589 (0.559); the fused kernel's ideal is already counted in O-38 (it zero-fills the RS buffer instead of the table), so the whole copy is saved.",
+   "cards": [
+    {
+     "card": "C-9549",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4715",
+     "coverage": 0.38,
+     "note": "packs the table at roofline but keeps the copy"
+    },
+    {
+     "card": "C-2589",
+     "coverage": 0.5,
+     "note": "mentions writing into the RS bucket in its dataflow, but its footprint and numbers exclude the chunk_cat"
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-40",
+   "title": "tok_embeddings lookup from the all-gather buffer (skip the full-table copy-out)",
+   "ops_summary": "forward / tok_embeddings split_with_sizes_copy (1.85 GB) + embedding (1)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 0.547,
+   "saving_basis": "measured 0.564 ms (C-2019). Ideal: gather 4096 rows + write output 117.5 MB -> 0.017 ms.",
+   "cards": [
+    {
+     "card": "C-2019",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "The embedding group holds one dim-0, evenly sharded parameter, so the rank-major gathered buffer already is the table layout."
+  },
+  {
+   "id": "O-41",
+   "title": "FSDP forward all-gather copy-in: fp32 -> bf16 cast fused with the pack (incl. uneven-shard pad)",
+   "ops_summary": "forward / per-block fp32 shard casts (_to_copy / constant_pad_nd / clone) + _foreach_copy_ / bucketing._pre_bucket_all_gather into the all-gather input (62)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 2.621,
+   "saving_basis": "measured 4.894 ms (C-2650); C-7411's forward half is ~6.76 ms, used the smaller. Ideal: read fp32 shards + write bf16 = 269.7 MB per MoE block (39 us), small dense/norm/embedding groups -> 2.273 ms.",
+   "cards": [
+    {
+     "card": "C-2650",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7411",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-42",
+   "title": "FSDP backward re-unshard all-gather copy-in (same cast + pack)",
+   "ops_summary": "backward / per-block fp32 shard casts + clone + _foreach_copy_ before the backward all-gather (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 2.549,
+   "saving_basis": "only C-7411 reports it (its backward half ~6.55 ms). Measured taken as the forward per-block cost of the smaller forward report (C-2650: 4.894 x 61/62 = 4.815 ms) for consistency with O-41. Ideal 2.266 ms.",
+   "cards": [
+    {
+     "card": "C-7411",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Parameters do not change between forward and backward, so caching the bf16 shard would remove it entirely (memory cost). Using C-7411's own figure the saving would be ~4.3 ms."
+  },
+  {
+   "id": "O-43",
+   "title": "FSDP forward all-gather copy-out fused with MXFP8 weight quantization",
+   "ops_summary": "forward / split_with_sizes_copy of the gathered bucket, w13 dim-1 reassembly cat, torchao 32x32 weight quantize, dist_moe.prepare_mxfp8_weight (blocks + norm/lm_head group)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "weight-prep",
+   "saving_ms": 23.711,
+   "saving_basis": "measured 35.204 ms (C-7051; C-1888's forward half is larger because it also counts the temp->persistent copy_ and clone, recorded in O-45). Fused ideal: read the gathered bf16 buffer once and write fp8 qdata + scales (+bf16 router/norm weights): MoE block 821 + 412 MB = 1233 MB -> 178.1 us x58, dense block 1754 MB -> 253.5 us x3, norm/lm_head 2782 MB -> 401.9 us. Ideal 11.494 ms.",
+   "cards": [
+    {
+     "card": "C-7051",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1888",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Both cards' ideals are too high (2.1 and 3.0 GB/inst): they keep most of today's traffic. One qdata allocation serves fprop and dgrad (tensor.py), so 1 byte/element."
+  },
+  {
+   "id": "O-44",
+   "title": "FSDP backward re-unshard copy-out fused with MXFP8 weight quantization",
+   "ops_summary": "backward / same copy-out + quantize ops for the backward all-gather of each block (61)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "weight-prep",
+   "saving_ms": 22.881,
+   "saving_basis": "only C-1888 covers it. Measured taken as the forward per-block cost of C-7051 scaled to the 61 blocks (35.204 x 11.092/11.494 = 33.97 ms); the rest of C-1888's 92.83 ms is assigned to O-45. Ideal 11.092 ms.",
+   "cards": [
+    {
+     "card": "C-1888",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Default reshard_after_forward (no PP) re-gathers in backward. Keeping the MXFP8 operands from forward removes this half entirely at ~23 GB of memory."
+  },
+  {
+   "id": "O-45",
+   "title": "Quantize straight into the persistent MXFP8 operand storage (drop the temp -> persistent copy_ and the dim-1 clone)",
+   "ops_summary": "forward + backward / _build_operands copy_ refill of qdata/scales and contiguous clone of dim-1-sharded w13 (123)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "weight-prep",
+   "saving_ms": 23.651,
+   "saving_basis": "C-1888's 92.828 ms minus the copy-out/quantize parts assigned to O-43/O-44 (35.204 + 33.973) = 23.65 ms (~190 us per block, consistent with 932 MB of copy_ + clone traffic per MoE block). Fused ideal 0 (the O-43/O-44 kernels write the persistent buffers).",
+   "cards": [
+    {
+     "card": "C-1888",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Verified the copy_ refill in torchtitan/quantization/mxfp8/tensor.py _build_operands; C-7051 does not list these ops. Derived split, so moderate uncertainty."
+  },
+  {
+   "id": "O-46",
+   "title": "FSDP reduce-scatter copy-in in one pass (w13 dim-1 shard interleave folded into the pack)",
+   "ops_summary": "backward / per-block w13 grad interleave cat (256 chunks) + _chunk_cat / bucketing._pre_bucket_reduce_scatter into the RS input (62)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 24.391,
+   "saving_basis": "measured 39.701 ms (C-8089, 62 groups; C-4715's 40.397 also includes the embedding group, moved to O-39). Ideal: read every bf16 grad once and write the RS buffer once: MoE block 1642 MB -> 237 us x58, dense 2339 MB x3, norm/lm_head 3707 MB -> 15.311 ms.",
+   "cards": [
+    {
+     "card": "C-8089",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4715",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "C-8089's ideal (22.94 ms) is too high. Most of the gap is chunk_cat running well below roofline plus the strided 256-input cat; needs per-tensor shard-dim support in fsdp::chunk_cat."
+  },
+  {
+   "id": "O-47",
+   "title": "Reduce-scatter output cast to fp32 written directly into param.grad (no per-parameter casts + clone)",
+   "ops_summary": "backward / per-parameter bf16 -> fp32 _to_copy after each reduce-scatter (848) + param.grad clone/copy_ (848) (63)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 6.248,
+   "saving_basis": "measured 8.521 ms (C-9655). Ideal: one multi-tensor cast per bucket, read bf16 + write fp32 (269.7 MB per MoE block) -> 2.273 ms.",
+   "cards": [
+    {
+     "card": "C-9655",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "The clone runs in the runtime's gradient hand-off after the program, at the edge of the backward scope; counted because it is gradient glue, not optimizer math."
+  }
+ ],
+ "card_notes": [
+  {
+   "card": "C-1047",
+   "note": "Correct; cross-layer kernel split into O-28 and O-29."
+  },
+  {
+   "card": "C-1217",
+   "note": "Ideal matches; measured 14.080 vs 13.794 (C-9958), smaller used."
+  },
+  {
+   "card": "C-1260",
+   "note": "Covers the split (O-25) fully and only the add_/cast part of the wgrad accumulation (O-26)."
+  },
+  {
+   "card": "C-1293",
+   "note": "Correct."
+  },
+  {
+   "card": "C-1332",
+   "note": "The 3.979 ms gap includes the wq_b GEMM's own gap to MXFP8 peak (~0.39 ms), which the epilogue fusion does not recover; 3.589 ms used."
+  },
+  {
+   "card": "C-1508",
+   "note": "Numbers check out (147.7 MB fused ideal)."
+  },
+  {
+   "card": "C-1543",
+   "note": "Implied w2 dY quantize time (1.80 ms) is higher than the 1.59 ms implied by C-1047 minus C-7467; the smaller was used. Its broadcast part only reaches roofline."
+  },
+  {
+   "card": "C-1640",
+   "note": "Tier T2 overstated: the gather backward is collision-free per row; includes the hi/mid/lo split (O-25)."
+  },
+  {
+   "card": "C-1888",
+   "note": "Ideal (2.99 GB/inst) is roughly today's traffic, not the proposed single kernel's; recomputed fused ideal ~22.6 ms fwd+bwd. Tier T2 -> T1 (max-based block scales are order-independent). Split into O-43/O-44/O-45."
+  },
+  {
+   "card": "C-2019",
+   "note": "Correct; the embedding group is a single evenly dim-0-sharded parameter, so the gathered buffer is already the table layout."
+  },
+  {
+   "card": "C-2076",
+   "note": "Measured 7.112 is ~0.81 ms above the backward requant time reported by C-9441 (6.302, used); proposal also needs a saved-format change with a memory cost for O and ffn_norm output."
+  },
+  {
+   "card": "C-2099",
+   "note": "Numbers check out; measured 3.846 used (smaller than C-4713)."
+  },
+  {
+   "card": "C-2289",
+   "note": "Correct."
+  },
+  {
+   "card": "C-2330",
+   "note": "Correct."
+  },
+  {
+   "card": "C-2589",
+   "note": "Correct."
+  },
+  {
+   "card": "C-2650",
+   "note": "Correct; smaller of the two forward copy-in measurements."
+  },
+  {
+   "card": "C-2777",
+   "note": "Small; covers the backward plan (O-16) and the backward copy's roofline gap (O-17)."
+  },
+  {
+   "card": "C-2793",
+   "note": "Roofline ideal ~0 ignores that planning is split by EP barrier points, so a minimum number of kernels remains."
+  },
+  {
+   "card": "C-3040",
+   "note": "Same ops as C-2289 (2.587 vs 2.450)."
+  },
+  {
+   "card": "C-3838",
+   "note": "Measured 2.381 vs 2.301 for the same ops in C-5649; the smaller was used."
+  },
+  {
+   "card": "C-3934",
+   "note": "Correct."
+  },
+  {
+   "card": "C-4163",
+   "note": "Plausible T3; ideal is an upper bound on added GEMM cost; fake-PG GEMM times are not representative."
+  },
+  {
+   "card": "C-4192",
+   "note": "Tier T1 understated for the postprocess part: it replaces flash-attention's own postprocess kernel (attention epilogue, T3). Split into O-32 and O-33."
+  },
+  {
+   "card": "C-4525",
+   "note": "Ideal keeps the redundant activation copy; covers the forward planning/glue (O-16) and part of the copy savings (O-17)."
+  },
+  {
+   "card": "C-4713",
+   "note": "Same ops as C-2099 with a higher measured time (3.980); the smaller was used."
+  },
+  {
+   "card": "C-4715",
+   "note": "Ideal matches the one-pass pack; its 63 instances include the embedding group (moved to O-39)."
+  },
+  {
+   "card": "C-5399",
+   "note": "Single-pass variant; the extra 0.153 ms over C-9228 recorded as O-23."
+  },
+  {
+   "card": "C-5475",
+   "note": "Correct."
+  },
+  {
+   "card": "C-5502",
+   "note": "Correct."
+  },
+  {
+   "card": "C-5526",
+   "note": "Same ops as C-5641 with higher measured time (1.514 vs 1.387)."
+  },
+  {
+   "card": "C-5641",
+   "note": "Correct."
+  },
+  {
+   "card": "C-5649",
+   "note": "Correct; split into the standalone quant+swizzle part (O-09) and the epilogue-only extra (O-10)."
+  },
+  {
+   "card": "C-5659",
+   "note": "Gap includes the wo dgrad GEMM's own gap to peak (not separable, <= ~0.7 ms); assumes the dQaccum zeroing hides under GEMM compute."
+  },
+  {
+   "card": "C-5686",
+   "note": "Same ops as C-7974 with higher measured time (1.476 vs 1.339)."
+  },
+  {
+   "card": "C-5923",
+   "note": "Saving is GEMM efficiency at an idealized peak (upper bound); the K-concat dgrad is not bitwise."
+  },
+  {
+   "card": "C-6538",
+   "note": "Correct; the 1.2 us roofline ideal is below a realistic launch floor."
+  },
+  {
+   "card": "C-6651",
+   "note": "Ideal overstated: 214 MB/inst vs ~154 MB actually needed (norm in, normed bf16 + fp8 + scales out); recomputed ideal 1.36 ms, saving 2.41 ms rather than 1.88."
+  },
+  {
+   "card": "C-6773",
+   "note": "Numbers check out."
+  },
+  {
+   "card": "C-7051",
+   "note": "Ideal (2.12 GB/inst) too high: a fused kernel reads the gathered buffer once and writes 1-byte qdata (~1.23 GB per MoE block). Omits the copy_ refill into persistent operands."
+  },
+  {
+   "card": "C-7143",
+   "note": "Correct."
+  },
+  {
+   "card": "C-7365",
+   "note": "Correct."
+  },
+  {
+   "card": "C-7411",
+   "note": "Forward half (~6.8 ms) higher than C-2650 for the same logical work; backward half recorded separately (O-42)."
+  },
+  {
+   "card": "C-7457",
+   "note": "Includes the two routed_experts padding masked_fills (assigned to O-16); router-only measured is a bit higher than C-9469's derived figure."
+  },
+  {
+   "card": "C-7467",
+   "note": "Correct."
+  },
+  {
+   "card": "C-7582",
+   "note": "Fused ideal of 490.8 MB keeps the full kv write as well as K; the gap also includes the GEMM's own ~1.1 ms inefficiency. Recomputed as rope-kernel time minus 9.8 us of extra epilogue writes: 2.50 ms."
+  },
+  {
+   "card": "C-7968",
+   "note": "Bytes and ideal check out; split into O-01 (norm + shared quantize), O-02 (combine + adds), O-03 (cross-layer extra 0.49 ms) and O-04 (final norm)."
+  },
+  {
+   "card": "C-7974",
+   "note": "Correct."
+  },
+  {
+   "card": "C-8089",
+   "note": "Ideal (22.94 ms) too high; one-pass pack ideal 15.31 ms."
+  },
+  {
+   "card": "C-8100",
+   "note": "Correct; the 'backward restore' must still land in the symmetric buffer, so only the activation copy is removable without per-layer symmetric buffers."
+  },
+  {
+   "card": "C-8154",
+   "note": "Same ops as C-6538 (measured 0.846 vs 0.843)."
+  },
+  {
+   "card": "C-8742",
+   "note": "Correct, but a cross-layer dedupe rather than a fusion; categorized under rope."
+  },
+  {
+   "card": "C-8973",
+   "note": "Cannot be verified from the repo (external Dist-MoE kernels); possible cross-rank ordering dependency noted by the card itself."
+  },
+  {
+   "card": "C-9194",
+   "note": "Ideal assumes one compute-bound GEMM reading x once; the bitwise beta=1 variant would still run three GEMMs."
+  },
+  {
+   "card": "C-9228",
+   "note": "Correct for a two-kernel fused CE."
+  },
+  {
+   "card": "C-9256",
+   "note": "Correct."
+  },
+  {
+   "card": "C-9441",
+   "note": "Ideal counts separate colwise writes for wq_a and wkv_a (same tensor); deduped ideal 1.205 ms used."
+  },
+  {
+   "card": "C-9444",
+   "note": "Same ops as C-2330 (11.914 vs 11.934)."
+  },
+  {
+   "card": "C-9464",
+   "note": "Same ops as C-1293 (1.661 vs 1.648)."
+  },
+  {
+   "card": "C-9469",
+   "note": "Consistent with C-7457 + C-9256; router-only part derived as 14.439 ms."
+  },
+  {
+   "card": "C-9549",
+   "note": "Correct; split into the single-pass embedding backward (O-38) and the chunk_cat elimination (O-39)."
+  },
+  {
+   "card": "C-9619",
+   "note": "Same as C-5923 (measured 5.893 vs 5.873)."
+  },
+  {
+   "card": "C-9655",
+   "note": "Correct; the param.grad clone runs outside the program at the edge of scope."
+  },
+  {
+   "card": "C-9717",
+   "note": "Same ops as C-3934."
+  },
+  {
+   "card": "C-9958",
+   "note": "Ideal 7.525 overcounts ~34 MB/inst; recomputed 7.03 ms."
+  }
+ ]
+}

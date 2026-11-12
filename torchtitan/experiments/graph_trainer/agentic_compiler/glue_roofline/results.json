@@ -1,0 +1,166 @@
+{
+ "dsv3": {
+  "base_run": "dsv3_base",
+  "pack_run": "dsv3_pack",
+  "base_ms": {
+   "communication (fake-PG emulation)": 176.74545300000116,
+   "glue: memcpy / memset": 20.57870799999991,
+   "glue: other kernels": 264.28551400000464,
+   "GEMM": 160.21921000000012,
+   "glue: multi_tensor_apply": 45.90107500000006,
+   "attention": 88.83768599999999,
+   "glue: sort + indexing_backward": 4.098302999999995
+  },
+  "pack_ms": {
+   "communication (fake-PG emulation)": 176.38280400000056,
+   "glue: memcpy / memset": 18.911201999999907,
+   "glue: other kernels": 153.30372599999976,
+   "fused by the loop": 36.027836000000015,
+   "GEMM": 160.7247280000003,
+   "glue: multi_tensor_apply": 43.86775499999996,
+   "attention": 88.88377,
+   "glue: sort + indexing_backward": 0.356547
+  },
+  "step_ms": [
+   583.9204960000047,
+   502.07556399999993
+  ],
+  "glue_ms": [
+   334.8636000000046,
+   252.46706599999965
+  ],
+  "gemm_attention_ms": [
+   249.0568960000001,
+   249.6084980000003
+  ],
+  "glue_share": 0.5734746464525573,
+  "glue_share_excl_multi_tensor_apply": 0.49486621377305146,
+  "achieved_reduction": 0.1401645130812537,
+  "captured_of_glue": 0.24441274596583107,
+  "captured_of_glue_excl_multi_tensor_apply": 0.28323718447574997,
+  "glue_share_excl_multi_tensor_apply_and_sort_index": 0.4878476161590366
+ },
+ "q30": {
+  "base_run": "q30_base",
+  "pack_run": "q30_pack",
+  "base_ms": {
+   "glue: multi_tensor_apply": 58.627782999999994,
+   "glue: memcpy / memset": 44.01300699999996,
+   "communication (fake-PG emulation)": 2.9190619999999985,
+   "glue: other kernels": 384.4162790000006,
+   "glue: sort + indexing_backward": 7.058455999999997,
+   "GEMM": 318.06458999999995,
+   "attention": 155.38666199999992
+  },
+  "pack_ms": {
+   "glue: multi_tensor_apply": 58.611215000000016,
+   "glue: memcpy / memset": 31.07475899999994,
+   "communication (fake-PG emulation)": 2.842862000000001,
+   "glue: other kernels": 68.91083600000006,
+   "glue: sort + indexing_backward": 2.5755049999999993,
+   "fused by the loop": 54.963421000000004,
+   "GEMM": 318.4072500000006,
+   "attention": 155.52876399999994
+  },
+  "step_ms": [
+   967.5667770000005,
+   690.0717500000005
+  ],
+  "glue_ms": [
+   494.11552500000056,
+   216.135736
+  ],
+  "gemm_attention_ms": [
+   473.45125199999984,
+   473.93601400000057
+  ],
+  "glue_share": 0.5106784738227947,
+  "glue_share_excl_multi_tensor_apply": 0.45008546423044493,
+  "achieved_reduction": 0.2867967706171042,
+  "captured_of_glue": 0.5615994903216198,
+  "captured_of_glue_excl_multi_tensor_apply": 0.6372051386006625,
+  "glue_share_excl_multi_tensor_apply_and_sort_index": 0.4427904059793905
+ },
+ "gptoss": {
+  "base_run": "gptoss_base",
+  "pack_run": "gptoss_pack",
+  "base_ms": {
+   "GEMM": 248.99634799999995,
+   "glue: memcpy / memset": 26.858674000000008,
+   "glue: other kernels": 537.3997919999953,
+   "glue: sort + indexing_backward": 1092.1867500000023,
+   "attention": 72.58895300000002,
+   "glue: multi_tensor_apply": 24.662720999999998,
+   "communication (fake-PG emulation)": 35.35581
+  },
+  "pack_ms": {
+   "fused by the loop": 70.90619599999992,
+   "glue: other kernels": 160.1166550000011,
+   "glue: memcpy / memset": 12.34048899999998,
+   "glue: sort + indexing_backward": 1080.512710000001,
+   "GEMM": 253.63756600000016,
+   "attention": 74.43795300000001,
+   "glue: multi_tensor_apply": 24.688059000000003,
+   "communication (fake-PG emulation)": 35.48045800000009
+  },
+  "step_ms": [
+   2002.6932379999976,
+   1676.6396280000022
+  ],
+  "glue_ms": [
+   1681.1079369999977,
+   1348.5641090000022
+  ],
+  "gemm_attention_ms": [
+   321.58530099999996,
+   328.07551900000016
+  ],
+  "glue_share": 0.8394235847517251,
+  "glue_share_excl_multi_tensor_apply": 0.827108807564666,
+  "achieved_reduction": 0.1628075652393029,
+  "captured_of_glue": 0.19395162132292987,
+  "captured_of_glue_excl_multi_tensor_apply": 0.19683935626156912,
+  "glue_share_excl_multi_tensor_apply_and_sort_index": 0.281749823334649
+ },
+ "q235": {
+  "base_run": "q235_base",
+  "pack_run": "q235_pack",
+  "base_ms": {
+   "communication (fake-PG emulation)": 44.49087700000442,
+   "glue: memcpy / memset": 46.44021699999967,
+   "glue: other kernels": 410.6070139999961,
+   "GEMM": 389.20954300000074,
+   "glue: sort + indexing_backward": 5.552196999999998,
+   "attention": 169.81575799999996,
+   "glue: multi_tensor_apply": 9.364011000000003
+  },
+  "pack_ms": {
+   "glue: other kernels": 88.56246700000052,
+   "glue: memcpy / memset": 28.227736999999856,
+   "GEMM": 390.8511600000018,
+   "glue: multi_tensor_apply": 7.611773000000004,
+   "communication (fake-PG emulation)": 44.638392000003826,
+   "fused by the loop": 47.28064500000008,
+   "attention": 170.78706000000005,
+   "glue: sort + indexing_backward": 0.6753329999999999
+  },
+  "step_ms": [
+   1030.9887399999966,
+   733.9961750000024
+  ],
+  "glue_ms": [
+   471.9634389999958,
+   172.35795500000046
+  ],
+  "gemm_attention_ms": [
+   559.0253010000007,
+   561.6382200000019
+  ],
+  "glue_share": 0.45777749134291934,
+  "glue_share_excl_multi_tensor_apply": 0.4486949372502335,
+  "achieved_reduction": 0.28806576975806275,
+  "captured_of_glue": 0.6292702791327802,
+  "captured_of_glue_excl_multi_tensor_apply": 0.6420080679390657,
+  "glue_share_excl_multi_tensor_apply_and_sort_index": 0.4433096243126742
+ }
+}

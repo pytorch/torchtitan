@@ -1,0 +1,41 @@
+{
+ "judge_llama3_8b": {
+  "transcript": "/tmp/claude-bahuang/claude-544399/-home-bahuang-local-torchtitan/0cc686c8-c191-47b4-968c-bc78b660905d/tasks/a9bcdc29e7bfdf2e5.output",
+  "tool_calls": {
+   "Bash": 27,
+   "Write": 1
+  },
+  "num_tool_calls": 28,
+  "first": "2026-11-11T01:09:51.796Z",
+  "last": "2026-11-11T01:28:26.750Z",
+  "usage": {
+   "input_tokens": 96,
+   "output_tokens": 235779,
+   "cache_read_input_tokens": 5078999
+  },
+  "flags": [
+   {
+    "kind": "review_no_sandbox_path",
+    "tool": "Bash",
+    "input": "{\"command\": \"date; python3 - <<'EOF'\\nBW=6921.257833704666e9\\ndef ms(b,n=1): return b*n/BW*1e3\\nE=8192*14336*2\\nprint('E',E)\\nprint('O1 ideal',ms(4*E,32),'O2 ideal',ms(6*E,32),'O3',ms(2*E,32),'O4',ms(3*E,32),'O5',ms(5*E,32))\\nidx=0.3904/3\\nprint('idx',idx)\\nprint('O6', 5.7194-idx, ms(205586432,32), "
+   }
+  ]
+ },
+ "judge_qwen3_30b": {
+  "transcript": "/tmp/claude-bahuang/claude-544399/-home-bahuang-local-torchtitan/0cc686c8-c191-47b4-968c-bc78b660905d/tasks/a79b45bf442413165.output",
+  "tool_calls": {
+   "Bash": 20,
+   "Read": 1,
+   "Write": 2
+  },
+  "num_tool_calls": 23,
+  "first": "2026-11-11T01:14:49.853Z",
+  "last": "2026-11-11T01:32:04.483Z",
+  "usage": {
+   "input_tokens": 82,
+   "output_tokens": 249328,
+   "cache_read_input_tokens": 3957230
+  },
+  "flags": []
+ }
+}

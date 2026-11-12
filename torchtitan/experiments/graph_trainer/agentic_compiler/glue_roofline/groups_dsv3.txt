@@ -1,0 +1,11 @@
+
+== dsv3: glue 334.9 -> 252.5 ms
+  optimizer step / foreach (multi_tensor_apply)        45.9 ->     43.9  (   -2.0)
+  deterministic index ops + sorts                       4.1 ->      0.4  (   -3.7)
+  FSDP copy-in / copy-out, bucket packs, cats          75.9 ->     42.1  (  -33.8)
+  memset / memcpy                                      20.6 ->     18.9  (   -1.7)
+  MXFP8 quantize / scale swizzle                       73.4 ->     32.1  (  -41.3)
+  Dist-MoE / MoE glue kernels (triton)                 25.8 ->     26.0  (   +0.2)
+  RoPE / norm kernels                                  25.4 ->     16.5  (   -8.9)
+  loop's fused kernels                                  0.0 ->     36.0  (  +36.0)
+  other elementwise / reduction / copy                 63.8 ->     36.6  (  -27.2)

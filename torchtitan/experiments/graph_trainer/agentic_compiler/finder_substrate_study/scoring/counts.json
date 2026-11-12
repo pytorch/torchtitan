@@ -1,0 +1,162 @@
+{
+ "llama3_8b": {
+  "regions": {
+   "eager": 27,
+   "graph": 28
+  },
+  "opportunities": 33,
+  "not_real": 1,
+  "all": {
+   "both": 26,
+   "eager_only": 5,
+   "graph_only": 1,
+   "eager_found": 31,
+   "graph_found": 27,
+   "by_phase": {
+    "forward": {
+     "both": 11,
+     "graph_only": 1,
+     "eager_only": 1
+    },
+    "backward": {
+     "both": 11,
+     "eager_only": 4
+    },
+    "mixed": {
+     "both": 4
+    }
+   }
+  },
+  "shared_program": {
+   "both": 26,
+   "eager_only": 2,
+   "graph_only": 1,
+   "eager_found": 28,
+   "graph_found": 27,
+   "by_phase": {
+    "forward": {
+     "both": 11,
+     "graph_only": 1,
+     "eager_only": 1
+    },
+    "backward": {
+     "both": 11,
+     "eager_only": 1
+    },
+    "mixed": {
+     "both": 4
+    }
+   }
+  }
+ },
+ "qwen3_30b": {
+  "regions": {
+   "eager": 34,
+   "graph": 21
+  },
+  "opportunities": 41,
+  "not_real": 3,
+  "all": {
+   "both": 25,
+   "eager_only": 7,
+   "graph_only": 6,
+   "eager_found": 32,
+   "graph_found": 31,
+   "by_phase": {
+    "forward": {
+     "both": 10,
+     "eager_only": 2,
+     "graph_only": 1
+    },
+    "backward": {
+     "both": 14,
+     "eager_only": 2,
+     "graph_only": 4
+    },
+    "mixed": {
+     "eager_only": 3,
+     "both": 1,
+     "graph_only": 1
+    }
+   }
+  },
+  "shared_program": {
+   "both": 25,
+   "eager_only": 7,
+   "graph_only": 6,
+   "eager_found": 32,
+   "graph_found": 31,
+   "by_phase": {
+    "forward": {
+     "both": 10,
+     "eager_only": 2,
+     "graph_only": 1
+    },
+    "backward": {
+     "both": 14,
+     "eager_only": 2,
+     "graph_only": 4
+    },
+    "mixed": {
+     "eager_only": 3,
+     "both": 1,
+     "graph_only": 1
+    }
+   }
+  }
+ },
+ "dsv3": {
+  "regions": {
+   "eager": 31,
+   "graph": 33
+  },
+  "opportunities": 47,
+  "not_real": 0,
+  "all": {
+   "both": 33,
+   "eager_only": 9,
+   "graph_only": 5,
+   "eager_found": 42,
+   "graph_found": 38,
+   "by_phase": {
+    "forward": {
+     "both": 17,
+     "eager_only": 4
+    },
+    "mixed": {
+     "eager_only": 2,
+     "both": 1,
+     "graph_only": 1
+    },
+    "backward": {
+     "both": 15,
+     "graph_only": 4,
+     "eager_only": 3
+    }
+   }
+  },
+  "shared_program": {
+   "both": 33,
+   "eager_only": 6,
+   "graph_only": 5,
+   "eager_found": 39,
+   "graph_found": 38,
+   "by_phase": {
+    "forward": {
+     "both": 17,
+     "eager_only": 4
+    },
+    "mixed": {
+     "eager_only": 1,
+     "both": 1,
+     "graph_only": 1
+    },
+    "backward": {
+     "both": 15,
+     "graph_only": 4,
+     "eager_only": 1
+    }
+   }
+  }
+ }
+}

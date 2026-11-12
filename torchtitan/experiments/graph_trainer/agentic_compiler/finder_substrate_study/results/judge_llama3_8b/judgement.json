@@ -1,0 +1,1158 @@
+{
+ "opportunities": [
+  {
+   "id": "O-01",
+   "title": "SwiGLU forward: silu + mul in one pass (silu still saved)",
+   "ops_summary": "forward / layers.*.feed_forward / silu, mul on the strided gate/up halves of w13's [8192,2,14336] output (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "activation",
+   "saving_ms": 13.5055,
+   "saving_basis": "measured 17.8493 ms (C-7770; C-9122 17.8696, used the smaller) minus fused ideal 32 x 939.5 MB (read gate_up 469.8 MB, write silu 234.9 MB + product 234.9 MB) / 6921 GB/s = 4.3438 ms. Silu stays written because the unchanged backward reads it; dropping it is O-03.",
+   "cards": [
+    {
+     "card": "C-7770",
+     "coverage": 1.0,
+     "note": "its kernel cannot drop the silu write unless backward recomputes it"
+    },
+    {
+     "card": "C-9122",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5925",
+     "coverage": 1.0,
+     "note": "via w13 epilogue"
+    },
+    {
+     "card": "C-4671",
+     "coverage": 1.0,
+     "note": "via w13 epilogue"
+    },
+    {
+     "card": "C-8256",
+     "coverage": 1.0,
+     "note": "via w2 A-operand prologue"
+    },
+    {
+     "card": "C-9264",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Two ATen kernels on non-contiguous gate/up views run at ~1.7 TB/s. The recipe's fused_binary_activation local_compile region covers this but is off in this run."
+  },
+  {
+   "id": "O-02",
+   "title": "SwiGLU backward: two muls, silu_backward and gate/up gradient stack in one pass",
+   "ops_summary": "backward / layers.*.feed_forward / mul x2, silu_backward, stack (UnbindBackward cat) -> d_gate_up [8192,2,14336] (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "activation",
+   "saving_ms": 20.156,
+   "saving_basis": "measured 26.6717 ms (C-7435; C-2844 26.8838, used the smaller) minus fused ideal 32 x 1409.3 MB (read dh, saved silu, gate, up; write 2 x 234.9 MB) / 6921 GB/s = 6.5157 ms. Not reading silu (recompute) is O-03.",
+   "cards": [
+    {
+     "card": "C-7435",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-2844",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9264",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6148",
+     "coverage": 1.0,
+     "note": "via w2 dgrad epilogue"
+    },
+    {
+     "card": "C-6097",
+     "coverage": 1.0,
+     "note": "via w2 dgrad epilogue"
+    }
+   ],
+   "notes": "All intermediates single-use; the stacked gradient feeds only w13's backward GEMMs."
+  },
+  {
+   "id": "O-03",
+   "title": "SwiGLU forward/backward pairing: recompute silu(gate) in backward instead of saving it",
+   "ops_summary": "forward silu output write (saved for MulBackward) + backward read of the saved silu, 32 layers",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "activation",
+   "saving_ms": 2.1719,
+   "saving_basis": "32 x (234.9 MB forward write + 234.9 MB backward read) / 6921 GB/s = 2 x 1.0860 ms. Requires both fused forward (O-01) and fused backward (O-02). Cards that fold the forward into a GEMM (O-04) or the backward into the w2 dgrad epilogue (O-05) hide the corresponding half under the GEMM, so they capture 0.5.",
+   "cards": [
+    {
+     "card": "C-9264",
+     "coverage": 1.0,
+     "note": "proposes exactly this pairing"
+    },
+    {
+     "card": "C-7435",
+     "coverage": 0.5,
+     "note": "backward recomputes silu; the forward write only goes away with a fused forward it does not propose"
+    },
+    {
+     "card": "C-6148",
+     "coverage": 0.5,
+     "note": "backward epilogue reads gate_up only"
+    },
+    {
+     "card": "C-6097",
+     "coverage": 0.5,
+     "note": "silu read hidden in the w2 dgrad epilogue"
+    },
+    {
+     "card": "C-5925",
+     "coverage": 0.5,
+     "note": "silu write hidden in the w13 epilogue"
+    },
+    {
+     "card": "C-4671",
+     "coverage": 0.5,
+     "note": "silu write hidden in (or dropped from) the w13 epilogue"
+    },
+    {
+     "card": "C-8256",
+     "coverage": 0.5,
+     "note": "silu/h side outputs hidden in the w2 prologue GEMM"
+    }
+   ],
+   "notes": "Bitwise if silu is recomputed with aten's fp32 formula and exp, then rounded to bf16. Also saves 7.5 GB of activation memory."
+  },
+  {
+   "id": "O-04",
+   "title": "SwiGLU forward folded into an adjacent GEMM (w13 epilogue or w2 A-operand prologue)",
+   "ops_summary": "forward / layers.*.feed_forward.w13 mm (or .w2 mm) + the fused SwiGLU kernel of O-01",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 3.2579,
+   "saving_basis": "Extra over O-01+O-03: the standalone fused kernel's ideal (read gate_up, write h) 32 x 704.6 MB / 6921 GB/s = 3.2579 ms disappears. w13 GEMM measured 28.35 ms (46.20-17.85; C-5925 implies 28.72) vs roofline 31.91 ms; epilogue bytes 1.24 GB/instance = 5.74 ms total, under the GEMM time. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time. Strict max(bytes, flops/peak) would give -0.30 ms for the w13 route (GEMM already beats the peak); the w2-prologue route has GEMM 16.23 ms vs 15.96 ideal.",
+   "cards": [
+    {
+     "card": "C-5925",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4671",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-8256",
+     "coverage": 1.0,
+     "note": "alternative host GEMM (w2 prologue)"
+    }
+   ],
+   "notes": "w13 route needs paired gate/up columns (14336 apart) in one tile; w2 route needs an elementwise A-prologue and still owes h (and silu) to the backward. Alternatives: implement one."
+  },
+  {
+   "id": "O-05",
+   "title": "SwiGLU backward folded into the w2 dgrad GEMM epilogue",
+   "ops_summary": "backward / layers.*.feed_forward.w2 dgrad mm + the fused SwiGLU-backward kernel of O-02",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 5.4298,
+   "saving_basis": "Extra over O-02+O-03: standalone fused backward ideal (read dh, gate, up; write d_gate_up) 32 x 1174.4 MB / 6921 GB/s = 5.4298 ms disappears. w2 dgrad GEMM measured 14.85 ms (41.7355-26.8838; C-6148 implies 14.90) vs roofline 15.96 ms; epilogue bytes 6.28 ms total fit under it. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time.",
+   "cards": [
+    {
+     "card": "C-6148",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6097",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "dh has no other consumer (w2 wgrad uses dout and h). Tile columns of dh align directly with gate/up columns."
+  },
+  {
+   "id": "O-06",
+   "title": "QKV split copies + complex RoPE forward in one pass",
+   "ops_summary": "forward / layers.*.attention.qkv_linear clone x3 + layers.*.attention.rope _to_copy x2, mul x2, _to_copy x2 (rotary gather and bounds check are O-07)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "rope",
+   "saving_ms": 4.6388,
+   "saving_basis": "C-9181 10 kernels 5.7194 ms (C-5602 13 kernels 5.9532 incl. bounds check) minus the per-layer gather 0.1301 ms = 5.5893 ms measured; fused ideal 32 x 205.6 MB (qkv 100.7 MB + rotary rows 4.2 MB + q,k,v 100.7 MB) = 0.9505 ms.",
+   "cards": [
+    {
+     "card": "C-9181",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5602",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9529",
+     "coverage": 1.0,
+     "note": "via wqkv epilogue"
+    },
+    {
+     "card": "C-2562",
+     "coverage": 1.0,
+     "note": "via wqkv epilogue"
+    }
+   ],
+   "notes": "Bitwise needs the same fp32 complex-multiply evaluation (FMA contraction) as aten's complex mul kernel."
+  },
+  {
+   "id": "O-07",
+   "title": "Rotary table gather, position bounds check and conjugate computed once per step",
+   "ops_summary": "forward / layers.*.attention.rope index, le, all, _assert_async; backward / layers.*.attention.rope clone x2 (conj) -- identical in all 32 layers",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "rope",
+   "saving_ms": 0.6218,
+   "saving_basis": "measured min(C-6152 0.6408, C-3937 0.3904 + bounds check 0.2338 from C-5602 minus C-9181) = 0.6242 ms; once-per-step ideal 16.8 MB / 6921 GB/s = 0.0024 ms. Split: gather 0.130, conj clones 0.260, bounds check 0.234 ms. Fused per-layer RoPE kernels that gather/conjugate inline capture their phase's share.",
+   "cards": [
+    {
+     "card": "C-6152",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-3937",
+     "coverage": 0.62,
+     "note": "omits the per-layer bounds check"
+    },
+    {
+     "card": "C-9181",
+     "coverage": 0.21,
+     "note": "inline gather only"
+    },
+    {
+     "card": "C-2562",
+     "coverage": 0.21,
+     "note": "inline gather only"
+    },
+    {
+     "card": "C-5602",
+     "coverage": 0.59,
+     "note": "inline gather + bounds check"
+    },
+    {
+     "card": "C-9529",
+     "coverage": 0.59,
+     "note": "inline gather + bounds check"
+    },
+    {
+     "card": "C-2535",
+     "coverage": 0.42,
+     "note": "conj in registers"
+    },
+    {
+     "card": "C-6083",
+     "coverage": 0.42,
+     "note": "conj in registers"
+    },
+    {
+     "card": "C-5114",
+     "coverage": 0.42,
+     "note": "conj in registers"
+    }
+   ],
+   "notes": "Cross-layer CSE; decoder holds one shared cache, positions identical for every layer."
+  },
+  {
+   "id": "O-08",
+   "title": "RoPE forward folded into the wqkv GEMM epilogue",
+   "ops_summary": "forward / layers.*.attention.qkv_linear.wqkv mm + the fused split/RoPE kernel of O-06",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 0.9505,
+   "saving_basis": "Extra over O-06: the standalone kernel's ideal 0.9505 ms disappears. wqkv GEMM measured 6.49 ms (12.4409-5.9532; C-2562 implies 6.52) vs roofline 6.84 ms; epilogue bytes 222 MB/instance fit under it. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time.",
+   "cards": [
+    {
+     "card": "C-9529",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-2562",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Epilogue needs a position-indexed table load and head-dependent output routing to q/k/v."
+  },
+  {
+   "id": "O-09",
+   "title": "RoPE backward + dq/dk/dv concat into d_qkv in one pass",
+   "ops_summary": "backward / layers.*.attention.rope _to_copy x4, mul x2 + layers.*.attention.qkv_linear cat (conj clones are O-07)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "rope",
+   "saving_ms": 4.2588,
+   "saving_basis": "measured 5.4693 ms (C-6083; C-2535 5.4816, used the smaller) minus conj clones 0.2603 ms = 5.2090; fused ideal 32 x 205.5 MB = 0.9502 ms.",
+   "cards": [
+    {
+     "card": "C-2535",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6083",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5114",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-10",
+   "title": "Attention-backward postprocess (fp32 dq/dk/dv accum -> bf16) folded into the RoPE-backward pass",
+   "ops_summary": "backward / layers.*.attention.inner_attention postprocess kernels x3 (inside _varlen_attn_backward) + the fused kernel of O-09",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "attention-glue",
+   "saving_ms": 1.3455,
+   "saving_basis": "postprocess measured 1.8109 ms (C-5114 7.2925 minus rope-bwd 5.4816); extra = 1.8109 + O-09 ideal 0.9502 - combined ideal 32 x 306.2 MB (1.4156) ms.",
+   "cards": [
+    {
+     "card": "C-5114",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9764",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Library-owned (flash_attn cute postprocess); epilogue must round dq/dk to bf16 before the fp32 rotation for bitwise parity."
+  },
+  {
+   "id": "O-11",
+   "title": "Attention-backward accumulator memsets folded into the preprocess kernel",
+   "ops_summary": "backward / layers.*.attention.inner_attention 5 memsets + flash_bwd_preprocess (rowsum dO*O)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "attention-glue",
+   "saving_ms": 1.0539,
+   "saving_basis": "measured 2.1583 ms (C-9393) minus fused ideal 32 x 238.9 MB = 1.1044 ms. Bytes unchanged; the gain is launch/tail overhead of 6 kernels.",
+   "cards": [
+    {
+     "card": "C-9393",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9764",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Requires a flash_attn library change."
+  },
+  {
+   "id": "O-12",
+   "title": "Attention-backward preprocess (rowsum dO*O, zero-fills) folded into the wo dgrad GEMM epilogue",
+   "ops_summary": "backward / layers.*.attention.wo dgrad mm + the fused preprocess kernel of O-11",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "attention-glue",
+   "saving_ms": 1.1044,
+   "saving_basis": "Extra over O-11: the fused preprocess ideal 1.1044 ms disappears; wo dgrad is 142.5 us/instance flop-bound vs ~64 us of epilogue+GEMM bytes. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time.",
+   "cards": [
+    {
+     "card": "C-9764",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "dO is the wo dgrad output; tiles covering whole 128-wide heads can produce the per-head rowsum. Needs flash_attn to accept a precomputed rowsum."
+  },
+  {
+   "id": "O-13",
+   "title": "Attention residual add + ffn_norm RMSNorm",
+   "ops_summary": "forward / layers.* add (x + attn_out) + layers.*.ffn_norm _fused_rms_norm (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 0.3618,
+   "saving_basis": "measured 1.6031 ms (C-4343; C-7074 1.6081) minus fused ideal 32 x 268.5 MB = 1.2413 ms.",
+   "cards": [
+    {
+     "card": "C-7074",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-4343",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9878",
+     "coverage": 1.0,
+     "note": "epilogue route removes the add kernel, subsuming this"
+    },
+    {
+     "card": "C-6419",
+     "coverage": 1.0,
+     "note": "epilogue route removes the add kernel, subsuming this"
+    }
+   ],
+   "notes": "Both kernels already near roofline; small saving."
+  },
+  {
+   "id": "O-14",
+   "title": "FFN residual add + next layer's attention_norm (final norm after layer 31)",
+   "ops_summary": "forward / layers.* add (h + ffn_out) + layers.[1-31].attention_norm / norm _fused_rms_norm (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 0.3332,
+   "saving_basis": "measured 1.5745 ms (C-6623; C-6438 1.5796) minus fused ideal 32 x 268.5 MB = 1.2413 ms.",
+   "cards": [
+    {
+     "card": "C-6623",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6438",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9878",
+     "coverage": 1.0,
+     "note": "epilogue route subsumes this"
+    },
+    {
+     "card": "C-6419",
+     "coverage": 1.0,
+     "note": "epilogue route subsumes this"
+    }
+   ],
+   "notes": "Crosses the block / FSDP-unit boundary."
+  },
+  {
+   "id": "O-15",
+   "title": "Residual adds in the wo / w2 GEMM epilogues (extra beyond add+norm)",
+   "ops_summary": "forward / layers.*.attention.wo mm, layers.*.feed_forward.w2 mm + layers.* add (64 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 1.2415,
+   "saving_basis": "With the add in the epilogue the norm reads h and writes normed (134.3 MB, 19.4 us) instead of the fused add+norm's 268.5 MB (38.8 us): extra 64 x 19.4 us = 1.2415 ms over O-13+O-14. Epilogue bytes (235 MB wo, ~400 MB w2) fit under the GEMMs; wo/w2 GEMMs measure at/below their 20.51 ms roofline. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time.",
+   "cards": [
+    {
+     "card": "C-9878",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6419",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Epilogue route and add+norm route compete for the same add; epilogue route total = O-13+O-14+O-15 = 1.94 ms."
+  },
+  {
+   "id": "O-16",
+   "title": "RMSNorm backward + residual-gradient accumulation add",
+   "ops_summary": "backward / layers.*.attention_norm, layers.*.ffn_norm _fused_rms_norm_backward + add_ into the residual-stream gradient (64 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 2.4277,
+   "saving_basis": "measured 4.9104 ms (C-3593; C-7034 5.4362, used the smaller) minus fused ideal 64 x 268.5 MB (read dy, x, residual grad; write dx+residual) = 2.4827 ms.",
+   "cards": [
+    {
+     "card": "C-3593",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-7034",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "The add is autograd gradient accumulation for the residual tensor's two uses."
+  },
+  {
+   "id": "O-17",
+   "title": "Token-embedding gather + layer-0 attention_norm",
+   "ops_summary": "forward / tok_embeddings embedding + layers.0.attention_norm _fused_rms_norm",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "norm",
+   "saving_ms": 0.0079,
+   "saving_basis": "measured 0.0370 ms (C-2399; C-5259 0.0385) minus fused ideal 201.4 MB = 0.0291 ms.",
+   "cards": [
+    {
+     "card": "C-5259",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-2399",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Tiny; unfused pair already runs at the copy roofline."
+  },
+  {
+   "id": "O-18",
+   "title": "Chunked cross-entropy forward + backward in one kernel per chunk",
+   "ops_summary": "forward+backward / loss: _to_copy f32, _log_softmax, nll_loss_forward, div, add, ones_like, new_zeros, nll_loss_backward (zero-fill + scatter), _log_softmax_backward_data, _to_copy bf16 (8 chunks of [1024,128256])",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T1",
+   "category": "loss",
+   "saving_ms": 7.6766,
+   "saving_basis": "measured 8.2838 ms (C-2595; C-6957 8.2844) minus fused ideal 8 x 525.3 MB (read bf16 logits, write bf16 dlogits) = 0.6072 ms.",
+   "cards": [
+    {
+     "card": "C-2595",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6957",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5541",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-8340",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Backward of each chunk runs inside the forward chunk loop, so one kernel can emit loss and dlogits. Default recipe compiles the loss region (off here)."
+  },
+  {
+   "id": "O-19",
+   "title": "Fused linear cross-entropy: CE folded into the lm_head forward / dgrad GEMMs (extra beyond O-18)",
+   "ops_summary": "forward+backward / lm_head fwd mm + lm_head dgrad mm + the fused CE kernel of O-18 (8 chunks)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "loss",
+   "saving_ms": 0.6072,
+   "saving_basis": "Extra over O-18: the fused CE kernel's ideal 0.6072 ms disappears into the GEMMs. lm_head fwd+dgrad measured 8.59 ms vs 8.92 ms roofline; even spilling logits once and writing dlogits for wgrad (~788 MB/chunk, 114 us) fits under 1115 us/chunk of GEMM. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time.",
+   "cards": [
+    {
+     "card": "C-5541",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-8340",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "dlogits is still needed by the lm_head wgrad GEMM; the 128256-wide row needs a cross-tile logsumexp. Bitwise parity with cunn_SoftMax is very hard."
+  },
+  {
+   "id": "O-20",
+   "title": "lm_head input-gradient chunks written in place into the hidden-state gradient buffer (no zero-fill, no copies)",
+   "ops_summary": "forward (loss chunk loop) / GradAccumulator zeros_like [8192,4096] + 8 copy_ of chunk grads",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "loss",
+   "saving_ms": 0.0471,
+   "saving_basis": "measured 0.0471 ms (C-8381, 9 kernels); ideal 0: each dgrad GEMM writes its contiguous row slice and the 8 chunks cover every row.",
+   "cards": [
+    {
+     "card": "C-8381",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-3987",
+     "coverage": 1.0,
+     "note": "norm backward reading chunk grads also removes buffer fill and copies"
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-21",
+   "title": "lm_head weight gradient written once, in fp32, into the reduce-scatter input",
+   "ops_summary": "backward / lm_head wgrad GEMMs over 8 chunks plus their fp32 handoff: per-module realization mm + 7 fp32 addmm (4.2 GB RMW each) + _chunk_cat copy; traced realization 8 bf16 mm + 8 _to_copy f32",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 2.2925,
+   "saving_basis": "measured 6.7532 ms (C-3808; the other realization C-6983 measures 7.5196, used the smaller) minus ideal = 8 x 557.6 us flop-bound GEMMs writing fp32 directly = 4.4607 ms.",
+   "cards": [
+    {
+     "card": "C-3808",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-2560",
+     "coverage": 0.48,
+     "note": "removes only the final 4.2 GB chunk_cat copy (1.09 ms); the per-chunk fp32 RMW remains"
+    },
+    {
+     "card": "C-6983",
+     "coverage": 1.0,
+     "note": "in its realization the fp32 epilogue reaches the same 4.46 ms ideal"
+    }
+   ],
+   "notes": "Two FSDP realizations of the same stage: per-module FSDP accumulates in fp32 with addmm and reduce-scatters once; the traced program reduce-scatters every chunk. A single K=8192 GEMM needs all 8 chunks' dlogits (2.1 GB) alive."
+  },
+  {
+   "id": "O-22",
+   "title": "lm_head per-chunk reduce-scatter output accumulation folded into the reduce-scatter",
+   "ops_summary": "backward / loss add_ of fp32 [16032,4096] shards after each per-chunk reduce-scatter (7 instances)",
+   "real": false,
+   "not_real_reason": "The only fusion partner is the reduce-scatter collective itself (out of scope, and NCCL has no accumulate-into-output). Accumulating before one reduce-scatter, which the per-module FSDP realization already does, is a schedule change, not a fusion.",
+   "tier": "T1",
+   "category": "communication-glue",
+   "saving_ms": 0.0,
+   "saving_basis": "not real; measured 0.7697 ms vs 0.2657 ms ideal would only be reachable inside the collective.",
+   "cards": [
+    {
+     "card": "C-8387",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-23",
+   "title": "Final norm weight-gradient fp32 cast + reduce-scatter bucket copy in one kernel",
+   "ops_summary": "backward / norm _to_copy (bf16 [4096] -> f32) + bucketing._pre_bucket_reduce_scatter",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 0.0049,
+   "saving_basis": "measured 0.0049 ms (C-6358) minus ideal 24.6 KB (~0 ms); launch-bound.",
+   "cards": [
+    {
+     "card": "C-6358",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-3987",
+     "coverage": 0.5,
+     "note": "writes dw in fp32 directly; bucket copy not addressed"
+    }
+   ],
+   "notes": "Better fix: put the 4096-element parameter in the lm_head bucket."
+  },
+  {
+   "id": "O-24",
+   "title": "FSDP reduce-scatter pack: bf16 weight grads -> fp32 rank-major bucket (incl. w13 Shard(1) re-layout) in one pass",
+   "ops_summary": "backward / layers.* gradient casts (_to_copy), w13 cat re-layout, _chunk_cat / _pre_bucket_reduce_scatter into fp32 [8,27264000] (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "communication-glue",
+   "saving_ms": 24.9527,
+   "saving_basis": "measured 31.0033 ms (C-7328; C-9055 31.7367 in the other realization, used the smaller) minus fused ideal 32 x 1308.7 MB (read 436 MB bf16, write 872 MB fp32) = 6.0506 ms.",
+   "cards": [
+    {
+     "card": "C-7328",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9055",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9095",
+     "coverage": 1.0,
+     "note": "via wgrad epilogue"
+    },
+    {
+     "card": "C-1135",
+     "coverage": 1.0,
+     "note": "via wgrad epilogue"
+    }
+   ],
+   "notes": "Largest single opportunity: the strided upcasting chunk_cat runs at ~1.35 TB/s. Owned by FSDP / bucketing pass."
+  },
+  {
+   "id": "O-25",
+   "title": "Weight-gradient GEMM epilogues write fp32 straight into the reduce-scatter bucket (extra beyond O-24)",
+   "ops_summary": "backward / layers.* wqkv, wo, w13, w2 wgrad mm + the one-pass pack of O-24",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 6.0506,
+   "saving_basis": "Extra over O-24: the one-pass pack's ideal 6.0506 ms disappears. wgrad GEMMs measure 58.30 ms (C-1135 realization) / 59.62 ms (C-9095) vs 59.26 ms roofline; fp32 output bytes (2.0 GB/layer, 9.3 ms total) fit under them. GEMM-epilogue/prologue rule: the fused kernel's ideal is max(bytes/HBM, min(flops/peak, measured GEMM)); the GEMM here measures below its bf16 roofline (low-entropy fake-PG data), and epilogue bytes fit under it, so the increment over the standalone fused glue kernel is that kernel's ideal time.",
+   "cards": [
+    {
+     "card": "C-9095",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-1135",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Needs FSDP to expose the bucket before backward and a row-blocked scattered output (per-rank offsets; w13 Shard(1)). Norm-weight grads come from the norm kernels."
+  },
+  {
+   "id": "O-26",
+   "title": "Token-embedding backward: zero-fill, deterministic scatter-add, fp32 cast and bucket copy in one pass",
+   "ops_summary": "backward / tok_embeddings zeros, embedding_dense_backward (sort + segment sum), _to_copy f32, _chunk_cat / _pre_bucket_reduce_scatter",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "communication-glue",
+   "saving_ms": 1.4946,
+   "saving_basis": "measured 1.8079 ms (C-7174; C-5781 1.8448) minus ideal 2168.5 MB (write fp32 bucket 2.1 GB, read dh) = 0.3133 ms.",
+   "cards": [
+    {
+     "card": "C-7174",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-5781",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Bitwise needs the same sorted segment-sum order and bf16 rounding before widening."
+  },
+  {
+   "id": "O-27",
+   "title": "FSDP all-gather copy-in (forward): fp32 shard -> bf16 slice of the gather buffer in one pass / one launch",
+   "ops_summary": "forward / tok_embeddings, layers.*, norm+lm_head: cast + copy into all-gather input (_foreach_copy_ x2 per bucket, or one _pre_bucket_all_gather per bucket), 34 buckets",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 0.2433,
+   "saving_basis": "measured 1.1135 ms (C-2543, traced realization with one cast kernel per bucket; the per-module realization's two-kernel version is ~1.97 ms, used the smaller) minus ideal 6.02 GB / 6921 GB/s = 0.8702 ms.",
+   "cards": [
+    {
+     "card": "C-2543",
+     "coverage": 1.0,
+     "note": "batches the 34 packs into one launch"
+    },
+    {
+     "card": "C-6658",
+     "coverage": 1.0,
+     "note": "single cast-into-buffer kernel per bucket, at roofline per its ideal"
+    },
+    {
+     "card": "C-8884",
+     "coverage": 0.87,
+     "note": "decoder layers only (5.23 of 6.02 GB)"
+    }
+   ],
+   "notes": "In the traced realization the cast+copy fusion C-6658 proposes already exists; the residual gap is per-launch inefficiency."
+  },
+  {
+   "id": "O-28",
+   "title": "FSDP all-gather copy-in for the backward re-gather: cast + copy in one pass",
+   "ops_summary": "backward / layers.* (and lm_head) _foreach_copy_ cast to bf16 temp + copy into all-gather input (33 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 1.0423,
+   "saving_basis": "measured 1.8555 ms (backward half of C-8884, 1.7414, plus one of C-6658's three non-layer instances, 0.1142) minus one-pass ideal 0.8132 ms.",
+   "cards": [
+    {
+     "card": "C-6658",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-8884",
+     "coverage": 0.95,
+     "note": "layers only"
+    }
+   ],
+   "notes": "Exists only in the per-module FSDP realization, which reshards after forward and re-gathers in backward; absent when gathered weights are kept from the forward."
+  },
+  {
+   "id": "O-29",
+   "title": "Reuse the forward's bf16 all-gather input for the backward re-gather (no second cast)",
+   "ops_summary": "backward / layers.* all-gather copy-in (the one-pass kernel left by O-28)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T0",
+   "category": "communication-glue",
+   "saving_ms": 0.7563,
+   "saving_basis": "Extra over O-28: 32 x 163.6 MB one-pass cast = 0.7563 ms removed.",
+   "cards": [
+    {
+     "card": "C-8884",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Per-module FSDP realization only; keeps 1.7 GB of bf16 shards alive from forward to backward."
+  },
+  {
+   "id": "O-30",
+   "title": "FSDP all-gather copy-out (forward): unpack + w13 Shard(1) re-layout in one pass",
+   "ops_summary": "forward / layers.* split_with_sizes_copy from the [8,27264000] gather buffer + w13 cat into [2,14336,4096] (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "communication-glue",
+   "saving_ms": 2.4796,
+   "saving_basis": "measured 32 x 203.54 us = 6.5133 ms (per-instance from C-6460; C-6650 207.08 us, used the smaller) minus ideal 32 x 872.4 MB = 4.0337 ms.",
+   "cards": [
+    {
+     "card": "C-6650",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-6460",
+     "coverage": 1.0,
+     "note": ""
+    },
+    {
+     "card": "C-9736",
+     "coverage": 1.0,
+     "note": "eliminates the copy entirely"
+    }
+   ],
+   "notes": ""
+  },
+  {
+   "id": "O-31",
+   "title": "FSDP all-gather copy-out for the backward re-gather: unpack + w13 re-layout in one pass",
+   "ops_summary": "backward / layers.* split_with_sizes_copy + w13 cat (32 instances)",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "communication-glue",
+   "saving_ms": 2.4796,
+   "saving_basis": "measured 32 x 203.54 us = 6.5133 ms (C-6460 backward half) minus ideal 4.0337 ms.",
+   "cards": [
+    {
+     "card": "C-6460",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Per-module FSDP realization only (backward re-gather)."
+  },
+  {
+   "id": "O-32",
+   "title": "Weight unpack folded into GEMM operand loads (GEMMs read the rank-chunked gather buffer)",
+   "ops_summary": "forward / layers.* wqkv/wo/w13/w2 B-operand loads + the one-pass unpack left by O-30; norm+lm_head bucket split_with_sizes_copy",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T3",
+   "category": "gemm-adjacent",
+   "saving_ms": 4.3431,
+   "saving_basis": "Extra over O-30: layers' one-pass unpack ideal 4.0337 ms + norm/lm_head bucket unpack measured 0.3094 ms (C-9736 6.936 minus 32 x 207.08 us; already at its 0.304 ms copy roofline, so only elimination helps). GEMMs read the same bytes from 8 (16 for w13) descriptors.",
+   "cards": [
+    {
+     "card": "C-9736",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Backward GEMMs also need the weights: the gather buffer must stay alive (traced realization) or the backward copy-out (O-31) stays."
+  },
+  {
+   "id": "O-33",
+   "title": "Varlen attention metadata (cu_seqlens) built from positions in one kernel",
+   "ops_summary": "forward / decoder preprocess: ~25 small integer ops incl. deterministic scatter_ (sort-based index_put), cumsum, where, asserts",
+   "real": true,
+   "not_real_reason": "",
+   "tier": "T2",
+   "category": "attention-glue",
+   "saving_ms": 0.7234,
+   "saving_basis": "measured 0.7234 ms (C-5810, 40 kernels) minus ideal 65.6 KB (~0 ms).",
+   "cards": [
+    {
+     "card": "C-5810",
+     "coverage": 1.0,
+     "note": ""
+    }
+   ],
+   "notes": "Deterministic mode routes scatter_ through a sort; ~0.65 ms of it."
+  }
+ ],
+ "card_notes": [
+  {
+   "card": "C-5925",
+   "note": "Measured 46.57 ms vs C-4671's 46.20 for the same ops; used 46.20. The claimed 14.66 ms gap is mostly the standalone SwiGLU fusion (O-01, 13.51). The w13 GEMM measures ~28.4 ms, below its 31.91 ms roofline, so measured-minus-ideal understates the epilogue's own increment (O-04, 3.26)."
+  },
+  {
+   "card": "C-4671",
+   "note": "Bytes leave out the saved silu. With the backward unchanged, silu still has to be written (hidden in the epilogue) or recomputed in backward, which the card doesn't propose. Gap mostly O-01."
+  },
+  {
+   "card": "C-7770",
+   "note": "Its 3.26 ms ideal assumes silu is not written, but its own dataflow says silu is saved for MulBackward. A standalone forward kernel still has to write it (939.5 MB, 4.34 ms ideal), so the saving is 13.51 ms, not 14.59. The other 1.09 ms needs backward recompute (O-03)."
+  },
+  {
+   "card": "C-9122",
+   "note": "Consistent: silu kept, 939.5 MB ideal. Measured 17.87 vs 17.85; used 17.85."
+  },
+  {
+   "card": "C-8256",
+   "note": "The claimed 18.12 ms includes 0.27 ms of w2 forward GEMM inefficiency (16.23 vs 15.96 ms), which is not a fusion saving. Bytes leave out the h and silu that backward still needs unless both are recomputed."
+  },
+  {
+   "card": "C-9264",
+   "note": "Measured 44.75 ms uses the larger reading of both halves; with the smaller ones (17.85 + 26.67) the saving is 35.83 ms (O-01 + O-02 + O-03), not 36.07."
+  },
+  {
+   "card": "C-7435",
+   "note": "Bytes assume the backward does not read silu (recompute). That only removes forward traffic together with a fused forward. 'cat' and C-2844's 'stack' are the same UnbindBackward op."
+  },
+  {
+   "card": "C-2844",
+   "note": "Consistent (reads saved silu, 1409 MB). Measured 26.88 vs 26.67; used 26.67."
+  },
+  {
+   "card": "C-6148",
+   "note": "w2 dgrad GEMM measures ~14.9 ms, below its 15.96 ms roofline. Its gap = O-02 + half of O-03 + O-05."
+  },
+  {
+   "card": "C-6097",
+   "note": "Same as C-6148, but the epilogue also reads silu (1359 MB). Measured 41.74 vs 41.57."
+  },
+  {
+   "card": "C-9878",
+   "note": "Claimed 1.60 ms (strict formula). Adjudicated 1.94 ms (O-13 + O-14 + O-15), because the wo/w2 GEMMs already run at or below roofline and the add kernel can be removed entirely. Competes with the add+norm cards for the same add."
+  },
+  {
+   "card": "C-6419",
+   "note": "Same as C-9878 (claimed 1.71). Correctly notes the conflict with add+norm."
+  },
+  {
+   "card": "C-7074",
+   "note": "Measured 1.6081 vs C-4343 1.6031; used the smaller."
+  },
+  {
+   "card": "C-4343",
+   "note": "Consistent."
+  },
+  {
+   "card": "C-6623",
+   "note": "Consistent; 31 next-layer norms + final norm = 32 instances."
+  },
+  {
+   "card": "C-6438",
+   "note": "Measured 1.5796 vs 1.5745; used the smaller."
+  },
+  {
+   "card": "C-5259",
+   "note": "Measured 0.0385 vs 0.0370; used the smaller. Tiny."
+  },
+  {
+   "card": "C-2399",
+   "note": "Consistent; tiny."
+  },
+  {
+   "card": "C-9181",
+   "note": "Footprint includes the per-layer rotary gather, accounted in O-07; the rest is O-06."
+  },
+  {
+   "card": "C-5602",
+   "note": "Includes the per-layer bounds check and gather (O-07). Measured 5.95 vs 5.72 for C-9181; the difference is the 3 bounds-check kernels."
+  },
+  {
+   "card": "C-9529",
+   "note": "GEMM measures 6.49 ms vs 6.84 roofline. Gap = O-06 + part of O-07 + O-08."
+  },
+  {
+   "card": "C-2562",
+   "note": "Same as C-9529 without the bounds check."
+  },
+  {
+   "card": "C-3937",
+   "note": "Correct. Doesn't include the per-layer bounds check (C-6152 does)."
+  },
+  {
+   "card": "C-6152",
+   "note": "external_bytes_per_instance (526 KB) is inconsistent with the once-per-step ideal; harmless. Measured 0.6408 vs 0.6242 derived from C-3937 + bounds check; used the smaller."
+  },
+  {
+   "card": "C-2535",
+   "note": "Includes the conj clones (O-07). Measured 5.48 vs 5.47."
+  },
+  {
+   "card": "C-6083",
+   "note": "Consistent; conj clones split into O-07."
+  },
+  {
+   "card": "C-5114",
+   "note": "Consistent. Its total implies a ~1.81 ms postprocess, which gives the O-10 extra."
+  },
+  {
+   "card": "C-9764",
+   "note": "Footprint lists forward inner_attention 'zeros' that the description never explains, and 14 kernels/instance is more than the 9 described. The proposal adds O-12 (rowsum in the wo dgrad epilogue) on top of O-10/O-11."
+  },
+  {
+   "card": "C-9393",
+   "note": "Fine. The bytes are unchanged, so the gain is launch/tail overhead only."
+  },
+  {
+   "card": "C-3593",
+   "note": "Consistent; used its 4.91 ms (smaller)."
+  },
+  {
+   "card": "C-7034",
+   "note": "Footprint includes the final norm's backward, which has no residual-gradient add to fuse. Measured 5.44 vs 4.91 ms for the shared ops; used the smaller."
+  },
+  {
+   "card": "C-3987",
+   "note": "The final norm backward has no fusion partner. Chunk gradients still have to be stored, because they're produced during the forward chunk loop. The saving is only the zero-fill/copies (O-20) and the dw cast (half of O-23); its 0.029 ms ideal counts traffic that remains."
+  },
+  {
+   "card": "C-8381",
+   "note": "Correct. Phase 'forward' is right: the chunk loop runs inside the forward."
+  },
+  {
+   "card": "C-6358",
+   "note": "Correct; launch-bound."
+  },
+  {
+   "card": "C-2595",
+   "note": "Consistent; same as C-6957."
+  },
+  {
+   "card": "C-6957",
+   "note": "Consistent. Its footprint's empty module path creates a spurious overlap with C-5810."
+  },
+  {
+   "card": "C-5541",
+   "note": "lm_head GEMMs measure 8.59 ms vs 8.92 roofline, so the claimed 8.01 = CE 7.68 + noise. The extra over the CE fusion is the CE kernel's 0.61 ms (O-19). dlogits must still reach the wgrad GEMM."
+  },
+  {
+   "card": "C-8340",
+   "note": "Same as C-5541 (claimed 7.95)."
+  },
+  {
+   "card": "C-3808",
+   "note": "Correct for the per-module FSDP realization. Needs all 8 chunks' dlogits alive, or the accumulator aliased to the reduce-scatter buffer."
+  },
+  {
+   "card": "C-2560",
+   "note": "Correct, but it captures only the final copy (1.09 of 2.29 ms)."
+  },
+  {
+   "card": "C-6983",
+   "note": "Describes the other FSDP realization (per-chunk bf16 wgrad + cast + per-chunk reduce-scatter). Measured 7.52 vs 6.75 ms for the same stage; used the smaller."
+  },
+  {
+   "card": "C-8387",
+   "note": "Not real: the fused kernel would be the reduce-scatter collective."
+  },
+  {
+   "card": "C-9095",
+   "note": "wgrad GEMMs measure 59.6 ms (its realization) vs 59.26 ideal. The claimed 31.36 = O-24 + O-25 + 0.35 ms GEMM noise; adjudicated 31.00."
+  },
+  {
+   "card": "C-1135",
+   "note": "Same as C-9095 (claimed 30.77, GEMMs 58.3 ms)."
+  },
+  {
+   "card": "C-7328",
+   "note": "Same logical op as C-9055 in the other FSDP realization; used its 31.00 ms (smaller)."
+  },
+  {
+   "card": "C-9055",
+   "note": "Measured 31.74 vs 31.00; used the smaller."
+  },
+  {
+   "card": "C-6650",
+   "note": "Per-instance 207.08 vs 203.54 us; used the smaller. Forward only, because this realization doesn't re-gather in backward."
+  },
+  {
+   "card": "C-6460",
+   "note": "Backward re-gather instances exist only in the per-module FSDP realization (O-31)."
+  },
+  {
+   "card": "C-9736",
+   "note": "Plausible. Backward GEMMs also need the weights, so the gather buffer has to stay alive, or the backward copy-out stays."
+  },
+  {
+   "card": "C-6658",
+   "note": "In the traced realization the cast+copy is already one kernel per bucket (C-2543); the forward saving uses that smaller 1.11 ms. The 3 non-layer instances are only roughly separable."
+  },
+  {
+   "card": "C-8884",
+   "note": "Only in the per-module FSDP realization; costs 1.7 GB of memory."
+  },
+  {
+   "card": "C-2543",
+   "note": "Consistent."
+  },
+  {
+   "card": "C-7174",
+   "note": "Measured 1.81 vs C-5781 1.84; used the smaller."
+  },
+  {
+   "card": "C-5781",
+   "note": "Consistent."
+  },
+  {
+   "card": "C-5810",
+   "note": "Consistent. Verified against attention.py (cumsum/scatter_ builder)."
+  }
+ ]
+}

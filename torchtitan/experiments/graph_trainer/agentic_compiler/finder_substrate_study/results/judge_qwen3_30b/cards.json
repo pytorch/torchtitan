@@ -1,0 +1,3071 @@
+[
+ {
+  "card": "C-2144",
+  "title": "RoPE backward: q/k rotate-half backward chain in one pass",
+  "description": "Backward of CosSinRoPE for dq [32768,32,128] and dk [32768,4,128]: bf16->fp32 cast, two muls, neg, slice-backward zero-fill + copies, two adds, fp32->bf16 cast, 22 kernels per layer.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "intra-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "dq [32768,32,128] bf16, dk [32768,4,128] bf16 -> bf16 (fp32 math); cos/sin cache [4096,256] fp32",
+  "kernels_per_instance": 22.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 608436224,
+  "measured_us_per_instance": 2151.2,
+  "measured_ms_total": 103.258,
+  "ideal_us_per_instance": 87.91,
+  "ideal_ms_total": 4.22,
+  "gap_ms_total": 99.038,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Pointwise: grad*cos + rotate_half^T(grad*sin) in fp32 with the <program> rounding order (autograd accumulates the two branches with add_).",
+  "dataflow": "The transpose of rotate_half is again a fixed permutation within the head dim; every output element depends on two input elements of the same row and the cache row.",
+  "blockers": "None structural; disabled \"rope\" local_compile region. Slice backward materializes zero-filled fp32 [32768,32,128] buffers twice.",
+  "source": "torchtitan/models/common/rope.py:455-482",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "mul",
+     "neg",
+     "slice_backward",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-8290",
+  "title": "Embedding gather + layer-0 attention RMSNorm + MXFP8 quantize",
+  "description": "The token embedding gather [32768,2048] bf16 feeds the residual stream and layer 0's attention RMSNorm and rowwise MXFP8 quantization of the wqkv input.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module"
+  ],
+  "shapes_dtypes": "[32768,2048] bf16",
+  "kernels_per_instance": 4.0,
+  "instances_per_step": 1,
+  "external_bytes_per_instance": 472256512,
+  "measured_us_per_instance": 110.91,
+  "measured_ms_total": 0.111,
+  "ideal_us_per_instance": 68.23,
+  "ideal_ms_total": 0.068,
+  "gap_ms_total": 0.043,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm row reduction and per-32 amax.",
+  "dataflow": "embedding output -> attention_norm -> quantize; the embedding output is also kept as residual.",
+  "blockers": "None specific.",
+  "source": "torchtitan/models/common/embedding.py:41, torchtitan/models/common/nn_modules.py:155, torchtitan/quantization/mxfp8/linear.py:162-168",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": [
+     0
+    ],
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention_norm",
+    "layers": [
+     0
+    ],
+    "ops": [
+     "_fused_rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "tok_embeddings",
+    "layers": "all",
+    "ops": [
+     "embedding"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-6498",
+  "title": "Root FSDP groups (tok_embeddings, norm+lm_head): unshard and reduce-scatter glue",
+  "description": "Cast/copy-in, copy-out of the all-gathered [151936,2048] embedding and lm_head weights (lm_head re-gathered for the decoder backward), chunk_cat into the reduce-scatter buffer and fp32 cast of the reduced shard.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "communication-glue"
+  ],
+  "shapes_dtypes": "[151936,2048] params, shards [18992,2048]; bf16 all-gather [8,38895616]",
+  "kernels_per_instance": 10.5,
+  "instances_per_step": 2,
+  "external_bytes_per_instance": 1089077248,
+  "measured_us_per_instance": 773.72,
+  "measured_ms_total": 1.547,
+  "ideal_us_per_instance": 157.35,
+  "ideal_ms_total": 0.315,
+  "gap_ms_total": 1.233,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Pure copies and casts.",
+  "dataflow": "For single-parameter groups the dim-0 all-gather output already has the parameter layout, so copy-out and chunk_cat are layout no-ops; casts fold into the copy-in and the post-reduce copy.",
+  "blockers": "FSDP generic buffer management; norm weight is packed with lm_head so that group needs a strided copy.",
+  "source": "torch/distributed/fsdp/_fully_shard/_fsdp_collectives.py:36,259-319",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "norm, lm_head",
+    "layers": "all",
+    "ops": [
+     "_foreach_copy_",
+     "fsdp.all_gather_copy_in",
+     "fsdp.chunk_cat_mixed_dtype",
+     "fsdp.split_with_sizes_copy",
+     "to"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "tok_embeddings",
+    "layers": "all",
+    "ops": [
+     "fsdp.chunk_cat_mixed_dtype",
+     "to"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "norm, lm_head",
+    "layers": "all",
+    "ops": [
+     "_foreach_copy_",
+     "fsdp.all_gather_copy_in",
+     "fsdp.split_with_sizes_copy"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "tok_embeddings",
+    "layers": "all",
+    "ops": [
+     "_foreach_copy_",
+     "fsdp.all_gather_copy_in",
+     "fsdp.split_with_sizes_copy"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7541",
+  "title": "FSDP reduce-scatter pack + post-reduce-scatter fp32 cast + gradient clone",
+  "description": "Per layer, the bf16 weight gradients of the dense parameters are packed into the reduce-scatter bucket; after the reduce-scatter each shard is cast to fp32, and after backward every gradient is cloned into param.grad.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "horizontal"
+  ],
+  "shapes_dtypes": "19.1M bf16 bucket per layer -> 2.39M bf16 shard -> fp32 shard -> fp32 clone; plus the embedding and LM-head fp32 grad clones (155 MB each)",
+  "kernels_per_instance": 15.8,
+  "instances_per_step": 49,
+  "external_bytes_per_instance": 89064113,
+  "measured_us_per_instance": 53.33,
+  "measured_ms_total": 2.613,
+  "ideal_us_per_instance": 12.87,
+  "ideal_ms_total": 0.631,
+  "gap_ms_total": 1.982,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Copies and casts only.",
+  "dataflow": "_pre_bucket_reduce_scatter only concatenates the wgrad outputs; the post-RS casts (7 per layer) are siblings over one buffer; the clone copies the cast output. A T3 variant writes the wgrad GEMM outputs straight into the bucket.",
+  "blockers": "The clone runs outside the program; the program would have to receive param.grad storage as an output buffer.",
+  "source": "torchtitan/experiments/graph_trainer/simple_fsdp.py:366, torchtitan/experiments/graph_trainer/common_utils.py:322",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "",
+    "layers": "all",
+    "ops": [
+     "clone"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "bucketing._pre_bucket_reduce_scatter"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "norm",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "bucketing._pre_bucket_reduce_scatter"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-1422",
+  "title": "MoE dx top-k sum + ffn-input gradient sum + ffn RMSNorm backward + residual add + MXFP8 quantize of the wo gradient",
+  "description": "In backward, the 8 expert dx rows per token are summed ([32768,8,2048] -> [32768,2048]), added to the router-gate dx, passed through the ffn RMSNorm backward, added to the residual gradient, and the result is quantized rowwise+colwise to MXFP8 as the wo GEMM grad_output.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "in dx rows [32768,8,2048] bf16, router dx [32768,2048] bf16, saved norm input, residual grad; out residual grad bf16, fp8 rowwise+colwise [32768,2048] + scales",
+  "kernels_per_instance": 8.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 1752309760,
+  "measured_us_per_instance": 436.39,
+  "measured_ms_total": 20.947,
+  "ideal_us_per_instance": 253.18,
+  "ideal_ms_total": 12.153,
+  "gap_ms_total": 8.794,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Top-k sum order, RMSNorm backward reductions, per-32 amax for both directions; the bf16 roundings of the two adds must be reproduced (round after each add).",
+  "dataflow": "scale_and_sum(dx rows) -> add(router dx) -> rms_norm_backward(ffn_norm) -> add(residual grad) -> mxfp8_quantize(row+col) -> scale swizzle; each intermediate has a single consumer except the residual grad (also needed by the next residual add), which stays an output. The router backward currently runs between the dx sum and the first add; it depends only on the score gradients, so the fused kernel can be scheduled after the router dgrad GEMM.",
+  "blockers": "Crosses the dist_moe boundary (dx sum is inside block_scaled_backward); colwise quantization requires 32-token tiles.",
+  "source": "dist_moe/_blockscaled.py:4377 (scale_and_sum), torchtitan/models/common/nn_modules.py:155, torchtitan/quantization/mxfp8/linear.py:129",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.ffn_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9827",
+  "title": "Dist-MoE backward plan/metadata kernels",
+  "description": "Backward plan construction, activation-to-dispatch copy and four GEMM scheduler preparation kernels per layer.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "forward-backward"
+  ],
+  "shapes_dtypes": "ids [32768,8], counts -> backward dispatch/scheduling tables",
+  "kernels_per_instance": 8.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 10485760,
+  "measured_us_per_instance": 32.98,
+  "measured_ms_total": 1.583,
+  "ideal_us_per_instance": 1.52,
+  "ideal_ms_total": 0.073,
+  "gap_ms_total": 1.51,
+  "bitwise_tier": "T2",
+  "bitwise_notes": "Integer index tables; same slot order required.",
+  "dataflow": "The backward plan is a function of the forward routing; it could be produced together with the forward plan.",
+  "blockers": "Inside the dist_moe library.",
+  "source": "dist_moe/_blockscaled.py (moe_backward_plan, moe_forward_recompute stages)",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-1552",
+  "title": "Dist-MoE forward combine: weighted top-k sum",
+  "description": "Reduces the expert outputs scattered into [32768,8,2048] bf16 by the router scores into the MoE output [32768,2048].",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "intra-module",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "route outputs [32768,8,2048] bf16, scores [32768,8] fp32 -> out [32768,2048] bf16",
+  "kernels_per_instance": 1.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 1209008128,
+  "measured_us_per_instance": 326.49,
+  "measured_ms_total": 15.672,
+  "ideal_us_per_instance": 174.68,
+  "ideal_ms_total": 8.385,
+  "gap_ms_total": 7.287,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Sum over K=8 in fixed order with fp32 accumulation.",
+  "dataflow": "Single memory-bound reduction; runs at 54% of HBM roofline.",
+  "blockers": "The [T,K,D] buffer is written by remote ranks' combine GEMM epilogues (symmetric memory); folding the K-sum into those epilogues would need cross-rank atomics (non-deterministic).",
+  "source": "dist_moe/_postprocess.py:502-551; dist_moe/kernels/triton/broadcast_n_reduction.py:190",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4953",
+  "title": "LM-head weight-grad post-reduce-scatter cast + chunk accumulation",
+  "description": "Each of the 8 loss chunks reduce-scatters its LM-head weight gradient [151936,2048] bf16 to a [18992,2048] shard, casts it to fp32 and adds it into an fp32 accumulator.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "intra-module"
+  ],
+  "shapes_dtypes": "[18992,2048] bf16 -> fp32 accumulate",
+  "kernels_per_instance": 1.88,
+  "instances_per_step": 8,
+  "external_bytes_per_instance": 369508352,
+  "measured_us_per_instance": 92.26,
+  "measured_ms_total": 0.738,
+  "ideal_us_per_instance": 53.39,
+  "ideal_ms_total": 0.427,
+  "gap_ms_total": 0.311,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Same cast and same left-to-right accumulation order.",
+  "dataflow": "_to_copy has a single consumer, the add_ into the accumulator.",
+  "blockers": "None beyond <transform>; accumulating before the reduce-scatter would change numerics.",
+  "source": "torchtitan/experiments/graph_trainer/chunked_loss.py:107",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "loss",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "add_"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4698",
+  "title": "MoE dx combine + router-gate dgrad add + ffn_norm backward + residual-grad add + MXFP8 quantize of the wo grad",
+  "description": "The top-k sum of the expert input gradients, the add of the router gate input gradient, the ffn_norm RMSNorm backward, the residual gradient accumulation, and the 1x32/32x1 quantization of the result for the wo backward GEMMs.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "communication-glue",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "d route [32768,8,2048] bf16 + scores, d gate-input [32768,2048] bf16, saved x bf16, rstd, residual grad [32768,2048] bf16 -> grad x [32768,2048] bf16 + fp8 rowwise/colwise + scales",
+  "kernels_per_instance": 8.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 1750204416,
+  "measured_us_per_instance": 438.66,
+  "measured_ms_total": 21.056,
+  "ideal_us_per_instance": 252.87,
+  "ideal_ms_total": 12.138,
+  "gap_ms_total": 8.918,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "K-sum order, autograd accumulation order (experts first, then gate), RMSNorm backward reductions; amax is order-insensitive.",
+  "dataflow": "The ffn_norm output gradient is the sum of two producers (experts and gate) and is consumed only by the norm backward; the norm backward output plus the residual gradient is the grad of the attention residual stream, consumed by the wo backward (quantized) and passed down the residual.",
+  "blockers": "The expert dx sum is inside the Dist-MoE backward custom op; autograd performs the gradient accumulation as separate add_ kernels; ffn_norm weight-grad column reduction.",
+  "source": "dist_moe/_postprocess.py:502-551; torchtitan/models/qwen3/model.py:57-73; torchtitan/quantization/mxfp8/linear.py:233-300",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.gate",
+    "layers": "all",
+    "ops": [
+     "add_"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.ffn_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward",
+     "add_"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-8332",
+  "title": "MoE weighted top-k sum + residual add + next-layer attention RMSNorm + MXFP8 quantize of wqkv input",
+  "description": "The MoE output is the score-weighted sum of 8 expert rows per token ([32768,8,2048] bf16 -> [32768,2048]); it is added to the residual stream, and the next layer's attention RMSNorm and rowwise MXFP8 quantization (plus scale swizzle) of the wqkv input follow; the last layer feeds the final norm instead.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "cross-layer",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "in expert rows [32768,8,2048] bf16 (combine receive buffer), scores [32768,8] fp32, residual [32768,2048] bf16; out residual, normed bf16, fp8 [32768,2048] + e8m0 [32768,64], rstd; the 1 GiB expert-row copy saved for backward",
+  "kernels_per_instance": 5.96,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 2621181952,
+  "measured_us_per_instance": 469.3,
+  "measured_ms_total": 22.527,
+  "ideal_us_per_instance": 378.71,
+  "ideal_ms_total": 18.178,
+  "gap_ms_total": 4.348,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Top-k sum order (the library already preserves it in its fused RMSNorm+combine kernel), RMSNorm row reduction over 2048 and 32-element amax must be reproduced.",
+  "dataflow": "scale_and_sum writes y[T,D]; add(h, y) is the only consumer of y; the sum h' feeds attention_norm (and the next residual); the normed output feeds mxfp8_quantize whose scales feed the swizzle. All are row-local over D=2048, so one row-per-CTA kernel can produce h', normed, fp8 and swizzled scales while it streams the expert rows.",
+  "blockers": "Crosses the dist_moe op boundary (scale_and_sum is inside dist_moe.block_scaled_forward) and the decoder-layer boundary. The 1 GiB copy of expert rows for backward is kept as an external write here; removing it would need the combine GEMM to write into a per-layer saved slot (symmetric-memory capacity).",
+  "source": "dist_moe/_blockscaled.py:4377 (scale_and_sum), torchtitan/models/qwen3/model.py:73, torchtitan/models/common/nn_modules.py:155, torchtitan/quantization/mxfp8/linear.py:162-168",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25,
+     26,
+     27,
+     28,
+     29,
+     30,
+     31,
+     32,
+     33,
+     34,
+     35,
+     36,
+     37,
+     38,
+     39,
+     40,
+     41,
+     42,
+     43,
+     44,
+     45,
+     46,
+     47
+    ],
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention_norm",
+    "layers": [
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25,
+     26,
+     27,
+     28,
+     29,
+     30,
+     31,
+     32,
+     33,
+     34,
+     35,
+     36,
+     37,
+     38,
+     39,
+     40,
+     41,
+     42,
+     43,
+     44,
+     45,
+     46,
+     47
+    ],
+    "ops": [
+     "_fused_rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-1237",
+  "title": "Embedding backward + reduce-scatter pack + post-reduce-scatter cast",
+  "description": "The embedding gradient [151936,2048] bf16 is built by a deterministic sort-and-segment-sum over 32768 token IDs (with a full zero-fill), then copied into the reduce-scatter bucket and the shard cast to fp32.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "intra-module"
+  ],
+  "shapes_dtypes": "grad [32768,2048] bf16 + IDs -> [151936,2048] bf16 (622 MB) -> bucket copy -> [18992,2048] fp32",
+  "kernels_per_instance": 24.0,
+  "instances_per_step": 1,
+  "external_bytes_per_instance": 990183424,
+  "measured_us_per_instance": 864.97,
+  "measured_ms_total": 0.865,
+  "ideal_us_per_instance": 143.06,
+  "ideal_ms_total": 0.143,
+  "gap_ms_total": 0.722,
+  "bitwise_tier": "T2",
+  "bitwise_notes": "Duplicate token IDs are summed in sorted order; the fused kernel must keep the segment order.",
+  "dataflow": "The bucket pack for a single parameter is a pure copy of the embedding gradient.",
+  "blockers": "Library sort kernels; the bucket is created by the bucketing pass.",
+  "source": "torchtitan/models/common/embedding.py:41",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "tok_embeddings",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "bucketing._pre_bucket_reduce_scatter",
+     "embedding_dense_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3331",
+  "title": "HiMidLo router-gate backward glue: bf16 piece split, concats, weight-grad adds",
+  "description": "Splits the fp32 gate gradient [32768,128] into three bf16 pieces (casts, shift, subtracts), concatenates pieces and weight copies for the stacked GEMMs, adds the per-piece weight gradients and casts to bf16.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "intra-module",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "d logits [32768,128] fp32 -> pieces [32768,384] bf16; weight [128,2048] bf16 -> [384,2048]; wgrad [128,2048] fp32 -> bf16",
+  "kernels_per_instance": 14.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 47710208,
+  "measured_us_per_instance": 60.42,
+  "measured_ms_total": 2.9,
+  "ideal_us_per_instance": 6.89,
+  "ideal_ms_total": 0.331,
+  "gap_ms_total": 2.569,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Exact bit manipulations (bf16 round, shift-upcast, subtract) and copies.",
+  "dataflow": "All pieces derive elementwise from the fp32 gradient; writing them directly in the stacked layout removes the cats.",
+  "blockers": "Disabled \"fp32_to_bf16_split\" local_compile region. T3 extension: split in registers inside the GEMM prologue (noted as TODO in the source).",
+  "source": "torchtitan/models/common/linear/hi_mid_lo_linear.py:342-415",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.gate",
+    "layers": "all",
+    "ops": [
+     "__lshift__",
+     "add_",
+     "cat",
+     "sub",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3721",
+  "title": "Router gate dgrad GEMM accumulates into the expert input gradient (beta=1 epilogue)",
+  "description": "The HiMidLo gate input-gradient GEMM [32768,384]x[384,2048] writes a fresh bf16 [32768,2048] tensor that autograd then adds into the routed-experts input gradient with a separate add_.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "gemm-adjacent",
+   "cross-module"
+  ],
+  "shapes_dtypes": "pieces [32768,384] bf16 x stacked W [384,2048] bf16 -> += d ffn_norm-output [32768,2048] bf16",
+  "kernels_per_instance": 2.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 295174144,
+  "measured_us_per_instance": 88.8,
+  "measured_ms_total": 4.262,
+  "ideal_us_per_instance": 42.65,
+  "ideal_ms_total": 2.047,
+  "gap_ms_total": 2.215,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "<program> rounds the GEMM result to bf16, then adds in fp32 and rounds again; the epilogue must round the accumulator to bf16 before adding C to stay bitwise.",
+  "dataflow": "The GEMM output is consumed only by the accumulation into the gradient buffer that the expert backward already produced.",
+  "blockers": "Autograd owns gradient accumulation; the Function would need the existing gradient buffer as an in/out operand (the code already does this for weight gradients).",
+  "source": "torchtitan/models/common/linear/hi_mid_lo_linear.py:342-362",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.gate",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "mm"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-5490",
+  "title": "MXFP8 quantize of the attention output in the flash-attention forward epilogue",
+  "description": "The wo input (attention output [32768,4096] bf16) is quantized to MXFP8 1x32 plus scale swizzle by two separate kernels right after flash attention writes it.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "O [32768,4096] bf16 -> fp8 e4m3 [32768,4096] + e8m0 scales [32768,128] swizzled",
+  "kernels_per_instance": 2.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 138412032,
+  "measured_us_per_instance": 70.26,
+  "measured_ms_total": 3.373,
+  "ideal_us_per_instance": 20.0,
+  "ideal_ms_total": 0.96,
+  "gap_ms_total": 2.413,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "The quantization itself is exact given O; but it requires changes inside the flash-attention kernel epilogue (bf16 O must still be written for the attention backward).",
+  "dataflow": "Each output tile of the attention kernel is a complete set of 32-element blocks along head_dim (128), so the per-block amax/scale can be computed in the epilogue from registers.",
+  "blockers": "Flash attention is a library kernel (CuTe DSL flash_attn); the quantized output must be handed to the MXFP8Linear Function. Ideal counts only the extra fp8+scale bytes written by the epilogue (attention kernel time is excluded since document lengths are unknown).",
+  "source": "torchtitan/models/common/attention/attention.py:318-324; torchtitan/quantization/mxfp8/linear.py:77-170",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7500",
+  "title": "Router scoring + top-k bookkeeping + aux-loss forward glue",
+  "description": "Softmax over gate logits, round-robin expert ids, gather of top-k scores, normalization, routing-map scatter, expert counts, the batch-wise load-balance loss statistics and the padding masked_fill: 45 small kernels per layer on [32768,128] and [32768,8] tensors.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "intra-module"
+  ],
+  "shapes_dtypes": "gate logits [32768,128] fp32 -> scores [32768,128] fp32, ids [32768,8] int64, topk scores [32768,8] fp32, routing map [32768,128] bool, counts [128] fp32",
+  "kernels_per_instance": 45.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 40929280,
+  "measured_us_per_instance": 275.67,
+  "measured_ms_total": 13.232,
+  "ideal_us_per_instance": 5.91,
+  "ideal_ms_total": 0.284,
+  "gap_ms_total": 12.948,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Row softmax and column sums over 32768 tokens (expert counts, normalized-score sums) must keep the <program> reduction order; the count all-reduce sits between the count and loss stages.",
+  "dataflow": "All ops consume the [32768,128] gate output or the [32768,8] top-k tensors; row-wise ops (softmax, gather, normalize, scatter, L1 normalize) fuse into one pass, and the column sums can be accumulated in the same pass as partial sums.",
+  "blockers": "The expert-count all-reduce (DP/EP) splits the region into a pre- and post-collective kernel; the deterministic column reductions over T are long and narrow (128 outputs), so a fused kernel needs a fixed-order tree reduction to stay bitwise.",
+  "source": "torchtitan/models/common/moe/moe.py:233-330,339-361,662-705; torchtitan/models/common/aux_loss.py:141-200",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "masked_fill"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.router",
+    "layers": "all",
+    "ops": [
+     "__and__",
+     "add",
+     "add_",
+     "arange",
+     "bitwise_not",
+     "div",
+     "gather",
+     "mul",
+     "remainder",
+     "scatter_",
+     "softmax",
+     "sum",
+     "zeros_like"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.router.aux_loss",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "bitwise_not",
+     "clamp_min",
+     "clone",
+     "div",
+     "linalg_vector_norm",
+     "mul",
+     "reciprocal",
+     "sum",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-2902",
+  "title": "RoPE forward: q/k rotate-half chain in one pass",
+  "description": "CosSinRoPE on q [32768,32,128] and k [32768,4,128]: upcast to fp32, x*cos + rotate_half(x)*sin, cast back to bf16, plus the position bound check and cache gather, run as 18 separate kernels per layer.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "intra-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "q [32768,32,128] bf16, k [32768,4,128] bf16 -> fp32 math -> bf16; cos/sin cache [4096,256] fp32 gathered by positions [32768] int64",
+  "kernels_per_instance": 18.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 608436224,
+  "measured_us_per_instance": 2118.06,
+  "measured_ms_total": 101.667,
+  "ideal_us_per_instance": 87.91,
+  "ideal_ms_total": 4.22,
+  "gap_ms_total": 97.447,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Pure pointwise: two fp32 muls and one fp32 add per element, then a bf16 round; the fused kernel must keep the same op order and avoid FMA contraction (x*cos + y*sin evaluated as two rounded products then a rounded add).",
+  "dataflow": "Every op is elementwise over (token, head, dim) except rotate_half, which is a fixed permutation within the 128-wide head dim (neg + cat of halves); the cos/sin row depends only on the token position. Each element of q_out/k_out depends on two elements of the same input row and one cache row, so one pass reading q,k once and writing once is legal. q and k share the cache row (sibling fusion).",
+  "blockers": "None structural. This model has a \"rope\" local_compile region that is disabled in this capture; <program> runs every op as its own kernel with fp32 intermediates (q fp32 copy, rotated copy, two products, sum).",
+  "source": "torchtitan/models/common/rope.py:25-37,455-482,485-505",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "_assert_async",
+     "add",
+     "all",
+     "cat",
+     "index",
+     "le",
+     "mul",
+     "neg",
+     "to",
+     "type_as"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-1835",
+  "title": "Chunked LM-head cross-entropy: fp32 upcast + log_softmax + NLL forward and backward + bf16 downcast",
+  "description": "For each of 8 chunks of 4096 tokens, the bf16 logits [4096,151936] are upcast to fp32, log_softmax'ed and NLL-reduced; backward zero-fills and scatters the NLL grad, runs log_softmax backward and downcasts the logit gradient to bf16 for the two LM-head GEMMs.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "forward-backward",
+   "intra-module"
+  ],
+  "shapes_dtypes": "logits [4096,151936] bf16 -> fp32 copies (2.49 GB each) -> grad logits [4096,151936] bf16",
+  "kernels_per_instance": 13.25,
+  "instances_per_step": 8,
+  "external_bytes_per_instance": 2489352192,
+  "measured_us_per_instance": 4408.11,
+  "measured_ms_total": 35.265,
+  "ideal_us_per_instance": 359.67,
+  "ideal_ms_total": 2.877,
+  "gap_ms_total": 32.388,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Row max and sum-exp over 151936 classes; to be bitwise the kernel must match cunn_SoftMaxForward/Backward's block reduction order and the fp32 rounding of log-probs before the NLL gather.",
+  "dataflow": "The loss is the last op, so the logit gradient depends only on the logits, labels and the loss scale: one kernel can read the bf16 logits once, compute logsumexp and the NLL, and write grad = (softmax - onehot) * scale in bf16 immediately (or in a second pass over the same logits), never materializing the fp32 copy, the fp32 log-probs saved for backward, the fp32 NLL grad or the fp32 softmax grad.",
+  "blockers": "Forward and backward live in different phases of the <program>; fusing them requires computing the logit gradient during forward (it only depends on the loss scale, known at <profile> time). A row of 151936 classes does not fit in shared memory, so a two-pass (online lse + gradient) design reads logits twice unless fused into the LM-head GEMM epilogue (T3, then reduction order changes).",
+  "source": "torchtitan/experiments/graph_trainer/chunked_loss.py:107, torchtitan/distributed/local_compile.py:96",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "loss",
+    "layers": "all",
+    "ops": [
+     "_log_softmax_backward_data",
+     "_to_copy",
+     "div",
+     "nll_loss_backward"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "loss",
+    "layers": "all",
+    "ops": [
+     "_log_softmax",
+     "_to_copy",
+     "add",
+     "clone",
+     "div",
+     "new_zeros",
+     "nll_loss_forward",
+     "ones_like"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-5560",
+  "title": "Router backward: aux-loss grad + top-k grad scatter + softmax backward + hi/mid/lo bf16 split of the gate grad",
+  "description": "Backward of the router: aux-loss and score-normalization gradients on [32768,128]/[32768,8] fp32, a deterministic sort-based scatter_add of the 8 route gradients into [32768,128], softmax backward, and splitting the fp32 logit gradient into three bf16 parts (hi/mid/lo via casts, shifts and subtracts) concatenated to [32768,384] for the gate dgrad GEMM.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module"
+  ],
+  "shapes_dtypes": "[32768,128] fp32, [32768,8] fp32/int64, out [32768,384] bf16 and [384,2048] bf16",
+  "kernels_per_instance": 74.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 48562176,
+  "measured_us_per_instance": 359.22,
+  "measured_ms_total": 17.242,
+  "ideal_us_per_instance": 7.02,
+  "ideal_ms_total": 0.337,
+  "gap_ms_total": 16.906,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Softmax backward row sum over 128 and aux-loss row sums; the scatter_add has no collisions (the 8 expert IDs of a row are distinct), so its order does not matter. The hi/mid/lo split is exact bit manipulation.",
+  "dataflow": "Every op is row-local over the 128 experts of a token: grad of scores -> scatter into the row -> add aux grad -> softmax backward -> split to bf16 hi/mid/lo -> concatenated row. One row-per-warp kernel produces the [T,384] GEMM operand directly.",
+  "blockers": "The ATen deterministic scatter_add path (sort + index_put, 33 kernels) is chosen because deterministic algorithms are on; a fused kernel must know the indices are row-local.",
+  "source": "torchtitan/models/common/moe/moe.py:257-292, torchtitan/models/common/moe/moe.py:702-705, torchtitan/models/common/linear/hi_mid_lo_linear.py:117",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "masked_fill"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router",
+    "layers": "all",
+    "ops": [
+     "_softmax_backward_data",
+     "add",
+     "div",
+     "mul",
+     "neg",
+     "new_zeros",
+     "scatter_add",
+     "sum"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.aux_loss",
+    "layers": "all",
+    "ops": [
+     "add",
+     "div",
+     "gt",
+     "mul",
+     "neg",
+     "ones_like",
+     "scalar_tensor",
+     "sgn",
+     "sum",
+     "where"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.gate",
+    "layers": "all",
+    "ops": [
+     "__lshift__",
+     "_to_copy",
+     "cat",
+     "sub"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-2569",
+  "title": "LM-head dgrad chunk staging (zero-init + copy into the full gradient)",
+  "description": "The hidden-state gradient buffer [32768,2048] bf16 is zero-initialized and each chunk's LM-head dgrad [4096,2048] is copied into its slice.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "[32768,2048] bf16, 8 x [4096,2048]",
+  "kernels_per_instance": 9.0,
+  "instances_per_step": 1,
+  "external_bytes_per_instance": 0,
+  "measured_us_per_instance": 77.76,
+  "measured_ms_total": 0.078,
+  "ideal_us_per_instance": 0.0,
+  "ideal_ms_total": 0.0,
+  "gap_ms_total": 0.078,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "Same GEMM, only the output pointer changes.",
+  "dataflow": "Each copy_ consumes one dgrad GEMM output; the chunks tile the buffer completely, so the zero-fill is dead.",
+  "blockers": "None (mm supports out= into a contiguous row slice).",
+  "source": "torchtitan/experiments/graph_trainer/chunked_loss.py:107",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "loss",
+    "layers": "all",
+    "ops": [
+     "copy_",
+     "zeros_like"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-6771",
+  "title": "Expert weight prep per unshard: fp32->bf16 cast, copy-in, MXFP8 quantize, operand copies",
+  "description": "Per layer and per unshard (forward and backward), the local experts w13 [16,1536,2048] and w2 [16,2048,768] fp32 are cast to bf16, copied through the size-1 FSDP group buffer, quantized to MXFP8 with 32x32 scales by Dist-MoE, and copied into the persistent operand buffers.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "forward-backward",
+   "horizontal"
+  ],
+  "shapes_dtypes": "w13 [16,1536,2048] + w2 [16,2048,768] fp32 -> bf16 -> fp8 e4m3 + e8m0 scales ([24576,64],[32768,48],[32768,24],[12288,64])",
+  "kernels_per_instance": 12.0,
+  "instances_per_step": 96,
+  "external_bytes_per_instance": 377634816,
+  "measured_us_per_instance": 205.38,
+  "measured_ms_total": 19.717,
+  "ideal_us_per_instance": 54.56,
+  "ideal_ms_total": 5.238,
+  "gap_ms_total": 14.479,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Cast then 32x32 amax quantization; amax is order-insensitive.",
+  "dataflow": "The bf16 copy exists only to feed the quantizer; the expert FSDP group has size 1 so the all-gather is a no-op copy. One kernel can read fp32 weights and write fp8 data + both scale layouts directly into the operand buffers. Expert weights do not change within a step, so the backward instance repeats identical work.",
+  "blockers": "FSDP mixed-precision cast and copy-in are generic; dist_moe.prepare_mxfp8_weight takes bf16 input and returns new tensors that are then copied. Skipping the backward re-quantization means keeping 80 MB/layer of fp8 expert weights alive across the step.",
+  "source": "torchtitan/models/common/dist_moe/mxfp8.py:64-120,170-220; torchtitan/quantization/_fsdp_tensor.py:352-411",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "copy_",
+     "dist_moe.prepare_mxfp8_weight",
+     "to"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "copy_",
+     "dist_moe.prepare_mxfp8_weight",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-1212",
+  "title": "Dist-MoE backward: broadcast and scale dy into [T,K,D] with score gradients",
+  "description": "Broadcasts the MoE output gradient to every routed slot scaled by its router score and computes the score gradient as a dot product with the saved route outputs.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "intra-module",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "dy [32768,2048] bf16, scores [32768,8] fp32, saved route outputs [32768,8,2048] bf16 -> d route [32768,8,2048] bf16, d scores [32768,8] fp32",
+  "kernels_per_instance": 1.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 2283798528,
+  "measured_us_per_instance": 409.92,
+  "measured_ms_total": 19.676,
+  "ideal_us_per_instance": 329.97,
+  "ideal_ms_total": 15.838,
+  "gap_ms_total": 3.838,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Score gradient is a 2048-long dot product per (token, k); order must match.",
+  "dataflow": "Single kernel already; 80% of roofline. T3 extension: apply the per-row score in the dgrad dispatch GEMM prologue so the 1.07 GB scaled-dy buffer is never written.",
+  "blockers": "The dgrad dispatch GEMM reads the scaled gradient through remote symmetric memory; scaling in its prologue is a Dist-MoE kernel change.",
+  "source": "dist_moe/_postprocess.py:552-616; dist_moe/kernels/triton/broadcast_n_reduction.py:386-533",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-2480",
+  "title": "QKV split/contiguous copies + q_norm + k_norm forward",
+  "description": "The wqkv output [32768,5120] is split into q/k/v and copied contiguous (3 copies), then q_norm and k_norm (RMSNorm over head_dim 128) run as separate kernels.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "qkv [32768,5120] bf16 viewed [32768,4,10,128] -> q [32768,32,128], k,v [32768,4,128] bf16; norm weights [128] bf16; rstd [32768,36] fp32",
+  "kernels_per_instance": 5.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 675807232,
+  "measured_us_per_instance": 202.2,
+  "measured_ms_total": 9.705,
+  "ideal_us_per_instance": 97.64,
+  "ideal_ms_total": 4.687,
+  "gap_ms_total": 5.019,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm reduces over 128 elements per (token, head); the fused kernel must reproduce the quack RMSNorm reduction order.",
+  "dataflow": "q_norm/k_norm read only the split views of qkv; v needs only a strided copy. A single kernel can read each qkv row once and emit normalized q, k and contiguous v. q_norm and k_norm are siblings over the same input row.",
+  "blockers": "The contiguous copies exist for vLLM KV-cache layout compatibility (comment in QKVLinear.forward); a fused kernel must still produce contiguous outputs. The RMSNorm backward saves its input, which would become a view of qkv.",
+  "source": "torchtitan/models/common/attention/attention.py:169-197,287-302; torchtitan/models/common/norm.py:36-51",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "contiguous",
+     "reshape"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7280",
+  "title": "Post-attention residual add + ffn RMSNorm + copy into the MoE dispatch buffer",
+  "description": "The wo projection output is added to the residual stream, RMS-normalized by ffn_norm, and the normalized [32768,2048] bf16 activations plus routing IDs are copied into the expert-parallel dispatch buffer.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "in residual + wo output [32768,2048] bf16; out residual, normed bf16 (saved), dispatch copy bf16, rstd, routing IDs [32768,8] int64",
+  "kernels_per_instance": 3.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 675418112,
+  "measured_us_per_instance": 136.63,
+  "measured_ms_total": 6.558,
+  "ideal_us_per_instance": 97.59,
+  "ideal_ms_total": 4.684,
+  "gap_ms_total": 1.874,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm row reduction over 2048 must match the fused_rms_norm kernel.",
+  "dataflow": "add -> rms_norm -> (router gate GEMM, saved for wgrad, and dispatch copy). The dispatch copy is a pure copy of the norm output, so the norm kernel can store its output to both destinations.",
+  "blockers": "The dispatch buffer is dist_moe symmetric memory published inside the dist_moe op; the norm would need the buffer handle, and the routing-ID part of the publish (which depends on the router that runs after the norm) would move to the router kernel. The residual add could alternatively go into the wo GEMM epilogue (T3).",
+  "source": "torchtitan/models/qwen3/model.py:61-65, torchtitan/models/common/nn_modules.py:155, dist_moe/_blockscaled.py:4377 (copy_routing_and_dispatch)",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.ffn_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9374",
+  "title": "Cross-layer: MoE combine sum + ffn residual add + next attention_norm + MXFP8 quantize",
+  "description": "The weighted top-k combine of layer i-1 feeding its residual add, layer i attention_norm and the wqkv-input quantization, without materializing the MoE output.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-layer",
+   "cross-module",
+   "communication-glue",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "[32768,8,2048] bf16 + scores, x [32768,2048] bf16 -> x, normed bf16, fp8 + scales",
+  "kernels_per_instance": 4.98,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 1546649600,
+  "measured_us_per_instance": 466.82,
+  "measured_ms_total": 22.408,
+  "ideal_us_per_instance": 223.46,
+  "ideal_ms_total": 10.726,
+  "gap_ms_total": 11.681,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "K-sum order, RMSNorm order.",
+  "dataflow": "The MoE output row is consumed only by the residual add, whose row is consumed by the next norm and quantizer: a row-parallel kernel can do all of it.",
+  "blockers": "Crosses the Dist-MoE library boundary and the FSDP block boundary.",
+  "source": "dist_moe/_postprocess.py:502-551; torchtitan/models/qwen3/model.py:57-73; torchtitan/models/common/norm.py:36-51",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25,
+     26,
+     27,
+     28,
+     29,
+     30,
+     31,
+     32,
+     33,
+     34,
+     35,
+     36,
+     37,
+     38,
+     39,
+     40,
+     41,
+     42,
+     43,
+     44,
+     45,
+     46
+    ],
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-8055",
+  "title": "FSDP all-gather pack/unpack + wqkv/wo weight MXFP8 quantize",
+  "description": "Per layer, the fp32 parameter shards (wqkv, wo, router gate, norms) are cast to bf16 and packed into the all-gather buffer; after the all-gather, the gathered [8, chunk] buffer is copied out per parameter and wqkv [5120,2048] / wo [2048,4096] are quantized to MXFP8 with 32x32 block scales.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "communication-glue",
+   "horizontal"
+  ],
+  "shapes_dtypes": "per layer: 2.39M fp32 per shard -> 19.1M bf16 gathered -> fp8 [5120,2048], [2048,4096]; plus the embedding and norm/LM-head buckets",
+  "kernels_per_instance": 4.88,
+  "instances_per_step": 50,
+  "external_bytes_per_instance": 104519813,
+  "measured_us_per_instance": 52.89,
+  "measured_ms_total": 2.645,
+  "ideal_us_per_instance": 15.1,
+  "ideal_ms_total": 0.755,
+  "gap_ms_total": 1.89,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "32x32 block amax for the weight quantization; pack/unpack and casts are exact.",
+  "dataflow": "split_with_sizes_copy writes per-parameter bf16 tensors whose only consumer for wqkv/wo is the 32x32 quantizer; a fused unpack can quantize straight from the gathered layout.",
+  "blockers": "The pre-all-gather cast must stay a separate kernel (the all-gather sits between); the norm/LM-head bucket's copy-out cannot be skipped because each rank's chunk starts with a 256-element norm shard that misaligns the LM-head rows.",
+  "source": "torchtitan/experiments/graph_trainer/simple_fsdp.py:268,366",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "bucketing._pre_bucket_all_gather",
+     "split_with_sizes_copy",
+     "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "norm",
+    "layers": "all",
+    "ops": [
+     "bucketing._pre_bucket_all_gather",
+     "split_with_sizes_copy"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "tok_embeddings",
+    "layers": "all",
+    "ops": [
+     "bucketing._pre_bucket_all_gather"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3475",
+  "title": "Chunked cross-entropy forward + backward per chunk",
+  "description": "Per 4096-token chunk: fp32 upcast of the bf16 logits [4096,151936], log_softmax, nll, then immediately nll/log_softmax backward, zero-fill and bf16 downcast of the logits gradient, plus the gradient-accumulator writes.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "forward-backward",
+   "intra-module"
+  ],
+  "shapes_dtypes": "logits [4096,151936] bf16 x 8 chunks -> loss scalar; grad logits [4096,151936] bf16; grad accumulator [32768,2048] bf16",
+  "kernels_per_instance": 14.38,
+  "instances_per_step": 8,
+  "external_bytes_per_instance": 2489352192,
+  "measured_us_per_instance": 4418.73,
+  "measured_ms_total": 35.35,
+  "ideal_us_per_instance": 359.67,
+  "ideal_ms_total": 2.877,
+  "gap_ms_total": 32.472,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Row max/logsumexp over 151936 fp32 values must follow the cunn_SoftMax reduction order; gradient = softmax - onehot, scaled, rounded to bf16.",
+  "dataflow": "Backward runs right after forward on the same chunk (chunk_loss.backward()); the gradient needs only the logits row and its logsumexp, so one kernel can read logits once and write grad once. The gradient accumulator zero-fill is redundant since every slice is overwritten.",
+  "blockers": "Inner loss and lm_head are separate modules; the \"loss\" local_compile region is disabled. T3 extension: fuse with the lm_head GEMMs (linear cross-entropy).",
+  "source": "torchtitan/components/loss.py:54-90,620-675,900-1000",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "",
+    "layers": "all",
+    "ops": [
+     "_log_softmax_backward_data",
+     "copy_",
+     "div",
+     "nll_loss_backward",
+     "ones_like",
+     "to"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "",
+    "layers": "all",
+    "ops": [
+     "add",
+     "cross_entropy_loss",
+     "div",
+     "new_zeros",
+     "ones_like",
+     "to",
+     "zeros_like"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-5618",
+  "title": "RoPE backward + q/k RMSNorm backward + dQKV concat + MXFP8 quantize of dQKV",
+  "description": "From the attention gradients dq [32768,32,128] and dk/dv [32768,4,128] bf16: RoPE backward in fp32 (upcast, mul by cos/sin, neg, two zero-filled slice_backward scatters, gradient adds, downcast), q/k RMSNorm backward, concatenation into the interleaved [32768,4,10,128] dQKV and its rowwise+colwise MXFP8 quantization for the wqkv dgrad/wgrad GEMMs.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "in dq [32768,32,128] bf16, dk/dv [32768,4,128] bf16, q/k pre-norm, rstd, cos/sin; out dQKV fp8 e4m3 rowwise+colwise [32768,5120] + e8m0 scales; intermediates fp32 [32768,32,128]",
+  "kernels_per_instance": 30.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 992740352,
+  "measured_us_per_instance": 2557.58,
+  "measured_ms_total": 122.764,
+  "ideal_us_per_instance": 143.43,
+  "ideal_ms_total": 6.885,
+  "gap_ms_total": 115.879,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm backward needs per-(token,head) dot products over head_dim and a token-wide dweight reduction ([128] per norm, two-stage in the current kernel); MXFP8 needs per-32-element amax. RoPE backward is pointwise (slice_backward + add is a pure interleave).",
+  "dataflow": "dq/dk -> fp32 -> (g*cos) + rotate_half^T(g*sin) -> bf16 -> rms_norm_backward(q/k) -> cat with dv into [T,4,10,128] -> mxfp8_quantize (row+col) -> scale swizzle. Each step is per (token, head) except the norm dweight and the colwise quantize (32-row blocks), which tile naturally over 32-token blocks.",
+  "blockers": "Colwise MXFP8 needs 32-token tiles of all 5120 columns, so the kernel must tile tokens by 32 and all heads; dweight for q_norm/k_norm needs a cross-CTA reduction with fixed order. The FA backward postprocess (dq fp32 accum -> bf16) could also be folded in (T3), but is owned by the attention library.",
+  "source": "torchtitan/models/common/rope.py:171, torchtitan/models/common/nn_modules.py:155, torchtitan/models/common/attention/attention.py:189, torchtitan/quantization/mxfp8/linear.py:129",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "cat"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "add",
+     "mul",
+     "neg",
+     "slice_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3972",
+  "title": "QKV split + QK-norm + RoPE forward (one kernel per layer)",
+  "description": "Merge of the QKV split/contiguous copies, q_norm/k_norm and RoPE: read the wqkv output once and write rotated, normalized q, k and contiguous v.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "qkv [32768,5120] bf16 -> q [32768,32,128], k,v [32768,4,128] bf16; rstd fp32",
+  "kernels_per_instance": 23.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 680263680,
+  "measured_us_per_instance": 2320.26,
+  "measured_ms_total": 111.372,
+  "ideal_us_per_instance": 98.29,
+  "ideal_ms_total": 4.718,
+  "gap_ms_total": 106.655,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Inherits the RMSNorm reduction order constraint of the QK-norm part; RoPE part is pointwise.",
+  "dataflow": "RoPE consumes exactly the normalized q/k rows produced by q_norm/k_norm, row by row, so the normalized values never need to reach HBM. Backward needs only rstd plus the pre-norm q/k (a view of qkv) and the cos/sin cache.",
+  "blockers": "Same as the two parts; RMSNorm backward would have to read its saved input from the qkv buffer.",
+  "source": "torchtitan/models/common/attention/attention.py:169-197,287-306; torchtitan/models/common/rope.py:455-482",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "contiguous",
+     "reshape"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "_assert_async",
+     "add",
+     "all",
+     "cat",
+     "index",
+     "le",
+     "mul",
+     "neg",
+     "to",
+     "type_as"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-2351",
+  "title": "Attention RMSNorm backward + residual-gradient add + MoE dy broadcast-and-scale of the layer below",
+  "description": "In backward, layer N+1's attention RMSNorm backward and residual-gradient add produce the residual-stream gradient [32768,2048] bf16, which layer N's MoE immediately broadcasts to its 8 expert rows scaled by the routing scores ([32768,8,2048] bf16) while computing the score gradients; the final norm backward plays this role for the last layer.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "cross-layer",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "in wqkv dgrad [32768,2048] bf16, saved norm input, rstd, residual grad, saved expert rows [32768,8,2048] bf16, scores; out residual grad, dx rows [32768,8,2048] bf16 (dispatch send buffer), dscores [32768,8] fp32",
+  "kernels_per_instance": 4.04,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 2697079637,
+  "measured_us_per_instance": 552.68,
+  "measured_ms_total": 26.529,
+  "ideal_us_per_instance": 389.68,
+  "ideal_ms_total": 18.705,
+  "gap_ms_total": 7.824,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm backward row reductions and dweight reduction; dscores = <dy, expert_row> dot over 2048 in the library's order.",
+  "dataflow": "rms_norm_backward(dx) -> add(residual grad) -> this sum is exactly grad_output_TD of the MoE backward below, whose first kernel broadcasts it to [T,8,D] and reduces <dy, x_k> per route. One row-local kernel can emit the residual grad, the scaled rows and dscores from registers.",
+  "blockers": "Crosses the dist_moe op boundary and the layer boundary; the broadcast writes into the expert-parallel dispatch buffer. A T3 alternative folds the scale into the dgrad-dispatch grouped GEMM prologue (no 1 GiB dx write) but is owned by dist_moe.",
+  "source": "torchtitan/models/common/nn_modules.py:155, dist_moe/_blockscaled.py:4377 (broadcast_and_scale)",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9768",
+  "title": "wo MXFP8 GEMM epilogue adds the attention residual",
+  "description": "The wo projection GEMM [32768,4096]x[4096,2048] writes attn_out, then a separate kernel computes x + attn_out.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "gemm-adjacent",
+   "cross-module"
+  ],
+  "shapes_dtypes": "O fp8 [32768,4096] x W fp8 [4096,2048] + x [32768,2048] bf16 -> x [32768,2048] bf16",
+  "kernels_per_instance": 2.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 415252480,
+  "measured_us_per_instance": 190.15,
+  "measured_ms_total": 9.127,
+  "ideal_us_per_instance": 152.06,
+  "ideal_ms_total": 7.299,
+  "gap_ms_total": 1.828,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "The epilogue must round the GEMM accumulator to bf16 (attn_out) before the bf16 residual add, as <program> does.",
+  "dataflow": "attn_out is consumed only by the residual add (it is not saved for backward); the add is elementwise on the GEMM output tile.",
+  "blockers": "Custom epilogue on the MXFP8 GEMM inside the MXFP8Linear Function; the residual lives outside the attention module. The following ffn_norm needs whole 2048-wide rows, which a tile epilogue does not see.",
+  "source": "torchtitan/models/common/attention/attention.py:322-324; torchtitan/models/qwen3/model.py:55-60",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "_scaled_mm_v2"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7967",
+  "title": "wo dgrad GEMM epilogue computes the flash-attention backward preprocess; fold accumulator zero-fills",
+  "description": "The wo dgrad GEMM writes dO [32768,4096]; flash-attention backward then re-reads dO and O to compute rowsum(dO*O) per head and zero-fills its fp32 dq/dk/dv accumulators and semaphores.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "dy fp8 [32768,2048] x W fp8 [2048,4096] -> dO [32768,4096] bf16; O [32768,4096] bf16 -> D [32,32768] fp32; accumulators [4,6553600] fp32 x2, [32,32768] fp32",
+  "kernels_per_instance": 9.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 832569344,
+  "measured_us_per_instance": 359.45,
+  "measured_ms_total": 17.253,
+  "ideal_us_per_instance": 152.06,
+  "ideal_ms_total": 7.299,
+  "gap_ms_total": 9.955,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "rowsum(dO*O) over 128 elements per head in fp32 must match the FA preprocess order, computed from the bf16-rounded dO.",
+  "dataflow": "Each 128-column slice of a dO output tile is one head; the epilogue has dO in registers and can load the matching O tile and reduce. The zero-fills have no inputs and can be issued by the same kernel.",
+  "blockers": "Requires a custom epilogue on the cuBLAS/nvjet MXFP8 GEMM and passing D into the flash-attention backward (library API change).",
+  "source": "torchtitan/models/common/attention/attention.py:318-324; torchtitan/quantization/mxfp8/linear.py:233-300",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.inner_attention",
+    "layers": "all",
+    "ops": [
+     "torch_attn._varlen_attn_backward",
+     "zeros"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "_scaled_mm_v2"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4730",
+  "title": "FSDP attention-group unshard glue (forward and backward re-unshard)",
+  "description": "Per layer and per unshard: fp32->bf16 casts of the wqkv/wo shards, copy-in to the all-gather buffer, copy-out split, MXFP8 32x32 weight quantization of wqkv [5120,2048] and wo [2048,4096] with swizzled scales, and copies of the fp8 data/scales into FSDP-managed operand buffers.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "forward-backward",
+   "horizontal"
+  ],
+  "shapes_dtypes": "fp32 shards [640,2048], [256,4096] + small params -> bf16 [8,2392608] all-gather buffer -> fp8 wqkv [5120,2048], wo [2048,4096] + 32x32 e8m0 scales",
+  "kernels_per_instance": 14.0,
+  "instances_per_step": 96,
+  "external_bytes_per_instance": 72081600,
+  "measured_us_per_instance": 66.29,
+  "measured_ms_total": 6.364,
+  "ideal_us_per_instance": 10.41,
+  "ideal_ms_total": 1.0,
+  "gap_ms_total": 5.364,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Cast and quantize are exact functions of the inputs; 32x32 amax is order-insensitive.",
+  "dataflow": "Pre-collective: the cast output is only copied into the all-gather input buffer (cast directly into it). Post-collective: the gathered bf16 weights are only quantized and the quantized operands are copied into persistent buffers (quantize directly into them; skip the bf16 unsharded copy-out for wqkv/wo).",
+  "blockers": "FSDP owns copy-in/copy-out and the all-gather boundary; the operand copy exists because _build_operands refills FSDP-managed buffers. The backward instance re-does the forward work because blocks reshard after forward (keeping fp8 operands costs ~20 MB/layer).",
+  "source": "torch/distributed/fsdp/_fully_shard/_fsdp_collectives.py:36,259-294; torchtitan/quantization/_fsdp_tensor.py:352-411; torchtitan/quantization/mxfp8/tensor.py:71-110",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "_foreach_copy_",
+     "copy_",
+     "fsdp.all_gather_copy_in",
+     "fsdp.split_with_sizes_copy",
+     "to",
+     "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "_foreach_copy_",
+     "copy_",
+     "fsdp.all_gather_copy_in",
+     "fsdp.split_with_sizes_copy",
+     "to",
+     "torchao.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-8981",
+  "title": "Router gate weight-grad: hi/mid/lo partial GEMM sum + bf16 cast",
+  "description": "The router gate weight gradient [128,2048] is computed as three fp32 GEMMs (one per bf16 split part of the logit gradient) against the same normalized input; their outputs are summed with two in-place adds and cast to bf16.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "gemm-adjacent",
+   "horizontal"
+  ],
+  "shapes_dtypes": "3 x [128,2048] fp32 partials -> [128,2048] bf16",
+  "kernels_per_instance": 3.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 524288,
+  "measured_us_per_instance": 5.78,
+  "measured_ms_total": 0.277,
+  "ideal_us_per_instance": 0.08,
+  "ideal_ms_total": 0.004,
+  "gap_ms_total": 0.274,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "The fp32 sum order ((hi+mid)+lo) and the split-K reduction inside each GEMM must be kept; a single GEMM with M=384 and a fixed-order epilogue sum preserves it.",
+  "dataflow": "The three GEMMs share the B operand (normed input [32768,2048]) and differ only in A; their outputs are consumed only by the adds and the cast.",
+  "blockers": "Needs a custom GEMM epilogue (cuBLAS split-K + separate reduce today).",
+  "source": "torchtitan/models/common/linear/hi_mid_lo_linear.py:117",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.gate",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "add_"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-5765",
+  "title": "Attention residual add + ffn_norm + Dist-MoE dispatch copy",
+  "description": "x + attn_out, the ffn_norm RMSNorm, and the Dist-MoE kernel that copies the normalized tokens (and routing ids/scores) into the expert-parallel dispatch buffer.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "communication-glue"
+  ],
+  "shapes_dtypes": "x, attn_out [32768,2048] bf16 -> x [32768,2048] bf16, normed [32768,2048] bf16 in the symmetric dispatch buffer; ids/scores [32768,8]",
+  "kernels_per_instance": 3.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 543162368,
+  "measured_us_per_instance": 137.39,
+  "measured_ms_total": 6.595,
+  "ideal_us_per_instance": 78.48,
+  "ideal_ms_total": 3.767,
+  "gap_ms_total": 2.828,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm row reduction order.",
+  "dataflow": "The normed tokens are consumed by the router gate GEMM and copied verbatim into the dispatch buffer; writing them once directly into the dispatch buffer removes one [32768,2048] read+write.",
+  "blockers": "Dist-MoE owns the symmetric-memory dispatch buffer and its conditional (activation-slot) placement; the router gate GEMM and saved activations would read from that buffer.",
+  "source": "torchtitan/models/qwen3/model.py:57-67; torchtitan/models/common/dist_moe/routed_experts.py:166-243; dist_moe/kernels/triton/conditional_copy.py:303",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.ffn_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3653",
+  "title": "Router softmax + top-k score normalization + routing map + aux-loss statistics",
+  "description": "From router logits [32768,128] fp32: softmax, gather of the 8 routed experts' probabilities and their normalization, routing mask and tokens-per-expert count, aux-loss statistics (per-expert means, L1 norms, clamps, scalar products) and masking of padded tokens' expert IDs/scores, as ~45 small kernels.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module"
+  ],
+  "shapes_dtypes": "[32768,128] fp32 probabilities, [32768,8] fp32/int64 routes, [128] counters, scalars",
+  "kernels_per_instance": 46.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 40173568,
+  "measured_us_per_instance": 271.48,
+  "measured_ms_total": 13.031,
+  "ideal_us_per_instance": 5.8,
+  "ideal_ms_total": 0.279,
+  "gap_ms_total": 12.752,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Softmax row reduction over 128, column sums over 32768 tokens (tokens-per-expert, aux means) and L1 norms need fixed reduction orders.",
+  "dataflow": "All ops read the same softmax output (or its per-row derivatives) and produce per-row results plus per-expert column sums; a row-tile kernel can compute softmax, top-k gather/normalize, the routing mask, and accumulate column partial sums, with a tiny second stage for the [128]-vector and scalar aux-loss math.",
+  "blockers": "Column sums over all tokens need a deterministic two-stage reduction; one all_reduce (fake here) sits in the middle of the aux-loss statistics.",
+  "source": "torchtitan/models/common/moe/moe.py:257-318, torchtitan/models/common/moe/moe.py:675-705, torchtitan/models/common/dist_moe/routed_experts.py:195-196",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "masked_fill"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.router",
+    "layers": "all",
+    "ops": [
+     "_softmax",
+     "add",
+     "add_",
+     "arange",
+     "bitwise_and",
+     "bitwise_not",
+     "div",
+     "gather",
+     "mul",
+     "remainder",
+     "scatter_",
+     "sum",
+     "zeros_like"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.router.aux_loss",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "add_",
+     "bitwise_not",
+     "cat",
+     "clamp_min",
+     "clone",
+     "div",
+     "linalg_vector_norm",
+     "mul",
+     "reciprocal",
+     "sum"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3535",
+  "title": "Aux-loss forward + backward pair: score gradient computed in the forward pass",
+  "description": "The batch-wise load-balance loss forward statistics and its backward (division, norm and clamp backward over [32768,128] scores) computed together, since all backward inputs are known after the forward count all-reduce.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "forward-backward",
+   "intra-module"
+  ],
+  "shapes_dtypes": "scores [32768,128] fp32, routing map bool -> loss scalar and dLoss/dscores [32768,128] fp32",
+  "kernels_per_instance": 41.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 33587200,
+  "measured_us_per_instance": 260.58,
+  "measured_ms_total": 12.508,
+  "ideal_us_per_instance": 4.85,
+  "ideal_ms_total": 0.233,
+  "gap_ms_total": 12.275,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Column reductions over T and row L1 norms must keep the <program> order; the backward chain (DivBackward, LinalgVectorNormBackward, ClampMinBackward) must be replicated op by op.",
+  "dataflow": "The injected gradient depends only on scores, routing counts (after the all-reduce), the denominator and coeff, all available at forward time; computing it once in the forward and adding it in the router backward removes ~20 backward kernels.",
+  "blockers": "AuxLoss.inject relies on autograd to deliver the gradient; computing it eagerly needs a custom autograd Function and stores an extra [32768,128] fp32 tensor.",
+  "source": "torchtitan/models/common/moe/moe.py:662-705; torchtitan/models/common/aux_loss.py:141-220",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.aux_loss",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "div",
+     "gt",
+     "mul",
+     "neg",
+     "ones_like",
+     "scalar_tensor",
+     "sgn",
+     "sum",
+     "where"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.router.aux_loss",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "bitwise_not",
+     "clamp_min",
+     "clone",
+     "div",
+     "linalg_vector_norm",
+     "mul",
+     "reciprocal",
+     "sum",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-6432",
+  "title": "FSDP reduce-scatter glue: chunk_cat, size-1 group copy, fp32 gradient cast",
+  "description": "Per layer: chunk_cat of the expert gradients and attention-group gradients into reduce-scatter buffers, the size-1 expert group copy, and casts of the reduced shards to fp32.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "communication-glue"
+  ],
+  "shapes_dtypes": "expert grads [16,2,768,2048]+[16,2048,768] bf16 -> fp32 shard; attention grads -> bf16 [8,2392608] -> fp32 shard",
+  "kernels_per_instance": 7.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 543903936,
+  "measured_us_per_instance": 217.16,
+  "measured_ms_total": 10.424,
+  "ideal_us_per_instance": 78.58,
+  "ideal_ms_total": 3.772,
+  "gap_ms_total": 6.651,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Copies and casts only.",
+  "dataflow": "For the size-1 expert group, chunk_cat -> copy -> cast is one bf16->fp32 cast of the gradients; for the attention group the post-reduce cast can be folded into the reduce-scatter output copy.",
+  "blockers": "FSDP generic reduce-scatter path; T3 extension: wgrad GEMMs writing directly into the reduce-scatter buffer.",
+  "source": "torch/distributed/fsdp/_fully_shard/_fsdp_collectives.py:300-319",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*",
+    "layers": "all",
+    "ops": [
+     "copy_",
+     "fsdp.chunk_cat_mixed_dtype",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-6450",
+  "title": "Expert weight-grad bf16->fp32 cast + gradient clone",
+  "description": "The expert weight gradients [16,1536,2048] and [16,2048,768] come out of the grouped wgrad GEMMs in bf16, are cast to fp32 to match the parameter dtype, and are cloned again into param.grad after backward.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "intra-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "bf16 [16,1536,2048] + [16,2048,768] -> fp32 (302 MB) -> fp32 clone",
+  "kernels_per_instance": 4.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 452984832,
+  "measured_us_per_instance": 158.1,
+  "measured_ms_total": 7.589,
+  "ideal_us_per_instance": 65.45,
+  "ideal_ms_total": 3.142,
+  "gap_ms_total": 4.447,
+  "bitwise_tier": "T0",
+  "bitwise_notes": "Pure cast and copy.",
+  "dataflow": "wgrad (bf16) -> _to_copy fp32 -> returned as program output -> grad.clone() into param.grad; the fp32 intermediate has no other consumer.",
+  "blockers": "The clone happens outside the program (grad accumulation helper clones to avoid aliasing program-owned buffers); the program would have to write into param.grad storage. A T3 variant has the wgrad GEMM write fp32 (rounded through bf16) directly.",
+  "source": "torchtitan/experiments/graph_trainer/simple_fsdp.py (grad cast), torchtitan/experiments/graph_trainer/common_utils.py:322 (clone)",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "",
+    "layers": "all",
+    "ops": [
+     "clone"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "_to_copy"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9922",
+  "title": "Dist-MoE forward routing-plan metadata kernels",
+  "description": "Per layer, ten small Dist-MoE kernels build the expert-parallel dispatch plan from the gathered top-k expert ids (routing split, prefix, combine, metadata gather, block-scaled plan, two GEMM scheduler preparations, small cat/copies).",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "communication-glue",
+   "intra-module"
+  ],
+  "shapes_dtypes": "expert ids [8,32768,8] int64 (all EP ranks) -> gather/scatter index tables per local expert, token counts",
+  "kernels_per_instance": 10.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 23068672,
+  "measured_us_per_instance": 87.28,
+  "measured_ms_total": 4.19,
+  "ideal_us_per_instance": 3.33,
+  "ideal_ms_total": 0.16,
+  "gap_ms_total": 4.03,
+  "bitwise_tier": "T2",
+  "bitwise_notes": "Slot assignment uses prefix sums over tokens; outputs are integer indices, so bitwise equality requires the same slot order (order-sensitive data movement).",
+  "dataflow": "Each stage consumes the previous stage's counts/offsets; routing split -> prefix -> combine is a classic histogram/scan/scatter that fits one persistent kernel with grid-wide sync or a decoupled look-back scan.",
+  "blockers": "Inside the dist_moe library; the stages are separated by cross-rank metadata exchange in the real job (gathered ids), and the routing split kernel itself is 55 us of the 87 us.",
+  "source": "dist_moe/kernels/triton/dist_dispatch_routing_kernel.py:421-470; dist_moe/_blockscaled.py:1318,3369-3483",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9447",
+  "title": "Attention output MXFP8 rowwise quantize + scale swizzle as attention epilogue",
+  "description": "The attention output [32768,32,128] bf16 is re-read to quantize it rowwise to MXFP8 and swizzle the scales for the wo GEMM.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "[32768,4096] bf16 -> fp8 e4m3 [32768,4096] + e8m0 [32768,128] (swizzled)",
+  "kernels_per_instance": 2.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 138412032,
+  "measured_us_per_instance": 70.39,
+  "measured_ms_total": 3.379,
+  "ideal_us_per_instance": 20.0,
+  "ideal_ms_total": 0.96,
+  "gap_ms_total": 2.419,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "Rowwise 32-element blocks lie within one head's 128-dim output row, so the amax is local to an attention output tile; values must be the bf16-rounded outputs.",
+  "dataflow": "mxfp8_quantize is the only consumer of the attention output in forward besides saving it for backward; scale swizzle consumes only the quantize's scales.",
+  "blockers": "Needs a FlashAttention (CuTe DSL) epilogue change in an external library.",
+  "source": "torchtitan/quantization/mxfp8/linear.py:162-168",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4049",
+  "title": "Router + aux-loss backward glue (incl. deterministic gather backward)",
+  "description": "Backward of top-k score gather (deterministic index_put with radix sort, bounds asserts), route normalization, softmax and the load-balance loss: 62 kernels per layer over [32768,128] and [32768,8].",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module"
+  ],
+  "shapes_dtypes": "d topk scores [32768,8] fp32, saved scores [32768,128] fp32, ids [32768,8] int64 -> d gate logits [32768,128] fp32",
+  "kernels_per_instance": 62.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 40894464,
+  "measured_us_per_instance": 301.89,
+  "measured_ms_total": 14.491,
+  "ideal_us_per_instance": 5.91,
+  "ideal_ms_total": 0.284,
+  "gap_ms_total": 14.207,
+  "bitwise_tier": "T2",
+  "bitwise_notes": "The gather backward is a scatter-add; with unique expert ids per token each target is written once, so a row-wise scatter is exact, but matching the <program> accumulation order of the aux-loss gradient and gather gradient (add_) is required.",
+  "dataflow": "Every op is row-local in tokens except the aux-loss column statistics (already reduced in forward); one row-parallel kernel can scatter the 8 gradients, add the aux-loss gradient and apply the softmax backward.",
+  "blockers": "Deterministic mode makes index_put sort-based (~25 kernels); the bounds asserts come from index validation.",
+  "source": "torchtitan/models/common/moe/moe.py:233-330,662-705; torchtitan/models/common/aux_loss.py:141-220",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "masked_fill"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router",
+    "layers": "all",
+    "ops": [
+     "_softmax_backward_data",
+     "add_",
+     "div",
+     "gather_backward",
+     "mul",
+     "neg",
+     "sum"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.aux_loss",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "div",
+     "gt",
+     "mul",
+     "neg",
+     "ones_like",
+     "scalar_tensor",
+     "sgn",
+     "sum",
+     "where"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-2146",
+  "title": "Expert weight fp32->bf16 cast + MXFP8 weight preparation",
+  "description": "Each layer's local expert weights w13 [16,1536,2048] and w2 [16,2048,768] are cast from fp32 to bf16 and then quantized to MXFP8 with scales for both GEMM orientations.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "intra-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "in fp32 [16,1536,2048] + [16,2048,768]; out fp8 e4m3 + e8m0 scales (2 orientations)",
+  "kernels_per_instance": 4.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 382205952,
+  "measured_us_per_instance": 127.28,
+  "measured_ms_total": 6.109,
+  "ideal_us_per_instance": 55.22,
+  "ideal_ms_total": 2.651,
+  "gap_ms_total": 3.459,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Per-32 amax and scale computation; the bf16 rounding before quantization must be reproduced (cast in registers).",
+  "dataflow": "_to_copy(fp32->bf16) has a single consumer, prepare_mxfp8_weight; w13 and w2 are independent siblings.",
+  "blockers": "The cast is emitted by the FSDP mixed-precision wrapper and the quantize by dist_moe; could also move into the optimizer step (write the fp8 copy when updating), which crosses the step boundary.",
+  "source": "torchtitan/experiments/graph_trainer/simple_fsdp.py:268,366 (mixed-precision cast), dist_moe prepare_mxfp8_weight",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "dist_moe.prepare_mxfp8_weight"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4735",
+  "title": "wqkv MXFP8 GEMM epilogue: QKV split + QK-norm + RoPE",
+  "description": "The wqkv GEMM [32768,2048]x[2048,5120] epilogue writes contiguous q/k/v directly, applying q_norm/k_norm (128-wide rows fit one output tile) and RoPE, so the [32768,5120] qkv tensor is never materialized.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "gemm-adjacent",
+   "cross-module"
+  ],
+  "shapes_dtypes": "x fp8 [32768,2048] x W fp8 [2048,5120] -> q [32768,32,128], k,v [32768,4,128] bf16; rstd fp32",
+  "kernels_per_instance": 24.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 424431616,
+  "measured_us_per_instance": 2488.29,
+  "measured_ms_total": 119.438,
+  "ideal_us_per_instance": 190.07,
+  "ideal_ms_total": 9.124,
+  "gap_ms_total": 110.315,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "The GEMM output must be rounded to bf16 before the norm exactly as the <program> GEMM writes it; RMSNorm reduction order over each 128-column head slice.",
+  "dataflow": "Each 128-column slice of the GEMM output tile is one (kv-group, slot) head; the norm needs only that slice and RoPE only its row position, so the whole chain is a per-tile epilogue.",
+  "blockers": "Needs a custom epilogue on the cuBLAS/nvjet MXFP8 GEMM; the RMSNorm backward needs its pre-norm input, which then must be recomputed or written as an extra output.",
+  "source": "torchtitan/quantization/mxfp8/linear.py:77-200; torchtitan/models/common/attention/attention.py:169-197,287-306; torchtitan/models/common/rope.py:455-482",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "contiguous",
+     "reshape"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "_scaled_mm_v2"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "_assert_async",
+     "add",
+     "all",
+     "cat",
+     "index",
+     "le",
+     "mul",
+     "neg",
+     "to",
+     "type_as"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7296",
+  "title": "Attention-backward chain: FA dq/dk/dv postprocess + RoPE bwd + QK-norm bwd + concat + MXFP8 dy quantize",
+  "description": "From the flash-attention fp32 dq/dk/dv accumulators to the MXFP8 (row- and column-wise) wqkv output gradient: accumulator conversion, RoPE backward, q/k RMSNorm backward, the dqkv cat and the 1x32/32x1 quantization with scale swizzles.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "gemm-adjacent",
+   "horizontal"
+  ],
+  "shapes_dtypes": "dq_accum [32768,32,128] fp32, dk/dv accum [4,6553600] fp32, saved xq,xk bf16, rstd -> dqkv fp8 rowwise + colwise [32768,5120] + scales",
+  "kernels_per_instance": 33.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 1403518976,
+  "measured_us_per_instance": 2710.35,
+  "measured_ms_total": 130.097,
+  "ideal_us_per_instance": 202.78,
+  "ideal_ms_total": 9.734,
+  "gap_ms_total": 120.363,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "The FA postprocess (scale + bf16 round) and RoPE are pointwise; the bf16 rounding points of the <program> chain must be kept; RMSNorm backward reductions; amax is order-insensitive.",
+  "dataflow": "Each stage consumes the previous stage row by row (token, head) and the only consumer of the bf16 dqkv is the MXFP8 quantizer feeding the wqkv dgrad/wgrad GEMMs; the 32x1 column-wise blocks span 32 tokens, so the kernel tiles 32 tokens x full row.",
+  "blockers": "The FA postprocess kernels are inside the flash_attn library call; RMSNorm weight-grad reduction; the quantizer lives inside the MXFP8Linear backward.",
+  "source": "torchtitan/models/common/attention/attention.py:180-197,287-324; torchtitan/models/common/rope.py:455-482; torchtitan/quantization/mxfp8/linear.py:233-300",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.inner_attention",
+    "layers": "all",
+    "ops": [
+     "torch_attn._varlen_attn_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "cat"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "mul",
+     "neg",
+     "slice_backward",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-5562",
+  "title": "lm_head GEMMs + chunked cross-entropy forward/backward (linear cross-entropy)",
+  "description": "Per 4096-token chunk, the lm_head forward GEMM, the cross-entropy forward/backward glue and the lm_head dgrad/wgrad GEMMs fused so the [4096,151936] logits and their gradient never reach HBM.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "gemm-adjacent",
+   "forward-backward"
+  ],
+  "shapes_dtypes": "h chunk [4096,2048] bf16, W [151936,2048] bf16 -> loss, dh [4096,2048] bf16, dW [151936,2048] (accumulated)",
+  "kernels_per_instance": 17.38,
+  "instances_per_step": 8,
+  "external_bytes_per_instance": 1900576768,
+  "measured_us_per_instance": 7986.9,
+  "measured_ms_total": 63.895,
+  "ideal_us_per_instance": 3963.23,
+  "ideal_ms_total": 31.706,
+  "gap_ms_total": 32.189,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "Logit values come out of a GEMM; matching <program> bitwise requires the same GEMM tiling/accumulation and the same logsumexp order.",
+  "dataflow": "The logits are consumed only by the loss and its gradient only by the two lm_head backward GEMMs; an online-softmax formulation over vocab tiles needs logits only in registers.",
+  "blockers": "Bitwise parity with cuBLAS GEMM outputs; lm_head is an FSDP root module with chunked backward <callback>.",
+  "source": "torchtitan/components/loss.py:54-90,900-1000",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "",
+    "layers": "all",
+    "ops": [
+     "_log_softmax_backward_data",
+     "copy_",
+     "div",
+     "nll_loss_backward",
+     "ones_like",
+     "to"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "lm_head",
+    "layers": "all",
+    "ops": [
+     "addmm",
+     "mm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "",
+    "layers": "all",
+    "ops": [
+     "add",
+     "cross_entropy_loss",
+     "div",
+     "new_zeros",
+     "ones_like",
+     "to",
+     "zeros_like"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "lm_head",
+    "layers": "all",
+    "ops": [
+     "linear"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-8971",
+  "title": "q_norm/k_norm backward + dqkv concat",
+  "description": "RMSNorm backward for q and k heads (with their weight-grad row reductions) and the SplitWithSizes backward cat that reassembles dq/dk/dv into the [32768,5120] wqkv gradient.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module",
+   "horizontal"
+  ],
+  "shapes_dtypes": "dq,dk bf16 + saved xq,xk bf16 + rstd fp32, dv [32768,4,128] bf16 -> dqkv [32768,4,10,128] bf16; dweight [128] fp32",
+  "kernels_per_instance": 5.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 977797120,
+  "measured_us_per_instance": 273.14,
+  "measured_ms_total": 13.111,
+  "ideal_us_per_instance": 141.27,
+  "ideal_ms_total": 6.781,
+  "gap_ms_total": 6.33,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm backward row reduction and the [128] weight-grad column reduction order.",
+  "dataflow": "q_norm/k_norm backward outputs are consumed only by the cat; writing directly into the strided dqkv slots removes the cat.",
+  "blockers": "Weight-grad column reduction across 32768x32 rows needs a second pass or a fixed-order cross-CTA reduction.",
+  "source": "torchtitan/models/common/attention/attention.py:180-197,296-302",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "cat"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4174",
+  "title": "HiMidLo gate weight gradient: three per-piece GEMMs + adds -> one GEMM",
+  "description": "The router gate weight gradient is computed as three [128,32768]x[32768,2048] split-K GEMMs (one per bf16 piece) with split-K reduce kernels, then two fp32 adds and a bf16 cast.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "horizontal",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "pieces 3x[32768,128] bf16, x [32768,2048] bf16 -> wgrad [128,2048] fp32 -> bf16",
+  "kernels_per_instance": 9.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 159907840,
+  "measured_us_per_instance": 105.76,
+  "measured_ms_total": 5.076,
+  "ideal_us_per_instance": 26.71,
+  "ideal_ms_total": 1.282,
+  "gap_ms_total": 3.794,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "Accumulating the three pieces inside one GEMM changes the fp32 rounding order relative to three separately rounded GEMM results plus two adds.",
+  "dataflow": "All three GEMMs read the same x; one GEMM over K=3x32768 (or one kernel with three accumulators) reads x once.",
+  "blockers": "Bitwise equality with the <program> per-piece rounding; cuBLAS split-K heuristics.",
+  "source": "torchtitan/models/common/linear/hi_mid_lo_linear.py:363-377",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.router.gate",
+    "layers": "all",
+    "ops": [
+     "add_",
+     "mm",
+     "to"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-4533",
+  "title": "Cross-layer: ffn residual add + next attention_norm + MXFP8 quantize of the wqkv input",
+  "description": "Layer i-1's trailing residual add (x + ffn_out), layer i's attention_norm RMSNorm and the 1x32 MXFP8 quantization (+ scale swizzle) of the normalized activations for the wqkv GEMM.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-layer",
+   "cross-module",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "x, ffn_out [32768,2048] bf16 -> x [32768,2048] bf16, normed [32768,2048] bf16 (saved), fp8 e4m3 [32768,2048] + e8m0 scales [32768,64] (swizzled)",
+  "kernels_per_instance": 3.98,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 606076928,
+  "measured_us_per_instance": 140.33,
+  "measured_ms_total": 6.736,
+  "ideal_us_per_instance": 87.57,
+  "ideal_ms_total": 4.203,
+  "gap_ms_total": 2.533,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm row reduction over 2048 must match the quack kernel order; the 1x32 amax is order-insensitive (max).",
+  "dataflow": "The add output is the residual stream x consumed row-wise by the norm; the norm output row is consumed only by the MXFP8 quantizer (and saved in bf16 for the wgrad). One row-parallel kernel can do add -> rmsnorm -> amax/scale/cast per 32-element block -> swizzled scale write.",
+  "blockers": "Crosses the FSDP block boundary (the add is in block i-1, the norm in block i; FSDP pre-forward <callback> of block i run in between). The quantizer is inside the MXFP8Linear autograd Function, so the norm output must be passed in pre-quantized. Layer 0 has no preceding add.",
+  "source": "torchtitan/models/qwen3/model.py:47-73; torchtitan/models/common/norm.py:36-51; torchtitan/quantization/mxfp8/linear.py:77-170",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": [
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15,
+     16,
+     17,
+     18,
+     19,
+     20,
+     21,
+     22,
+     23,
+     24,
+     25,
+     26,
+     27,
+     28,
+     29,
+     30,
+     31,
+     32,
+     33,
+     34,
+     35,
+     36,
+     37,
+     38,
+     39,
+     40,
+     41,
+     42,
+     43,
+     44,
+     45,
+     46
+    ],
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention_norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3845",
+  "title": "Forward-backward: column-wise MXFP8 of the wqkv/wo inputs produced in the forward",
+  "description": "The wqkv and wo backward re-read the saved bf16 inputs (normed x [32768,2048], attention output [32768,4096]) to quantize them column-wise (32x1) for the weight-gradient GEMMs.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "forward-backward",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "saved x [32768,2048] bf16 -> fp8 colwise + scales; saved O [32768,4096] bf16 -> fp8 colwise + scales",
+  "kernels_per_instance": 4.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 207618048,
+  "measured_us_per_instance": 103.93,
+  "measured_ms_total": 4.989,
+  "ideal_us_per_instance": 30.0,
+  "ideal_ms_total": 1.44,
+  "gap_ms_total": 3.549,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "32x1 amax is order-insensitive; requires the forward producers (attention_norm, attention epilogue) to emit the column-wise blocks.",
+  "dataflow": "The column-wise quantization depends only on forward values; the forward norm (R-27) and attention epilogue (R-28) already hold these tiles.",
+  "blockers": "The capture saves inputs in bf16 (96 bf16, 0 mxfp8 saved formats); for the attention output the bf16 copy must stay for the flash-attention backward, so this adds 138 MB/layer of saved fp8.",
+  "source": "torchtitan/quantization/mxfp8/linear.py:138-170,290-310",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "triton.triton_scale_swizzle"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9390",
+  "title": "Last-layer residual add + final norm forward, final norm backward",
+  "description": "Layer 47 trailing residual add fused with the final RMSNorm, and the final RMSNorm backward with its weight-grad reduction.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "cross-module"
+  ],
+  "shapes_dtypes": "x, ffn_out [32768,2048] bf16 -> h [32768,2048] bf16; backward dy [32768,2048] bf16",
+  "kernels_per_instance": 4.0,
+  "instances_per_step": 1,
+  "external_bytes_per_instance": 1073741824,
+  "measured_us_per_instance": 188.61,
+  "measured_ms_total": 0.189,
+  "ideal_us_per_instance": 155.14,
+  "ideal_ms_total": 0.155,
+  "gap_ms_total": 0.033,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "Row reductions of RMSNorm forward/backward and the column reduction for the weight gradient.",
+  "dataflow": "Same as the per-layer residual+norm pattern; single instance.",
+  "blockers": "Final norm is a separate FSDP root module; negligible size.",
+  "source": "torchtitan/models/qwen3/model.py:69-73; torchtitan/models/common/decoder.py:352",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*",
+    "layers": [
+     47
+    ],
+    "ops": [
+     "add"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "norm",
+    "layers": "all",
+    "ops": [
+     "rms_norm"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-1704",
+  "title": "QKV split + q/k RMSNorm + RoPE forward (fp32 round trip)",
+  "description": "After the wqkv projection [32768, 5120] bf16, q (32 heads), k and v (4 heads) are copied out of the GQA-interleaved layout, q and k are RMS-normalized over head_dim 128, then RoPE upcasts q/k to fp32, builds rotate_half with neg+cat, multiplies by cos/sin gathered per position, adds and downcasts to bf16.",
+  "phases": [
+   "forward"
+  ],
+  "scope": [
+   "cross-module",
+   "horizontal",
+   "cross-layer"
+  ],
+  "shapes_dtypes": "in qkv [32768,4,10,128] bf16, cos/sin table [4096,256] fp32 indexed by position; out q [32768,32,128] bf16, k/v [32768,4,128] bf16, rstd fp32; intermediates [32768,32,128] fp32",
+  "kernels_per_instance": 20.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 680264192,
+  "measured_us_per_instance": 2309.77,
+  "measured_ms_total": 110.869,
+  "ideal_us_per_instance": 98.29,
+  "ideal_ms_total": 4.718,
+  "gap_ms_total": 106.151,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm reduces over head_dim=128 per (token, head); the fused kernel must reproduce the fused_rms_norm reduction order. RoPE math is pointwise in fp32 (x*cos + rotate_half(x)*sin, rounded to bf16 once) and is trivially reproducible.",
+  "dataflow": "Every op is per (token, head) and consumes only the previous op's output plus a per-position cos/sin row: clone(view of qkv) -> rms_norm -> to fp32 -> mul/neg/cat/mul/add -> to bf16 -> attention. No intermediate is needed by any other consumer, so the whole chain can run in registers; q and k share the same cos/sin rows (horizontal), and the cos/sin gather by position is identical in all 48 layers (cross-layer hoist).",
+  "blockers": "Backward needs the pre-norm q/k and rstd: the fused kernel must keep the qkv GEMM output alive (instead of the contiguous clones) or write it, and backward must read it strided. Needs a custom kernel or Inductor region (not enabled in this run).",
+  "source": "torchtitan/models/common/attention/attention.py:194-196, torchtitan/models/common/nn_modules.py:155, torchtitan/models/common/rope.py:170-171",
+  "footprint": [
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.k_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.q_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.qkv_linear",
+    "layers": "all",
+    "ops": [
+     "clone"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.attention.rope",
+    "layers": "all",
+    "ops": [
+     "_to_copy",
+     "add",
+     "cat",
+     "index",
+     "mul",
+     "neg"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7359",
+  "title": "Colwise MXFP8 of the saved wqkv and wo inputs moved from backward into forward",
+  "description": "In backward, the saved bf16 inputs of wqkv (normalized hidden [32768,2048]) and wo (attention output [32768,4096]) are re-read and quantized columnwise to MXFP8 for the weight-gradient GEMMs; the forward pass already produces the same tensors and quantizes them rowwise.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "forward-backward",
+   "gemm-adjacent"
+  ],
+  "shapes_dtypes": "[32768,2048] and [32768,4096] bf16 -> fp8 colwise + e8m0 [2048,1024]/[4096,1024]",
+  "kernels_per_instance": 4.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 207618048,
+  "measured_us_per_instance": 103.95,
+  "measured_ms_total": 4.99,
+  "ideal_us_per_instance": 30.0,
+  "ideal_ms_total": 1.44,
+  "gap_ms_total": 3.55,
+  "bitwise_tier": "T3",
+  "bitwise_notes": "Colwise amax over 32 tokens; quantization of identical bf16 values gives identical fp8, wherever it runs. The wo half needs the attention kernel epilogue (T3); the wqkv half fits in the RMSNorm kernel (T1).",
+  "dataflow": "The colwise quantize reads exactly the tensor produced in forward by attention_norm (wqkv input) and by attention (wo input); emitting it at production time removes the backward re-read.",
+  "blockers": "Keeps fp8 colwise copies alive from forward to backward (+138 MB per layer for wo since the bf16 attention output is still needed by attention backward; the wqkv bf16 copy could be dropped, net -64 MB per layer). Colwise needs 32-token tiles in the producer.",
+  "source": "torchtitan/quantization/mxfp8/linear.py:129",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.qkv_linear.wqkv",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   },
+   {
+    "phase": "backward",
+    "module": "layers.*.attention.wo",
+    "layers": "all",
+    "ops": [
+     "torchao.mxfp8_quantize",
+     "torchao.triton_mx_block_rearrange"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-9301",
+  "title": "MoE routing metadata + forward/backward execution plans",
+  "description": "Per layer, the expert IDs of all expert-parallel peers are gathered and turned into dispatch/combine gather and scatter index tables (four passes), a forward plan and a backward plan are built, and conditional activation copies are issued.",
+  "phases": [
+   "forward",
+   "backward"
+  ],
+  "scope": [
+   "communication-glue",
+   "forward-backward"
+  ],
+  "shapes_dtypes": "expert IDs [8 x 32768 x 8] int64 gathered from peers -> int64 index tables [2099200] x 3, small plans",
+  "kernels_per_instance": 9.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 68158016,
+  "measured_us_per_instance": 82.71,
+  "measured_ms_total": 3.97,
+  "ideal_us_per_instance": 9.85,
+  "ideal_ms_total": 0.473,
+  "gap_ms_total": 3.498,
+  "bitwise_tier": "T2",
+  "bitwise_notes": "Prefix sums / compaction define row order of the dispatched tokens; any fused kernel must produce the same order.",
+  "dataflow": "All kernels derive from the same expert IDs; the backward plan is a function of the forward routing, so it can be produced in forward.",
+  "blockers": "Global compaction needs a grid-wide prefix (decoupled look-back) and reads peer buffers; owned by dist_moe.",
+  "source": "dist_moe/_blockscaled.py:4377 (dist_dispatch_routing kernels, blockscaled plans)",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_backward"
+    ]
+   },
+   {
+    "phase": "forward",
+    "module": "layers.*.feed_forward.routed_experts",
+    "layers": "all",
+    "ops": [
+     "dist_moe.block_scaled_forward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-7672",
+  "title": "Embedding backward (deterministic sort-based scatter-add)",
+  "description": "Gradient of tok_embeddings: zero-fill of [151936,2048], radix sort of token ids, segment reduction and scatter.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "intra-module"
+  ],
+  "shapes_dtypes": "grad [32768,2048] bf16, ids [32768] -> grad weight [151936,2048] bf16",
+  "kernels_per_instance": 21.0,
+  "instances_per_step": 1,
+  "external_bytes_per_instance": 756809728,
+  "measured_us_per_instance": 526.73,
+  "measured_ms_total": 0.527,
+  "ideal_us_per_instance": 109.35,
+  "ideal_ms_total": 0.109,
+  "gap_ms_total": 0.417,
+  "bitwise_tier": "T2",
+  "bitwise_notes": "Segment sums over duplicate token ids must follow the sorted order.",
+  "dataflow": "Zero-fill and scatter of the same buffer can be one kernel; sort + segment reduce is the deterministic contract.",
+  "blockers": "Single instance; library implementation.",
+  "source": "torchtitan/models/common/embedding.py",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "tok_embeddings",
+    "layers": "all",
+    "ops": [
+     "embedding_backward"
+    ]
+   }
+  ]
+ },
+ {
+  "card": "C-3415",
+  "title": "attention_norm backward + residual-grad add",
+  "description": "RMSNorm backward of attention_norm and the autograd add_ that accumulates it into the residual-stream gradient.",
+  "phases": [
+   "backward"
+  ],
+  "scope": [
+   "cross-module"
+  ],
+  "shapes_dtypes": "d normed [32768,2048] bf16, saved x bf16, rstd fp32, residual grad [32768,2048] bf16 -> grad x [32768,2048] bf16",
+  "kernels_per_instance": 3.0,
+  "instances_per_step": 48,
+  "external_bytes_per_instance": 537001984,
+  "measured_us_per_instance": 137.62,
+  "measured_ms_total": 6.606,
+  "ideal_us_per_instance": 77.59,
+  "ideal_ms_total": 3.724,
+  "gap_ms_total": 2.882,
+  "bitwise_tier": "T1",
+  "bitwise_notes": "RMSNorm backward row reduction; the add of the residual grad happens after the bf16 rounding of the norm grad.",
+  "dataflow": "The norm backward output is consumed only by the accumulation add_.",
+  "blockers": "Autograd accumulation is a separate kernel; T3 extension into the wqkv dgrad GEMM epilogue would also remove the d normed round trip.",
+  "source": "torchtitan/models/qwen3/model.py:57-60; torchtitan/models/common/norm.py:36-51",
+  "footprint": [
+   {
+    "phase": "backward",
+    "module": "layers.*.attention_norm",
+    "layers": "all",
+    "ops": [
+     "_fused_rms_norm_backward",
+     "add_"
+    ]
+   }
+  ]
+ }
+]

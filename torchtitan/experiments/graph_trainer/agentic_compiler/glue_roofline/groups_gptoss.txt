@@ -1,0 +1,11 @@
+
+== gptoss: glue 1681.1 -> 1348.6 ms
+  optimizer step / foreach (multi_tensor_apply)        24.7 ->     24.7  (   +0.0)
+  deterministic index ops + sorts                    1093.0 ->   1081.0  (  -11.9)
+  FSDP copy-in / copy-out, bucket packs, cats          35.5 ->     17.4  (  -18.2)
+  memset / memcpy                                      26.9 ->     12.3  (  -14.5)
+  MXFP8 quantize / scale swizzle                       12.5 ->     12.6  (   +0.2)
+  Dist-MoE / MoE glue kernels (triton)                  0.0 ->      0.0  (   +0.0)
+  RoPE / norm kernels                                   7.2 ->      7.2  (   +0.0)
+  loop's fused kernels                                  0.0 ->     70.9  (  +70.9)
+  other elementwise / reduction / copy                481.4 ->    122.3  ( -359.1)

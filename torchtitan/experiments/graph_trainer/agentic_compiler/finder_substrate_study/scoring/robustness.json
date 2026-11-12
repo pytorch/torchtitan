@@ -1,0 +1,71 @@
+{
+ "llama3_8b": {
+  "eager_only_removed_ms": 4.28,
+  "recall_shared_program": {
+   "total_ms": 113.78,
+   "eager": 0.9523,
+   "graph": 0.9819
+  },
+  "recall_shared_program_excl_t3": {
+   "total_ms": 86.06,
+   "eager": 0.9874,
+   "graph": 0.9888
+  },
+  "recall_excl_comm_and_weight_prep": {
+   "total_ms": 84.61,
+   "eager": 0.9358,
+   "graph": 0.9756
+  },
+  "recall_excl_comm_weight_prep_t3": {
+   "total_ms": 56.88,
+   "eager": 0.9809,
+   "graph": 0.9831
+  }
+ },
+ "qwen3_30b": {
+  "eager_only_removed_ms": 9.89,
+  "recall_shared_program": {
+   "total_ms": 359.18,
+   "eager": 0.992,
+   "graph": 0.9191
+  },
+  "recall_shared_program_excl_t3": {
+   "total_ms": 330.31,
+   "eager": 0.9915,
+   "graph": 0.9708
+  },
+  "recall_excl_comm_and_weight_prep": {
+   "total_ms": 341.95,
+   "eager": 0.9966,
+   "graph": 0.9372
+  },
+  "recall_excl_comm_weight_prep_t3": {
+   "total_ms": 313.09,
+   "eager": 0.9965,
+   "graph": 0.9934
+  }
+ },
+ "dsv3": {
+  "eager_only_removed_ms": 49.08,
+  "recall_shared_program": {
+   "total_ms": 169.85,
+   "eager": 0.8817,
+   "graph": 0.9237
+  },
+  "recall_shared_program_excl_t3": {
+   "total_ms": 136.37,
+   "eager": 0.9462,
+   "graph": 0.9828
+  },
+  "recall_excl_comm_and_weight_prep": {
+   "total_ms": 111.47,
+   "eager": 0.8758,
+   "graph": 0.8925
+  },
+  "recall_excl_comm_weight_prep_t3": {
+   "total_ms": 77.98,
+   "eager": 0.986,
+   "graph": 0.9826
+  }
+ }
+}
