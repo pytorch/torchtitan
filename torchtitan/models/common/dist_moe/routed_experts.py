@@ -223,6 +223,16 @@ class DistMoeRoutedExperts(Module):
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
+        if runtime.is_pipeline_metadata_inference:
+            # Dynamic PP inference reconstructs cross-rank inputs from shape
+            # metadata, so their values are uninitialized and cannot safely be
+            # routed through a capacity-bounded distributed backend. The
+            # pipeline only needs output and input-gradient metadata here.
+            return torch.where(
+                torch.zeros((), dtype=torch.bool, device=x_TD.device),
+                x_TD,
+                torch.zeros_like(x_TD),
+            )
         if padding_mask_T is not None:
             padding_mask_TK = padding_mask_T.unsqueeze(-1)
             topk_expert_ids_TK = topk_expert_ids_TK.masked_fill(padding_mask_TK, -1)

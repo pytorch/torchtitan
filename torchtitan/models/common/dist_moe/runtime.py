@@ -106,6 +106,12 @@ class _DistMoeForwardContext:
         )
         self._activation_slot_ids_S = activation_slot_ids_S
         self._max_moe_layers_per_activation_slot = max_moe_layers_per_activation_slot
+        self._metadata_inference_active = False
+
+    @property
+    def is_metadata_inference(self) -> bool:
+        """Return whether dynamic pipeline metadata inference is active."""
+        return self._metadata_inference_active
 
     def _slot_id(self, info: PipelineStageInfo) -> int | None:
         if info.stage_index not in self._active_stage_indices:
@@ -131,9 +137,24 @@ class _DistMoeForwardContext:
             return None
         return self._activation_slot_ids_S.narrow(0, slot_id, 1)
 
+    def finish_metadata_inference(self) -> None:
+        """Leave metadata mode and reset the annex before execution or tracing."""
+        self._metadata_inference_active = False
+        self._context.reset()
+
     @contextmanager
     def __call__(self, info: PipelineStageInfo) -> Iterator[None]:
         """Select the slot used by one eager pipeline forward."""
+        if info.is_metadata_inference:
+            # Keep this state after the forward context exits because dynamic
+            # backward metadata inference may recompute checkpointed model
+            # regions without entering another forward context. The first real
+            # pipeline forward below clears it.
+            self._metadata_inference_active = True
+            yield
+            return
+
+        self._metadata_inference_active = False
         slot_id = self._slot_id(info)
         if slot_id is not None:
             self._context.select_activation_slot(
@@ -399,7 +420,7 @@ class DistMoeRuntime(Configurable):
                         pp_schedule.register_post_metadata_inference_cleanup
                     )
                 self._metadata_inference_cleanup_handle = cleanup_registrar(
-                    self.context.reset
+                    self.forward_context.finish_metadata_inference
                 )
                 if set_forward_context is None:
                     for stage in pp_schedule._stages:
@@ -420,6 +441,11 @@ class DistMoeRuntime(Configurable):
                 set_forward_context(None)
             self.context.close()
             raise
+
+    @property
+    def is_pipeline_metadata_inference(self) -> bool:
+        """Return whether pipeline setup is inferring forward/backward metadata."""
+        return self.forward_context.is_metadata_inference
 
     def _resolve_context_config(
         self,
