@@ -11,6 +11,7 @@ import uuid
 from unittest import mock
 
 import fsspec
+from fsspec.implementations.local import LocalFileSystem
 
 from torchtitan.tools import filesystem
 
@@ -110,12 +111,40 @@ class TestRemoteOps(unittest.TestCase):
         # otherwise a failed purge would kill the background purge thread.
         filesystem.rmtree(f"{self.root}/does-not-exist")
 
-    def test_remote_filesystem_has_no_listing_cache(self):
-        # Catches use_listings_cache=False being dropped from _resolve. The
-        # behavior it prevents is tested on GPU in
-        # tests/unit_tests/gpu/components/test_checkpoint.py.
-        fs, _ = filesystem._resolve(self.root)
-        self.assertFalse(fs.dircache.use_listings_cache)
+
+class _ListingCachingLocalFileSystem(LocalFileSystem):
+    """``file://`` that caches directory listings, as gcsfs, s3fs and adlfs do."""
+
+    def ls(self, path, detail=False, **kwargs):
+        listing = self.dircache.get((path, detail))
+        if listing is None:
+            listing = super().ls(path, detail=detail, **kwargs)
+            self.dircache[(path, detail)] = listing
+        return listing
+
+
+class TestRemoteListingCache(unittest.TestCase):
+    def test_listdir_sees_a_directory_created_by_another_process(self):
+        # async_with_pinned_mem writes each checkpoint from DCP's save
+        # process, which has its own filesystem instance. Answered from
+        # fsspec's listing cache, keep_latest_k never saw the new checkpoints
+        # and never purged one.
+        fsspec.register_implementation(
+            "file", _ListingCachingLocalFileSystem, clobber=True
+        )
+        self.addCleanup(
+            fsspec.register_implementation, "file", LocalFileSystem, clobber=True
+        )
+        folder = self.enterContext(tempfile.TemporaryDirectory())
+        os.makedirs(os.path.join(folder, "step-1"))
+        self.assertEqual(filesystem.listdir(f"file://{folder}"), ["step-1"])
+
+        # Created outside this process's filesystem instance, as the save
+        # process does.
+        os.makedirs(os.path.join(folder, "step-2"))
+        self.assertEqual(
+            sorted(filesystem.listdir(f"file://{folder}")), ["step-1", "step-2"]
+        )
 
 
 class TestListdirDirectoryMarker(unittest.TestCase):
