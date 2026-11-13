@@ -33,6 +33,7 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Callable
 
 from torchtitan.config import ConfigLoader
 from torchtitan.observability import structured_logger as sl
@@ -44,8 +45,15 @@ from torchtitan.rl.controller.controller import Controller
 logger = logging.getLogger(__name__)
 
 
-async def main() -> ActorSystem | None:
-    """Run RL training; return the actor system for the caller to shut down."""
+async def main(
+    build_actor_system: Callable[[Controller.Config], ActorSystem] | None = None,
+) -> ActorSystem | None:
+    """Run RL training; return the actor system for the caller to shut down.
+
+    ``build_actor_system`` lets a launcher that allocates its own hosts supply the
+    actor system; it runs before the controller is built. None builds
+    ``config.actor_system``.
+    """
     init_logger()
     config = ConfigLoader().load()
     assert isinstance(config, Controller.Config)
@@ -57,9 +65,11 @@ async def main() -> ActorSystem | None:
     )
     sl.log_trace_instant("structured_logger_started")
 
+    actor_system = build_actor_system(config) if build_actor_system else None
+
     rl_trainer: Controller = config.build()
     try:
-        await rl_trainer.setup_async()
+        await rl_trainer.setup_async(actor_system=actor_system)
         await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
@@ -69,8 +79,11 @@ async def main() -> ActorSystem | None:
     return rl_trainer.actor_system
 
 
-if __name__ == "__main__":
-    actor_system = asyncio.run(main())
+def run(
+    build_actor_system: Callable[[Controller.Config], ActorSystem] | None = None,
+) -> None:
+    """Run :func:`main` and exit; see :func:`main` for ``build_actor_system``."""
+    actor_system = asyncio.run(main(build_actor_system))
     # The run finished and every actor is closed. Shut down the actor framework's
     # client (for Monarch, normally an atexit hook), flush logs, then exit without
     # interpreter finalization: before CPython 3.14, finalization ends Monarch's
@@ -83,3 +96,7 @@ if __name__ == "__main__":
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)
+
+
+if __name__ == "__main__":
+    run()
