@@ -74,6 +74,65 @@ def _collect_model_layouts(
     return layouts
 
 
+def _layout_declares_axis(
+    axis: MeshAxisName, axes: set[MeshAxisName], *, sparse: bool
+) -> bool:
+    """Whether a layout explicitly names an active parallelism axis."""
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+
+    if axis in axes:
+        return True
+    if sparse:
+        return False
+    # Dense fwd/bwd layouts use logical ``dp``, which unfolds to storage axes.
+    if axis in (MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD) and (
+        MeshAxisName.DP in axes
+    ):
+        return True
+    return False
+
+
+def _dense_parallel_axes_required(
+    parallelism: ParallelismConfig,
+) -> tuple[MeshAxisName, ...]:
+    """Mesh axes that must appear in every dense-region layout."""
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+
+    required: list[MeshAxisName] = []
+    if parallelism.tensor_parallel_degree > 1:
+        required.append(MeshAxisName.TP)
+    if parallelism.context_parallel_degree > 1:
+        required.append(MeshAxisName.CP)
+    if parallelism.data_parallel_replicate_degree > 1:
+        required.append(MeshAxisName.DP_REPLICATE)
+    dp_shard = parallelism.data_parallel_shard_degree
+    if dp_shard > 1 or dp_shard == -1:
+        required.append(MeshAxisName.DP_SHARD)
+    return tuple(required)
+
+
+def _sparse_parallel_axes_required(
+    parallelism: ParallelismConfig,
+) -> tuple[MeshAxisName, ...]:
+    """Mesh axes that must appear in every sparse routed-expert layout."""
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+
+    required: list[MeshAxisName] = [MeshAxisName.EP]
+    if parallelism.data_parallel_replicate_degree > 1:
+        required.append(MeshAxisName.DP_REPLICATE)
+    dp_shard = parallelism.data_parallel_shard_degree
+    if (
+        dp_shard == -1
+        or dp_shard
+        * parallelism.context_parallel_degree
+        * (parallelism.tensor_parallel_degree)
+        // parallelism.expert_parallel_degree
+        > 1
+    ):
+        required.append(MeshAxisName.EDP_SHARD)
+    return tuple(required)
+
+
 def _validate_declared_parallel_axes(
     model: Module.Config, parallelism: ParallelismConfig
 ) -> None:
@@ -83,75 +142,80 @@ def _validate_declared_parallel_axes(
     that never mentions an axis is replicated over that axis, so a model
     that is only partly sharded must not pass.
 
-    Dense and sparse layouts get different treatment. Layouts under a
-    ``RoutedExperts.Config`` live in the sparse EP/EDP region, so TP/CP
-    need not appear there. Every other layout is dense: with
-    ``tensor_parallel_degree > 1`` each dense layout must name TP.
+    Dense and sparse layouts get different treatment.     Layouts on ``routed_experts`` submodules (``w13``, ``w2``, postprocess,
+    and Dist-MoE children) live in the sparse ``{dp_replicate, edp_shard, ep}``
+    region. Activation contracts on the ``routed_experts`` container and all
+    other modules use the dense ``{dp, cp, tp}`` mesh. For each
+    enabled degree in that region, every layout must name the axis explicitly.
 
-    Expert parallelism is checked on the routed-expert weights themselves
-    (the ``w13``/``w2`` configs under each ``RoutedExperts.Config``): with
-    ``expert_parallel_degree > 1`` every one of them must name EP, and a
-    model with no routed experts at all is rejected. A config built with
-    ``expert_parallel_degree == 1`` gets dense ``{DP, CP, TP: R}`` expert
-    weight placements, so it is rejected here instead of silently ignoring
-    the EP degree at runtime.
-
-    CP is intentionally not checked per layout: Kimi K3's layer-0
-    ``block_residual`` boundary omits CP (``multimodal_first_layer_sharding_config``;
-    the tensor is empty at layer 0 and no later layer declares it), while
-    Kimi K3 with ``context_parallel_degree == 2`` is a working,
-    integration-tested configuration. CP stays covered by the structural
-    ``validate_context_parallel`` check below.
+    A config built with ``expert_parallel_degree == 1`` gets dense expert
+    weight placements, so validating it at ``expert_parallel_degree > 1``
+    fails here instead of silently ignoring the EP degree at runtime.
     """
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.distributed.spmd_types import spmd_axes
-    from torchtitan.models.common.moe import RoutedExperts
+    from torchtitan.models.common.moe import MoE
 
     model_name = type(model).__qualname__
-    tp = parallelism.tensor_parallel_degree
     ep = parallelism.expert_parallel_degree
 
-    # The routed-expert (sparse) region lives under RoutedExperts.Config.
-    sparse_prefixes = [fqn for fqn, _, _, _ in model.traverse(RoutedExperts.Config)]
+    has_routed_experts = any(True for _ in model.traverse(MoE.Config))
 
     def _is_sparse(fqn: str) -> bool:
-        return any(
-            fqn == prefix or fqn.startswith(f"{prefix}.") for prefix in sparse_prefixes
+        """Layouts on routed-expert submodules use the sparse mesh.
+
+        Activation contracts on the ``routed_experts`` container itself stay
+        on the dense mesh.
+        """
+        parts = fqn.split(".")
+        for index, part in enumerate(parts):
+            if part != "routed_experts":
+                continue
+            return index + 1 < len(parts)
+        return False
+
+    dense_required = _dense_parallel_axes_required(parallelism)
+    sparse_required = _sparse_parallel_axes_required(parallelism) if ep > 1 else ()
+
+    if ep > 1 and not has_routed_experts:
+        raise ValueError(
+            f"{model_name} has no routed experts; set "
+            "parallelism.expert_parallel_degree to 1 (got "
+            f"{ep})."
         )
 
-    if tp > 1:
-        for fqn, field, axes in _collect_model_layouts(model):
-            if _is_sparse(fqn) or MeshAxisName.TP in axes:
+    for fqn, field, axes in _collect_model_layouts(model):
+        axes_set = set(axes)
+        if _is_sparse(fqn):
+            required_axes = sparse_required
+            sparse = True
+        else:
+            required_axes = dense_required
+            sparse = False
+        for axis in required_axes:
+            if _layout_declares_axis(axis, axes_set, sparse=sparse):
                 continue
+            degree_field = {
+                MeshAxisName.TP: "tensor_parallel_degree",
+                MeshAxisName.CP: "context_parallel_degree",
+                MeshAxisName.EP: "expert_parallel_degree",
+                MeshAxisName.DP_REPLICATE: "data_parallel_replicate_degree",
+                MeshAxisName.DP_SHARD: "data_parallel_shard_degree",
+            }.get(axis)
+            if degree_field is not None:
+                degree = getattr(parallelism, degree_field)
+                degree_msg = (
+                    f"parallelism.{degree_field} is {degree}. Set {degree_field} to 1, "
+                    "or declare the axis on that layout."
+                )
+            else:
+                degree_msg = (
+                    "parallelism enables a derived expert FSDP axis (edp_shard). "
+                    "Declare 'edp_shard' on that layout."
+                )
             raise ValueError(
-                f"{model_name} declares no 'tp' sharding in {fqn} ({field}), "
-                "but parallelism.tensor_parallel_degree is "
-                f"{tp}. Set tensor_parallel_degree to 1, or use a model that "
-                "shards over 'tp'."
+                f"{model_name} declares no '{axis.value}' sharding in {fqn} ({field}), "
+                f"but {degree_msg}"
             )
-
-    if ep > 1:
-        if not sparse_prefixes:
-            raise ValueError(
-                f"{model_name} has no routed experts; set "
-                "parallelism.expert_parallel_degree to 1 (got "
-                f"{ep})."
-            )
-        for fqn, experts, _, _ in model.traverse(RoutedExperts.Config):
-            for sub in ("w13", "w2"):
-                sub_cfg = getattr(experts, sub, None)
-                if sub_cfg is None or sub_cfg.sharding_config is None:
-                    continue
-                for key, layout in sub_cfg.sharding_config.state_shardings.items():
-                    if MeshAxisName.EP in spmd_axes(layout):
-                        continue
-                    raise ValueError(
-                        f"{model_name} routed-expert weights declare no 'ep' "
-                        f"sharding in {fqn}.{sub} (state_shardings[{key}]), "
-                        "but parallelism.expert_parallel_degree is "
-                        f"{ep}. Build the model with expert_parallel_degree "
-                        f"{ep} so the routed experts are EP-sharded."
-                    )
 
 
 def validate_model_training_config(

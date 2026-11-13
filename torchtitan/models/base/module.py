@@ -373,14 +373,9 @@ class Module(nn.Module, Configurable):
             # sharding them. Buffers alone do not trip this: auxiliary
             # modules such as the MoE load-balance losses own only
             # per-rank statistics buffers that are intentionally replicated.
-            # The context may be None in unit tests that only exercise the
-            # protocol check above; without mesh info there is nothing to
-            # enforce here.
             if (
-                parallelism_context is not None
-                and (parallelism_context.tp_enabled or parallelism_context.ep_enabled)
-                and next(self.parameters(recurse=False), None) is not None
-            ):
+                parallelism_context.tp_enabled or parallelism_context.ep_enabled
+            ) and next(self.parameters(recurse=False), None) is not None:
                 raise RuntimeError(
                     f"{type(self).__name__} owns parameters but declares no "
                     "sharding_config, so they would be silently replicated "
