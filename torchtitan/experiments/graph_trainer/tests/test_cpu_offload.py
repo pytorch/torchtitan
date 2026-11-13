@@ -900,3 +900,132 @@ class TestCpuOffloadPass(TestCase):
         self.assertGreater(
             len(tagged), 0, "Single layer nodes can be tagged (last_layer_id=None)"
         )
+
+    def test_offload_follows_forward_write_through_view(self):
+        """The D2H copy must start after in-place writes into the offloaded storage.
+
+        ``ao.offload`` snapshots the tensor when it runs. Here the forward pass
+        writes into ``mm`` through a view after producing it, and backward reads
+        ``mm`` itself, so offloading right after ``mm`` would reload the
+        pre-write value.
+        """
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+            tag_all_offloadable_activations,
+        )
+
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = self._make_fake_val()
+
+        def fwd(target, args, val, fqn="layers.0.block"):
+            node = graph.call_function(target, args=args)
+            node.meta["autograd_backward"] = False
+            node.meta["custom"] = {"module_fqn": fqn}
+            node.meta["val"] = val
+            return node
+
+        mm = fwd(torch.ops.aten.mm.default, (x, x), self._make_fake_val())
+        flat = fwd(
+            torch.ops.aten.view.default, (mm, [-1]), self._make_fake_val((4096,))
+        )
+        half = fwd(
+            torch.ops.aten.slice.Tensor,
+            (flat, 0, 0, 2048),
+            self._make_fake_val((2048,)),
+        )
+        write = fwd(
+            torch.ops.aten.add_.Tensor, (half, 1.0), self._make_fake_val((2048,))
+        )
+        mm2 = fwd(
+            torch.ops.aten.mm.default, (mm, mm), self._make_fake_val(), "layers.1.block"
+        )
+        bwd = graph.call_function(torch.ops.aten.mm.default, args=(mm2, mm))
+        bwd.meta["autograd_backward"] = True
+        bwd.meta["custom"] = {"module_fqn": "layers.0.block"}
+        bwd.meta["val"] = self._make_fake_val()
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_all_offloadable_activations(gm)
+        self.assertIs(mm.meta.get("recompute"), CheckpointPolicy.MUST_CPU_OFFLOAD)
+        apply_cpu_offload_pass(gm, prefetch_lookahead=0)
+
+        (offload,) = gm.graph.find_nodes(
+            op="call_function", target=torch.ops.ao.offload.default
+        )
+        self.assertIs(offload.args[0], mm)
+        node_pos = {n: i for i, n in enumerate(gm.graph.nodes)}
+        self.assertGreater(node_pos[offload], node_pos[write])
+
+    def test_sac_and_offload_with_forward_view_write_matches_eager(self):
+        """End to end: offloading a tensor written through a view keeps gradients."""
+        from types import SimpleNamespace
+
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_module_fqns,
+        )
+        from torchtitan.experiments.graph_trainer.configs import (
+            GraphTrainerCompileConfig,
+        )
+        from torchtitan.experiments.graph_trainer.cpu_offload import (
+            apply_cpu_offload_pass,
+        )
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+            run_traced,
+        )
+        from torchtitan.experiments.graph_trainer.memory_policy import (
+            tag_with_memory_policy_pass,
+        )
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        class Layer(torch.nn.Module):
+            def __init__(self, dim):
+                super().__init__()
+                self.lin = torch.nn.Linear(dim, dim, bias=False)
+
+            def forward(self, x):
+                h = self.lin(x)
+                h.view(-1)[: h.numel() // 2].add_(1.0)
+                return h * h
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                # Offload tagging finds layers by "layers.<i>" module FQNs.
+                self.layers = torch.nn.Sequential(*(Layer(256) for _ in range(3)))
+
+            def forward(self, x):
+                return self.layers(x)
+
+        torch.manual_seed(0)
+        model = Model().cuda()
+        inputs = torch.randn(128, 256, device="cuda")
+
+        def step(inp):
+            loss = model(inp).sum()
+            return list(torch.autograd.grad(loss, tuple(model.parameters())))
+
+        expected = step(inputs)
+        annotate_module_fqns(model)
+        traced = minimal_fx_tracer(step, module=model)(inputs)
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="sac_and_offload"),
+            parallelism=ParallelismConfig(),
+        )
+        tag_with_memory_policy_pass(traced.gm, config=config)
+        traced.gm = apply_cpu_offload_pass(traced.gm)
+        traced.gm = selective_activation_remat_pass(traced.gm)
+        self.assertTrue(
+            traced.gm.graph.find_nodes(
+                op="call_function", target=torch.ops.ao.offload.default
+            )
+        )
+
+        grads = run_traced(traced, module=model)(inputs)
+        for grad, ref in zip(grads, expected, strict=True):
+            self.assertEqual(grad, ref, atol=0, rtol=0)
