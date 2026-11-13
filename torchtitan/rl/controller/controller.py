@@ -649,8 +649,9 @@ class Controller(Configurable):
         return result.get(0)
 
     def _make_generate_fn(self) -> GenerateFn:
-        """Build the rollouter's `GenerateFn`: route a completion via the generator router, pinning sticky
-        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV)."""
+        """Build the rollouter's `GenerateFn`: reserve a generator from the generator router, pinning sticky
+        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV), and call it
+        directly."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
@@ -666,13 +667,22 @@ class Controller(Configurable):
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            return await generator_router.generate.call_one(
-                prompt,
-                request_id=request_id,
-                group_id=group_id,
-                routing_session_id=routing_session_id,
-                sampling_config=sampling_config,
+            # TODO: a cancelled caller releases while the generator still runs its call,
+            #   and a caller that dies never releases. Moot today: nothing cancels a
+            #   generate call, and a dead rollout worker fails the run.
+            generator = await generator_router.reserve.call_one(
+                request_id, routing_session_id=routing_session_id
             )
+            try:
+                return await generator.generate.call_one(
+                    prompt,
+                    request_id=request_id,
+                    group_id=group_id,
+                    routing_session_id=routing_session_id,
+                    sampling_config=sampling_config,
+                )
+            finally:
+                generator_router.release_reservation.broadcast(request_id)
 
         return generate
 
