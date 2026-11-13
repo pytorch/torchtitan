@@ -142,7 +142,7 @@ def _transfer(
         sources.append(
             trainer.register_trainer_source(
                 sd,
-                rank_layouts,
+                generator_rank_layouts=rank_layouts,
                 transfer_dtype=transfer_dtype,
                 preserve_dtype_keys=preserve_dtype_keys,
             )
@@ -153,7 +153,7 @@ def _transfer(
     for rank, sd in enumerate(generator_sds):
         generator = ModelStateDictTransport(config)
         generator.connect_generator(
-            sd, sources, rank=rank, generator_index=generator_index
+            sd, sources=sources, rank=rank, generator_index=generator_index
         )
         asyncio.run(generator.read())
     return generator_sds
@@ -424,7 +424,7 @@ class TestStageDTensors(DTensorTestBase):
                 trainer = ModelStateDictTransport(config)
                 source = trainer.register_trainer_source(
                     sd,
-                    rank_layouts,
+                    generator_rank_layouts=rank_layouts,
                     transfer_dtype=None,
                     preserve_dtype_keys=frozenset(),
                 )
@@ -439,7 +439,7 @@ class TestStageDTensors(DTensorTestBase):
                         boxes[id(generator_sd[key])] = (shard.offset, shard.shape)
                     generator = ModelStateDictTransport(config)
                     generator.connect_generator(
-                        generator_sd, sources, rank=rank, generator_index=0
+                        generator_sd, sources=sources, rank=rank, generator_index=0
                     )
                     asyncio.run(generator.read())
                     for key, shard in layout.items():
