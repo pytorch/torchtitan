@@ -247,10 +247,11 @@ save nothing, such as the residual add at the end of a block. `remat.checkpoint`
 replays the whole block, so a bare trailing add would need a marker that keeps
 its inputs (e.g. the MoE combine output) alive from the forward until replay.
 Instead, the end-of-block residual add (`ffn_residual`) and the shared-expert
-add (`moe.shared_add`) are fixed `recompute=False` regions: they save nothing
-for backward, so a saved add keeps nothing resident, its inputs need no
-marker, and replay skips it. Only the adds are wrapped; a trailing norm, such
-as Muse Glimmer's post-norm, stays a bare operation with a marker on its input.
+add (`moe.shared_add`) are fixed `recompute=False` regions, so replay skips
+them. A bare add saves nothing for backward, so its inputs need no marker and
+stay resident only as long as the forward needs them. Muse Glimmer's
+`ffn_residual` also holds its post-FFN norm: it keeps only its `[T]` rstd, and
+replay rebuilds its input (`ffn_out`) while rerunning the FFN.
 
 ## Random state
 
