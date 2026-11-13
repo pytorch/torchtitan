@@ -9,7 +9,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import grain.python as grain
 from grain import experimental as grain_experimental
@@ -76,12 +76,22 @@ class GrainDataLoader(BaseDataLoader):
         seed: int = 42
         shuffle: bool = True
         repeat: bool = True
+        map_dataset_dp_sharding: Literal["contiguous", "strided"] = "contiguous"
+        """Indexed row ownership after global ordering; strided rejects streams."""
         streaming_shuffle_buffer_size: int = 1_000
         """Streaming rows retained per rank for approximate shuffling."""
         read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
+
+        def __post_init__(self) -> None:
+            BaseDataLoader.Config.__post_init__(self)
+            if self.map_dataset_dp_sharding not in ("contiguous", "strided"):
+                raise ValueError(
+                    "map_dataset_dp_sharding must be 'contiguous' or 'strided', "
+                    f"got {self.map_dataset_dp_sharding!r}"
+                )
 
     def __init__(
         self,
@@ -108,6 +118,7 @@ class GrainDataLoader(BaseDataLoader):
                 "controlled step count"
             )
         self._dp_world_size = dp_world_size
+        self._map_dataset_dp_sharding = config.map_dataset_dp_sharding
         self._rank_id = f"dp_rank_{dp_rank}"
         self.max_num_documents = config.max_num_documents
 
@@ -129,6 +140,7 @@ class GrainDataLoader(BaseDataLoader):
             dp_rank=dp_rank,
             dp_world_size=dp_world_size,
             streaming_shuffle_buffer_size=config.streaming_shuffle_buffer_size,
+            map_dataset_dp_sharding=config.map_dataset_dp_sharding,
         )
 
         dataset = config.dataset.build(
@@ -167,6 +179,7 @@ class GrainDataLoader(BaseDataLoader):
         return {
             "version": 1,
             "dp_world_size": self._dp_world_size,
+            "map_dataset_dp_sharding": self._map_dataset_dp_sharding,
             self._rank_id: self._iterator.get_state(),
         }
 
@@ -178,8 +191,16 @@ class GrainDataLoader(BaseDataLoader):
                 f"unsupported GrainDataLoader state version {state_dict['version']}"
             )
         if state_dict["dp_world_size"] != self._dp_world_size:
+            # TODO(data-dp-resharding): Translate iterator cursors when DP changes.
             raise ValueError(
-                "cannot resume after changing the effective data-parallel degree"
+                "cannot resume after changing the effective data-parallel degree "
+                f"from {state_dict['dp_world_size']} to {self._dp_world_size}"
+            )
+        checkpoint_sharding = state_dict.get("map_dataset_dp_sharding", "contiguous")
+        if checkpoint_sharding != self._map_dataset_dp_sharding:
+            raise ValueError(
+                "cannot resume after changing map-dataset sharding "
+                f"from {checkpoint_sharding!r} to {self._map_dataset_dp_sharding!r}"
             )
         if self._rank_id not in state_dict:
             raise ValueError(

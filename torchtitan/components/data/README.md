@@ -509,6 +509,35 @@ GrainDataLoader     -> batches and collates that rank's samples
 
 For random-access training, each rank receives a contiguous slice of the globally shuffled index space, not a contiguous region of the original corpus.
 
+Set `GrainDataLoader.Config(map_dataset_dp_sharding="strided")` when each
+global index identifies one fixed sample. After global ordering, local sample
+`i` on effective-DP rank `r` reads global index `i * dp_world_size + r`:
+
+```text
+global order:  0  1  2  3  4  5  6  7
+DP rank 0:    0     2     4     6
+DP rank 1:       1     3     5     7
+```
+
+Repetition happens before strided ownership, so interleaving the ranks still
+reconstructs the global stream when the corpus length is not divisible by DP.
+This policy applies to indexed `SingleDatasetConfig` and
+`DatasetConcatConfig` graphs. Streaming sources own their sharding and reject
+the strided policy.
+
+`DatasetMixConfig` shards its map children independently; interleaving DP
+ranks does not reconstruct a single global mixed stream. A mix or concat
+containing a streaming child rejects strided ownership.
+
+Checkpoints record the map-sharding policy and reject changing it on resume.
+Older checkpoints without this field use the historical contiguous policy.
+Global row ordering is independent of DP degree, but checkpoint resume after
+changing DP degree is not implemented and is rejected.
+
+External indexed providers can implement the existing `SourceConfig.build()`
+seam to supply a `RandomAccessDataSource`, without a storage-client dependency
+in TorchTitan. Frozen samples can use strided ownership without repacking.
+
 With effective DP greater than one, `repeat=False` is rejected because ranks can exhaust at different steps and hang training collectives. Use `repeat=True` and let the trainer's step count stop training.
 
 `GrainDataLoader.state_dict()` records:
