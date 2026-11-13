@@ -7,11 +7,11 @@
 from dataclasses import dataclass
 
 from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3Model, KimiK3MultimodalModel
 
 from .state_dict_adapter import KimiK31StateDictAdapter
 
-__all__ = ["KimiK31Model"]
+__all__ = ["KimiK31Model", "KimiK31MultimodalModel"]
 
 
 class KimiK31Model(KimiK3Model):
@@ -29,3 +29,11 @@ class KimiK31Model(KimiK3Model):
     ) -> None:
         super()._register_optimizer_hooks(optimizers, model_parts, parallelism_context)
         register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
+
+
+class KimiK31MultimodalModel(KimiK31Model, KimiK3MultimodalModel):
+    """Kimi K3.1 with its MoonViT vision encoder."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(KimiK31Model.Config, KimiK3MultimodalModel.Config):
+        pass
