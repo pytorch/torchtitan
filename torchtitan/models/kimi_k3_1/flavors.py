@@ -13,6 +13,10 @@ import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import (
+    ModelConfigConverter,
+    validate_converter_compatibility,
+)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
@@ -246,6 +250,7 @@ MODEL_FLAVORS = {
 
 def build_model_config(
     flavor: str,
+    converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
@@ -276,4 +281,8 @@ def build_model_config(
             f"{num_heads} heads with tensor_parallel_degree="
             f"{parallelism.tensor_parallel_degree} gives {num_heads_per_rank}."
         )
+    if converters is not None:
+        validate_converter_compatibility(converters)
+        for converter in converters:
+            model_config = converter.build().convert(model_config)
     return model_config
