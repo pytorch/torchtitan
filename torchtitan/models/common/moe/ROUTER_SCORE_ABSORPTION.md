@@ -1,8 +1,10 @@
 # Router-score absorption
 
-[`RoutedExperts`](moe.py) absorbs DeepEP router scores into W2's input when
-`output_postprocess` is absent. Local, AllToAll, and HybridEP keep post-expert
-scoring; Dist-MoE owns its compute and communication optimizations.
+[`RoutedExperts`](moe.py) absorbs DeepEP and HybridEP router scores into W2's
+input when `output_postprocess` is absent. Local and AllToAll keep post-expert
+scoring; Dist-MoE owns its compute and communication optimizations. This extends
+the DeepEP optimization from [#5543](https://github.com/pytorch/torchtitan/pull/5543)
+to HybridEP through shared `EPDispatchMetadata.scores_R`.
 
 `R` is the number of routed rows on this rank, `D` the model dimension, `F` the
 expert intermediate dimension, and `E` the number of local experts. Dispatch
@@ -16,7 +18,7 @@ Without absorption, each expert output is multiplied by its router score:
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
     A --> S["FP32 score multiply + cast back"]
-    S --> C["Unpermute + DeepEP combine"]
+    S --> C["Unpermute + EP combine"]
 ```
 
 For a linear W2, scores can instead multiply its input:
@@ -27,7 +29,7 @@ flowchart LR
     B["Expanded bias B [R,D]"] --> BS["FP32 score multiply + cast back"]
     W --> A["Add"]
     BS --> A
-    A --> C["Unpermute + DeepEP combine"]
+    A --> C["Unpermute + EP combine"]
 ```
 
 Each score multiplication broadcasts scores as `[R, 1]`. The bias branch is
@@ -52,13 +54,13 @@ Padding rows receive zero bias.
 ## Output postprocessing
 
 A postprocess such as expert-output normalization need not commute with score
-multiplication. DeepEP retains post-expert scoring when it is configured:
+multiplication. Both backends retain post-expert scoring when it is configured:
 
 ```mermaid
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
     A --> P["Output postprocess"] --> S["FP32 score multiply + cast back"]
-    S --> C["Unpermute + DeepEP combine"]
+    S --> C["Unpermute + EP combine"]
 ```
 
 Thus `s * output_postprocess(W2(h) + B)` keeps the original operation order.
@@ -96,7 +98,58 @@ outputs. The optimized combine does not consume scores. W2 follows its
 configured remat policy, and the GPT-OSS bias addition follows the same
 `grouped_mm` decision rather than an independent bias policy. Replaying even a
 cheap bias addition after a saved matmul would retain the matmul's full routed
-output; saving both avoids this dependency. Other replayed consumers, such as a
-dtype conversion, can still need W2's output, so saved combine alone does not
-guarantee its complete removal from retained memory. FullAC can still replay
-the W2 GEMM and its bias addition.
+output; saving both avoids this dependency. A real dtype conversion or output
+postprocess still consumes W2's output. With W2 saved it remains resident; under
+full remat W2 and its bias addition replay. Full remat also replays W2 in the
+common BF16 path: absorption enables saving W2 without retaining its output,
+but does not itself change W2's policy.
+
+### Skip W2 replay while recomputing the rest
+
+For BF16 experts without output postprocessing or a real output dtype cast,
+save only W2 and let the other policy-controlled regions replay:
+
+```python
+from torchtitan.distributed.activation_remat import ActivationRematConfig
+
+config.activation_remat = ActivationRematConfig(
+    save_regions=["*routed_experts.w2.grouped_mm"],
+)
+```
+
+This skips W2's forward GEMM during backward. Replay still rebuilds its scored
+input, and W2's input-gradient and weight-gradient GEMMs still run. The GPT-OSS
+bias addition follows the same policy. Saved combine removes the remaining
+replay consumer of W2's output, so that output need not remain resident.
+For bias-free experts, each skipped forward replay avoids approximately
+`2 * R * F * D` FLOPs, including any routed padding rows in `R`.
+`DefaultActivationRematConfig` already saves W2; the explicit policy above
+also replays dispatch and the other projections.
+
+`FullActivationRematConfig` continues to replay W2. Saving the region is an
+explicit choice because quantized and LoRA grouped linears can retain internal
+activations in addition to their inputs. Compare saved-tensor reports and
+profile GEMM counts for the selected implementation; a policy name alone does
+not establish the memory or compute saving.
+
+## HybridEP dispatch and combine
+
+HybridEP returns its permuted FP32 scores explicitly with dispatched rows.
+The same W2-input and GPT-OSS bias scaling above applies; with postprocessing,
+the shared expert path scores after that postprocess. Combine accepts weighted
+rows and never multiplies scores a second time. Blocking and nonblocking modes
+use the same scoring contract, including aligned padding and capacity-limited
+dispatch. Absorption does not change capacity sizing or restore dropped tokens.
+
+HybridEP combine is always a SAVE region, including its fused unpermutation.
+Its backward needs the opaque forward dispatch handle, not the expert output.
+That handle retains routing maps, so this is not the DeepEP `8R`-byte index-only
+storage example above. Dispatch still follows `ep_communication`: integer
+prefix scans reproduce row positions on replay, keeping rebuilt activations
+and scores aligned with the forward handle used by saved combine. Backward
+communication still runs; only forward combine replay is skipped.
+
+The earlier HybridEP path cast router scores to the activation dtype before
+post-W2 multiplication. The current path keeps scores in FP32 until the product
+is cast back. Both this precision change and moving multiplication across W2
+can change BF16 outputs and gradients; this is not a bitwise-preserving change.
