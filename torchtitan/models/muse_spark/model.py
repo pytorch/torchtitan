@@ -590,11 +590,12 @@ class MuseSparkMultimodalModel(MuseSparkModel, MultimodalModel):
     """Muse Spark with its vision and audio encoders.
 
     ``dataset_modalities`` is the union of modalities the current dataset can
-    supply, shared across ranks. Listed encoders always run, using dummy
-    inputs when locally absent, even on steps with no media on any rank.
-    Static participation and zero-valued dependencies keep FSDP all-gathers
-    and reduce-scatters aligned without a media-presence collective.
-    Unlisted encoders are skipped but retained in checkpoints.
+    supply, shared across ranks; it lists at least one (text-only training uses
+    ``MuseSparkModel``). Listed encoders always run, using dummy inputs when
+    locally absent, even on steps with no media on any rank. Static
+    participation and zero-valued dependencies keep FSDP all-gathers and
+    reduce-scatters aligned without a media-presence collective. Unlisted
+    encoders are skipped but retained in checkpoints.
     """
 
     multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
@@ -609,7 +610,7 @@ class MuseSparkMultimodalModel(MuseSparkModel, MultimodalModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MuseSparkModel.Config, MultimodalModel.Config):
-        dataset_modalities: tuple[Literal["vision", "audio"], ...] = ()
+        dataset_modalities: tuple[Literal["vision", "audio"], ...]
         audio_encoder: MuseSparkAudioEncoder.Config | None = None
         vision_encoder: NaViTEncoder.Config | None = None
         vision_adapter: MuseSparkNaViTAdapter.Config | None = None
@@ -618,6 +619,11 @@ class MuseSparkMultimodalModel(MuseSparkModel, MultimodalModel):
 
         def __post_init__(self) -> None:
             super(MuseSparkMultimodalModel.Config, self).__post_init__()
+            if not self.dataset_modalities:
+                raise ValueError(
+                    "dataset_modalities must list at least one modality; use "
+                    "MuseSparkModel (a text-only flavor) for text-only training."
+                )
             encoders = {"vision": self.vision_encoder, "audio": self.audio_encoder}
             for modality in self.dataset_modalities:
                 if modality not in encoders:

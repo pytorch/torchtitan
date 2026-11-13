@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Iterator, Mapping
 from threading import local
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import spmd_types as spmd
 import torch
@@ -25,6 +25,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 setattr(spmd.PartitionSpec, "__deepcopy__", lambda self, memo: self)  # noqa: B010
 
 __all__ = [
+    "SpmdAnnotatedInput",
     "disable_dense_sp",
     "annotate_input_spmd_types",
     "annotate_replicated_parameters",
@@ -194,6 +195,15 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
         yield
 
 
+@runtime_checkable
+class SpmdAnnotatedInput(Protocol):
+    """A non-tensor forward input, e.g. attention metadata, whose nested tensors
+    ``annotate_input_spmd_types`` can't see; it annotates them itself."""
+
+    def annotate_spmd_types(self) -> None:
+        ...
+
+
 def annotate_input_spmd_types(
     parallelism_context: "ParallelismContext",
     input_dict: dict[str, Any],
@@ -205,9 +215,9 @@ def annotate_input_spmd_types(
     to its value. Each named tensor is asserted against its own layout, and
     must have a layout entry: a tensor with no entry raises rather than being
     silently left untyped. A non-tensor kwarg, or a value of a mapping kwarg
-    (e.g. ``attention_metadata``), that defines ``annotate_spmd_types()``
-    annotates its own nested tensors; other non-tensor kwargs (e.g.
-    ``special_tokens``) are left untouched.
+    (e.g. ``attention_metadata``), that is a ``SpmdAnnotatedInput`` annotates
+    its own nested tensors; other non-tensor kwargs (e.g. ``special_tokens``)
+    are left untouched.
     """
     mesh = parallelism_context.spmd_dense_mesh()
     untyped: list[str] = []
@@ -216,9 +226,8 @@ def annotate_input_spmd_types(
             if not isinstance(value, torch.Tensor):
                 nested = value.values() if isinstance(value, Mapping) else (value,)
                 for item in nested:
-                    annotate = getattr(item, "annotate_spmd_types", None)
-                    if annotate is not None:
-                        annotate()
+                    if isinstance(item, SpmdAnnotatedInput):
+                        item.annotate_spmd_types()
                 continue
             layout = input_sharding.get(name)
             if layout is None:
@@ -230,7 +239,7 @@ def annotate_input_spmd_types(
             "spmd_types backend requires an SPMD layout for every tensor input, "
             f"but these have no entry in input_sharding: {sorted(untyped)}. Add "
             "them to the input layout the model declares in ``preprocess_inputs``, "
-            "or give their container an ``annotate_spmd_types()`` method."
+            "or make their container a ``SpmdAnnotatedInput``."
         )
     return input_dict
 

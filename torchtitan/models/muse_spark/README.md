@@ -49,7 +49,8 @@ on every rank:
 - `("vision",)`: images and videos, using one shared vision forward.
 - `("audio",)`: audio.
 - `("vision", "audio")`: both; the multimodal flavor default.
-- `()`: no media; the encoders are skipped.
+
+Text-only training uses a text flavor; an empty `dataset_modalities` raises.
 
 CC12M activates vision; the debug Grain mix activates both. Listed modalities
 require their encoders, and undeclared media inputs raise `ValueError`.

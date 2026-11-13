@@ -893,7 +893,7 @@ def _muse_spark_config(
             )
         )
 
-    decoder_config = MuseSparkModel.Config(
+    fields = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
@@ -940,7 +940,7 @@ def _muse_spark_config(
     )
     if audio_encoder is None and vision_encoder is None:
         assert vision_adapter is None and not dataset_modalities
-        return decoder_config
+        return MuseSparkModel.Config(**fields)
 
     if audio_encoder is not None and audio_encoder.output_size != dim:
         raise ValueError(
@@ -959,10 +959,7 @@ def _muse_spark_config(
             ),
         )
     return MuseSparkMultimodalModel.Config(
-        **{
-            f.name: getattr(decoder_config, f.name)
-            for f in dataclasses.fields(decoder_config)
-        },
+        **fields,
         dataset_modalities=dataset_modalities,
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
