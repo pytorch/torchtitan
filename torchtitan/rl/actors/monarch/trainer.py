@@ -60,10 +60,12 @@ class _TrainerActorEndpoints:
         )
 
     @concurrent_endpoint
-    async def optim_step(
-        self, *, resume_state: dict[str, Any], last_step: bool = False
-    ) -> OptimizerStepOutput:
-        return await super().optim_step(resume_state=resume_state, last_step=last_step)
+    async def optim_step(self, *, resume_state: dict[str, Any]) -> OptimizerStepOutput:
+        return await super().optim_step(resume_state=resume_state)
+
+    @concurrent_endpoint
+    async def save_checkpoint(self, *, last_step: bool) -> None:
+        await super().save_checkpoint(last_step=last_step)
 
     @concurrent_endpoint
     async def push_model_state_dict(self) -> None:

@@ -364,9 +364,7 @@ class Trainer(Configurable):
         return metrics
 
     @sl.log_trace_span("optim_step")
-    async def optim_step(
-        self, *, resume_state: dict[str, Any], last_step: bool = False
-    ) -> OptimizerStepOutput:
+    async def optim_step(self, *, resume_state: dict[str, Any]) -> OptimizerStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules.
@@ -398,7 +396,6 @@ class Trainer(Configurable):
             has_quantization=engine.has_quantization,
         )
 
-        engine.save_checkpoint(last_step=last_step)
         engine.step_profiler()
         device_mem_stats = engine.device_memory_monitor.get_peak_stats()
         engine.device_memory_monitor.reset_peak_stats()
@@ -434,6 +431,11 @@ class Trainer(Configurable):
                 ),
             },
         )
+
+    @sl.log_trace_span("save_checkpoint")
+    async def save_checkpoint(self, *, last_step: bool) -> None:
+        """Save a checkpoint if the checkpointer is due one at this step, or `last_step` is True."""
+        self.engine.save_checkpoint(last_step=last_step)
 
     @sl.log_trace_span("push_model_state_dict")
     async def push_model_state_dict(self) -> None:

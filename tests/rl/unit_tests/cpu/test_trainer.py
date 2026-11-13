@@ -569,7 +569,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         }
         engine.optim_step.assert_called_once_with()
         assert trainer._resume_state.value == {"next_index": 3}
-        engine.save_checkpoint.assert_called_once_with(last_step=False)
+        engine.save_checkpoint.assert_not_called()  # the controller calls `save_checkpoint`
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(
             num_tokens=10,
