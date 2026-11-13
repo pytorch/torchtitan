@@ -9,8 +9,6 @@
 from dataclasses import replace
 from typing import cast
 
-import torch
-
 from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
 from torchtitan.components.data.multimodal.vision_processor import (
     NaViTPatchGridResize,
@@ -22,8 +20,6 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
-from torchtitan.distributed.flex_shard import BlockShard, ComputeLayout, Owned
-from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.kimi_k3 import (
     KIMI_K3_SPECIAL_TOKENS,
@@ -52,22 +48,6 @@ def kimi_k3_1_debugmodel(
         "debugmodel_mm", seq_len=seq_len, parallelism=parallelism
     )
     indexer = cast(KimiDSAAttention.Config, model_config.first_full_attention).indexer
-    # Same storage axes as the Kimi K3 layouts in ``_dist_muon_optimizer``.
-    storage_axes = (
-        MeshAxisName.DP_SHARD.value,
-        f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
-    )
-    owned = ComputeLayout(
-        shardings_by_mesh_axis={axis: Owned() for axis in storage_axes},
-        compute_dtype=torch.bfloat16,
-    )
-    per_index_head = ComputeLayout(
-        shardings_by_mesh_axis={
-            axis: BlockShard(dim=0, block_sizes=(indexer.index_head_dim,))
-            for axis in storage_axes
-        },
-        compute_dtype=torch.bfloat16,
-    )
     return _KimiK3TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -91,10 +71,10 @@ def kimi_k3_1_debugmodel(
                 muon_lr=8e-4,
                 adamw_lr=8e-4,
                 parallelism=parallelism,
-                extra_full_attention_shardings={
-                    "indexer.wq_b": per_index_head,
-                    "indexer.wk": owned,
-                    "indexer.weights_proj": owned,
+                extra_full_attention_block_sizes={
+                    "indexer.wq_b": (indexer.index_head_dim,),
+                    "indexer.wk": (),
+                    "indexer.weights_proj": (),
                 },
             ),
             lr_scheduler=LRSchedulersContainer.Config(
