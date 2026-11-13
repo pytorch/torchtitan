@@ -16,7 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
 
-from torchtitan.distributed.row_sharded_embedding import (
+from torchtitan.models.qwen3_8_flash_next.row_sharded_embedding import (
     prepare_row_sharded_embedding,
     row_sharded_embedding,
 )

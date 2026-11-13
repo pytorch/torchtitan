@@ -17,10 +17,6 @@ import torch_remat as remat
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.distributed.row_sharded_embedding import (
-    prepare_row_sharded_embedding,
-    RowShardedEmbeddingMetadata,
-)
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     set_current_spmd_mesh,
@@ -38,6 +34,10 @@ from torchtitan.models.qwen3_5.model import Qwen35Model
 from .attention import QSAAttention, QSAIndexMetadata
 from .embedding import NGramTable, PLELayer
 from .residual import add_residuals, GatedResidual
+from .row_sharded_embedding import (
+    prepare_row_sharded_embedding,
+    RowShardedEmbeddingMetadata,
+)
 from .state_dict_adapter import Qwen38FlashNextStateDictAdapter
 
 # T = packed tokens, D = model dimension, S = residual streams, C = S * D.

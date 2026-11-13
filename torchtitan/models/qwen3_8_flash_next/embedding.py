@@ -19,14 +19,11 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.distributed.row_sharded_embedding import (
-    row_sharded_embedding,
-    RowShardedEmbeddingMetadata,
-)
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Conv1d, Embedding, Linear
 
 from .norm import GroupedOffsetRMSNorm
+from .row_sharded_embedding import row_sharded_embedding, RowShardedEmbeddingMetadata
 
 # T = packed tokens, N = hash heads, E = embedding dimension,
 # S = residual streams, D = model dimension, C = S * D, W = kernel width,

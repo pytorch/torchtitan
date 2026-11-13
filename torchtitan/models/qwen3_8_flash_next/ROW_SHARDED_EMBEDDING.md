@@ -11,7 +11,7 @@ the mesh size. Every rank uses the same weight dtype and feature width.
 Input IDs can be int32 or int64 and have any shape.
 
 ```python
-from torchtitan.distributed.row_sharded_embedding import (
+from torchtitan.models.qwen3_8_flash_next.row_sharded_embedding import (
     prepare_row_sharded_embedding,
     row_sharded_embedding,
 )
@@ -75,5 +75,5 @@ updates with a dense reference. Cases include duplicate IDs, BF16
 cancellation, ranks with no input IDs, integer dtypes and recomputation.
 
 ```bash
-pytest tests/unit_tests/cpu/distributed/test_row_sharded_embedding.py -q
+pytest tests/unit_tests/cpu/models/qwen3_8_flash_next/test_row_sharded_embedding.py -q
 ```
