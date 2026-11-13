@@ -6,6 +6,8 @@
 
 """Moves the trainer's model state dict into the generators' prefetch buffers with
 one-sided reads over a ``torch.distributed._transport`` backend.
+
+See ``MODEL_STATE_DICT_TRANSPORT.md``.
 """
 
 from __future__ import annotations
