@@ -95,6 +95,7 @@ class DatasetBuildContext:
     read_options: grain.ReadOptions
     max_num_documents: int | None = None
     num_mtp_layers: int = 0
+    per_sample_pad_multiple: int | None = None
     vision_processor: VisionProcessor | None = None
     """The model's image and video preprocessing. None: no image or video
     inputs."""

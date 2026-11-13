@@ -14,6 +14,7 @@ import grain.python as grain
 import numpy as np
 
 from torchtitan.components.data.dataset import DatasetConfig, TextSequence
+from torchtitan.components.data.padding import append_padded_segment
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 
@@ -30,6 +31,16 @@ class ConcatThenSplitPackingConfig:
         context: DatasetBuildContext,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
+        if context.per_sample_pad_multiple is not None:
+            alignment = context.per_sample_pad_multiple
+            if (
+                context.max_context_length % alignment
+                or context.num_tokens_per_microbatch % alignment
+            ):
+                raise ValueError(
+                    "per_sample_pad_multiple must divide max_context_length and "
+                    "num_tokens_per_microbatch"
+                )
         dataset = self.dataset.build(
             context=context,
             dataset_iteration_policy=dataset_iteration_policy,
@@ -42,6 +53,7 @@ class ConcatThenSplitPackingConfig:
                 max_num_documents_per_row=context.max_num_documents,
                 max_context_length=context.max_context_length,
                 num_tokens_per_row=context.num_tokens_per_microbatch,
+                per_sample_pad_multiple=context.per_sample_pad_multiple or 1,
             )
         dataset = dataset.map(
             partial(
@@ -79,11 +91,13 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
         max_num_documents_per_row: int,
         max_context_length: int,
         num_tokens_per_row: int,
+        per_sample_pad_multiple: int,
     ) -> None:
         super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
+        self._per_sample_pad_multiple = per_sample_pad_multiple
 
     def __iter__(self) -> grain.DatasetIterator:
         return _DocumentAwareConcatThenSplitIterator(
@@ -91,6 +105,7 @@ class _DocumentAwareConcatThenSplitIterDataset(grain.IterDataset):
             max_num_documents_per_row=self._max_num_documents_per_row,
             max_context_length=self._max_context_length,
             num_tokens_per_row=self._num_tokens_per_row,
+            per_sample_pad_multiple=self._per_sample_pad_multiple,
         )
 
 
@@ -104,11 +119,13 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
         max_num_documents_per_row: int,
         max_context_length: int,
         num_tokens_per_row: int,
+        per_sample_pad_multiple: int,
     ) -> None:
         super().__init__(parent)
         self._max_num_documents_per_row = max_num_documents_per_row
         self._max_context_length = max_context_length
         self._num_tokens_per_row = num_tokens_per_row
+        self._per_sample_pad_multiple = per_sample_pad_multiple
         self._remainder: TextSequence | None = None
         self._remainder_parent_state: dict[str, Any] | None = None
         self._remainder_offset = 0
@@ -119,15 +136,14 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
         if self._finished:
             raise StopIteration
 
-        input_parts: list[np.ndarray] = []
-        label_parts: list[np.ndarray] = []
-        position_parts: list[np.ndarray] = []
-        mask_parts: list[np.ndarray] = []
+        parts: dict[str, list[np.ndarray]] = {
+            key: [] for key in ("input_ids", "labels", "positions", "padding_mask")
+        }
         num_tokens = 0
 
         while (
             num_tokens < self._num_tokens_per_row
-            and len(position_parts) < self._max_num_documents_per_row
+            and len(parts["positions"]) < self._max_num_documents_per_row
         ):
             if self._remainder is None:
                 parent_state = self._parent.get_state()
@@ -163,29 +179,33 @@ class _DocumentAwareConcatThenSplitIterator(grain.DatasetIterator):
                 self._remainder_offset,
                 self._remainder_offset + num_segment_tokens,
             )
-            input_parts.append(np.asarray(sequence.input_ids[token_slice]))
-            label_parts.append(np.asarray(sequence.labels[token_slice]))
-            position_parts.append(np.arange(num_segment_tokens, dtype=np.int64))
-            # Keep padding from an upstream packer marked as padding.
-            mask_parts.append(
-                np.zeros(num_segment_tokens, dtype=np.bool_)
-                if sequence.padding_mask is None
-                else np.asarray(sequence.padding_mask[token_slice], dtype=np.bool_)
+            num_tokens += append_padded_segment(
+                parts,
+                {
+                    "input_ids": np.asarray(sequence.input_ids[token_slice]),
+                    "labels": np.asarray(sequence.labels[token_slice]),
+                },
+                per_sample_pad_multiple=self._per_sample_pad_multiple,
+                pad_values={"input_ids": 0, "labels": IGNORE_INDEX},
+                padding_mask=(
+                    None
+                    if sequence.padding_mask is None
+                    else np.asarray(sequence.padding_mask[token_slice], dtype=np.bool_)
+                ),
             )
-            num_tokens += num_segment_tokens
             self._remainder_offset += num_segment_tokens
             if self._remainder_offset == len(sequence.input_ids):
                 self._remainder = None
                 self._remainder_parent_state = None
                 self._remainder_offset = 0
 
-        if not input_parts:
+        if not parts["input_ids"]:
             raise StopIteration
 
-        input_ids = np.concatenate(input_parts)
-        labels = np.concatenate(label_parts)
-        positions = np.concatenate(position_parts)
-        padding_mask = np.concatenate(mask_parts)
+        input_ids = np.concatenate(parts["input_ids"])
+        labels = np.concatenate(parts["labels"])
+        positions = np.concatenate(parts["positions"])
+        padding_mask = np.concatenate(parts["padding_mask"])
         pad_len = self._num_tokens_per_row - num_tokens
         if pad_len:
             padding_positions = (
