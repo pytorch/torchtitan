@@ -14,7 +14,7 @@ is applied during model parallelization.
 | `spmd_types.py` | SPMD type annotations for tensor-parallel and other sharded regions. |
 | `fsdp.py` | FSDP2 / HSDP application. See [FSDP.md](FSDP.md). |
 | `pipeline_parallel.py` | Pipeline stages and schedules. See [PIPELINE_PARALLEL.md](PIPELINE_PARALLEL.md). |
-| `context_parallel.py` | Context-parallel sequence sharding. |
+| `context_parallel.py` | CP sequence sharding, load balancing, and K/V exchange. See [SELECTIVE_GATHER.md](SELECTIVE_GATHER.md) for sliding-window selective gather. |
 | `deepep/` | DeepEP / HybridEP expert-parallel token dispatch. |
 | `flex_shard/` | Optimizer-compute layouts that differ from parameter storage (DistMuon). See [flex_shard/README.md](flex_shard/README.md). |
 | `utils.py` | Process-group initialization, distributed reductions, determinism, gradient clipping. |

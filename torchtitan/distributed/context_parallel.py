@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Context-parallel partitioning and load-balancing APIs."""
+"""Context-parallel partitioning, load balancing, and K/V exchange.
+
+Tensor suffixes: T tokens, R remote tokens, H heads, K and V head dims.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +15,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast, TYPE_CHECKING
+from weakref import WeakValueDictionary
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 from spmd_types import SpmdType
 
 # TODO(acisseJZhong): Move these implementations into TorchTitan to avoid
@@ -34,10 +39,17 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
+    from attn_gym.distributed.selective_gather import (
+        BlockExchangePlan,
+        CopyEngineBlockExchange,
+    )
+
     from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
 __all__ = [
     "cp_all_gather_tensors",
+    "get_copy_engine_block_exchange",
+    "cp_query_ranges",
     "ContextParallelLoadBalancer",
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
@@ -171,6 +183,7 @@ def supports_cp_inner_attention(
         AllGatherKVFlexInnerAttention,
         AllGatherKVSlidingWindowFlexInnerAttention,
         AllGatherKVVarlen,
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention,
     )
     from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 
@@ -180,6 +193,7 @@ def supports_cp_inner_attention(
             AllGatherKVSlidingWindowFlexInnerAttention,
             AllGatherKVMLAFlexAttention,
             AllGatherKVVarlen,
+            SelectiveGatherKVSlidingWindowVarlenInnerAttention,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
             AllGatherKVFlexInnerAttention,
@@ -392,3 +406,83 @@ def shard_tensors(
             dst=spmd.S(seq_dim),
         )
     return input_dict
+
+
+def cp_query_ranges(
+    global_tokens: int, cp_size: int, cp_rank: int, *, head_tail: bool
+) -> tuple[tuple[int, int], ...]:
+    """Return one rank's global ``[start, end)`` ranges in local Q order.
+
+    Args:
+        global_tokens: Tokens before CP sharding. The sequence must split
+            evenly into one or two chunks per rank.
+        cp_size: Number of CP ranks sharing the sequence.
+        cp_rank: Rank within the CP group.
+        head_tail: If true, return the head range followed by the tail range.
+            If false, return one contiguous range.
+
+    Returns:
+        A tuple of half-open global token ranges.
+    """
+    if not head_tail:
+        local_tokens = global_tokens // cp_size
+        start = cp_rank * local_tokens
+        return ((start, start + local_tokens),)
+    chunk_tokens = global_tokens // (2 * cp_size)
+    head_start = cp_rank * chunk_tokens
+    tail_start = global_tokens - (cp_rank + 1) * chunk_tokens
+    return (
+        (head_start, head_start + chunk_tokens),
+        (tail_start, tail_start + chunk_tokens),
+    )
+
+
+# Modules keep exchanges alive; the cache does not extend their lifetime.
+_copy_engine_exchanges: WeakValueDictionary[
+    tuple, CopyEngineBlockExchange
+] = WeakValueDictionary()
+
+
+def get_copy_engine_block_exchange(
+    group: dist.ProcessGroup,
+    plan: BlockExchangePlan,
+    *,
+    k_token_shape: tuple[int, ...],
+    v_token_shape: tuple[int, ...],
+    dtype: torch.dtype,
+    device: torch.device,
+) -> CopyEngineBlockExchange:
+    """Return a shared copy-engine exchange for matching plans and K/V layouts.
+
+    Matching layers in the same process group reuse transport buffers.
+    Create the exchange before CUDA Graph capture. Keep it alive for the run.
+    The cache holds only weak references.
+
+    Args:
+        group: CP process group used for the exchange.
+        plan: This rank's fixed block-exchange plan.
+        k_token_shape: Shape of one K token, excluding the sequence dimension.
+        v_token_shape: Shape of one V token, excluding the sequence dimension.
+        dtype: Dtype shared by K, V, and transport buffers.
+        device: Device for the transport buffers.
+
+    Returns:
+        An exchange shared by matching layers.
+    """
+    key = (group, plan, k_token_shape, v_token_shape, dtype, device)
+    exchange = _copy_engine_exchanges.get(key)
+    if exchange is None:
+        from attn_gym.distributed.selective_gather import CopyEngineBlockExchange
+
+        # Transport buffers do not carry model SPMD types.
+        with spmd.no_typecheck():
+            exchange = CopyEngineBlockExchange(
+                group,
+                plan,
+                k_token_shape=k_token_shape,
+                v_token_shape=v_token_shape,
+                dtype=dtype,
+                device=device,
+            )
+        _copy_engine_exchanges[key] = exchange
+    return exchange
