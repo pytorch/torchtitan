@@ -9,7 +9,9 @@ import unittest
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.norm import residual_rms_norm
 
 
 class TestRMSNorm(unittest.TestCase):
@@ -90,6 +92,41 @@ class TestRMSNorm(unittest.TestCase):
         nn.init.zeros_(norm1.weight)
         self.assertTrue(torch.all(norm1.weight == 0))
         self.assertTrue(torch.all(norm2.weight == 1))
+
+
+class _DoubledRMSNorm(RMSNorm):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return 2 * super().forward(input)
+
+
+class TestResidualRMSNorm(unittest.TestCase):
+    def setUp(self):
+        LocalCompileConfig().apply()
+
+    def test_disabled_region_matches_module(self):
+        """With the region off, the fused helper keeps the module's exact bits."""
+        norm = RMSNorm.Config(normalized_shape=32, eps=1e-6).build()
+        with torch.no_grad():
+            norm.weight.normal_()
+        residual = torch.randn(10, 32)
+        delta = torch.randn(10, 32)
+
+        h, normed = residual_rms_norm(residual, delta, norm)
+
+        expected_h = residual + delta
+        self.assertTrue(torch.equal(h, expected_h))
+        self.assertTrue(torch.equal(normed, norm(expected_h)))
+
+    def test_norm_subclass_keeps_its_forward(self):
+        """Norms other than plain RMSNorm are not replaced by the fused math."""
+        norm = _DoubledRMSNorm(RMSNorm.Config(normalized_shape=32))
+        residual = torch.randn(10, 32)
+        delta = torch.randn(10, 32)
+
+        h, normed = residual_rms_norm(residual, delta, norm)
+
+        self.assertTrue(torch.equal(normed, norm(residual + delta)))
+        self.assertTrue(torch.equal(h, residual + delta))
 
 
 if __name__ == "__main__":

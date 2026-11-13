@@ -36,6 +36,7 @@ from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.norm import residual_rms_norm
 
 
 def roll_mtp_sequence(
@@ -159,15 +160,16 @@ class MTPTransformerBlock(TransformerBlock):
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
-        h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
+        attn_out = self.attention(self.attention_norm(h), attention_metadata, positions)
+        h, ffn_input = residual_rms_norm(h, attn_out, self.ffn_norm)
         if isinstance(self.feed_forward, MoE):
             h = h + self.feed_forward(
-                self.ffn_norm(h),
+                ffn_input,
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            h = h + self.feed_forward(self.ffn_norm(h))
+            h = h + self.feed_forward(ffn_input)
         return self.mtp_norm(h)
 
     def _maybe_shard_mtp_valid_mask_across_tp(
