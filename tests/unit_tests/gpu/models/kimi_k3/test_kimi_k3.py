@@ -41,7 +41,7 @@ def _small_model_config(*, attn_backend: str = "flex") -> KimiK3Model.Config:
         vocab_size=32,
         num_layers=2,
         full_attention_layers={1},
-        full_attention=partial(mla_config, attn_backend=attn_backend),
+        full_attention_config_factory=partial(mla_config, attn_backend=attn_backend),
         attn_res_block_size=1,
         num_heads=2,
         q_lora_rank=32,

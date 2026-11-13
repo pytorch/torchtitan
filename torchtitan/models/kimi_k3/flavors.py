@@ -279,7 +279,7 @@ def mla_config(
         sharding_config=mla_attention_local_spmd_sharding_config(),
     )
     return mla_attention_config(
-        config_cls=KimiMLAAttention.Config,
+        config_factory=KimiMLAAttention.Config,
         inner_attention=inner_attention,
         dim=dim,
         num_heads=num_heads,
@@ -294,7 +294,7 @@ def mla_config(
 
 def mla_attention_config(
     *,
-    config_cls: Callable[..., KimiMLAAttention.Config],
+    config_factory: Callable[..., KimiMLAAttention.Config],
     inner_attention: InnerAttention.Config,
     dim: int,
     num_heads: int,
@@ -308,7 +308,7 @@ def mla_attention_config(
     """Low-rank projections and norms stay replicated; up-projections and the
     gate are column-parallel; ``wo`` is row-parallel to the residual layout."""
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    return config_cls(
+    return config_factory(
         dim=dim,
         n_heads=num_heads,
         kv_lora_rank=kv_lora_rank,
@@ -605,7 +605,7 @@ def kimi_k3_config(
     vocab_size: int,
     num_layers: int,
     full_attention_layers: set[int],
-    full_attention: Callable[..., KimiMLAAttention.Config],
+    full_attention_config_factory: Callable[..., KimiMLAAttention.Config],
     attn_res_block_size: int,
     num_heads: int,
     q_lora_rank: int,
@@ -668,7 +668,7 @@ def kimi_k3_config(
                 layer_id=layer_idx,
                 attn_res_block_size=attn_res_block_size,
                 attention=(
-                    full_attention(
+                    full_attention_config_factory(
                         dim=dim,
                         num_heads=num_heads,
                         q_lora_rank=q_lora_rank,
@@ -755,7 +755,7 @@ def _debugmodel(
         vocab_size=2048,
         num_layers=17,
         full_attention_layers={3, 7, 11, 15, 16},
-        full_attention=partial(mla_config, attn_backend=attn_backend),
+        full_attention_config_factory=partial(mla_config, attn_backend=attn_backend),
         attn_res_block_size=4,
         num_heads=4,
         q_lora_rank=128,
@@ -804,7 +804,7 @@ def _kimi_k3(
         vocab_size=163840,
         num_layers=93,
         full_attention_layers=set(range(3, 92, 4)) | {92},
-        full_attention=partial(mla_config, attn_backend=attn_backend),
+        full_attention_config_factory=partial(mla_config, attn_backend=attn_backend),
         attn_res_block_size=12,
         num_heads=96,
         q_lora_rank=1536,
