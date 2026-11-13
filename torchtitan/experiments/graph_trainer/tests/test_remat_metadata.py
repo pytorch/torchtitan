@@ -32,6 +32,8 @@ from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     remove_parameter_gradient_markers_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+    REMAT_LAYER_ID_META,
+    REMAT_REGION_ID_META,
     selective_activation_remat_pass,
 )
 
@@ -130,15 +132,19 @@ class TestRematMetadata(TestCase):
 
         selective_activation_remat_pass(traced.gm)
 
-        remat_regions: dict[str, set[int]] = defaultdict(set)
+        remat_regions: dict[str, set[tuple[int, int]]] = defaultdict(set)
         for node in traced.gm.graph.nodes:
             layer_id = _get_layer_id(node)
             if layer_id < 0:
                 continue
+            region = (
+                node.meta.get(REMAT_LAYER_ID_META),
+                node.meta.get(REMAT_REGION_ID_META),
+            )
             if node.name.endswith("_recomputed"):
-                remat_regions["recompute"].add(layer_id)
+                remat_regions["recompute"].add(region)
             elif _is_backward_node(node):
-                remat_regions["backward"].add(layer_id)
+                remat_regions["backward"].add(region)
 
         # This one structural comparison proves that SAC saves both ordinary
         # and final-layer boundaries, remat exposes matching per-layer regions,
@@ -163,8 +169,8 @@ class TestRematMetadata(TestCase):
                     ("layers.1", "norm"),
                 },
                 "remat_regions": {
-                    "backward": {0, 1},
-                    "recompute": {0, 1},
+                    "backward": {(0, 0), (1, 1)},
+                    "recompute": {(0, 0), (1, 1)},
                 },
                 "marker_fqn_sets": (
                     ("tied_weight",),
