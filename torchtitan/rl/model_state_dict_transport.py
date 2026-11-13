@@ -214,7 +214,7 @@ def shared_rank_layouts(
 
 def _staged_pieces(
     trainer_boxes: dict[str, tuple[tuple[int, ...], tuple[int, ...]]],
-    rank_layouts: list[dict[str, TensorShard]],
+    generator_rank_layouts: list[dict[str, TensorShard]],
 ) -> tuple[list[dict[str, StagedPiece]], int]:
     """Lay out a trainer rank's staging buffer: for each generator rank in order, the
     intersection of each of its boxes with the trainer rank's, in its key order.
@@ -226,7 +226,7 @@ def _staged_pieces(
     nbytes = 0
     pieces = []
     byte_offsets: dict[tuple, int] = {}
-    for layout in rank_layouts:
+    for layout in generator_rank_layouts:
         rank_pieces = {}
         for key, shard in layout.items():
             if key not in trainer_boxes:
@@ -387,8 +387,8 @@ class ModelStateDictTransport(Configurable):
     def register_trainer_source(
         self,
         model_state_dict: dict[str, torch.Tensor],
-        rank_layouts: list[dict[str, TensorShard]],
         *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
         transfer_dtype: torch.dtype | None,
         preserve_dtype_keys: frozenset[str],
     ) -> TrainerSource:
@@ -397,7 +397,8 @@ class ModelStateDictTransport(Configurable):
 
         Args:
             model_state_dict: This trainer rank's model state dict.
-            rank_layouts: ``shard_layout`` of each rank of a generator, in rank order.
+            generator_rank_layouts: ``shard_layout`` of each rank of a generator,
+                in rank order.
             transfer_dtype: The dtype parameters are sent in, or None for their own.
             preserve_dtype_keys: Keys sent in their own dtype.
 
@@ -409,14 +410,14 @@ class ModelStateDictTransport(Configurable):
         placements = {}
         boxes = {}
         for key, tensor in model_state_dict.items():
-            if not any(key in layout for layout in rank_layouts):
+            if not any(key in layout for layout in generator_rank_layouts):
                 continue
             dtypes[key] = (
                 tensor.dtype
                 if transfer_dtype is None or key in preserve_dtype_keys
                 else transfer_dtype
             )
-            for layout in rank_layouts:
+            for layout in generator_rank_layouts:
                 if key in layout and layout[key].dtype != dtypes[key]:
                     raise ValueError(
                         f"{key}: the trainer sends {dtypes[key]}, the generator "
@@ -426,13 +427,14 @@ class ModelStateDictTransport(Configurable):
             if not isinstance(tensor, DTensor):
                 continue
             staged = _staged_placements(
-                tensor, [layout[key] for layout in rank_layouts if key in layout]
+                tensor,
+                [layout[key] for layout in generator_rank_layouts if key in layout],
             )
             if staged is not None:
                 placements[key] = staged
                 boxes[key] = _global_offset_and_local_shape(tensor, staged)
 
-        pieces, nbytes = _staged_pieces(boxes, rank_layouts)
+        pieces, nbytes = _staged_pieces(boxes, generator_rank_layouts)
         staging = _pinned_buffer(max(nbytes, 1))
         memory = self._transport.register_memory(staging)
         self._staging_plan = {
@@ -486,8 +488,8 @@ class ModelStateDictTransport(Configurable):
     def connect_generator(
         self,
         prefetched_model_state_dict: dict[str, torch.Tensor],
-        sources: list[TrainerSource],
         *,
+        sources: list[TrainerSource],
         rank: int,
         generator_index: int,
     ) -> None:
