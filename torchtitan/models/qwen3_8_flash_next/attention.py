@@ -454,6 +454,11 @@ class QSAInnerAttention(InnerAttention):
         apply the scale and the mask: the fp32 minimum absorbs any finite
         logit, so masked slots equal it exactly.
         """
+        # Pad J to a multiple of 8 with masked slots: an odd J (k * R + R - 1)
+        # sends cuBLAS to an unaligned kernel about 2x slower at 125B shapes.
+        selected_indices_TJ = F.pad(
+            selected_indices_TJ, (0, -selected_indices_TJ.shape[1] % 8), value=-1
+        )
         num_tokens, num_heads = query_THK.shape[:2]
         num_kv_heads, num_selected = key_THK.shape[1], selected_indices_TJ.shape[1]
         group_size = num_heads // num_kv_heads
