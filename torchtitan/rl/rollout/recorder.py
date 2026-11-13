@@ -150,8 +150,8 @@ class RolloutSampleRecorder(Configurable):
                 "is_validation": is_validation,
                 **self._encode_rollout(rollout),
             }
-            # Rollout messages can hold objects json.dumps can't serialize
-            # natively, e.g. tool-calling results
+            # `logs` and env messages come from user code and can hold dataclasses or
+            # enums, which json.dumps can't serialize natively.
             lines.append(json.dumps(record, default=_json_default) + "\n")
         write_future = self._write_executor.submit(self._append, "".join(lines))
         write_future.add_done_callback(_log_write_error)

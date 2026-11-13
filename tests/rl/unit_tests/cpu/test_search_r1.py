@@ -12,8 +12,7 @@ No GPU, no retrieval server: the retrieval call is monkeypatched.
 import asyncio
 
 import numpy as np
-from renderers import CustomRendererConfig
-from renderers.base import ParsedToolCall
+from renderers import CustomRendererConfig, ToolCall
 
 from torchtitan.components.renderer import RenderersConfigAdapter
 from torchtitan.config import ConfigLoader
@@ -58,9 +57,13 @@ def _build_env(monkeypatch, question="Who wrote Hamlet?"):
     )
 
 
-def _search_call(query, call_id: str = "c1") -> ParsedToolCall:
-    """A renderer-parsed search tool call (``arguments`` may be a dict or JSON str)."""
-    return ParsedToolCall(raw="", name="search", arguments={"query": query}, id=call_id)
+def _search_call(query, call_id: str = "c1") -> ToolCall:
+    """A search tool call as `TokenEnv` passes it (``arguments`` may be a dict or JSON str)."""
+    return {
+        "type": "function",
+        "id": call_id,
+        "function": {"name": "search", "arguments": {"query": query}},
+    }
 
 
 def test_env_init_exposes_search_tool(monkeypatch):
@@ -91,9 +94,11 @@ def test_env_no_tool_call_terminates(monkeypatch):
 
 def test_env_handles_json_string_arguments(monkeypatch):
     env = _build_env(monkeypatch)
-    call = ParsedToolCall(
-        raw="", name="search", arguments='{"query": "stringified"}', id="c1"
-    )
+    call: ToolCall = {
+        "type": "function",
+        "id": "c1",
+        "function": {"name": "search", "arguments": '{"query": "stringified"}'},
+    }
     out = asyncio.run(env.step({"role": "assistant", "tool_calls": [call]}))
     assert "stringified" in out.env_messages[0]["content"]
 

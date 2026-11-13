@@ -13,8 +13,7 @@ from dataclasses import dataclass
 
 import aiohttp
 
-from renderers import Message, ToolSpec
-from renderers.base import ParsedToolCall
+from renderers import Message, ToolCall, ToolSpec
 
 from torchtitan.rl.examples.search_r1.data import SearchR1Sample
 
@@ -97,9 +96,9 @@ async def _search(query: str, *, url: str, topk: int, timeout_s: float = 60.0) -
     return _passages_to_string(results[0])
 
 
-def _query_from_tool_call(tool_call: ParsedToolCall) -> str:
-    """Pull the ``query`` argument out of a renderer-parsed ``search`` tool call."""
-    arguments = tool_call.arguments
+def _query_from_tool_call(tool_call: ToolCall) -> str:
+    """Pull the ``query`` argument out of a ``search`` tool call."""
+    arguments = tool_call["function"]["arguments"]
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
@@ -148,8 +147,7 @@ class SearchR1Env(MessageEnv):
         )
 
     async def step(self, completion_message: Message) -> MessageEnvStepOutput:
-        # The renderer parses tool calls into ParsedToolCall objects (.name/.arguments).
-        tool_calls: list[ParsedToolCall] = completion_message.get("tool_calls") or []
+        tool_calls = completion_message.get("tool_calls") or []
         if not tool_calls:
             # No tool call -> the assistant's reply is the final answer.
             return MessageEnvStepOutput(done=True)
@@ -166,5 +164,9 @@ class SearchR1Env(MessageEnv):
                 for tc in tool_calls
             )
         )
+        # TODO: name each reply ("search"), and answer unknown tool names and empty queries with an
+        # error instead of a search. Muse Glimmer renders an unnamed reply as
+        # `<tool_output name="">`, so naming it changes that recipe's prompts: compare its tokens
+        # before and after.
         env_messages: list[Message] = [{"role": "tool", "content": p} for p in passages]
         return MessageEnvStepOutput(env_messages=env_messages, done=False)
