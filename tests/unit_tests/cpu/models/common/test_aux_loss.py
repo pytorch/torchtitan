@@ -561,7 +561,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         AuxLoss.group_acc[_METRIC_KEY] = torch.tensor(3.0, dtype=torch.float32)
 
         metrics = collect_aux_loss_metrics(parallelism_context)
-        self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], 2.0, places=6)
+        self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"].item(), 2.0, places=6)
         _clear_aux_loss_registry()
 
     def _run_reduction_case(self, *, use_typecheck: bool):
@@ -646,7 +646,9 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
                 stream_scores, _routing_map(stream_ids_TK, E), K
             ).item()
         metrics = collect_aux_loss_metrics(parallelism_context)
-        self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], ref_total, places=4)
+        self.assertAlmostEqual(
+            metrics[f"{_METRIC_KEY[1]}/mean"].item(), ref_total, places=4
+        )
         _clear_aux_loss_registry()
 
     @with_comms
@@ -743,7 +745,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             / denominator
         )
         self.assertAlmostEqual(
-            metrics[f"{_BATCH_METRIC_KEY[1]}/mean"], ref_metric, places=4
+            metrics[f"{_BATCH_METRIC_KEY[1]}/mean"].item(), ref_metric, places=4
         )
         _clear_aux_loss_registry()
 
