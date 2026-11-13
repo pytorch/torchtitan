@@ -121,8 +121,8 @@ def dist_sum(
     )
 
 
-def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
-    """Average a scalar over the mesh.
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> torch.Tensor:
+    """Average a scalar over the mesh and keep the result on its device.
 
     Divides by the number of values the all-reduce summed, not by the mesh size.
     A fake process group's all-reduce changes nothing, so this returns the local
@@ -133,8 +133,19 @@ def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
         reduceOp=c10d.ReduceOp.SUM.name,
         mesh=mesh,
         extra_pg=None,
-    ).tolist()
+    )
     return total / count
+
+
+def dist_max_tensor(
+    x: torch.Tensor,
+    mesh: DeviceMesh | None = None,
+    extra_pg: dist.ProcessGroup | None = None,
+) -> torch.Tensor:
+    """Max a tensor across process groups and keep the result on its device."""
+    return _dist_reduce_tensor(
+        x, reduceOp=c10d.ReduceOp.MAX.name, mesh=mesh, extra_pg=extra_pg
+    )
 
 
 def dist_sum_tensor(
