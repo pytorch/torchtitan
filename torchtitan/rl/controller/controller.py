@@ -123,6 +123,7 @@ from torchtitan.rl.controller.work_buffer import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -319,6 +320,13 @@ class Controller(Configurable):
         workers on processes, selected by config type, e.g.
         ``MonarchActorSystem.Config()`` (default)."""
 
+        model_state_dict_transport: ModelStateDictTransport.Config | None = None
+        """Moves the model state dict from the trainer into the generators with
+        one-sided ``torch.distributed._transport`` reads, or None to move it through
+        TorchStore. TODO: drop None (and TorchStore) once this has rolled out and
+        covers ``gpu_fetch``. Requires ``generator.model_state_dict_load_mode="cpu_prefetch"``.
+        See ``torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md``."""
+
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
@@ -371,8 +379,18 @@ class Controller(Configurable):
             if self.generator.checkpointer is not None:
                 raise ValueError(
                     "Generator checkpoint must be disabled in the RL loop "
-                    "(weights are synced from the trainer via TorchStore). "
+                    "(weights are synced from the trainer). "
                     "Set generator.checkpointer=None."
+                )
+            # TODO: support "gpu_fetch" by reading into generator GPU memory
+            # (https://github.com/pytorch/torchtitan/issues/6070).
+            if (
+                self.model_state_dict_transport is not None
+                and self.generator.model_state_dict_load_mode != "cpu_prefetch"
+            ):
+                raise ValueError(
+                    "model_state_dict_transport requires "
+                    'generator.model_state_dict_load_mode="cpu_prefetch"'
                 )
             if (
                 self.trainer.dist_moe_runtime is not None
@@ -618,9 +636,9 @@ class Controller(Configurable):
         """Spawn the services through the actor system and initialize weights.
 
         Kept separate from ``__init__`` because provisioning processes, spawning
-        actors, TorchStore initialization, and the initial model state dict
-        push/pull are all ``await``-based runtime side effects that cannot run in
-        a synchronous constructor.
+        actors, model state dict transport initialization, and the initial model
+        state dict push/pull are all ``await``-based runtime side effects that
+        cannot run in a synchronous constructor.
 
         Provisions and spawns the trainer, generators, router, batcher and rollout
         workers through the actor system, and synchronizes initial weights from
@@ -689,9 +707,15 @@ class Controller(Configurable):
                 hf_assets_path=config.hf_assets_path,
             )
 
-        # Initialize TorchStore, which carries the model state dict from the trainer to the generators.
-        with sl.log_trace_span("torchstore_init"):
-            await actor_system.initialize_torchstore()
+        if config.model_state_dict_transport is not None:
+            with sl.log_trace_span("model_state_dict_transport_init"):
+                await actor_system.initialize_model_state_dict_transport(
+                    config.model_state_dict_transport
+                )
+        else:
+            # Initialize TorchStore, which carries the model state dict from the trainer to the generators.
+            with sl.log_trace_span("torchstore_init"):
+                await actor_system.initialize_torchstore()
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
         # policy version and rollouter state.
@@ -1108,9 +1132,9 @@ class Controller(Configurable):
             Trainer:    forward/backward N
             Controller: await push N-1     (optimizer N must not mutate weights push N-1 reads)
             Trainer:    optimizer N -> policy N
-            Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
+            Controller: await pull N-1     (push N must not overwrite pushed weights mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: TorchStore put_state_dict of policy N
+                          |-> Trainer: TorchStore put_state_dict (or ModelStateDictTransport stage) of policy N
                           |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
@@ -1243,7 +1267,7 @@ class Controller(Configurable):
                     pull_s = await pull_task if pull_task is not None else 0.0
 
                 # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
-                push_task = asyncio.create_task(self._push_model_state_dict())
+                push_task = self._start_push_model_state_dict()
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
                         optimizer_result.policy_version, after=push_task
@@ -1293,12 +1317,18 @@ class Controller(Configurable):
             await push_task
             await pull_task
 
-    async def _push_model_state_dict(self) -> float:
-        """Push the trainer's model state dict to TorchStore; returns its wall time in seconds."""
-        with sl.log_trace_span("trainer_push_model_state_dict"):
-            start = time.perf_counter()
-            await self.trainer.all_ranks.push_model_state_dict.call()
+    def _start_push_model_state_dict(self) -> asyncio.Task[float]:
+        """Send the trainer's model state dict push now, so each trainer rank starts it before the next
+        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
+        start = time.perf_counter()
+        push = self.trainer.all_ranks.push_model_state_dict.call()
+
+        async def wait() -> float:
+            with sl.log_trace_span("trainer_push_model_state_dict"):
+                await push
             return time.perf_counter() - start
+
+        return asyncio.create_task(wait())
 
     async def _pull_model_state_dict_and_release_groups(
         self, version: int, *, after: asyncio.Task[float]

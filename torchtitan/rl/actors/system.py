@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.rl.generator.generator import Generator
     from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+    from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
     from torchtitan.rl.rollout.rollouter import RolloutWorker
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from torchtitan.rl.trainer.batcher import Batcher
@@ -130,8 +131,16 @@ class ActorSystem(Configurable, abc.ABC):
         """Initialize TorchStore, with its storage colocated with the trainer, and the
         TorchStore client of every trainer and generator actor.
 
-        TODO: move to a model state dict transport, which owns its placement.
+        TODO: delete once ``ModelStateDictTransport`` replaces TorchStore.
         """
+
+    @abc.abstractmethod
+    async def initialize_model_state_dict_transport(
+        self, config: ModelStateDictTransport.Config
+    ) -> None:
+        """Connect every generator rank to every trainer rank's
+        ``ModelStateDictTransport`` staging buffer, laid out for the generators'
+        shards."""
 
     @abc.abstractmethod
     async def stop(self) -> None:

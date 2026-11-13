@@ -163,6 +163,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         staging_state_dict = {"weight": torch.zeros(2)}
         generator = Generator.__new__(Generator)
         generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
+        generator._model_state_dict_transport = None
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):

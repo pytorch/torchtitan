@@ -53,6 +53,7 @@ def test_initialize_torchstore_client_uses_publisher_role() -> None:
 def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
+        trainer._model_state_dict_transport = None
         # Model parts are torchtitan Modules (BaseModel in the engine).
         weight_part = Module()
         weight_part.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
@@ -103,6 +104,46 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         assert len(worker_thread_ids) == 2
         assert worker_thread_ids[0] == worker_thread_ids[1]
         assert worker_thread_ids[0] != main_thread_id
+
+    asyncio.run(run())
+
+
+def test_push_model_state_dict_stages_before_first_await() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        weight_part = Module()
+        weight_part.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
+        trainer.engine = SimpleNamespace(model_parts=[weight_part])
+        stream = MagicMock()
+        trainer._push_model_state_dict_stream = stream
+        main_thread_id = threading.get_ident()
+        staged = []
+        sync_thread_ids = []
+
+        def stage(model_state_dict) -> None:
+            # Staging issues collectives: it runs on the push stream from the
+            # actor thread.
+            stream.__enter__.assert_called_once()
+            stream.__exit__.assert_not_called()
+            assert threading.get_ident() == main_thread_id
+            staged.append(model_state_dict)
+
+        stream.synchronize.side_effect = lambda: sync_thread_ids.append(
+            threading.get_ident()
+        )
+        trainer._model_state_dict_transport = SimpleNamespace(stage=stage)
+
+        # Staging must finish before the push's first await: Monarch starts the
+        # next forward/backward on this rank once the push yields.
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+        push = asyncio.create_task(trainer.push_model_state_dict())
+        assert len(staged) == 1
+        assert staged[0]["weight"].data_ptr() == weight_part.weight.data_ptr()
+        assert not push.done()
+        await push
+        # The wait for staging is off the event loop.
+        assert len(sync_thread_ids) == 1
+        assert sync_thread_ids[0] != main_thread_id
 
     asyncio.run(run())
 
@@ -230,6 +271,7 @@ def test_get_resume_state_returns_restored_state() -> None:
 def test_forward_backward_accumulates_microbatch_metrics(rdma: bool) -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
+        trainer._model_state_dict_transport = None
         engine = SimpleNamespace(
             num_completed_steps=4,
             ntokens_seen=10,
@@ -338,6 +380,7 @@ def test_forward_backward_rejects_a_misplaced_rdma_microbatch(
     batch_index: int, dp_rank: int, microbatch_index: int
 ) -> None:
     trainer = object.__new__(Trainer)
+    trainer._model_state_dict_transport = None
     trainer.engine = SimpleNamespace(num_completed_steps=0)
     trainer.config = Trainer.Config(model=MagicMock())
     trainer.dp_rank = 1
@@ -376,6 +419,7 @@ def _rl_microbatch(token: int) -> TrainingMicrobatch:
 def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
+        trainer._model_state_dict_transport = None
         engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
