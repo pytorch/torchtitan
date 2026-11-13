@@ -13,9 +13,9 @@ See ``MODEL_STATE_DICT_TRANSPORT.md``.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import math
 import weakref
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple
 
@@ -26,11 +26,8 @@ import torch
 # upstream APIs; switch to public ones once they exist (no upstream issue yet).
 import torch.cuda._pin_memory_utils as pin_memory_utils
 from torch.distributed._transport import new_transport, wait_all
-from torch.distributed.tensor import DTensor, Partial, Placement, Shard
-from torch.distributed.tensor._utils import (
-    _compute_local_shape_and_global_offset,
-    compute_local_shape_and_global_offset,
-)
+from torch.distributed.tensor import DTensor, Partial
+from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from torchtitan.config import Configurable
@@ -80,17 +77,27 @@ class _Read(NamedTuple):
     nbytes: int
     key: str
     local_byte_offset: int
-    """Offset in the generator's local tensor of ``key``."""
+    """Offset in the generator's prefetch buffer of ``key``."""
+
+
+class _PackedPiece(NamedTuple):
+    """A piece read whole into a packed prefetch buffer, and where it goes in the
+    generator rank's shard."""
+
+    index: tuple[slice, ...]
+    """The piece's index in the shard."""
+    offset: int
+    """Element offset in the prefetch buffer."""
+    shape: tuple[int, ...]
 
 
 def _global_offset_and_local_shape(
-    tensor: torch.Tensor, placements: tuple[Placement, ...] | None = None
+    tensor: torch.Tensor,
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Global offset and shape of this rank's local part of ``tensor``, if placed
-    with ``placements`` (default: its own)."""
+    """Global offset and shape of this rank's local part of ``tensor``."""
     if not isinstance(tensor, DTensor):
         return (0,) * tensor.ndim, tuple(tensor.shape)
-    placements = tensor.placements if placements is None else placements
+    placements = tensor.placements
     for p in placements:
         if isinstance(p, Partial):
             raise ValueError(f"Partial placements are unsupported: {placements}")
@@ -103,65 +110,6 @@ def _global_offset_and_local_shape(
         tensor.shape, tensor.device_mesh, placements
     )
     return tuple(offset), tuple(shape)
-
-
-def _staged_placements(
-    tensor: DTensor, generator_shards: list[TensorShard]
-) -> tuple[Placement, ...] | None:
-    """The placements the trainer stages ``tensor`` in, or None for its own.
-
-    A piece is read as one contiguous run per index of the dims before the last
-    one it does not span. A trainer box that cuts a generator box on a dim after
-    the first sharded dim multiplies the runs, so its shards of later dims are
-    then moved to the first sharded dim. E.g. a row-parallel weight (FSDP
-    ``Shard(0)``, TP ``Shard(1)``) read by generator ranks split on dim 0 is
-    staged as ``(Shard(0), Shard(0))``, read at once. If every trainer box
-    contains the generator boxes it overlaps on those dims (e.g. generator TP
-    on dim 1 matching the trainer's), the restage would not reduce the runs.
-
-    Decided from every trainer rank's box so all trainer ranks agree: a
-    redistribute is a collective.
-    """
-    dims = [p.dim for p in tensor.placements if isinstance(p, Shard)]
-    if not dims:
-        return None
-    first = min(dims)
-    staged = tuple(
-        Shard(first) if isinstance(p, (Shard, _StridedShard)) and p.dim > first else p
-        for p in tensor.placements
-    )
-    if staged == tensor.placements:
-        return None
-    # Only the axes sharding later dims change a trainer box on those dims.
-    axes = [
-        axis
-        for axis, p in enumerate(tensor.placements)
-        if isinstance(p, (Shard, _StridedShard)) and p.dim > first
-    ]
-    mesh_shape = tensor.device_mesh.shape
-    coordinate = [0] * len(mesh_shape)
-    later = range(first + 1, tensor.ndim)
-    for index in itertools.product(*(range(mesh_shape[axis]) for axis in axes)):
-        for axis, i in zip(axes, index):
-            coordinate[axis] = i
-        shape, offset = _compute_local_shape_and_global_offset(
-            tensor.shape, mesh_shape, coordinate, tensor.placements
-        )
-        for shard in generator_shards:
-            spans = [
-                (
-                    offset[d],
-                    offset[d] + shape[d],
-                    shard.offset[d],
-                    shard.offset[d] + shard.shape[d],
-                )
-                for d in later
-            ]
-            overlaps = all(lo < g_hi and g_lo < hi for lo, hi, g_lo, g_hi in spans)
-            contains = all(lo <= g_lo and g_hi <= hi for lo, hi, g_lo, g_hi in spans)
-            if overlaps and not contains:
-                return staged
-    return None
 
 
 def _pinned_buffer(nbytes: int) -> torch.Tensor:
@@ -276,11 +224,20 @@ def _plan_reads(
     *,
     rank: int,
     generator_index: int,
-) -> list[_Read]:
+) -> tuple[list[_Read], dict[str, list[_PackedPiece]]]:
     """Plan the reads that fill generator rank ``rank``'s shards from the trainer.
+
+    Each staged piece is read whole, into the key's prefetch buffer at the next
+    offset in offset order. If every piece is one contiguous run of the shard,
+    that is where it belongs; otherwise the key's buffer is packed and is copied
+    into the shard piece by piece on load. E.g. a ``[8, 6]`` shard covered by
+    ``[2, 6]`` row pieces is read in place; covered by ``[8, 3]`` column pieces,
+    it is packed.
 
     When several trainer ranks stage the same piece (e.g. HSDP), generator ranks
     are spread across them round-robin, by generator then rank.
+
+    Returns the reads and the pieces of each packed key.
 
     Raises:
         ValueError: if the trainer does not cover a shard exactly once.
@@ -288,6 +245,7 @@ def _plan_reads(
     # Index of this rank across every generator's ranks.
     spread_index = generator_index * len(sources[0].pieces) + rank
     reads = []
+    packed = {}
     for key, shard in layout.items():
         # (offset, shape) -> the trainer ranks staging that piece.
         stagers: dict[tuple, list[tuple[int, StagedPiece]]] = {}
@@ -297,9 +255,10 @@ def _plan_reads(
                 stagers.setdefault((piece.offset, piece.shape), []).append((i, piece))
 
         _check_disjoint(key, list(stagers))
-        numel = 0
-        itemsize = shard.dtype.itemsize
-        for piece_stagers in stagers.values():
+        pieces = []
+        offset = 0
+        contiguous = True
+        for _, piece_stagers in sorted(stagers.items()):
             source, piece = piece_stagers[spread_index % len(piece_stagers)]
             if any(
                 o < so or o + n > so + m
@@ -310,39 +269,42 @@ def _plan_reads(
                 raise ValueError(
                     f"{key}: a staged piece is outside the generator shard"
                 )
-            numel += math.prod(piece.shape)
-            # One contiguous run per index of the dims before the last one the
-            # piece does not span (see _staged_placements).
+            numel = math.prod(piece.shape)
+            reads.append(
+                _Read(
+                    source,
+                    piece.byte_offset,
+                    numel * shard.dtype.itemsize,
+                    key,
+                    offset * shard.dtype.itemsize,
+                )
+            )
+            pieces.append(
+                _PackedPiece(
+                    tuple(
+                        slice(o - so, o - so + n)
+                        for o, so, n in zip(piece.offset, shard.offset, piece.shape)
+                    ),
+                    offset,
+                    piece.shape,
+                )
+            )
+            offset += numel
+            # Contiguous iff size 1 on every dim before the last one narrower
+            # than the shard.
             dim = max(
                 (d for d, (n, m) in enumerate(zip(piece.shape, shard.shape)) if n != m),
                 default=0,
             )
-            strides = [math.prod(shard.shape[d + 1 :]) for d in range(len(shard.shape))]
-            run = math.prod(piece.shape[dim:])
-            for i, index in enumerate(
-                itertools.product(*map(range, piece.shape[:dim]))
-            ):
-                start = sum(
-                    (o - so + j) * stride
-                    for o, so, j, stride in zip(
-                        piece.offset, shard.offset, (*index, 0), strides
-                    )
-                )
-                reads.append(
-                    _Read(
-                        source,
-                        piece.byte_offset + i * run * itemsize,
-                        run * itemsize,
-                        key,
-                        start * itemsize,
-                    )
-                )
-        if numel != math.prod(shard.shape):
+            contiguous = contiguous and math.prod(piece.shape[:dim]) == 1
+        if offset != math.prod(shard.shape):
             raise ValueError(
-                f"{key}: the trainer covers {numel} of the generator shard's "
+                f"{key}: the trainer covers {offset} of the generator shard's "
                 f"{math.prod(shard.shape)} elements"
             )
-    return reads
+        if not contiguous:
+            packed[key] = pieces
+    return reads, packed
 
 
 class ModelStateDictTransport(Configurable):
@@ -355,7 +317,8 @@ class ModelStateDictTransport(Configurable):
     rank directly into its own registered prefetch buffers.
 
     Trainer: ``register_trainer_source`` once, then ``stage`` per push.
-    Generator: ``connect_generator`` once, then ``read`` per prefetch.
+    Generator: ``connect_generator`` once, then ``read`` per prefetch and
+    ``copy_prefetched_`` per load.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -371,20 +334,18 @@ class ModelStateDictTransport(Configurable):
     def __init__(self, config: Config):
         self._transport = new_transport(config.backend)
         self._read_timeout_s = config.read_timeout_s
-        # Trainer: the staging buffer and, per key in model state dict order, the
-        # dtype and placements it is staged in (None to keep its own) and a
-        # (local index, staging view) per piece.
+        # Trainer: the staging buffer and, per key with pieces on this rank, the
+        # dtype it is staged in and a (local index, staging view) per piece.
         self._staging: torch.Tensor | None = None
         self._staging_plan: dict[
-            str,
-            tuple[
-                torch.dtype,
-                tuple[Placement, ...] | None,
-                list[tuple[tuple[slice, ...], torch.Tensor]],
-            ],
+            str, tuple[torch.dtype, list[tuple[tuple[slice, ...], torch.Tensor]]]
         ] = {}
-        # Generator: (local view, remote buffer) per read, or None until connected.
+        # Generator: (local view, remote buffer) per read, or None until connected;
+        # the prefetch buffers; and (shard index, packed view) per piece of each
+        # packed key.
         self._reads: list[tuple[Any, Any]] | None = None
+        self._prefetched: dict[str, torch.Tensor] = {}
+        self._packed: dict[str, list[tuple[tuple[slice, ...], torch.Tensor]]] = {}
 
     def register_trainer_source(
         self,
@@ -409,7 +370,6 @@ class ModelStateDictTransport(Configurable):
                 trainer sends it in.
         """
         dtypes = {}
-        placements = {}
         boxes = {}
         for key, tensor in model_state_dict.items():
             if not any(key in layout for layout in generator_rank_layouts):
@@ -426,22 +386,11 @@ class ModelStateDictTransport(Configurable):
                         f"receives {layout[key].dtype}"
                     )
             boxes[key] = _global_offset_and_local_shape(tensor)
-            if not isinstance(tensor, DTensor):
-                continue
-            staged = _staged_placements(
-                tensor,
-                [layout[key] for layout in generator_rank_layouts if key in layout],
-            )
-            if staged is not None:
-                placements[key] = staged
-                boxes[key] = _global_offset_and_local_shape(tensor, staged)
 
         pieces, nbytes = _staged_pieces(boxes, generator_rank_layouts)
         staging = _pinned_buffer(max(nbytes, 1))
         memory = self._transport.register_memory(staging)
-        self._staging_plan = {
-            key: (dtype, placements.get(key), []) for key, dtype in dtypes.items()
-        }
+        self._staging_plan = {}
         copied = set()
         for rank_pieces in pieces:
             for key, piece in rank_pieces.items():
@@ -456,34 +405,21 @@ class ModelStateDictTransport(Configurable):
                     for o, to, n in zip(piece.offset, boxes[key][0], piece.shape)
                 )
                 view = staging[start:end].view(dtype).view(piece.shape)
-                self._staging_plan[key][2].append((index, view))
-        # Keep restaged keys even without pieces on this rank: a redistribute is
-        # a collective.
-        self._staging_plan = {
-            key: plan
-            for key, plan in self._staging_plan.items()
-            if plan[1] is not None or plan[2]
-        }
+                self._staging_plan.setdefault(key, (dtype, []))[1].append((index, view))
         self._staging = staging
         return TrainerSource(pieces, memory.to_remote_buffer(), self._transport.bind())
 
     def stage(self, model_state_dict: dict[str, torch.Tensor]) -> None:
-        """Cast and reshard this trainer rank's shards and copy them into the
-        staging buffer.
+        """Cast this trainer rank's shards and copy them into the staging buffer.
 
-        A collective over the mesh of each restaged DTensor: every trainer rank
-        must call it, in the same order relative to its other collectives. The
-        copies are asynchronous; synchronize the current stream before generators
-        read.
+        The copies are asynchronous; synchronize the current stream before
+        generators read.
         """
         with torch.no_grad():
-            for key, (dtype, placements, copies) in self._staging_plan.items():
+            for key, (dtype, copies) in self._staging_plan.items():
                 # Cast on the device: a casting device-to-host copy_ goes through
                 # a pageable temporary and casts on the CPU.
-                tensor = model_state_dict[key].to(dtype)
-                if placements is not None:
-                    tensor = tensor.redistribute(placements=placements)
-                local = _local(tensor)
+                local = _local(model_state_dict[key]).to(dtype)
                 for index, view in copies:
                     view.copy_(local[index], non_blocking=True)
 
@@ -500,12 +436,13 @@ class ModelStateDictTransport(Configurable):
 
         Args:
             prefetched_model_state_dict: The buffers ``read`` fills, whose
-                ``shard_layout`` the trainer staged for.
+                ``shard_layout`` the trainer staged for. Packed keys hold
+                their pieces out of place; load them with ``copy_prefetched_``.
             sources: Every trainer rank's ``register_trainer_source`` result.
             rank: This rank within its generator.
             generator_index: Index of this rank's generator.
         """
-        reads = _plan_reads(
+        reads, packed = _plan_reads(
             sources,
             shard_layout(prefetched_model_state_dict),
             rank=rank,
@@ -513,11 +450,13 @@ class ModelStateDictTransport(Configurable):
         )
         for source in sources:
             self._transport.connect(source.url)
+        locals_ = {
+            key: _local(tensor).view(-1)
+            for key, tensor in prefetched_model_state_dict.items()
+        }
         # Only keys with reads: backends reject registering empty tensors.
         memories = {
-            key: self._transport.register_memory(
-                _local(prefetched_model_state_dict[key]).view(-1)
-            )
+            key: self._transport.register_memory(locals_[key])
             for key in {r.key for r in reads}
         }
         self._reads = [
@@ -527,6 +466,19 @@ class ModelStateDictTransport(Configurable):
             )
             for r in reads
         ]
+        self._prefetched = prefetched_model_state_dict
+        self._packed = {
+            key: [
+                (
+                    p.index,
+                    locals_[key][p.offset : p.offset + math.prod(p.shape)].view(
+                        p.shape
+                    ),
+                )
+                for p in pieces
+            ]
+            for key, pieces in packed.items()
+        }
 
     async def read(self) -> None:
         """Fill the prefetch buffers from the trainer's staging buffers.
@@ -544,3 +496,23 @@ class ModelStateDictTransport(Configurable):
             ]
         )
         await wait_all(works, timeout=self._read_timeout_s)
+
+    def copy_prefetched_(self, state_dict: dict[str, torch.Tensor]) -> Iterable[str]:
+        """Copy ``state_dict`` in place from the prefetch buffers, unpacking packed
+        keys. Returns its keys."""
+        unpacked = False
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                pieces = self._packed.get(key)
+                if pieces is None:
+                    tensor.copy_(self._prefetched[key])
+                    continue
+                unpacked = True
+                local = _local(tensor)
+                for index, view in pieces:
+                    local[index].copy_(view, non_blocking=True)
+        # Packed copies are async; finish them before the next read reuses
+        # the prefetch buffers.
+        if unpacked and torch.accelerator.is_available():
+            torch.accelerator.current_stream().synchronize()
+        return state_dict.keys()
