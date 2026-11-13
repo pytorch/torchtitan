@@ -9,15 +9,12 @@ import dataclasses
 import pytest
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.muse_spark import build_model_config
+from torchtitan.models.kimi_k3 import build_model_config
 
 
 def test_multimodal_config_requires_an_encoder() -> None:
-    """Muse Spark's encoders are each optional, so MultimodalModel.Config is
-    what rejects a multimodal config with none."""
+    """Kimi K3's vision_encoder is its only encoder, so MultimodalModel.Config
+    is the only check that rejects setting it to None."""
     config = build_model_config("debugmodel_mm", parallelism=ParallelismConfig())
-    dataclasses.replace(config, audio_encoder=None, dataset_modalities=("vision",))
     with pytest.raises(ValueError, match="needs at least one of"):
-        dataclasses.replace(
-            config, audio_encoder=None, vision_encoder=None, dataset_modalities=()
-        )
+        dataclasses.replace(config, vision_encoder=None)
