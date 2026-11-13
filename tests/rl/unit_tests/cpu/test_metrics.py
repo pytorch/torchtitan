@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
@@ -20,6 +23,8 @@ from torchtitan.observability.metrics import TensorBoardLogger, WandBLogger
 from torchtitan.rl.controller.metrics import compute_rollout_metrics
 
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.observability.metrics import process
+from torchtitan.rl.observability.metrics.process import ProcessStats
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.types import RolloutTurnID
 
@@ -841,3 +846,208 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def _burn(seconds: float, *, then_hold_and_wait: bool = False) -> str:
+    """Python code that burns ``seconds`` of CPU; optionally then holds 64 MiB until stdin closes."""
+    code = f"import sys, time\nstart = time.process_time()\nwhile time.process_time() - start < {seconds}: pass\n"
+    if then_hold_and_wait:
+        code += "held = bytearray(64 * 2**20)\nprint('ready', flush=True)\nsys.stdin.readline()\n"
+    return code
+
+
+def _read(stats: ProcessStats) -> dict:
+    return {
+        (metric.key, type(metric.value)): metric.value.value
+        for metric in stats.metrics()
+    }
+
+
+def _list_only_in_proc(
+    monkeypatch, pids: set[str], *, newest_first: bool = False
+) -> None:
+    """List only `pids` in /proc from now on; the test adds each process's pid as it starts it.
+
+    Without it, a read scans every process on the host (~0.2 s of CPU per 2,700 processes) and
+    counts any leftover child of pytest, so a CPU bound would depend on the host.
+    """
+    scandir = os.scandir
+
+    def listed(path):
+        if path != "/proc":
+            return scandir(path)
+        entries = [entry for entry in scandir(path) if entry.name in pids]
+        if newest_first:
+            entries.sort(key=lambda entry: int(entry.name), reverse=True)
+        return entries
+
+    monkeypatch.setattr(os, "scandir", listed)
+
+
+def test_process_stats_counts_each_child_cpu_second_once(monkeypatch) -> None:
+    """A rollout worker's agents are subprocesses. Example: a child burns 1 s and exits. The read
+    while it runs counts its 1 s; the read after it exits does not count it again."""
+    read = _read
+    cpu, memory = ("process/rollout_worker/cpu_seconds", m.Sum), (
+        "process/rollout_worker/rss_anon_gib",
+        m.Sum,
+    )
+    tree_pids: set[str] = set()
+    _list_only_in_proc(monkeypatch, tree_pids)
+    tree = ProcessStats("rollout_worker", children=True)
+
+    # 1. A child that already exited.
+    subprocess.run([sys.executable, "-c", _burn(0.5)], check=True)
+    assert read(tree)[cpu] >= 0.5
+
+    # 2. A live child. The router's stats (no children) count only this process.
+    own = ProcessStats("router", children=False)
+    live = subprocess.Popen(
+        [sys.executable, "-c", _burn(1.0, then_hold_and_wait=True)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    tree_pids.add(str(live.pid))
+    try:
+        assert live.stdout.readline() == b"ready\n"
+        while_live = read(tree)
+        own_while_live = read(own)
+    finally:
+        live.stdin.close()
+        live.wait()
+    assert while_live[cpu] >= 1.0
+    assert (
+        while_live[cpu] - own_while_live[("process/router/cpu_seconds", m.Sum)] >= 0.8
+    )
+    assert (
+        while_live[memory] - own_while_live[("process/router/rss_anon_gib", m.Sum)]
+        >= 60 / 1024
+    )
+    assert (
+        while_live[("process/rollout_worker/rss_anon_gib", m.Max)] == while_live[memory]
+    )
+    assert while_live[("process/rollout_worker/host_mem_available_gib", m.Min)] > 0
+
+    # 3. The same child after it exited: only this process's own work since read 2, not the
+    # child's 1 s again.
+    assert read(tree)[cpu] < 0.9
+
+
+@pytest.mark.parametrize("reap_after_read", [1, 2])
+@pytest.mark.parametrize("descendant", ["child", "grandchild"])
+def test_process_stats_counts_a_descendant_once_when_it_is_reaped_mid_read(
+    monkeypatch, descendant, reap_after_read
+) -> None:
+    """Example: a descendant burns 0.5 s and exits; its parent (this process, or a child) reaps it
+    in the middle of a read, right after the read looks at it (the 1st or the 2nd time). The read
+    counts the 0.5 s once, whatever order /proc lists the processes in."""
+    # Newest first: a scan sees the descendant before its parent.
+    tree_pids: set[str] = set()
+    _list_only_in_proc(monkeypatch, tree_pids, newest_first=True)
+    tree = ProcessStats("rollout_worker", children=True)
+    if descendant == "child":
+        proc = subprocess.Popen([sys.executable, "-c", _burn(0.5)])
+        os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)  # exited, not reaped
+        pid, reap = proc.pid, proc.wait
+    else:
+        parent_code = (
+            "import os, subprocess, sys\n"
+            f"grandchild = subprocess.Popen([sys.executable, '-c', {_burn(0.5)!r}])\n"
+            "os.waitid(os.P_PID, grandchild.pid, os.WEXITED | os.WNOWAIT)  # exited, not reaped\n"
+            "print(grandchild.pid, flush=True)\n"
+            "sys.stdin.readline()\n"
+            "grandchild.wait()\n"
+            "print('reaped', flush=True)\n"
+            "sys.stdin.readline()\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", parent_code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+        )
+        pid = int(proc.stdout.readline())
+
+        def reap():
+            proc.stdin.write(b"reap\n")
+            proc.stdin.flush()
+            assert proc.stdout.readline() == b"reaped\n"
+
+    reads, read_stat = [], process._read_stat
+
+    def read_stat_then_reap(stat_pid):
+        stat = read_stat(stat_pid)
+        if int(stat_pid) == pid:
+            reads.append(stat_pid)
+            if len(reads) == reap_after_read:
+                reap()
+        return stat
+
+    tree_pids.update({str(proc.pid), str(pid)})
+    monkeypatch.setattr(process, "_read_stat", read_stat_then_reap)
+    try:
+        cpu = _read(tree)[("process/rollout_worker/cpu_seconds", m.Sum)]
+    finally:
+        monkeypatch.undo()
+        if proc.stdin is not None:
+            proc.stdin.close()
+        proc.wait()
+    assert len(reads) >= reap_after_read
+    # The descendant's 0.5 s plus interpreter starts; counted twice it would be over 1 s.
+    assert 0.5 <= cpu < 0.9
+
+
+def test_process_stats_skips_a_pid_that_now_names_another_process(monkeypatch) -> None:
+    """Between finding the tree and reading its counters, a child's pid can be reused by a new
+    process. A different start time marks that case: the process is not counted."""
+    tree_pids: set[str] = set()
+    _list_only_in_proc(monkeypatch, tree_pids)
+    tree = ProcessStats("rollout_worker", children=True)
+    live = subprocess.Popen(
+        [sys.executable, "-c", _burn(0.5, then_hold_and_wait=True)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+    )
+    tree_pids.add(str(live.pid))
+    reads, read_stat = [], process._read_stat
+
+    def read_stat_of_a_newer_process(stat_pid):
+        stat = read_stat(stat_pid)
+        if int(stat_pid) == live.pid:
+            reads.append(stat_pid)
+            if len(reads) == 2:  # the counters' read: give it a later start time
+                stat = list(stat)
+                stat[process._START_TIME] = str(int(stat[process._START_TIME]) + 1)
+        return stat
+
+    try:
+        assert live.stdout.readline() == b"ready\n"
+        monkeypatch.setattr(process, "_read_stat", read_stat_of_a_newer_process)
+        cpu = _read(tree)[("process/rollout_worker/cpu_seconds", m.Sum)]
+    finally:
+        monkeypatch.undo()
+        live.stdin.close()
+        live.wait()
+    assert len(reads) == 2
+    assert cpu < 0.4
+
+
+def test_process_stats_reads_a_child_that_hides_its_memory() -> None:
+    """A process that calls prctl(PR_SET_DUMPABLE, 0) (ssh-agent does; so does a setuid binary
+    like sudo) hides /proc/<pid>/smaps_rollup from its own user (not from root). The read
+    skips its memory instead of raising PermissionError."""
+    hidden = (
+        "import ctypes, sys\n"
+        "ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE = 4\n"
+        "print('ready', flush=True)\n"
+        "sys.stdin.readline()\n"
+    )
+    tree = ProcessStats("rollout_worker", children=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", hidden], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+    )
+    try:
+        assert child.stdout.readline() == b"ready\n"
+        assert _read(tree)[("process/rollout_worker/rss_anon_gib", m.Sum)] > 0
+    finally:
+        child.stdin.close()
+        child.wait()
