@@ -30,6 +30,7 @@ from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.attention import AttentionMetadata, AttentionMetadataMap
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import token_id_placement
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.models.common.nn_modules import Identity
 from torchtitan.models.qwen3_5.model import Qwen35Model
@@ -59,7 +60,9 @@ class FlashNextRouter(TokenChoiceTopKRouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TokenChoiceTopKRouter.Config):
-        pass
+        # Keep the reference gate GEMM in the activation dtype; the shared
+        # router expects HiMidLoLinear's FP32 logits.
+        gate: Linear.Config  # pyrefly: ignore [bad-override]
 
     def forward(
         self, x_TD: torch.Tensor, expert_bias_E: torch.Tensor | None = None, **kwargs

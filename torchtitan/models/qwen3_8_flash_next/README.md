@@ -131,31 +131,27 @@ Results for reduced models using identical weights, measured on GB300 with the
 | Image/video, BF16 decoder + FP32 vision | `3.91e-3` | `0.999952` |
 
 One of 2,496 text logits exceeds the script's forward bound (`4.15e-3` versus
-`4.03e-3`). Against an FP32 copy of the HF model, that logit's error is
-`7.5e-4` for torchtitan and `3.34e-3` for the BF16 HF reference; with
-`gather_attn` forced to Attention Gym's reference kernel, every bound passes.
+`4.03e-3`); against an FP32 copy of the HF model, torchtitan's error on it is
+smaller than the BF16 HF reference's.
 
-Offline GB300 comparisons of unsharded versus `FSDP=2, EP=1/2` (same
-checkpoint and inputs) match routing and QSA selections exactly. Image/video
-logits match bitwise (gradient cosine `0.9999984`). Text logits exceed the
-forward bound in 182 of 159,744 entries: fused `gather_attn` rounds a query's
-output differently depending on its row in the packed batch (one BF16 ulp
-across a 64-query tile boundary), and the unsharded layout places the same
-tokens at different rows. With the reference kernel, text logits match bitwise
-(gradient cosine `0.9999977`).
+PLE, like the GDN layers, does not skip padding inside a document; the data
+pipeline starts trailing padding at document position 0. QSA excludes padding
+from its blocks.
 
-CPU tests cover indexer gradients with no complete blocks; the multimodal
-integration does not explicitly force that imbalance across ranks.
-
-Uninterrupted training is bitwise reproducible. Resuming from a step-5
-checkpoint matches it through step 8; from step 9 the loss and gradient norm
-differ by up to `9.9e-4` and `6.3e-3`. The cause is not yet identified.
+Uninterrupted training is bitwise reproducible. A run resumed from a step-5
+checkpoint differs from the uninterrupted run from step 9 (up to `9.9e-4` in
+loss) because `torch.compile` compiles the vision encoder's `flex_attention`
+with static shapes first and dynamic shapes after the first shape change, so
+the kernel a step uses depends on the process's history. With
+`torch._dynamo.config.automatic_dynamic_shapes = False`, the resumed run
+matches the uninterrupted run bitwise.
 
 ## TODO
 
 - Replace the model-local indexer teacher with
   [the shared teacher](https://github.com/pytorch/torchtitan/pull/5863) once it
   lands.
-- Find why resumed training diverges from uninterrupted training at step 9.
+- Compile the vision encoder's `flex_attention` independently of shape
+  history, so resumed training matches uninterrupted training bitwise.
 - Qualify released-model capacity and throughput, including table offload and
   longer-context attention.

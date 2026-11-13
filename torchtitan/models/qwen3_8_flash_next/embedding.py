@@ -173,9 +173,8 @@ class NGramEmbedding(Module):
         head_vocab_sizes: tuple[int, ...]
         ngram_embedding: NGramTable.Config
         eos_token_id: int
-        ple_layer_index: int = 0
-        seed: int = 1234
-        split_ngram_parts: int = 1
+        # Number of HF checkpoint parts of the table; read by the state dict adapter.
+        split_ngram_parts: int
 
         def __post_init__(self):
             if self.ngram_size < 2 or self.heads_per_ngram < 1:
@@ -207,11 +206,9 @@ class NGramEmbedding(Module):
         cfg = self.config
         with torch.device(buffer_device or self.ngram_embedding.weight.device):
             self.layer_multipliers = torch.tensor(
+                # The only PLE layer uses the reference's hash layer 0 and seed.
                 ngram_multipliers(
-                    cfg.vocab_size,
-                    cfg.ngram_size,
-                    ple_layer_index=cfg.ple_layer_index,
-                    seed=cfg.seed,
+                    cfg.vocab_size, cfg.ngram_size, ple_layer_index=0, seed=1234
                 ),
                 dtype=torch.int64,
             )
@@ -225,6 +222,12 @@ class NGramEmbedding(Module):
     def hash_ids(
         self, input_ids_T: torch.Tensor, *, document_positions_T: torch.Tensor
     ) -> torch.Tensor:
+        """Hash each token's document-local n-grams into table rows, ``[T, N]``.
+
+        Padding is hashed like any token. The data pipeline starts padding at
+        document position 0, so it never enters a real document's history;
+        like the GDN layers, PLE does not skip padding inside a document.
+        """
         input_ids_T = input_ids_T.long()
         indices_T = torch.arange(input_ids_T.numel(), device=input_ids_T.device)
         starts_T = document_starts(document_positions_T)

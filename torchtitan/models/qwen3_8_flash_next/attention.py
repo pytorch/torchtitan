@@ -27,7 +27,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attn_gym import gather_attn, lightning_indexer
 from torchtitan.models.common.aux_loss import AuxLoss
 
-from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm, Qwen35Attention
 from torchtitan.models.qwen3_5.rope import MRoPE as Qwen35MRoPE
@@ -136,10 +135,16 @@ def _selected_block_scores(query_QHK, key_GK, blocks_QB, *, scale):
 
 
 class QSAIndexMetadata(NamedTuple):
-    """Document-local complete blocks and tails shared by all QSA layers."""
+    """Document-local complete blocks and tails shared by all QSA layers.
 
-    starts_T: torch.Tensor  # noqa: N815
-    valid_T: torch.Tensor  # noqa: N815
+    Built once per microbatch, so the data-dependent shapes below cost one set
+    of host syncs instead of one per QSA layer and pass.
+    """
+
+    valid_indices_U: torch.Tensor  # noqa: N815
+    document_U: torch.Tensor  # noqa: N815
+    cu_seqlens: torch.Tensor
+    cu_seqlens_k: torch.Tensor
     block_indices_GR: torch.Tensor  # noqa: N815
     tail_indices_TR: torch.Tensor  # noqa: N815
 
@@ -179,16 +184,36 @@ class QSAIndexMetadata(NamedTuple):
         tail_indices_TR = tail_indices_TR.masked_fill(
             ~(valid_T[:, None] & (tail_offsets_TR < tail_count_T[:, None])), -1
         )
-        return cls(starts_T, valid_T, block_indices_GR, tail_indices_TR)
+        # lightning_indexer's varlen layout over valid tokens.
+        starts_U = starts_T[valid_indices_U]
+        new_document_U = F.pad(starts_U[1:] != starts_U[:-1], (1, 0), value=True)
+        document_U = new_document_U.cumsum(0) - 1
+        tokens_N = torch.bincount(document_U)
+        cu_seqlens = F.pad(tokens_N.cumsum(0), (1, 0)).int()
+        cu_seqlens_k = F.pad((tokens_N // compress_ratio).cumsum(0), (1, 0)).int()
+        return cls(
+            valid_indices_U,
+            document_U,
+            cu_seqlens,
+            cu_seqlens_k,
+            block_indices_GR,
+            tail_indices_TR,
+        )
 
     def annotate_spmd_types(self) -> None:
-        types_T = token_id_placement()
+        # Valid tokens and documents are rank-local and data-dependent.
+        types_local = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R}
         types_TR = spmd.SpmdType(
             {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
             spmd.PartitionSpec(("dp", "cp"), None),
         )
-        spmd.assert_type(self.starts_T, types_T)
-        spmd.assert_type(self.valid_T, types_T)
+        for tensor in (
+            self.valid_indices_U,
+            self.document_U,
+            self.cu_seqlens,
+            self.cu_seqlens_k,
+        ):
+            spmd.assert_type(tensor, types_local)
         spmd.assert_type(self.block_indices_GR, types_TR)
         spmd.assert_type(self.tail_indices_TR, types_TR)
 
@@ -271,7 +296,10 @@ class QSAIndexer(Module):
                 padding_mask_T=padding_mask_T,
                 compress_ratio=self.compress_ratio,
             )
-        starts_T, valid_T, block_indices_GR, tail_indices_TR = metadata
+        block_indices_GR, tail_indices_TR = (
+            metadata.block_indices_GR,
+            metadata.tail_indices_TR,
+        )
         num_blocks = block_indices_GR.shape[0]
         pooled_GK = raw_key_TK[block_indices_GR].float().mean(1).to(raw_key_TK.dtype)
         key_GK = self._rotate(
@@ -283,10 +311,10 @@ class QSAIndexer(Module):
         )
         if num_selected:
             with torch.no_grad():
-                valid_U, blocks_UB = self._select_blocks(
-                    query_THK, key_GK, starts_T, valid_T, num_selected=num_selected
+                blocks_UB = self._select_blocks(
+                    query_THK, key_GK, metadata, num_selected=num_selected
                 )
-            blocks_TB[valid_U] = blocks_UB
+            blocks_TB[metadata.valid_indices_U] = blocks_UB
         tokens_TBR = block_indices_GR[blocks_TB.clamp_min(0)].masked_fill(
             (blocks_TB < 0).unsqueeze(-1), -1
         )
@@ -311,7 +339,7 @@ class QSAIndexer(Module):
             )
         return selected_indices_TJ, torch.cat(selected_scores)
 
-    def _select_blocks(self, query_THK, key_GK, starts_T, valid_T, *, num_selected):
+    def _select_blocks(self, query_THK, key_GK, metadata, *, num_selected):
         """Top-k complete blocks per valid query with Attention Gym's lightning_indexer.
 
         lightning_indexer groups each document's tokens into compress_ratio-token
@@ -323,17 +351,10 @@ class QSAIndexer(Module):
         candidates; otherwise the choice among cutoff ties is backend-defined.
 
         Returns:
-            ``(valid_U, blocks_UB)``: valid token positions and their selected
-            global block ids in ascending order, -1 after the valid ones.
+            ``blocks_UB``: each valid token's selected global block ids in
+            ascending order, -1 after the valid ones.
         """
-        valid_U = valid_T.nonzero().flatten()
-        starts_U = starts_T[valid_U]
-        new_document_U = F.pad(starts_U[1:] != starts_U[:-1], (1, 0), value=True)
-        document_U = new_document_U.cumsum(0) - 1
-        tokens_N = torch.bincount(document_U)
-        cu_seqlens = F.pad(tokens_N.cumsum(0), (1, 0)).int()
-        cu_seqlens_k = F.pad((tokens_N // self.compress_ratio).cumsum(0), (1, 0)).int()
-        query_UHK = query_THK[valid_U]
+        query_UHK = query_THK[metadata.valid_indices_U]
         # The fused kernels need fp16/bf16 on SM90 or newer, as in DeepSeek-V4.
         fused = (
             query_UHK.is_cuda
@@ -347,20 +368,22 @@ class QSAIndexer(Module):
             num_selected,
             causal=True,
             compress_ratio=self.compress_ratio,
-            cu_seqlens=cu_seqlens,
-            cu_seqlens_k=cu_seqlens_k,
+            cu_seqlens=metadata.cu_seqlens,
+            cu_seqlens_k=metadata.cu_seqlens_k,
             impl="fused" if fused else "reference",
         ).squeeze(0)
         num_blocks = key_GK.shape[0]
         # Document-local -> global block ids; sort for a backend-independent order.
         blocks_UB = (
             torch.where(
-                local_UB >= 0, local_UB + cu_seqlens_k[document_U, None], num_blocks
+                local_UB >= 0,
+                local_UB + metadata.cu_seqlens_k[metadata.document_U, None],
+                num_blocks,
             )
             .sort(-1)
             .values
         )
-        return valid_U, blocks_UB.masked_fill(blocks_UB == num_blocks, -1).long()
+        return blocks_UB.masked_fill(blocks_UB == num_blocks, -1).long()
 
 
 class QSAIndexerLoss(AuxLoss):

@@ -214,11 +214,12 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
             owned = all(
                 isinstance(value, CheckpointableTensor) for value in shards.values()
             )
-            # DCP fills rank-local placeholders made by to_hf on this adapter.
-            if owned and layer_id not in self._ngram_weight_layouts:
+            # DCP fills rank-local placeholders made by to_hf on this adapter;
+            # complete shards would otherwise be wrapped as one rank's rows.
+            if owned != (layer_id in self._ngram_weight_layouts):
                 raise ValueError(
                     "Rank-local HF n-gram fragments require to_hf placeholders "
-                    "from the same adapter"
+                    "from the same adapter, and a row-owned table requires them"
                 )
             if not owned and set(shards) != set(range(parts)):
                 raise ValueError(
