@@ -112,6 +112,12 @@ class Glm5Attention(DeepSeekMLAAttention):
         remat.recompute_needs_tensor(q_TNH)
         with spmd.local():
             q_TNH = q_TNH.view(T, -1, self.qk_head_dim)
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    q_TNH,
+                    spmd.V,
+                    spmd.PartitionSpec(("dp", "cp"), "tp", None),
+                )
         # KV path: keep content in a compressed latent representation and keep
         # one shared rotary key. The backend absorbs K into Q and projects V
         # after attention, without expanding the key/value sequence per head.
