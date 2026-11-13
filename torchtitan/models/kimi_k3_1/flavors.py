@@ -7,6 +7,7 @@
 """Kimi K3.1 model flavors."""
 
 from functools import partial
+from typing import cast
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -236,8 +237,18 @@ def build_model_config(
         raise ValueError(
             f"indexer_loss_coeff must be nonnegative, got {indexer_loss_coeff}."
         )
-    return get_config(
+    model_config = get_config(
         seq_len=context_len,
         indexer_loss_coeff=indexer_loss_coeff,
         parallelism=parallelism,
     )
+    num_heads = cast(KimiDSAAttention.Config, model_config.first_full_attention).n_heads
+    num_heads_per_rank = num_heads // parallelism.tensor_parallel_degree
+    if not 16 <= num_heads_per_rank <= 128:
+        raise ValueError(
+            "Kimi K3.1 sparse attention runs the Attention Gym (latent, rope) pair "
+            "kernel, which needs 16 to 128 query heads per tensor parallel rank; "
+            f"{num_heads} heads with tensor_parallel_degree="
+            f"{parallelism.tensor_parallel_degree} gives {num_heads_per_rank}."
+        )
+    return model_config
