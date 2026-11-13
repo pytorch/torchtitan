@@ -36,7 +36,7 @@ class _LinearVisionEncoder(nn.Module):
 def _embeddings_only_model() -> Qwen35Model:
     config = cast(
         Qwen35Model.Config,
-        build_model_config("debugmodel", seq_len=8, parallelism=ParallelismConfig()),
+        build_model_config("debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()),
     )
     config = replace(
         config,

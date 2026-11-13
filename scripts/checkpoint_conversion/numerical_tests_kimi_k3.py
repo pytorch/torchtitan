@@ -500,7 +500,7 @@ def compare(
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_flavor", default="debugmodel")
+    parser.add_argument("--model_flavor", default="debugmodel_mm")
     parser.add_argument("--image_size", type=int, default=336)
     parser.add_argument(
         "--force-hf-routing",

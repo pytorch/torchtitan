@@ -75,7 +75,7 @@ def rl_grpo_qwen3_5_0_8b_geometry3k() -> Controller.Config:
     generator_parallelism = InferenceParallelismConfig(tensor_parallel_degree=1)
     trainer_model, generator_model = build_rl_model_configs(
         build_qwen3_5_model_config,
-        "0.8B",
+        "0.8B_mm",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
