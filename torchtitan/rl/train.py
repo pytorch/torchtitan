@@ -11,8 +11,8 @@ This demonstrates:
 1. Distributed actor architecture with Generator (vLLM) and Trainer (TorchTitan)
    running on separate GPU meshes
 2. Model state dict transfer across meshes via TorchStore: the trainer publishes its
-   model state dict and the generator pulls it into its own parallelism layout,
-   with direct GPU-to-GPU RDMA transfer when available
+   model state dict to StorageVolumes on the trainer hosts, and the generator pulls
+   it into its own parallelism layout
 3. Envs driven rollouts; reward and advantage computation live inline
    in the controller.
 
