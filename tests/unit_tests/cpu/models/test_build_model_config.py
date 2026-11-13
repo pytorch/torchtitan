@@ -36,6 +36,7 @@ _MODELS = [
     "gpt_oss",
     "kimi_k2_7",
     "kimi_k3",
+    "kimi_k3_1",
     "muse_glimmer",
     "flux",
 ]
@@ -47,7 +48,7 @@ _MODELS = [
         name
         for name in _MODELS
         # Their sparse attention layers build their own document metadata.
-        if name not in ("deepseek_v4", "kimi_k2_7", "qwen3_8_flash_next")
+        if name not in ("deepseek_v4", "kimi_k2_7", "qwen3_8_flash_next", "kimi_k3_1")
     ],
 )
 def test_model_defaults_to_varlen(model):
