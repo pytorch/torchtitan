@@ -46,8 +46,6 @@ from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
-from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rubric import Rubric
@@ -191,7 +189,6 @@ def _qwen3_4b_verifiers_config(
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

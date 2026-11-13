@@ -52,8 +52,6 @@ from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
-from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
@@ -166,7 +164,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -307,7 +304,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
             sampling=SamplingConfig(temperature=1.0, top_p=1.0, max_tokens=512),
             max_num_batched_tokens=max_num_batched_tokens,
@@ -442,7 +438,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         generator=Generator.Config(
             model=generator_model,
             parallelism=generator_parallelism,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
