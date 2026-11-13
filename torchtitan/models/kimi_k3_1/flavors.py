@@ -62,7 +62,7 @@ def _dsa_config(
     indexer_loss_coeff: float,
 ) -> KimiMLAAttention.Config:
     return mla_attention_config(
-        config_cls=partial(
+        config_factory=partial(
             KimiDSAAttention.Config,
             indexer=KimiDSAIndexer.Config(
                 num_index_heads=num_index_heads,
@@ -140,7 +140,7 @@ def _debugmodel(
         vocab_size=2048,
         num_layers=17,
         full_attention_layers={3, 7, 11, 15, 16},
-        full_attention=partial(
+        full_attention_config_factory=partial(
             _dsa_config,
             index_topk=128,
             num_index_heads=4,
@@ -196,7 +196,7 @@ def _kimi_k3_1_pro(
         vocab_size=163840,
         num_layers=93,
         full_attention_layers=set(range(3, 92, 4)) | {92},
-        full_attention=partial(
+        full_attention_config_factory=partial(
             _dsa_config,
             index_topk=2048,
             num_index_heads=32,

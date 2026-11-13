@@ -168,7 +168,7 @@ def _small_kimi_k3_config(*, has_vision_encoder: bool = True) -> KimiK3Model.Con
         vocab_size=32,
         num_layers=2,
         full_attention_layers={1},
-        full_attention=partial(mla_config, attn_backend="flex"),
+        full_attention_config_factory=partial(mla_config, attn_backend="flex"),
         attn_res_block_size=1,
         num_heads=2,
         q_lora_rank=32,
