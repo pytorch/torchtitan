@@ -69,7 +69,19 @@ class AlphabetSortDataset(RLDataset):
         hf_dataset: str = "kalomaze/alphabetic-arxiv-authors-it1"
         hf_split: str = "train"
 
+        num_samples: int | None = None
+        """Samples in one pass: with `repeat=False` (a validation dataset), the dataset ends after
+        them. None: samples are generated forever, so `repeat=False` raises. `repeat=True` ignores
+        it."""
+
         def __post_init__(self) -> None:
+            if not self.repeat and self.num_samples is None:
+                raise ValueError(
+                    "AlphabetSortDataset generates samples forever, so repeat=False (every "
+                    "validation dataset) needs num_samples, e.g. num_samples=20."
+                )
+            if self.num_samples is not None and self.num_samples < 1:
+                raise ValueError(f"num_samples must be >= 1; got {self.num_samples}")
             if self.max_turns < 1:
                 raise ValueError(f"max_turns must be >= 1; got {self.max_turns}")
             if self.max_names_per_turn < 1:
@@ -81,11 +93,18 @@ class AlphabetSortDataset(RLDataset):
         self._config = config
         self._author_pool = _load_authors(config.hf_dataset, config.hf_split)
         self._rng = random.Random(config.seed)
+        self._num_samples_drawn = 0
 
     def __iter__(self) -> Iterator[AlphabetSortSample]:
         return self
 
     def __next__(self) -> AlphabetSortSample:
+        if (
+            not self._config.repeat
+            and self._num_samples_drawn == self._config.num_samples
+        ):
+            raise StopIteration
+        self._num_samples_drawn += 1
         return self._sample()
 
     def state_dict(self) -> dict:

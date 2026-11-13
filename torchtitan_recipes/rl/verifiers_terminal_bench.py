@@ -169,7 +169,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         num_prompts_per_train_step=12,
         num_samples_per_prompt=32,
         target_offpolicy_steps=3,
-        validation=ValidationConfig(steps=89),
+        validation=ValidationConfig(steps=-1),
     )
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
@@ -307,7 +307,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         num_prompts_per_train_step=8,
         num_samples_per_prompt=32,
         target_offpolicy_steps=4,
-        validation=ValidationConfig(steps=89),
+        validation=ValidationConfig(steps=-1),
     )
     # TODO: update to distMoE model config
     trainer_parallelism = ParallelismConfig(
@@ -427,7 +427,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         num_training_steps=100,
         num_prompts_per_train_step=8,
         num_samples_per_prompt=8,
-        validation=ValidationConfig(steps=89),
+        validation=ValidationConfig(steps=-1),
     )
     trainer_parallelism = ParallelismConfig(
         data_parallel_shard_degree=4,

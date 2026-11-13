@@ -83,7 +83,7 @@ def _alphabet_sort_rollouter_config(*, max_rollout_tokens: int) -> Rollouter.Con
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=AlphabetSortDataset.Config(seed=42)
         ),
-        validation_dataset=AlphabetSortDataset.Config(seed=99),
+        validation_dataset=AlphabetSortDataset.Config(seed=99, num_samples=20),
         worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardAlphabetSort.Config(weight=1.0)]),
             message_env=AlphabetSortEnv.Config(),
