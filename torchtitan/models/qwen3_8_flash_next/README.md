@@ -138,20 +138,15 @@ PLE, like the GDN layers, does not skip padding inside a document; the data
 pipeline starts trailing padding at document position 0. QSA excludes padding
 from its blocks.
 
-Uninterrupted training is bitwise reproducible. A run resumed from a step-5
-checkpoint differs from the uninterrupted run from step 9 (up to `9.9e-4` in
-loss) because `torch.compile` compiles the vision encoder's `flex_attention`
-with static shapes first and dynamic shapes after the first shape change, so
-the kernel a step uses depends on the process's history. With
-`torch._dynamo.config.automatic_dynamic_shapes = False`, the resumed run
-matches the uninterrupted run bitwise.
+Uninterrupted training is bitwise reproducible. Resumed training is not, because
+the shared compiled `flex_attention` in the vision encoder picks static or
+dynamic shapes from the process's history
+([#6093](https://github.com/pytorch/torchtitan/issues/6093)).
 
 ## TODO
 
 - Replace the model-local indexer teacher with
   [the shared teacher](https://github.com/pytorch/torchtitan/pull/5863) once it
   lands.
-- Compile the vision encoder's `flex_attention` independently of shape
-  history, so resumed training matches uninterrupted training bitwise.
 - Qualify released-model capacity and throughput, including table offload and
   longer-context attention.
