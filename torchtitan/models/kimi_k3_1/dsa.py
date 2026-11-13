@@ -26,6 +26,7 @@ from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.deepseek_v4.compressor import Indexer, SparseIndexerLoss
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
+from torchtitan.tools.utils import has_cuda_capability
 
 __all__ = [
     "AbsorbedKVProjection",
@@ -194,6 +195,11 @@ class KimiSparseAttention(InnerAttention):
                 return_scores=aux_loss is not None,
             )
 
+        fused = (
+            q_THK.is_cuda
+            and q_THK.dtype == torch.bfloat16
+            and has_cuda_capability(8, 0)
+        )
         nope_dim = q_THK.shape[-1] - k_shared_TR.shape[-1]
         w_uk_HNL, w_uv_HVL = self.wkv_b()
         q_nope_THN, q_shared_THR = q_THK.split(
@@ -217,7 +223,7 @@ class KimiSparseAttention(InnerAttention):
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
                 scale=scale,
-                impl="fused" if q_THK.device.type == "cuda" else "reference",
+                impl="fused" if fused else "reference",
                 return_aux=AuxRequest(lse=aux_loss is not None),
             )
             out_THL = out_1HTL.squeeze(0).transpose(0, 1)
@@ -256,6 +262,21 @@ class KimiDSAAttention(KimiMLAAttention):
 
         def __post_init__(self) -> None:
             Attention.Config.__post_init__(self)
+            if not isinstance(self.inner_attention, KimiSparseAttention.Config):
+                raise ValueError(
+                    "KimiDSAAttention requires a KimiSparseAttention.Config, "
+                    f"but got {type(self.inner_attention).__qualname__}."
+                )
+            aux_loss = self.inner_attention.aux_loss
+            if aux_loss is not None and (
+                aux_loss.softmax_scale != self.softmax_scale
+                or aux_loss.num_heads != self.n_heads
+            ):
+                raise ValueError(
+                    "The indexer loss must use the attention's softmax scale "
+                    f"({self.softmax_scale}) and head count ({self.n_heads}), but got "
+                    f"{aux_loss.softmax_scale} and {aux_loss.num_heads}."
+                )
 
         def flops_per_token(self, seq_len: int) -> int:
             from torchtitan.models.common.flops import (
