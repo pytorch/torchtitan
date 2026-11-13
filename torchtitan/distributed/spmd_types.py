@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from threading import local
 from typing import Any
 
@@ -202,18 +202,23 @@ def annotate_input_spmd_types(
     """Annotate named forward inputs with SPMD types from ``input_sharding``.
 
     ``input_dict`` maps each name ('input', 'labels', and extra forward kwargs)
-    to its value. Each named tensor is asserted against its own layout.
-    Non-tensor kwargs (e.g. ``attention_metadata`` containers, ``special_tokens``)
-    are left untouched. Every *tensor* input, however, must have a layout entry:
-    a tensor with no entry raises rather than being silently left untyped.
-    Tensors nested inside container kwargs are not reachable here and must
-    be annotated at their construction site.
+    to its value. Each named tensor is asserted against its own layout, and
+    must have a layout entry: a tensor with no entry raises rather than being
+    silently left untyped. A non-tensor kwarg, or a value of a mapping kwarg
+    (e.g. ``attention_metadata``), that defines ``annotate_spmd_types()``
+    annotates its own nested tensors; other non-tensor kwargs (e.g.
+    ``special_tokens``) are left untouched.
     """
     mesh = parallelism_context.spmd_dense_mesh()
     untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
         for name, value in input_dict.items():
             if not isinstance(value, torch.Tensor):
+                nested = value.values() if isinstance(value, Mapping) else (value,)
+                for item in nested:
+                    annotate = getattr(item, "annotate_spmd_types", None)
+                    if annotate is not None:
+                        annotate()
                 continue
             layout = input_sharding.get(name)
             if layout is None:
@@ -225,7 +230,7 @@ def annotate_input_spmd_types(
             "spmd_types backend requires an SPMD layout for every tensor input, "
             f"but these have no entry in input_sharding: {sorted(untyped)}. Add "
             "them to the input layout the model declares in ``preprocess_inputs``, "
-            "or annotate nested/container tensors at their construction site."
+            "or give their container an ``annotate_spmd_types()`` method."
         )
     return input_dict
 

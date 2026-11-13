@@ -38,15 +38,18 @@ explicit sequence length up to the released checkpoint limit of 1,048,576.
 
 ## Modalities and checkpoints
 
-All flavors build the vision encoder and audio encoder. Text-only flavors use empty
-`model.dataset_modalities`. Set `model.dataset_modalities` to the
+The text flavors build `MuseSparkModel`, the decoder without encoders; HF
+loading reads the decoder from the multimodal checkpoint and ignores the encoder
+weights, so checkpoints saved from a text flavor have no encoder weights. The
+`_mm` flavors build `MuseSparkMultimodalModel`, which owns the vision encoder
+and audio encoder. Set its `model.dataset_modalities` to the
 modalities the current dataset can supply across DP ranks, with the same value
 on every rank:
 
 - `("vision",)`: images and videos, using one shared vision forward.
 - `("audio",)`: audio.
 - `("vision", "audio")`: both; the multimodal flavor default.
-- `()`: text-only training.
+- `()`: no media; the encoders are skipped.
 
 CC12M activates vision; the debug Grain mix activates both. Listed modalities
 require their encoders, and undeclared media inputs raise `ValueError`.
@@ -61,9 +64,9 @@ Unlisted encoders are skipped but remain in checkpoints. Encoders unused
 throughout the training stage keep their parameter gradients at `None`,
 so AdamW leaves their weights and optimizer state unchanged.
 Keep encoder configs and optimizer parameter assignments consistent across stages.
-If a custom model config omits one or both encoders, model-only native/HF loading
+If a custom multimodal config omits one encoder, model-only native/HF loading
 loads weights for the remaining modules. Subsequent checkpoints exclude the
-omitted encoders.
+omitted encoder.
 
 ## Architecture highlights
 

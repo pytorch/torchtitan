@@ -35,7 +35,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import Linear
@@ -484,17 +484,13 @@ class MuseSparkTransformerBlock(TransformerBlock):
         return self.ffn_residual(stream_TD, ffn_branch_TD)
 
 
-class MuseSparkModel(MultimodalModel):
-    state_dict_adapter_cls = MuseSparkStateDictAdapter
-    multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
+class MuseSparkModel(Decoder):
+    """Muse Spark language model.
 
-    pipeline_first_stage_module_fqns = (
-        "vision_encoder",
-        "vision_adapter",
-        "vision_projection",
-        "audio_encoder",
-        "perception_emb_norm",
-    )
+    ``MuseSparkMultimodalModel`` adds the vision and audio encoders.
+    """
+
+    state_dict_adapter_cls = MuseSparkStateDictAdapter
 
     @classmethod
     def _register_optimizer_hooks(
@@ -505,23 +501,7 @@ class MuseSparkModel(MultimodalModel):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config):
-        """Configure stage modalities consistently across ranks.
-
-        ``dataset_modalities`` is the union of modalities the current dataset can
-        supply, shared across ranks. Listed encoders always run, using dummy
-        inputs when locally absent, even on steps with no media on any rank.
-        Static participation and zero-valued dependencies keep FSDP all-gathers
-        and reduce-scatters aligned without a media-presence collective.
-        Unlisted encoders are skipped but retained in checkpoints.
-
-        TODO: Build only required encoders once checkpoint saving can preserve
-        weights for omitted encoders. Model-only loading supports omitted
-        encoders, but saving without an encoder drops its weights from subsequent
-        checkpoints. A decoder-only fine-tune would therefore lose pretrained
-        encoder weights needed for a later multimodal fine-tune.
-        """
-
+    class Config(Decoder.Config):
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=[
@@ -545,6 +525,90 @@ class MuseSparkModel(MultimodalModel):
         layers: list[MuseSparkTransformerBlock.Config]
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None
+
+        def __post_init__(self) -> None:
+            super(MuseSparkModel.Config, self).__post_init__()
+            if self.enable_weight_tying:
+                raise ValueError(
+                    "Muse Spark does not support token embedding weight tying"
+                )
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.residual_dtype = config.residual_dtype
+        self.final_norm_input_dtype = config.final_norm_input_dtype
+
+    def forward_embeddings(
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`Decoder.forward_embeddings` with Muse Spark's residual and final-norm dtypes."""
+        hidden_TD = h.to(self.residual_dtype)
+
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
+        for layer in self.layers.values():
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
+            hidden_TD = layer(
+                hidden_TD,
+                layer_attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
+
+        if self.norm is not None:
+            final_norm_input_dtype = (
+                self.final_norm_input_dtype
+                if self.final_norm_input_dtype is not None
+                else torch.bfloat16
+            )
+            hidden_TD = self._pre_lm_head_norm_and_gather(
+                hidden_TD.to(final_norm_input_dtype)
+            ).to(torch.bfloat16)
+
+        if self._skip_lm_head:
+            return hidden_TD
+        lm_head = self.lm_head
+        if lm_head is None:
+            return hidden_TD
+        return lm_head(hidden_TD.to(lm_head.weight.dtype))
+
+
+class MuseSparkMultimodalModel(MuseSparkModel, MultimodalModel):
+    """Muse Spark with its vision and audio encoders.
+
+    ``dataset_modalities`` is the union of modalities the current dataset can
+    supply, shared across ranks. Listed encoders always run, using dummy
+    inputs when locally absent, even on steps with no media on any rank.
+    Static participation and zero-valued dependencies keep FSDP all-gathers
+    and reduce-scatters aligned without a media-presence collective.
+    Unlisted encoders are skipped but retained in checkpoints.
+    """
+
+    multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
+
+    pipeline_first_stage_module_fqns = (
+        "vision_encoder",
+        "vision_adapter",
+        "vision_projection",
+        "audio_encoder",
+        "perception_emb_norm",
+    )
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MuseSparkModel.Config, MultimodalModel.Config):
         dataset_modalities: tuple[Literal["vision", "audio"], ...] = ()
         audio_encoder: MuseSparkAudioEncoder.Config | None = None
         vision_encoder: NaViTEncoder.Config | None = None
@@ -553,11 +617,7 @@ class MuseSparkModel(MultimodalModel):
         perception_emb_norm: MuseSparkRMSNorm.Config | None = None
 
         def __post_init__(self) -> None:
-            MultimodalModel.Config.__post_init__(self)
-            if self.enable_weight_tying:
-                raise ValueError(
-                    "Muse Spark does not support token embedding weight tying"
-                )
+            super(MuseSparkMultimodalModel.Config, self).__post_init__()
             encoders = {"vision": self.vision_encoder, "audio": self.audio_encoder}
             for modality in self.dataset_modalities:
                 if modality not in encoders:
@@ -576,13 +636,15 @@ class MuseSparkModel(MultimodalModel):
         ) -> FlopsEstimator:
             from torchtitan.models.common.flops import active_parameter_flops_per_token
 
-            model = cast(MuseSparkModel, model)
+            model = cast(MuseSparkMultimodalModel, model)
             vision_outputs = (
                 model.vision_adapter,
                 model.vision_projection,
                 model.perception_emb_norm,
             )
-            base_estimate = super(MuseSparkModel.Config, self).build_flops_estimator(
+            base_estimate = super(
+                MuseSparkMultimodalModel.Config, self
+            ).build_flops_estimator(
                 model,
                 seq_len=seq_len,
                 excluded_submodules=(*vision_outputs, *excluded_submodules),
@@ -618,8 +680,6 @@ class MuseSparkModel(MultimodalModel):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.residual_dtype = config.residual_dtype
-        self.final_norm_input_dtype = config.final_norm_input_dtype
         self.vision_encoder: NaViTEncoder | None = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
@@ -893,7 +953,9 @@ class MuseSparkModel(MultimodalModel):
     ) -> torch.Tensor:
         is_dummy = waveforms is None
         if waveforms is None:
-            audio_config = cast(MuseSparkModel.Config, self.config).audio_encoder
+            audio_config = cast(
+                MuseSparkMultimodalModel.Config, self.config
+            ).audio_encoder
             assert audio_config is not None
             waveforms, waveform_padded_lengths = build_dummy_audio_inputs(
                 patch_size=audio_config.patch_size,
@@ -930,7 +992,7 @@ class MuseSparkModel(MultimodalModel):
     ) -> torch.Tensor:
         """Fuse active perception banks, using dummies for absent local inputs."""
         dataset_modalities = cast(
-            "MuseSparkModel.Config", self.config
+            "MuseSparkMultimodalModel.Config", self.config
         ).dataset_modalities
         if (
             pixel_values is not None or pixel_values_videos is not None
@@ -1005,50 +1067,3 @@ class MuseSparkModel(MultimodalModel):
             padding_mask=padding_mask,
             aux_loss_denominators=aux_loss_denominators,
         )
-
-    def forward_embeddings(
-        self,
-        h: torch.Tensor,
-        positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadataMap | None = None,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        aux_loss_denominators: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """`Decoder.forward_embeddings` with Muse Spark's residual and final-norm dtypes."""
-        hidden_TD = h.to(self.residual_dtype)
-
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
-            )
-            hidden_TD = layer(
-                hidden_TD,
-                layer_attention_metadata,
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        if self.norm is not None:
-            final_norm_input_dtype = (
-                self.final_norm_input_dtype
-                if self.final_norm_input_dtype is not None
-                else torch.bfloat16
-            )
-            hidden_TD = self._pre_lm_head_norm_and_gather(
-                hidden_TD.to(final_norm_input_dtype)
-            ).to(torch.bfloat16)
-
-        if self._skip_lm_head:
-            return hidden_TD
-        lm_head = self.lm_head
-        if lm_head is None:
-            return hidden_TD
-        return lm_head(hidden_TD.to(lm_head.weight.dtype))

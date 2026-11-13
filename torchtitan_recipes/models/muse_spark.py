@@ -73,7 +73,7 @@ from torchtitan.models.common.moe import (
 )
 
 from torchtitan.models.muse_spark import build_model_config, MUSE_SPARK_SPECIAL_TOKENS
-from torchtitan.models.muse_spark.model import MuseSparkModel
+from torchtitan.models.muse_spark.model import MuseSparkModel, MuseSparkMultimodalModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.observability.metrics import MetricsProcessor
@@ -210,7 +210,7 @@ def use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
 
 # TODO: Add production Muse Spark Open video and audio datasets.
 def muse_spark_mm_dataloader(
-    model_config: MuseSparkModel.Config,
+    model_config: MuseSparkMultimodalModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
     """Multimodal dataloader for ``dataset``. The trainer config also needs

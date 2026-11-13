@@ -69,6 +69,7 @@ from .model import (
     Attention,
     EmbeddingWithNorm,
     MuseGlimmerModel,
+    MuseGlimmerMultimodalModel,
     MuseGlimmerTransformerBlock,
     RMSGainCenterNorm,
     SoftCappedLinear,
@@ -85,6 +86,7 @@ __all__ = [
     "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
     "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
+    "MuseGlimmerMultimodalModel",
     "MODEL_FLAVORS",
     "build_model_config",
     "muse_glimmer_vision_configs",
@@ -381,6 +383,30 @@ def muse_glimmer_vision_configs(
     return encoder, adapter
 
 
+def _model_config(
+    *,
+    vision_encoder: NaViTEncoder.Config | None,
+    vision_adapter: MuseSparkNaViTAdapter.Config | None,
+    vision_projection: Linear.Config | None,
+    perception_emb_norm: RMSNorm.Config | None,
+    **fields: Any,
+) -> MuseGlimmerModel.Config:
+    """Return the multimodal config with a vision stack, else the text-only one."""
+    if vision_encoder is None:
+        assert vision_adapter is None and vision_projection is None
+        assert perception_emb_norm is None
+        return MuseGlimmerModel.Config(**fields)
+    assert vision_adapter is not None and vision_projection is not None
+    assert perception_emb_norm is not None
+    return MuseGlimmerMultimodalModel.Config(
+        vision_encoder=vision_encoder,
+        vision_adapter=vision_adapter,
+        vision_projection=vision_projection,
+        perception_emb_norm=perception_emb_norm,
+        **fields,
+    )
+
+
 def _muse_glimmer_config(
     *,
     dim: int,
@@ -415,7 +441,7 @@ def _muse_glimmer_config(
             sharding_config=cp_replicated_vision_sharding_config(),
         )
 
-    return MuseGlimmerModel.Config(
+    return _model_config(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,

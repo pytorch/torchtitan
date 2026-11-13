@@ -67,7 +67,6 @@ def build_inference_model(
     parallelism: InferenceParallelismConfig,
     precision: PrecisionConfig,
     device: torch.device,
-    keep_vision_encoder: bool = False,
 ) -> tuple[Decoder, ParallelismContext, frozenset[str]]:
     """Build, parallelize and materialize the generator's model, without its weights.
 
@@ -81,23 +80,12 @@ def build_inference_model(
         parallelism: The generator's parallelism.
         precision: The trainer's dtypes, which the model mirrors.
         device: The device to materialize the model on.
-        keep_vision_encoder: Whether the engine serves image prompts and so keeps
-            the model's vision encoder. A text-only engine (False) requires a model
-            config without one.
 
     Returns:
         ``(model, parallelism_context, frozen_param_keys)``: the model, its buffers
         initialized, and the canonical FQNs of the parameters its config freezes (e.g. a
         LoRA base), which the trainer never sends.
     """
-    if not keep_vision_encoder and getattr(model_config, "vision_encoder", None):
-        raise ValueError(
-            "This generator serves text-only prompts, but the model config has a "
-            "vision encoder. Use a text-only flavor for the trainer and generator "
-            "(e.g. Qwen3.5 '9B'), or configure a vision processor to serve "
-            "image prompts."
-        )
-
     # Translate the inference parallelism into torchtitan's full
     # ParallelismConfig that ParallelismContext and model.parallelize consume.
     training_parallelism = parallelism.to_training()

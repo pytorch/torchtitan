@@ -444,10 +444,18 @@ class Controller(Configurable):
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
                     "trainer pipeline parallelism yet."
                 )
-            if self.vision_processor is not None:
-                generator_model = self.generator.model
-                # A model family can ship text-only variants of its multimodal model
-                # (vision_encoder=None), so the model class alone is not enough.
+            generator_model = self.generator.model
+            if self.vision_processor is None:
+                if isinstance(generator_model, MultimodalModel.Config):
+                    raise ValueError(
+                        "vision_processor is not set, but the generator model "
+                        f"({type(generator_model).__qualname__}) is multimodal. Use "
+                        "the model family's text-only flavor, or set vision_processor "
+                        "to serve image prompts."
+                    )
+            else:
+                # Images need the vision encoder in particular: a MultimodalModel may
+                # have only other encoders (e.g. Muse Spark's audio encoder).
                 if (
                     not isinstance(generator_model, MultimodalModel.Config)
                     or getattr(generator_model, "vision_encoder", None) is None
