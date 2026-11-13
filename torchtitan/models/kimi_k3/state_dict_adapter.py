@@ -304,11 +304,13 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 unmapped.append(key)
                 continue
             if key == "vision_encoder.patch_embed.weight":
-                vision_config = self.kimi_config.vision_encoder
-                if vision_config is None:
+                from .model import KimiK3MultimodalModel
+
+                if not isinstance(self.kimi_config, KimiK3MultimodalModel.Config):
                     raise ValueError(
                         "Vision state was provided for a text-only config."
                     )
+                vision_config = self.kimi_config.vision_encoder
                 value = value.reshape(
                     value.shape[0],
                     vision_config.in_channels,

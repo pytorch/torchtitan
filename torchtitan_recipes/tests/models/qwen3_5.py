@@ -47,7 +47,7 @@ def qwen35_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -108,7 +108,7 @@ def qwen35_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend="varlen",
         parallelism=config.parallelism,
@@ -131,7 +131,10 @@ def qwen35_debugmodel_moe(
             tensor_parallel_degree=2,
         )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel_moe_mm",
+        seq_len=seq_len,
+        attn_backend="flex",
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(

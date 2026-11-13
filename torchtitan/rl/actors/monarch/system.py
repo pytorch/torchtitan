@@ -36,7 +36,7 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
@@ -171,7 +171,7 @@ class MonarchActorSystem(ActorSystem):
         return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
 
     async def spawn_rollout_workers(
-        self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
+        self, config: BaseRolloutWorker.Config, *, num_workers: int, num_threads: int
     ) -> Any:
         self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
         return self._rollout_worker_mesh.spawn(
