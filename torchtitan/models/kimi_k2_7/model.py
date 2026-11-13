@@ -10,7 +10,7 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import spmd_types as spmd
@@ -20,32 +20,36 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
     spmd_local_context,
     spmd_mesh_size,
 )
 from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
-from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 
 from .state_dict_adapter import KimiK25StateDictAdapter
 from .vision_encoder import KimiK25VisionEncoder
 
 
-class KimiK25Model(MultimodalModel, MTPDecoder):
+class KimiK2Model(DeepSeekV3Model):
+    """Kimi K2 language model: a DeepSeek-V3 decoder (MLA + MoE) trained with QK
+    clipping. ``KimiK25Model`` adds the vision encoder."""
+
     state_dict_adapter_cls = KimiK25StateDictAdapter
-    multimodal_encoder_fqns = ("vision_encoder",)
 
     @classmethod
     def _register_optimizer_hooks(
@@ -57,9 +61,17 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
         register_qk_clip_hook(optimizers, model_parts, parallelism_context)
 
-    pipeline_first_stage_module_fqns = ("vision_encoder",)
+    @dataclass(kw_only=True, slots=True)
+    class Config(DeepSeekV3Model.Config):
+        # TODO: KimiK25Model.Config lists MultimodalModel.Config first, so the base
+        # defaults it inherits replace DeepSeekV3Model.Config's local_compile
+        # regions and Kimi K2.5 compiles none. Matched here so Moonlight keeps its
+        # numerics; fix both together.
+        local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
 
-    """Kimi K2.5: DeepSeekV3 language model with a MoonViT3d vision encoder.
+
+class KimiK25Model(MultimodalModel, KimiK2Model):
+    """Kimi K2.5: Kimi K2 language model with a MoonViT3d vision encoder.
 
     Forward pass flow::
 
@@ -72,25 +84,22 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
           +-- norm -> lm_head                      -> logits
     """
 
+    multimodal_encoder_fqns = ("vision_encoder",)
+    pipeline_first_stage_module_fqns = ("vision_encoder",)
+
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config, DeepSeekV3Model.Config):
-        vision_encoder: KimiK25VisionEncoder.Config | None = None
+    class Config(MultimodalModel.Config, KimiK2Model.Config):
+        vision_encoder: KimiK25VisionEncoder.Config
 
     def __init__(self, config: Config):
         tp = spmd_mesh_size("tp")
-        if (
-            tp > 1
-            and config.vision_encoder is not None
-            and config.vision_encoder.num_heads % tp != 0
-        ):
+        if tp > 1 and config.vision_encoder.num_heads % tp != 0:
             raise ValueError(
                 f"tensor parallel degree ({tp}) must divide "
                 f"vision num_heads ({config.vision_encoder.num_heads})."
             )
         super().__init__(config)
-        self.vision_encoder = (
-            config.vision_encoder.build() if config.vision_encoder is not None else None
-        )
+        self.vision_encoder = config.vision_encoder.build()
 
     def parallelize(
         self,
@@ -178,9 +187,12 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         to visual items in order. Mixing images and videos in one batch is not
         yet supported (see the TODO below).
         """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
+        inputs_embeds = self.tok_embeddings(tokens)
+        # The vision scatter writes arbitrary positions, so every TP rank needs
+        # the full sequence. Without SP this is a type change to Replicate, so
+        # the vision rows' gradient is all-reduced once, by the encoder output's
+        # invariant_to_replicate, and not again by layer 0's input gather.
+        inputs_embeds = maybe_gather_tp_input(self.tok_embeddings, inputs_embeds)
 
         modalities = []
         if pixel_values is not None and grid_thw is not None:
@@ -190,8 +202,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
         is_dummy = not modalities
         if is_dummy:
-            if self.vision_encoder is None:
-                return inputs_embeds
             kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
             modalities.append(
                 build_dummy_vision_inputs(
@@ -205,13 +215,15 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         # runs stay modality-agnostic and this branch goes away.
         assert len(modalities) == 1, "mixed image+video batches not yet supported"
         pixels, grid = modalities[0]
-        # A non-empty modalities list means a multimodal run, so the vision
-        # encoder is present (text-only configs never populate pixels).
-        assert self.vision_encoder is not None
 
         # Patches arrive float32; match the encoder's compute dtype for the matmul.
         pixels = pixels.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixels, grid_thw=grid)
+        # The encoder output is TP- and CP-invariant; the decoder consumes it in
+        # TP-sharded computation on CP-sharded tokens, so its gradient is summed
+        # across both. Converting TP first reduces CP first in backward.
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if is_dummy:
             return add_zero_vision_dependency(inputs_embeds, vision_embeds)
 
@@ -281,30 +293,17 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             else:
                 x = tokens
 
-        if spmd.is_type_checking():
-            # The scatter restores a token-aligned tensor, so text-model DP
-            # resumes as global batch sharding after the multimodal region.
-            spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+        if self.tok_embeddings is not None:
+            if spmd.is_type_checking():
+                # The scatter restores a token-aligned tensor, so text-model DP
+                # resumes as global batch sharding after the multimodal region.
+                spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
+            x = replicate_to_residual(x)
 
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
-            )
-            x = layer(
-                x,
-                layer_attention_metadata,
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        x = self.norm(x) if self.norm is not None else x
-        if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        return self.forward_embeddings(
+            x,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )

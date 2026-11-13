@@ -20,6 +20,7 @@ from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.serve.client import EnvClient as VerifiersEnvClient
 from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -35,10 +36,11 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    Prompt,
     ReleaseSessionFn,
     Rollout,
     RolloutGroup,
@@ -78,7 +80,7 @@ class VerifiersRollouter(Rollouter):
 
     Verifiers owns environment execution, including its process pool and the
     message/tool loop, so this path bypasses TitanRL's ``RolloutWorkerActor``,
-    ``RolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
+    ``MessageEnvRolloutWorker``, ``MessageEnv``, and ``TokenEnv``. Token-in/token-out is
     preserved through ``GenerationServer``, which forwards Verifiers model
     requests to TitanRL's controller-provided ``GenerateFn``.
 
@@ -95,7 +97,7 @@ class VerifiersRollouter(Rollouter):
         validation_dataset: VerifiersTaskDataset.Config
         """Verifiers taskset used for validation samples."""
 
-        worker: RolloutWorker.Config | None = None
+        worker: MessageEnvRolloutWorker.Config | None = None
         """Inherited schema field; hidden because Verifiers replaces that path."""
 
         worker_pool_size: int = 1
@@ -173,6 +175,7 @@ class VerifiersRollouter(Rollouter):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         """Start the EnvServer and connect it to TorchTitan generation.
 
@@ -180,6 +183,12 @@ class VerifiersRollouter(Rollouter):
         ``actor_system``.
         """
         del actor_system, tokenizer_config
+        if vision_processor_config is not None:
+            # TODO: pass the vision processor to the renderer the EnvServer builds.
+            raise NotImplementedError(
+                "Verifiers environments do not support image prompts yet; unset "
+                "Controller.Config.vision_processor."
+            )
         if self._verifiers_env_client is not None:
             return
         if not isinstance(renderer_config, RenderersConfigAdapter):
@@ -463,7 +472,8 @@ class VerifiersRollouter(Rollouter):
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
                     prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-                        token_ids[:absolute_start], previous_token_ids
+                        Prompt(token_ids=token_ids[:absolute_start]),
+                        previous=Prompt(token_ids=previous_token_ids),
                     )
                     previous_token_ids = token_ids[:absolute_end]
                     turns.append(

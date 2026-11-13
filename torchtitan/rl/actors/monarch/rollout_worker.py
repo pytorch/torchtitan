@@ -13,11 +13,12 @@ from typing import Any
 
 from monarch.actor import Actor, concurrent_endpoint, current_rank
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
 
@@ -27,7 +28,7 @@ class RolloutWorkerActor(Actor):
     def __init__(
         self,
         *,
-        worker_config: RolloutWorker.Config,
+        worker_config: BaseRolloutWorker.Config,
         num_threads: int,
         structured_logger_init_fn: functools.partial[None] | None,
     ) -> None:
@@ -47,11 +48,13 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            vision_processor_config=vision_processor_config,
         )
 
     @concurrent_endpoint

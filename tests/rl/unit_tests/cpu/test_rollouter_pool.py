@@ -20,7 +20,7 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 
 
 class _ChooseRunGroupEndpoint:
@@ -120,7 +120,7 @@ class _ControllerHost:
 
 def _rollouter_without_datasets() -> Rollouter:
     class WorkerConfig:
-        _owner = RolloutWorker
+        _owner = MessageEnvRolloutWorker
 
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
@@ -187,6 +187,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
                 "tokenizer_config": "tokenizer_config",
                 "renderer_config": "renderer_config",
                 "hf_assets_path": "hf_assets_path",
+                "vision_processor_config": None,
             }
         ]
         await rollouter.close()
