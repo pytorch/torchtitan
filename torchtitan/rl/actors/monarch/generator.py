@@ -55,12 +55,12 @@ class _GeneratorActorEndpoints:
     async def connect_model_state_dict_transport(
         self,
         config: ModelStateDictTransport.Config,
-        sources: list[TrainerSource],
         *,
+        sources: list[TrainerSource],
         generator_index: int,
     ) -> None:
         await super().connect_model_state_dict_transport(
-            config, sources, generator_index=generator_index
+            config, sources=sources, generator_index=generator_index
         )
 
     @concurrent_endpoint

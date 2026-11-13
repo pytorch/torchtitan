@@ -33,9 +33,12 @@ class _TrainerActorEndpoints:
     async def register_model_state_dict_source(
         self,
         config: ModelStateDictTransport.Config,
-        rank_layouts: list[dict[str, TensorShard]],
+        *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
     ) -> TrainerSource:
-        return super().register_model_state_dict_source(config, rank_layouts)
+        return super().register_model_state_dict_source(
+            config, generator_rank_layouts=generator_rank_layouts
+        )
 
     @concurrent_endpoint
     async def get_policy_version(self) -> int:

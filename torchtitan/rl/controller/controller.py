@@ -382,6 +382,8 @@ class Controller(Configurable):
                     "(weights are synced from the trainer). "
                     "Set generator.checkpointer=None."
                 )
+            # TODO: support "gpu_fetch" by reading into generator GPU memory
+            # (https://github.com/pytorch/torchtitan/issues/6070).
             if (
                 self.model_state_dict_transport is not None
                 and self.generator.model_state_dict_load_mode != "cpu_prefetch"

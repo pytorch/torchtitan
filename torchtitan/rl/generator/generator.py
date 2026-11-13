@@ -461,8 +461,8 @@ class Generator(Configurable):
     async def connect_model_state_dict_transport(
         self,
         config: ModelStateDictTransport.Config,
-        sources: list[TrainerSource],
         *,
+        sources: list[TrainerSource],
         generator_index: int,
     ) -> None:
         """Connect to every trainer rank's staging buffer for prefetches to read.
@@ -476,7 +476,7 @@ class Generator(Configurable):
         self._model_state_dict_transport = config.build()
         self._model_state_dict_transport.connect_generator(
             self._prefetched_model_state_dict,
-            sources,
+            sources=sources,
             rank=self._rank,
             generator_index=generator_index,
         )

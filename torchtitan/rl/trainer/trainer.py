@@ -525,19 +525,21 @@ class Trainer(Configurable):
     def register_model_state_dict_source(
         self,
         config: ModelStateDictTransport.Config,
-        rank_layouts: list[dict[str, TensorShard]],
+        *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
     ) -> TrainerSource:
         """Allocate and register the staging buffer generators read pushes from.
 
         Args:
             config: The transport config.
-            rank_layouts: The layout of each rank of a generator, in rank order.
+            generator_rank_layouts: The layout of each rank of a generator, in
+                rank order.
         """
         self._model_state_dict_transport = config.build()
         model_state_dict = self._model_state_dict()
         return self._model_state_dict_transport.register_trainer_source(
             model_state_dict,
-            rank_layouts,
+            generator_rank_layouts=generator_rank_layouts,
             transfer_dtype=self._transfer_dtype,
             preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
         )

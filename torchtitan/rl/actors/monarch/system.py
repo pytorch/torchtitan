@@ -224,18 +224,20 @@ class MonarchActorSystem(ActorSystem):
                 for generator in self._generators
             )
         )
-        rank_layouts = shared_rank_layouts([list(r.values()) for r in results])
+        generator_rank_layouts = shared_rank_layouts(
+            [list(r.values()) for r in results]
+        )
         sources = list(
             (
                 await self._trainer.register_model_state_dict_source.call(
-                    config, rank_layouts
+                    config, generator_rank_layouts=generator_rank_layouts
                 )
             ).values()
         )
         await asyncio.gather(
             *(
                 generator.all_ranks.connect_model_state_dict_transport.call(
-                    config, sources, generator_index=generator_index
+                    config, sources=sources, generator_index=generator_index
                 )
                 for generator_index, generator in enumerate(self._generators)
             )
