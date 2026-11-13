@@ -12,6 +12,7 @@ from typing import cast
 
 import spmd_types as spmd
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
@@ -20,7 +21,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
-from torchtitan.models.common import Conv1d, Embedding, Linear
+from torchtitan.models.common import Conv1d, Linear
 
 from .norm import GroupedOffsetRMSNorm
 from .row_sharded_embedding import row_sharded_embedding, RowShardedEmbeddingMetadata
@@ -71,17 +72,18 @@ def document_starts(positions_T: torch.Tensor) -> torch.Tensor:
     return torch.where(positions_T == 0, indices_T, 0).cummax(0).values
 
 
-class NGramTable(Embedding):
+class NGramTable(nn.Embedding, Module):
     """Lexical embedding with persistent rows owned by data-parallel ranks."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Embedding.Config):
-        pass
+    class Config(Module.Config):
+        num_embeddings: int
+        embedding_dim: int
 
     row_mesh: DeviceMesh | None
 
     def __init__(self, config: Config):
-        super().__init__(config)
+        super().__init__(config.num_embeddings, config.embedding_dim)
         self.row_mesh = None
 
     def _parallelize(self, parallelism_context: ParallelismContext) -> None:

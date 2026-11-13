@@ -27,16 +27,16 @@ TP = MeshAxisName.TP
 def unsharded_linear_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"input": layout},
-        out_src_shardings=layout,
+        input_shardings={"input": layout},
+        output_shardings=layout,
     )
 
 
 def grouped_norm_sharding(layout: SpmdType) -> ShardingConfig:
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"input": layout},
-        out_src_shardings=layout,
+        input_shardings={"input": layout},
+        output_shardings=layout,
         local_spmd=True,
     )
 
@@ -44,20 +44,17 @@ def grouped_norm_sharding(layout: SpmdType) -> ShardingConfig:
 def residual_mixer_sharding(*, enable_sp: bool, use_combine: bool) -> ShardingConfig:
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={"x_TC": layout},
-        out_src_shardings=(layout, layout, layout) if use_combine else layout,
+        input_shardings={"x_TC": layout},
+        output_shardings=(layout, layout, layout) if use_combine else layout,
         local_spmd=True,
     )
 
 
-def block_sharding(*, enable_sp: bool, first_layer: bool) -> ShardingConfig:
+def block_sharding(*, enable_sp: bool) -> ShardingConfig:
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={
-            "x_TC": replicated_activation_placement() if first_layer else layout
-        },
-        in_dst_shardings={"x_TC": layout},
-        out_src_shardings=layout,
+        input_shardings={"x_TC": layout},
+        output_shardings=layout,
     )
 
 
@@ -71,11 +68,11 @@ def ngram_embedding_sharding() -> ShardingConfig:
                 "ngram_heads_offsets",
             )
         },
-        in_src_shardings={
+        input_shardings={
             "input_ids_T": token_id_placement(),
             "document_positions_T": token_id_placement(),
         },
-        out_src_shardings=replicated_activation_placement(),
+        output_shardings=replicated_activation_placement(),
     )
 
 
@@ -88,23 +85,22 @@ def ngram_table_sharding() -> ShardingConfig:
     )
     return ShardingConfig(
         state_shardings={"weight": SpmdType({DP: spmd.S(0), CP: spmd.R, TP: spmd.R})},
-        in_src_shardings={"input": hashes},
-        out_src_shardings=replicated,
+        input_shardings={"input": hashes},
+        output_shardings=replicated,
         local_spmd=True,
     )
 
 
-def ple_sharding(*, enable_sp: bool) -> ShardingConfig:
+def ple_sharding() -> ShardingConfig:
+    # The block gathers the residual stream to Replicate around PLE.
     replicated = replicated_activation_placement()
     return ShardingConfig(
-        in_src_shardings={
-            "x_TC": residual_activation_placement(enable_sp=enable_sp),
+        input_shardings={
+            "x_TC": replicated,
             "input_ids_T": token_id_placement(),
             "document_positions_T": token_id_placement(),
         },
-        in_dst_shardings={"x_TC": replicated},
-        out_src_shardings=replicated,
-        out_dst_shardings=residual_activation_placement(enable_sp=enable_sp),
+        output_shardings=replicated,
         local_spmd=True,
     )
 
@@ -112,8 +108,8 @@ def ple_sharding(*, enable_sp: bool) -> ShardingConfig:
 def indexer_sharding() -> ShardingConfig:
     replicated = replicated_activation_placement()
     return ShardingConfig(
-        in_src_shardings={"x_TD": replicated},
-        out_src_shardings=(replicated, replicated),
+        input_shardings={"x_TD": replicated},
+        output_shardings=(replicated, replicated),
         local_spmd=True,
     )
 
@@ -121,7 +117,7 @@ def indexer_sharding() -> ShardingConfig:
 def qsa_inner_sharding() -> ShardingConfig:
     heads = attention_activation_placement()
     return ShardingConfig(
-        in_src_shardings={"query_THK": heads, "key_THK": heads, "value_THV": heads},
-        out_src_shardings=heads,
+        input_shardings={"query_THK": heads, "key_THK": heads, "value_THV": heads},
+        output_shardings=heads,
         local_spmd=True,
     )
