@@ -514,6 +514,12 @@ class Glm5Model(DeepSeekV3Model):
         input_dict = annotate_input_spmd_types(
             parallelism_context, input_dict, input_shardings
         )
+        # Nested metadata needs its own boundary, as in the linear-attention models.
+        metadata = input_dict.get("attention_masks")
+        if metadata is not None:
+            metadata.annotate_spmd_types()
+        for depth in depths:
+            input_dict[f"mtp_attention_masks_{depth}"].annotate_spmd_types()
 
         loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")

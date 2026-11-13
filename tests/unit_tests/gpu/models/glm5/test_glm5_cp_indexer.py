@@ -78,6 +78,18 @@ class TestGlm5CPIndexer(DTensorTestBase):
             local_metadata = Glm5CPMLAAttention.prepare_cp_metadata(
                 metadata, permutation=None
             )
+            local_metadata.annotate_spmd_types()
+            global_metadata_type = spmd.SpmdType(
+                {"dp": spmd.V, "cp": spmd.R, "tp": spmd.R},
+                partition_spec=spmd.PartitionSpec("dp"),
+            )
+            for value in (
+                local_metadata.positions_T,
+                local_metadata.documents_T,
+                local_metadata.valid_T,
+            ):
+                spmd.assert_type(value, global_metadata_type)
+            self.assertEqual(local_metadata.query_indices_Q.numel(), 32)
             for name, value in (
                 ("q_QNH", q), ("k_KH", gathered_k), ("weights_QN", weights)
             ):

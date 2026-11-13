@@ -47,6 +47,22 @@ class DsaMetadata:
     valid_T: torch.Tensor  # noqa: N815
     query_indices_Q: torch.Tensor  # noqa: N815
 
+    def annotate_spmd_types(self) -> None:
+        """Type global key metadata and rank-local query IDs before local kernels."""
+        from torchtitan.models.common.decoder_sharding import token_id_placement
+
+        global_keys = spmd.SpmdType(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.CP: spmd.R,
+                MeshAxisName.TP: spmd.R,
+            },
+            partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+        )
+        for value in (self.positions_T, self.documents_T, self.valid_T):
+            spmd.assert_type(value, global_keys)
+        spmd.assert_type(self.query_indices_Q, token_id_placement())
+
     @classmethod
     def from_positions(cls, positions, padding_mask=None):
         valid = (

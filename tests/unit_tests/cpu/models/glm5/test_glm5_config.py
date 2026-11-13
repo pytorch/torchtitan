@@ -19,7 +19,7 @@ from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
-from torchtitan.models.glm5.dsa import Glm5CPMLAAttention
+from torchtitan.models.glm5.dsa import DsaMetadata, Glm5CPMLAAttention
 from torchtitan.models.glm5.model import Glm5Attention, Glm5Model
 from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
 from torchtitan_recipes.tests.models.glm5_configs import resolve_model_config
@@ -128,6 +128,9 @@ class TestGlm5Config(unittest.TestCase):
                     "torchtitan.models.glm5.model.annotate_input_spmd_types",
                     side_effect=lambda context, inputs, shardings: inputs,
                 ),
+                patch.object(
+                    DsaMetadata, "annotate_spmd_types", autospec=True
+                ) as annotate_metadata,
             ):
                 _, _, kwargs, _ = model.preprocess_inputs(
                     {
@@ -141,6 +144,8 @@ class TestGlm5Config(unittest.TestCase):
                     max_num_documents=2,
                 )
             metadata = kwargs["attention_masks"]
+            self.assertIs(annotate_metadata.call_args_list[0].args[0], metadata)
+            self.assertEqual(annotate_metadata.call_count, 2 if role == "mtp" else 1)
             torch.testing.assert_close(metadata.positions_T, positions)
             torch.testing.assert_close(metadata.valid_T, ~padding)
             torch.testing.assert_close(
@@ -149,6 +154,7 @@ class TestGlm5Config(unittest.TestCase):
             torch.testing.assert_close(metadata.query_indices_Q, torch.arange(4, 8))
             if role == "mtp":
                 shifted = kwargs["mtp_attention_masks"][0]
+                self.assertIs(annotate_metadata.call_args_list[1].args[0], shifted)
                 torch.testing.assert_close(
                     shifted.query_indices_Q, metadata.query_indices_Q
                 )
