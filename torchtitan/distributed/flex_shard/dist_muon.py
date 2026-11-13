@@ -237,6 +237,7 @@ class DistMuon(Optimizer):
         self._prepare_input = _prepare_muon_input
         self._compute_direction = _compute_muon_direction
         self._apply_parameter_update = _apply_muon_update
+        self._compiled_lr: Tensor | None = None
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -274,16 +275,21 @@ class DistMuon(Optimizer):
                 raise ValueError(
                     "Compiled DistMuon updates require FP32 or BF16 storage"
                 )
-            compile_fn = partial(
+            compile_fn: Callable[
+                [Callable[..., Tensor]], Callable[..., Tensor]
+            ] = partial(
                 torch.compile,
                 fullgraph=True,
                 dynamic=False,
+                # Leave room for shape/stride variants across model parameters.
                 recompile_limit=256,
                 options={"emulate_precision_casts": True},
             )
             self._prepare_input = compile_fn(self._prepare_input)
             self._compute_direction = compile_fn(self._compute_direction)
             self._apply_parameter_update = compile_fn(self._apply_parameter_update)
+            # Preserve Python-float precision without specializing on LR values.
+            self._compiled_lr = torch.tensor(lr, dtype=torch.float64, device="cpu")
 
     @staticmethod
     def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
@@ -315,6 +321,8 @@ class DistMuon(Optimizer):
                 loss = closure()
 
         self._preflight_step()
+        if self._compiled_lr is not None:
+            self._compiled_lr.fill_(self.param_groups[0]["lr"])
         self._redistribution_runtime.run(
             self._bucket_plans,
             local_tensor_spec=self._local_tensor_spec,
@@ -695,7 +703,7 @@ class DistMuon(Optimizer):
         self._apply_parameter_update(
             local_param,
             direction,
-            lr=group["lr"],
+            lr=group["lr"] if self._compiled_lr is None else self._compiled_lr,
             weight_decay=group["weight_decay"],
             adjust_lr_fn=group["adjust_lr_fn"],
             compute_matrix_shape=compute_layout.lr_reference_shape,
@@ -1981,19 +1989,28 @@ def _apply_muon_update(
     parameter: Tensor,
     direction: Tensor,
     *,
-    lr: float,
+    lr: float | Tensor,
     weight_decay: float,
     adjust_lr_fn: str | None,
     compute_matrix_shape: torch.Size | tuple[int, ...],
 ) -> Tensor:
     """Apply decoupled weight decay and a computed Muon direction."""
-    adjusted_lr = _adjust_muon_learning_rate(
-        lr,
+    shape_scale = _adjust_muon_learning_rate(
+        1.0,
         adjust_lr_fn,
         compute_matrix_shape,
     )
+    if isinstance(lr, Tensor):
+        # Match scalar opmath and round the decayed parameter before adding.
+        parameter.copy_(parameter.float() * (1 - lr * weight_decay).float())
+        parameter.copy_(
+            torch.addcmul(
+                parameter.float(), direction.float(), -(lr * shape_scale).float()
+            )
+        )
+        return parameter
     parameter.mul_(1 - lr * weight_decay)
-    parameter.add_(direction, alpha=-adjusted_lr)
+    parameter.add_(direction, alpha=-(lr * shape_scale))
     return parameter
 
 

@@ -324,6 +324,9 @@ class TestDistMuon(DTensorTestBase):
         )
         init_optim_state(resumed_optimizer)
         load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        lr *= 0.5
+        resumed_optimizer.param_groups[0]["lr"] = lr
+        reference_optimizer.param_groups[0]["lr"] = lr
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
