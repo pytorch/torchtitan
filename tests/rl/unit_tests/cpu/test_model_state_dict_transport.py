@@ -10,6 +10,7 @@ FSDP/HSDP and generator TP shardings, over an in-process fake transport."""
 
 import asyncio
 import itertools
+import math
 from unittest.mock import patch
 
 import pytest
@@ -53,6 +54,8 @@ class _FakeMemory:
 
 class _FakeTransport:
     _urls = itertools.count()
+    # Bytes read by every instance.
+    nbytes_read = 0
 
     def __init__(self):
         self.url = str(next(self._urls)).encode()
@@ -72,6 +75,7 @@ class _FakeTransport:
         assert remote.url in self.connected
         assert local.shape == remote.data.shape
         local.copy_(remote.data)
+        _FakeTransport.nbytes_read += local.numel()
 
 
 async def _wait_all(works, *, timeout):
@@ -102,17 +106,26 @@ def _transfer(
     generator_index=0,
     transfer_dtype=None,
     preserve_dtype_keys=frozenset(),
+    delta_max_fraction=None,
+    updates=(),
 ):
     """Register and stage each trainer rank's ``{key: (local tensor, box)}``, then
     connect and read each generator rank's ``{key: (box, dtype)}``; returns the
-    generator ranks' state dicts."""
+    generator ranks' state dicts.
+
+    Then per ``updates`` entry ``(update, ranks)``: calls ``update(generator_sds,
+    nbytes_read)``, which checks the previous pull and modifies the trainer's
+    local tensors in place, and stages and reads into generator ranks ``ranks``.
+    """
     boxes = {}
     monkeypatch.setattr(
         m,
         "_global_offset_and_local_shape",
         lambda tensor, placements=None: boxes[id(tensor)],
     )
-    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
+    config = ModelStateDictTransport.Config(
+        backend="nixl", read_timeout_s=5.0, delta_max_fraction=delta_max_fraction
+    )
 
     def new_transport(backend):
         assert backend == config.backend
@@ -150,12 +163,23 @@ def _transfer(
         trainer.stage(sd)
         trainers.append(trainer)
 
+    generators = []
+    _FakeTransport.nbytes_read = 0
     for rank, sd in enumerate(generator_sds):
         generator = ModelStateDictTransport(config)
         generator.connect_generator(
             sd, sources=sources, rank=rank, generator_index=generator_index
         )
         asyncio.run(generator.read())
+        generators.append(generator)
+
+    for update, ranks in updates:
+        update(generator_sds, _FakeTransport.nbytes_read)
+        for shards, trainer in zip(trainer_shards, trainers):
+            trainer.stage({key: local for key, (local, _) in shards.items()})
+        _FakeTransport.nbytes_read = 0
+        for rank in ranks:
+            asyncio.run(generators[rank].read())
     return generator_sds
 
 
@@ -449,3 +473,126 @@ class TestStageDTensors(DTensorTestBase):
                             rtol=0,
                             atol=0,
                         )
+
+
+def _hsdp_tp_delta(
+    monkeypatch, generator_tp, generator_dim, *, shape=(16, 12), dim=0, **kwargs
+):
+    """Transfers of a bf16 tensor from HSDP 2x4 sharded on ``dim`` to generator
+    TP ranks over several pushes: a few elements change, then most, then few
+    again with generator rank 0 skipping a version, then a value whose bits
+    change but which compares equal. Checks every pull is exact and how many
+    bytes each reads."""
+    full = (torch.arange(math.prod(shape), dtype=torch.float32) / 7).reshape(shape)
+    full = full.to(torch.bfloat16)
+    trainer_boxes = _boxes(shape, 4, dim) * 2
+    trainer_locals = [(full[_index(*box)].clone(), box) for box in trainer_boxes]
+    generator_boxes = _boxes(shape, generator_tp, generator_dim)
+    numel = math.prod(shape)
+    # Delta rows: capacity values and int32 indices, plus a 16-byte header,
+    # padded to 16 bytes; one row per (trainer piece, generator rank).
+    pieces = [
+        (t, g)
+        for t in trainer_boxes[:4]
+        for g in generator_boxes
+        if all(
+            to < go + gn and go < to + tn
+            for to, tn, go, gn in zip(t[0], t[1], g[0], g[1])
+        )
+    ]
+
+    def piece_numel(t, g):
+        return math.prod(
+            min(to + tn, go + gn) - max(to, go)
+            for to, tn, go, gn in zip(t[0], t[1], g[0], g[1])
+        )
+
+    rows = sum(
+        m._delta_row_nbytes(8 * math.ceil(0.25 * piece_numel(*p) / 8), torch.bfloat16)
+        for p in pieces
+    )
+
+    def change(index):
+        flat = full.view(-1)
+        flat[index] += 1
+        for local, box in trainer_locals:
+            local.copy_(full[_index(*box)])
+
+    def check(generator_sds, ranks=range(generator_tp)):
+        for rank in ranks:
+            torch.testing.assert_close(
+                generator_sds[rank]["w"],
+                full[_index(*generator_boxes[rank])],
+                rtol=0,
+                atol=0,
+            )
+
+    expected = []
+
+    def step(index, nbytes=None, checked=range(generator_tp)):
+        def update(generator_sds, nbytes_read):
+            check(generator_sds, checked)
+            if expected:
+                assert nbytes_read == expected.pop(), nbytes_read
+            change(index)
+            if nbytes is not None:
+                expected.append(nbytes)
+
+        return update
+
+    two = torch.tensor([1, numel - 2])
+    _transfer(
+        monkeypatch,
+        [{"w": local_box} for local_box in trainer_locals],
+        [{"w": (box, torch.bfloat16)} for box in generator_boxes],
+        transfer_dtype=torch.bfloat16,
+        delta_max_fraction=0.25,
+        updates=[
+            # Two elements change: only the rows are read.
+            (step(two, rows), range(generator_tp)),
+            # Every element changes: the rows and everything are read.
+            (step(torch.arange(numel), rows + 2 * numel), range(generator_tp)),
+            # Rank 0 skips this version and reads its pieces in full next.
+            (step(two), range(1, generator_tp)),
+            (
+                step(torch.tensor([numel // 2]), checked=range(1, generator_tp)),
+                range(generator_tp),
+            ),
+            (lambda sds, _: check(sds), ()),
+        ],
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("generator_tp,generator_dim", [(1, 0), (2, 0), (2, 1), (3, 1)])
+def test_delta(monkeypatch, generator_tp, generator_dim):
+    # Several chunks per piece.
+    monkeypatch.setattr(m, "_CHUNK_NUMEL", 5)
+    _hsdp_tp_delta(monkeypatch, generator_tp, generator_dim)
+
+
+@pytest.mark.parametrize("chunk_numel", [5, 13])
+def test_delta_stacked_chunked(monkeypatch, chunk_numel):
+    # A stacked [2, F, D] weight sharded on F, read by generator ranks split on
+    # D: each staged piece is a strided part of the generator shard, and is
+    # compared in chunks of one or more dim-0 slices.
+    monkeypatch.setattr(m, "_CHUNK_NUMEL", chunk_numel)
+    _hsdp_tp_delta(monkeypatch, 2, 2, shape=(2, 8, 6), dim=1)
+
+
+def test_delta_negative_zero(monkeypatch):
+    # -0.0 == 0.0 but its bits differ: the generator must receive it.
+    w = torch.zeros(2, 4)
+    box = ((0, 0), (2, 4))
+
+    def update(generator_sds, nbytes_read):
+        w[1, 2] = -0.0
+
+    (out,) = _transfer(
+        monkeypatch,
+        [{"w": (w, box)}],
+        [{"w": (box, torch.float32)}],
+        delta_max_fraction=0.5,
+        updates=[(update, [0])],
+    )
+    assert torch.equal(out["w"].view(torch.int32), w.view(torch.int32))

@@ -94,3 +94,38 @@ does not cover every element of a generator shard, or on `Partial` and uneven
 
 The controller finishes pull N before push N+1, so a single staging buffer is
 enough.
+
+## Deltas
+
+With `delta_max_fraction` set, a pull reads only the elements whose bits
+changed since the previous push:
+
+```python
+config.model_state_dict_transport = ModelStateDictTransport.Config(
+    backend="nixl", delta_max_fraction=0.1
+)
+```
+
+Each staged piece gets a delta row after the pieces in the staging buffer:
+an int64 `[count, version]` header, then up to `capacity` values and their
+int32 flat indices in the piece, `capacity` being `delta_max_fraction` of the
+piece's elements. On each push, `stage` copies the piece's previous version
+from the staging buffer back to the device, in chunks, compares it bitwise
+with the new one, and writes the changed elements into the row with
+`nonzero_static`, without host syncs, before overwriting the piece. `count` is
+the number of changed elements, even past `capacity`.
+
+A generator rank reads its rows first, each from the trainer rank it reads the
+piece from. For each piece, if its prefetch buffers hold the previous version
+and `count` is at most `capacity`, it scatters the row's values into them;
+otherwise it reads the piece in full. The first pull, and the one after a
+skipped version, reads every piece in full. Bitwise comparison makes every
+pull exact, including `-0.0` and NaN payloads.
+
+Each generator rank logs, per pull, the fraction of elements that changed and
+the largest fraction in one piece; set `delta_max_fraction` just above the
+latter. The cost, on both sides, is pinned memory of about
+`delta_max_fraction * (1 + 4 / itemsize)` of the staging buffer. On the
+trainer, each push also copies every piece host to device on the push stream
+and holds a device copy of one row at a time. A pull reads the rows plus the
+pieces that changed more than `capacity`.
