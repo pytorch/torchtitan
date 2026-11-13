@@ -264,6 +264,24 @@ class BaseCheckpointManager(Configurable, ABC):
                 f"{sorted(collisions)}"
             )
 
+    @staticmethod
+    def _validate_hf_export(
+        model_parts: list[nn.Module], *, last_save_in_hf: bool
+    ) -> None:
+        """Reject an HF export of a model with frozen parameters, e.g. a LoRA model.
+
+        State dict adapters do not map LoRA adapters to HF keys, so the export would
+        hold only the base weights.
+        """
+        # TODO: export LoRA adapters in PEFT format.
+        if last_save_in_hf and any(
+            not p.requires_grad for part in model_parts for p in part.parameters()
+        ):
+            raise ValueError(
+                "checkpointer.last_save_in_hf does not support models with frozen "
+                "parameters (e.g. LoRA) yet: the export would drop the LoRA adapters."
+            )
+
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``."""

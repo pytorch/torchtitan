@@ -77,7 +77,7 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     from torchtitan.distributed.pipeline_parallel import (
         _generate_llm_fqn_per_model_part,
     )
-    from torchtitan.models.kimi_k3.model import KimiK3Model
+    from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
 
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
@@ -101,8 +101,8 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
         parallelism.pipeline_parallel_first_stage_less_layers,
         parallelism.pipeline_parallel_last_stage_less_layers,
     )
-    split[0][:0] = KimiK3Model.pipeline_first_stage_module_fqns
-    split[-1].extend(KimiK3Model.pipeline_last_stage_module_fqns)
+    split[0][:0] = KimiK3MultimodalModel.pipeline_first_stage_module_fqns
+    split[-1].extend(KimiK3MultimodalModel.pipeline_last_stage_module_fqns)
     parallelism.pipeline_parallel_module_fqns_per_model_part = split
     # DistMuon does not support tensor parallelism yet (#3353), so this cell
     # keeps AdamW the way kimi_k3_debugmodel_mm does.

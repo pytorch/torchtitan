@@ -259,7 +259,9 @@ def test_spark_shared_perception_norm_is_charged_for_both_encoders():
 def test_vision_estimators_accept_raw_microbatches(family):
     config = (
         importlib.import_module(f"torchtitan.models.{family}")
-        .build_model_config("debugmodel", parallelism=ParallelismConfig(), seq_len=128)
+        .build_model_config(
+            "debugmodel_mm", parallelism=ParallelismConfig(), seq_len=128
+        )
         .vision_encoder
     )
     with torch.device("meta"):

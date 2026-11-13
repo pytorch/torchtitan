@@ -242,15 +242,19 @@ def test_optim_update_uses_configured_grad_clip() -> None:
 
 
 @pytest.mark.parametrize(
-    "device_initialized, first_step",
+    "patched_device_type, device_initialized, first_step",
     [
-        (False, []),
-        (True, ["synchronize"]),
+        ("cuda", False, ["empty_cache"]),
+        ("cuda", True, ["synchronize", "empty_cache"]),
         # Device modules without is_initialized(), such as torch.mps.
-        (None, ["synchronize"]),
+        ("mps", None, ["synchronize", "empty_cache"]),
+        # XCCL does not let the driver reclaim memory released after its
+        # collectives: https://github.com/intel/torch-xpu-ops/issues/6125
+        ("xpu", True, []),
     ],
 )
 def test_optim_step_keeps_eager_state_outside_update(
+    patched_device_type: str,
     device_initialized: bool | None,
     first_step: list[str],
 ) -> None:
@@ -279,15 +283,13 @@ def test_optim_step_keeps_eager_state_outside_update(
             return_value=True,
         ),
         patch("torchtitan.components.optim.optim.device_module", device_module),
+        patch("torchtitan.components.optim.optim.device_type", patched_device_type),
     ):
         grad_norm = optim.step(torch.tensor(1.0), current_step=3)
         optim.step(torch.tensor(1.0), current_step=4)
 
-    device_module.empty_cache.assert_called_once_with()
-
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
     assert events == first_step + [
-        "empty_cache",
         "update",
         "lr_scheduler",
         "ema_3",

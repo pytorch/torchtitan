@@ -11,12 +11,6 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
-    dense_param_placement,
-    replicated_activation_placement,
-    token_id_placement,
-)
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -58,23 +52,6 @@ def multimodal_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def multimodal_token_embedding_sharding_config() -> ShardingConfig:
-    """Vocab-sharded token embedding whose output stays Replicate across TP.
-
-    The vision scatter writes features at arbitrary sequence positions, so it
-    needs the full embedding sequence on every TP rank; the first decoder layer
-    then restores the residual layout.
-    """
-    return ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=replicated_activation_placement(),
-        local_spmd=True,
-    )
-
-
 def invariant_norm_sharding_config() -> ShardingConfig:
     """Norm whose state and activations are invariant across TP and CP ranks."""
     return ShardingConfig(
@@ -82,14 +59,10 @@ def invariant_norm_sharding_config() -> ShardingConfig:
             "weight": _vision_state_placement(tp=spmd.I, cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": _vision_activation_placement(),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(),
-        },
-        out_src_shardings=_vision_activation_placement(),
-        out_dst_shardings=_vision_activation_placement(),
+        output_shardings=_vision_activation_placement(),
     )
 
 
@@ -100,14 +73,10 @@ def vision_invariant_linear_sharding_config() -> ShardingConfig:
             "weight": _vision_state_placement(tp=spmd.I, cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": _vision_activation_placement(),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(),
-        },
-        out_src_shardings=_vision_activation_placement(),
-        out_dst_shardings=_vision_activation_placement(),
+        output_shardings=_vision_activation_placement(),
     )
 
 
@@ -115,19 +84,22 @@ def vision_colwise_sharding_config(
     *,
     input_tp: spmd.PerMeshAxisSpmdType = spmd.I,
 ) -> ShardingConfig:
-    """Colwise vision linear with a TP-replicated local matmul input."""
+    """Colwise vision linear with a TP-replicated local matmul input.
+
+    ``input_tp`` is the input's TP layout at the module boundary: ``I`` for a
+    ``ColumnParallelLinear``, which replicates it itself (vision encoders run
+    under ``disable_dense_sp``), or ``R`` behind a shared boundary that already
+    did (the attention q/k/v).
+    """
     return ShardingConfig(
         state_shardings={
             "weight": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": _vision_activation_placement(tp=input_tp),
         },
-        in_dst_shardings={
-            "input": _vision_activation_placement(tp=spmd.R),
-        },
-        out_src_shardings=_vision_activation_placement(tp=spmd.S(-1)),
+        output_shardings=_vision_activation_placement(tp=spmd.S(-1)),
     )
 
 
@@ -139,13 +111,10 @@ def vision_rowwise_sharding_config() -> ShardingConfig:
             "weight": _vision_state_placement(tp=spmd.S(1), cp=spmd.I),
             "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": input_layout,
         },
-        in_dst_shardings={
-            "input": input_layout,
-        },
-        out_src_shardings=_vision_activation_placement(),
+        output_shardings=_vision_activation_placement(),
     )
 
 
@@ -153,18 +122,16 @@ def vision_attention_sharding_config(
     *,
     rope_cache_dp: spmd.PerMeshAxisSpmdType,
 ) -> ShardingConfig:
-    """Vision attention boundary: gather ``x`` and ``rope_cache`` across TP."""
+    """Vision attention boundary: TP-invariant ``x``, TP-replicated ``rope_cache``.
+
+    ``VisionAttention`` replicates ``x`` across TP itself. The rope cache is
+    already TP-``Replicate`` (like the decoder's), so it combines with the
+    head-sharded q/k.
+    """
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "x": _vision_activation_placement(),
-            "rope_cache": _vision_activation_placement(dp=rope_cache_dp),
-        },
-        in_dst_shardings={
-            "x": _vision_activation_placement(tp=spmd.R),
-            "rope_cache": _vision_activation_placement(
-                dp=rope_cache_dp,
-                tp=spmd.R,
-            ),
+            "rope_cache": _vision_activation_placement(dp=rope_cache_dp, tp=spmd.R),
         },
     )
 
@@ -173,16 +140,11 @@ def vision_inner_attention_sharding_config() -> ShardingConfig:
     """Local-SPMD vision attention kernel with heads sharded across TP."""
     attention_layout = _vision_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "q_THK": attention_layout,
             "k_THK": attention_layout,
             "v_THV": attention_layout,
         },
-        in_dst_shardings={
-            "q_THK": attention_layout,
-            "k_THK": attention_layout,
-            "v_THV": attention_layout,
-        },
-        out_src_shardings=attention_layout,
+        output_shardings=attention_layout,
         local_spmd=True,
     )

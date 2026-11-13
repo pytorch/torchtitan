@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import PrecisionConfig
 from torchtitan.rl.generator.generator import Generator
 
@@ -19,7 +20,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 
 
 class _GeneratorActorEndpoints:
@@ -31,6 +32,7 @@ class _GeneratorActorEndpoints:
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
+        vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -41,6 +43,7 @@ class _GeneratorActorEndpoints:
             rank=current_rank().rank,
             generator_name=context().actor_instance.actor_id.actor_name,
             open_result_channel=Channel.open,
+            vision_processor=vision_processor,
         )
 
     @concurrent_endpoint
@@ -78,7 +81,7 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -86,7 +89,7 @@ class _GeneratorActorEndpoints:
         sampling_config: SamplingConfig | None = None,
     ) -> Completion:
         return await super().generate(
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             routing_session_id=routing_session_id,

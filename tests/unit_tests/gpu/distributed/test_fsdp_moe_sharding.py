@@ -38,10 +38,15 @@ def _qwen3_moe_config(
     num_experts: int = 8, *, enable_sp: bool = False, enable_ep: bool = False
 ) -> Qwen3Model.Config:
     """Build a tiny, sharded Qwen3 MoE config with a configurable number of experts."""
-    from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
+    from torchtitan.models.common import (
+        CosSinRoPE,
+        Linear,
+        RMSNorm,
+        VocabParallelEmbedding,
+    )
     from torchtitan.models.common.decoder_sharding import (
         lm_head_sharding_config,
-        pre_lm_head_norm_sharding_config,
+        norm_sharding_config,
         token_embedding_sharding_config,
     )
 
@@ -60,9 +65,9 @@ def _qwen3_moe_config(
         dim=dim,
         norm=RMSNorm.Config(
             normalized_shape=dim,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),

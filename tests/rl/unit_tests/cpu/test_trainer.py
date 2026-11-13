@@ -14,7 +14,9 @@ import pytest
 import torch
 from torchstore import RankRole
 from torchtitan.config import PrecisionConfig, TrainingConfig
+from torchtitan.config.transform import LoRATransform
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
@@ -106,6 +108,39 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
         assert worker_thread_ids[0] != main_thread_id
 
     asyncio.run(run())
+
+
+def test_push_model_state_dict_carries_the_trainable_params_and_the_buffers() -> None:
+    """A push leaves out the frozen parameters, which generators load from the
+    checkpoint: the LoRA base, or a router gate with freeze_gate."""
+
+    async def push(model_part: Module) -> set[str]:
+        model_part.register_buffer("expert_bias", torch.zeros(2))
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(model_parts=[model_part])
+        trainer._transfer_dtype = None
+        trainer._push_model_state_dict_stream = None
+        trainer._model_state_dict_transport = None
+        with patch(
+            "torchtitan.rl.trainer.trainer.ts.put_state_dict", new_callable=AsyncMock
+        ) as put:
+            await trainer.push_model_state_dict()
+        return set(put.await_args.args[0])
+
+    lora_part = (
+        LoRATransform(rank=1, alpha=1.0)
+        .transform(Linear.Config(in_features=2, out_features=2))
+        .build()
+    )
+    frozen_part = Module()
+    frozen_part.gate = torch.nn.Parameter(torch.ones(2, 2), requires_grad=False)
+
+    assert asyncio.run(push(lora_part)) == {
+        "lora_a.weight",
+        "lora_b.weight",
+        "expert_bias",
+    }
+    assert asyncio.run(push(frozen_part)) == {"expert_bias"}
 
 
 def test_push_model_state_dict_stages_before_first_await() -> None:
@@ -414,6 +449,32 @@ def _rl_microbatch(token: int) -> TrainingMicrobatch:
         advantages=torch.tensor([1.0]),
         temperature=torch.tensor([0.7]),
     )
+
+
+def test_forward_backward_preprocesses_images_before_training() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
+        engine.forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(
+                loss=torch.tensor(-1.0), loss_metrics=[[{}]], num_flops=0
+            )
+        )
+        trainer.engine = engine
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        preprocessed = _rl_microbatch(1)
+        microbatch = MagicMock(spec=TrainingMicrobatch)
+        microbatch.preprocess_images.return_value = preprocessed
+
+        await Trainer.forward_backward(
+            trainer, [[microbatch]], torch.tensor([1]), torch.tensor([1])
+        )
+
+        groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
+        assert groups == [[preprocessed]]
+
+    asyncio.run(run())
 
 
 def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> None:
