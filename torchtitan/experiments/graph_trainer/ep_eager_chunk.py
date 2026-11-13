@@ -4,364 +4,111 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Eager producer for the EP-overlap chunk metadata contract.
+"""Split MoE token inputs before tracing and annotate the two chunk bodies."""
 
-Eager chunking is intentionally narrow: it supports the model input contracts
-used by ``layers.*`` TransformerBlock roots and ``layers.*.feed_forward`` MoE roots, and
-fails loudly if those upstream forward signatures drift.
-"""
+# Tensor axes: T = tokens, D = hidden width.
 
 from __future__ import annotations
 
 import logging
-
-from collections.abc import Callable
 from typing import Any
 
 import torch
 import torch.nn as nn
 from torch.fx.traceback import annotate_fn
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_size
 from torchtitan.experiments.graph_trainer.common_utils import matches_module_fqn_pattern
 from torchtitan.experiments.graph_trainer.configs import (
-    EpOverlapChunkDim,
     GraphTrainerCompileConfig,
-    MOE_BLOCK_FQN,
-    TRANSFORMER_BLOCK_FQN,
     validate_ep_overlap_config,
 )
-from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.moe import MoE
-
 
 logger = logging.getLogger(__name__)
 
 
-def _chunk_dim_index(mode: EpOverlapChunkDim) -> int:
-    """Map logical EP chunk mode to the tensor dimension used by eager wrappers."""
-    return 0
+def _split_padding_mask(
+    padding_mask_T: torch.Tensor, *, num_token_shards: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Match two local token chunks while keeping the mask replicated.
 
-
-def _cat_chunked_outputs(outputs: list[Any], dim: int, root_fqn: str) -> Any:
-    """Recursively cat Tensor outputs while preserving tuple/list structure."""
-    first = outputs[0]
-    if isinstance(first, torch.Tensor):
-        return torch.cat(outputs, dim=dim)
-    if isinstance(first, tuple):
-        if any(
-            not isinstance(output, tuple) or len(output) != len(first)
-            for output in outputs
-        ):
-            raise TypeError(
-                "ep_overlap eager chunking expected matching tuple outputs "
-                f"for {root_fqn!r}"
-            )
-        return tuple(
-            _cat_chunked_outputs([output[i] for output in outputs], dim, root_fqn)
-            for i in range(len(first))
-        )
-    if isinstance(first, list):
-        if any(
-            not isinstance(output, list) or len(output) != len(first)
-            for output in outputs
-        ):
-            raise TypeError(
-                "ep_overlap eager chunking expected matching list outputs "
-                f"for {root_fqn!r}"
-            )
-        return [
-            _cat_chunked_outputs([output[i] for output in outputs], dim, root_fqn)
-            for i in range(len(first))
-        ]
-    raise TypeError(
-        "ep_overlap eager chunking only supports Tensor, tuple, or list outputs "
-        f"for {root_fqn!r}; got {type(first).__name__}"
-    )
-
-
-def _describe_value(value: Any) -> str:
-    if isinstance(value, torch.Tensor):
-        return (
-            f"Tensor(shape={tuple(value.shape)}, dtype={value.dtype}, "
-            f"device={value.device})"
-        )
-    if isinstance(value, dict):
-        items = ", ".join(
-            f"{key!r}: {_describe_value(item)}" for key, item in value.items()
-        )
-        return f"dict({{{items}}})"
-    return type(value).__name__
-
-
-def _describe_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
-    arg_desc = ", ".join(_describe_value(arg) for arg in args)
-    kwarg_desc = ", ".join(
-        f"{key}={_describe_value(value)}" for key, value in kwargs.items()
-    )
-    return f"args=[{arg_desc}], kwargs={{{kwarg_desc}}}"
-
-
-def _expected_contract(root_kind: str) -> str:
-    if root_kind == "moe":
-        return (
-            "MoE.forward(x: Tensor[num_tokens, D], *, "
-            "padding_mask_T: Tensor[num_tokens]|None)"
-        )
-    return (
-        "TransformerBlock.forward(x: Tensor[num_tokens, D], "
-        "attention_metadata: BlockMask|dict[BlockMask]|None, "
-        "positions: Tensor[num_tokens]|None, *, "
-        "padding_mask: Tensor[num_tokens]|None)"
-    )
-
-
-def _contract_error(
-    *,
-    root_fqn: str,
-    root_kind: str,
-    chunk_dim: EpOverlapChunkDim,
-    args: tuple[Any, ...],
-    kwargs: dict[str, Any],
-    reason: str,
-) -> ValueError:
-    return ValueError(
-        "ep_overlap eager chunking only supports the current "
-        f"{_expected_contract(root_kind)} contract for root {root_fqn!r} "
-        f"with chunk_dim={chunk_dim!r}. {reason}. Observed "
-        f"{_describe_inputs(args, kwargs)}. If this is a real model path, "
-        "the upstream MoE.forward or TransformerBlock.forward contract likely "
-        "changed and the eager EP chunking wrapper must be updated."
-    )
+    Dense SP partitions activations across TP before this wrapper. Split each
+    shard's mask, then flatten: MoE's R -> S(0) transition must give each rank
+    the mask for its own activation chunk, not a slice of a global half.
+    """
+    mask_ST = padding_mask_T.reshape(num_token_shards, -1)
+    first_ST, second_ST = mask_ST.chunk(2, dim=1)
+    return first_ST.reshape(-1), second_ST.reshape(-1)
 
 
 class _EagerChunkedForward:
+    """A MoE forward that preserves token order across two annotated calls."""
+
     def __init__(
         self,
-        inner_forward: Callable[..., Any],
+        module: MoE,
         *,
         root_fqn: str,
-        chunk_dim: EpOverlapChunkDim,
-        root_kind: str,
     ) -> None:
-        self.inner_forward = inner_forward
+        self.inner_forward = module.forward
         self.root_fqn = root_fqn
-        self.chunk_dim = chunk_dim
-        self.root_kind = root_kind
-        self.dim = _chunk_dim_index(chunk_dim)
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        def split_block_mask(value: Any) -> list[Any] | None:
-            from torch.nn.attention.flex_attention import BlockMask
+    def __call__(
+        self,
+        x_TD: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
+        **router_kwargs: Any,
+    ) -> torch.Tensor:
+        """Split token-aligned inputs and share all other router arguments.
 
-            if isinstance(value, BlockMask):
-                from torch.distributed.pipelining.microbatch import _split_block_mask
+        Args:
+            x_TD: MoE input with an even token count and unchanged hidden width.
+            padding_mask_T: Optional token-aligned mask, replicated across TP
+                even when sequence parallelism shards the activation.
+            aux_loss_denominator: Optional full-call denominator shared by chunks.
+            **router_kwargs: Additional arguments forwarded unchanged to the router.
 
-                # Pipeline microbatching owns the BlockMask metadata splitting
-                # logic, including batch-index offsetting inside mask_mod.
-                return _split_block_mask(value, 2)
-            if isinstance(value, dict) and any(
-                isinstance(item, BlockMask) for item in value.values()
-            ):
-                split_items = {
-                    key: split_block_mask(item) or [item, item]
-                    for key, item in value.items()
-                }
-                return [
-                    {key: chunks[chunk_id] for key, chunks in split_items.items()}
-                    for chunk_id in (0, 1)
-                ]
-            return None
-
-        def split_tensor(
-            value: torch.Tensor, *, logical_name: str
-        ) -> list[torch.Tensor]:
-            if value.dim() <= self.dim:
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason=(
-                        f"{logical_name} rank must include selected dim {self.dim}"
-                    ),
-                )
-            full_extent = value.shape[self.dim]
-            torch._check(
-                full_extent % 2 == 0,
-                lambda: (
-                    f"ep_overlap eager chunking requires an even {self.chunk_dim} "
-                    f"extent for {logical_name} in {self.root_fqn!r}, "
-                    f"got {full_extent}"
-                ),
+        Returns:
+            Concatenated MoE outputs in the original token order.
+        """
+        if x_TD.ndim != 2:
+            raise ValueError(
+                f"EP overlap expects (T, D) input for {self.root_fqn}, "
+                f"got shape {tuple(x_TD.shape)}"
             )
-            chunk_extent = full_extent // 2
-            split = annotate_fn(
-                {
-                    "chunked_region_fqn": self.root_fqn,
-                    "chunked_region_role": "split_boundary",
-                }
-            )(torch.split)
-            # Materialize the chunk boundary for consumers that flatten with view().
-            return [
-                chunk.contiguous()
-                for chunk in split(value, [chunk_extent, chunk_extent], dim=self.dim)
-            ]
-
-        def split_optional_tensor(value: Any, *, logical_name: str) -> list[Any]:
-            if value is None:
-                return [None, None]
-            if isinstance(value, torch.Tensor):
-                return split_tensor(value, logical_name=logical_name)
-            raise _contract_error(
-                root_fqn=self.root_fqn,
-                root_kind=self.root_kind,
-                chunk_dim=self.chunk_dim,
-                args=args,
-                kwargs=kwargs,
-                reason=f"{logical_name} must be None or a tensor",
+        num_tokens = x_TD.shape[0]
+        torch._check(
+            num_tokens % 2 == 0,
+            lambda: f"EP overlap requires an even token count for {self.root_fqn}",
+        )
+        num_token_shards = (
+            spmd_mesh_size(MeshAxisName.TP) if spmd_dense_sp_enabled() else 1
+        )
+        mask_num_tokens = num_tokens * num_token_shards
+        if padding_mask_T is not None and padding_mask_T.shape != (mask_num_tokens,):
+            raise ValueError(
+                f"EP overlap padding mask for {self.root_fqn} must have shape "
+                f"({mask_num_tokens},), got {tuple(padding_mask_T.shape)}"
             )
 
-        def split_moe_inputs() -> tuple[list[list[Any]], dict[str, list[Any]]]:
-            if len(args) != 1 or not isinstance(args[0], torch.Tensor):
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="expected exactly one positional activation tensor",
-                )
-            if any(
-                key not in ("padding_mask_T", "aux_loss_denominator") for key in kwargs
-            ):
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="unexpected keyword argument",
-                )
-
-            split_kwargs: dict[str, list[Any]] = {}
-            if "padding_mask_T" in kwargs:
-                split_kwargs["padding_mask_T"] = split_optional_tensor(
-                    kwargs["padding_mask_T"], logical_name="padding_mask_T"
-                )
-            if "aux_loss_denominator" in kwargs:
-                aux_loss_denominator = kwargs["aux_loss_denominator"]
-                if not isinstance(aux_loss_denominator, torch.Tensor) or (
-                    aux_loss_denominator.ndim != 0
-                ):
-                    raise _contract_error(
-                        root_fqn=self.root_fqn,
-                        root_kind=self.root_kind,
-                        chunk_dim=self.chunk_dim,
-                        args=args,
-                        kwargs=kwargs,
-                        reason="aux_loss_denominator must be a scalar tensor",
-                    )
-                split_kwargs["aux_loss_denominator"] = [
-                    aux_loss_denominator,
-                    aux_loss_denominator,
-                ]
-            return [split_tensor(args[0], logical_name="x")], split_kwargs
-
-        def split_transformer_block_inputs() -> (
-            tuple[list[list[Any]], dict[str, list[Any]]]
-        ):
-            if self.chunk_dim != "batch":
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="TransformerBlock eager chunking only supports batch chunking",
-                )
-            if not args or len(args) > 3 or not isinstance(args[0], torch.Tensor):
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason=(
-                        "expected positional x tensor followed by optional "
-                        "attention_metadata and positions"
-                    ),
-                )
-            if any(
-                key not in ("attention_metadata", "positions", "padding_mask")
-                for key in kwargs
-            ):
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="unexpected keyword argument",
-                )
-            if len(args) > 1 and "attention_metadata" in kwargs:
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="attention_metadata was passed both positionally and by keyword",
-                )
-            if len(args) > 2 and "positions" in kwargs:
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason="positions was passed both positionally and by keyword",
-                )
-
-            def split_attention_metadata(value: Any) -> list[Any]:
-                if value is None:
-                    return [None, None]
-                chunks = split_block_mask(value)
-                if chunks is not None:
-                    return chunks
-                raise _contract_error(
-                    root_fqn=self.root_fqn,
-                    root_kind=self.root_kind,
-                    chunk_dim=self.chunk_dim,
-                    args=args,
-                    kwargs=kwargs,
-                    reason=(
-                        "attention_metadata must be None, BlockMask, or dict "
-                        "containing BlockMask"
-                    ),
-                )
-
-            def split_positions(value: Any) -> list[Any]:
-                return split_optional_tensor(value, logical_name="positions")
-
-            split_args = [split_tensor(args[0], logical_name="x")]
-            if len(args) > 1:
-                split_args.append(split_attention_metadata(args[1]))
-            if len(args) > 2:
-                split_args.append(split_positions(args[2]))
-            split_kwargs = {}
-            for key, value in kwargs.items():
-                if key == "attention_metadata":
-                    split_kwargs[key] = split_attention_metadata(value)
-                else:
-                    split_kwargs[key] = split_optional_tensor(value, logical_name=key)
-            return split_args, split_kwargs
-
-        if self.root_kind == "moe":
-            split_args, split_kwargs = split_moe_inputs()
-        else:
-            split_args, split_kwargs = split_transformer_block_inputs()
-
+        boundary_meta = {
+            "chunked_region_fqn": self.root_fqn,
+            "chunked_region_role": "split_boundary",
+        }
+        split = annotate_fn(boundary_meta)(torch.split)
+        chunk_sizes = [num_tokens // 2, num_tokens // 2]
+        inputs = split(x_TD, chunk_sizes, dim=0)
+        masks = (
+            [None, None]
+            if padding_mask_T is None
+            else annotate_fn(boundary_meta)(_split_padding_mask)(
+                padding_mask_T, num_token_shards=num_token_shards
+            )
+        )
         outputs = []
         for chunk_id in (0, 1):
             body = annotate_fn(
@@ -371,78 +118,41 @@ class _EagerChunkedForward:
                     "chunked_region_role": "body",
                 }
             )(self.inner_forward)
-            outputs.append(
-                body(
-                    *(chunks[chunk_id] for chunks in split_args),
-                    **{key: chunks[chunk_id] for key, chunks in split_kwargs.items()},
-                )
-            )
+            kwargs = dict(router_kwargs)
+            if masks[chunk_id] is not None:
+                kwargs["padding_mask_T"] = masks[chunk_id]
+            if aux_loss_denominator is not None:
+                kwargs["aux_loss_denominator"] = aux_loss_denominator
+            outputs.append(body(inputs[chunk_id], **kwargs))
 
         materialize = annotate_fn(
             {
                 "chunked_region_fqn": self.root_fqn,
                 "chunked_region_role": "materialization",
             }
-        )(_cat_chunked_outputs)
-        return materialize(outputs, self.dim, self.root_fqn)
-
-
-def _wrap_forward_with_eager_chunking(
-    module: nn.Module,
-    *,
-    root_fqn: str,
-    chunk_dim: EpOverlapChunkDim,
-    root_kind: str,
-) -> None:
-    """Install an idempotent two-chunk forward wrapper on ``module``."""
-    if isinstance(module.forward, _EagerChunkedForward):
-        return
-
-    module.forward = _EagerChunkedForward(
-        module.forward,
-        root_fqn=root_fqn,
-        chunk_dim=chunk_dim,
-        root_kind=root_kind,
-    )
-    logger.debug("Installed eager EP chunk wrapper on %s", root_fqn)
+        )(torch.cat)
+        return materialize(outputs, dim=0)
 
 
 def maybe_apply_ep_overlap_eager_chunking(
     model: nn.Module,
     compile_config: GraphTrainerCompileConfig,
 ) -> None:
-    """Wrap selected module forwards so tracing observes eager chunking."""
-    if compile_config is None or not compile_config.ep_overlap.enabled:
+    """Wrap selected MoE forwards once so tracing observes token chunking."""
+    if not compile_config.ep_overlap.enabled:
         return
-    chunk_dim, module_fqn = validate_ep_overlap_config(compile_config.ep_overlap)
-
-    root_kind = "moe" if module_fqn == MOE_BLOCK_FQN else "transformer_block"
-    matched: list[str] = []
+    module_fqn = validate_ep_overlap_config(compile_config.ep_overlap)
+    matched = []
     for fqn, module in model.named_modules():
-        if matches_module_fqn_pattern(module_fqn, fqn):
-            if (
-                module_fqn == TRANSFORMER_BLOCK_FQN
-                and isinstance(module, TransformerBlock)
-                and not isinstance(module.feed_forward, MoE)
-            ):
-                continue
-            if root_kind == "moe" and not isinstance(module, MoE):
-                continue
-            _wrap_forward_with_eager_chunking(
-                module,
-                root_fqn=fqn,
-                chunk_dim=chunk_dim,
-                root_kind=root_kind,
-            )
+        if isinstance(module, MoE) and matches_module_fqn_pattern(module_fqn, fqn):
+            if not isinstance(module.forward, _EagerChunkedForward):
+                module.forward = _EagerChunkedForward(module, root_fqn=fqn)
             matched.append(fqn)
     if not matched:
-        raise ValueError(f"ep_overlap eager chunking matched no modules: {module_fqn}")
-    logger.info(
-        "Applied eager EP chunking to %d module(s): pattern=%s, chunk_dim=%s",
-        len(matched),
-        module_fqn,
-        chunk_dim,
-    )
+        raise ValueError(
+            f"EP overlap eager chunking matched no MoE modules: {module_fqn}"
+        )
+    logger.info("Applied eager EP token chunking to %d MoE modules", len(matched))
 
 
 def populate_eager_chunk_metadata_pass(
@@ -451,7 +161,6 @@ def populate_eager_chunk_metadata_pass(
 ) -> torch.fx.GraphModule:
     """Promote eager traceback chunk annotations into pass metadata."""
     del example_inputs
-    imported = 0
     for node in gm.graph.nodes:
         custom = node.meta.get("custom")
         if not isinstance(custom, dict):
@@ -459,9 +168,4 @@ def populate_eager_chunk_metadata_pass(
         for key in ("chunk_id", "chunked_region_fqn", "chunked_region_role"):
             if key in custom:
                 node.meta[key] = custom[key]
-        if "chunked_region_role" in node.meta:
-            node.meta["chunked_region_producer"] = "eager"
-            imported += 1
-    if imported:
-        logger.debug("Populated eager EP chunk metadata for %d node(s)", imported)
     return gm
