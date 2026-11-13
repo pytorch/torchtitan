@@ -56,7 +56,8 @@ def backward(model, *, checkpoint=False):
         padding_mask=padding,
         aux_loss_denominators=torch.tensor([15.0]),
     )
-    output.float().square().mean().backward()
+    loss = output if model.config.indexer_training_stage == "warmup" else output.float().square().mean()
+    loss.backward()
     gradients = {
         name: parameter.grad.detach().clone()
         for name, parameter in model.named_parameters()
@@ -165,6 +166,118 @@ def test_warmup_weights_load_strictly_into_sparse_stage():
     backward(sparse)
 
 
+def test_kl_only_warmup_has_no_teacher_activation_backward_or_lm_head():
+    from torchtitan.models.glm5.loss import Glm5WarmupLoss
+    from torchtitan.components.loss import CrossEntropyLoss
+
+    _, model = build_stage("warmup")
+    teacher_outputs = []
+    handles = [
+        layer.feed_forward.register_forward_hook(
+            lambda _module, _inputs, output: teacher_outputs.append(output.requires_grad)
+        )
+        for layer in model.layers.values()
+    ]
+    try:
+        with patch.object(model.lm_head, "forward", side_effect=AssertionError("KL-only stage must skip LM head")):
+            output, gradients, _ = backward(model)
+    finally:
+        for handle in handles:
+            handle.remove()
+    assert output.ndim == 0 and torch.isfinite(output)
+    assert teacher_outputs and not any(teacher_outputs)
+    assert all(".indexer." in name for name in gradients)
+    loss = Glm5WarmupLoss.Config(evaluation_loss=CrossEntropyLoss.Config()).build()
+    actual, metrics = loss(output, torch.arange(16), torch.tensor(999.0))
+    assert actual is output and metrics == {}
+    # Evaluation remains teacher CE, not KL and not a new inference interface.
+    with torch.no_grad():
+        logits = model(torch.arange(16), positions=torch.arange(16))
+    labels = torch.arange(16)
+    actual, _ = loss(logits, labels)
+    expected, _ = CrossEntropyLoss.Config().build()(logits, labels)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("offset", [0, 4])
+def test_kl_only_value_and_student_gradients_match_dense_oracle(offset):
+    from torchtitan.models.glm5.dsa import DsaMetadata, Glm5IndexerLoss
+
+    torch.manual_seed(61)
+    q = torch.randn(4, 2, 6, requires_grad=True)
+    pool = torch.randn(8, 6, requires_grad=True)
+    features = (torch.randn(4, 2, 3, requires_grad=True),
+                torch.randn(8, 3, requires_grad=True),
+                torch.randn(4, 2, requires_grad=True))
+    positions = torch.arange(8) % 4
+    padding = torch.tensor([False, False, False, True] * 2)
+    metadata = DsaMetadata.from_positions(positions, padding)
+    metadata = DsaMetadata(metadata.positions_T, metadata.documents_T,
+                           metadata.valid_T, metadata.query_indices_Q[offset:offset + 4])
+    coefficient, denominator = 0.7, torch.tensor(6.0)
+    module = Glm5IndexerLoss.Config(coeff=coefficient, num_heads=2,
+                                    softmax_scale=0.25, chunk_size=3).build()
+    actual = module.warmup_objective(q, pool, features, metadata, denominator)
+    rows = metadata.query_indices_Q
+    valid = ((metadata.documents_T[rows, None] == metadata.documents_T[None, :])
+             & (metadata.positions_T[rows, None] >= metadata.positions_T[None, :])
+             & metadata.valid_T[rows, None] & metadata.valid_T[None, :])
+    teacher = (torch.einsum("qhd,kd->qhk", q.detach(), pool.detach()) * 0.25)
+    target = teacher.masked_fill(~valid[:, None], -torch.inf).softmax(-1).nan_to_num().mean(1)
+    target /= target.sum(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+    qi, ki, weights = features
+    scores = (torch.einsum("qnh,kh->qnk", qi, ki).relu() * weights[:, :, None]).sum(1) / 6**0.5
+    scores = scores.masked_fill(~valid, -torch.inf).masked_fill(~valid.any(-1, keepdim=True), 0)
+    log_prob = scores.log_softmax(-1).masked_fill(~valid, 0)
+    expected = (torch.special.xlogy(target, target) - target * log_prob).masked_fill(~valid, 0).sum() * coefficient / denominator
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(torch.autograd.grad(actual, features, retain_graph=True),
+                               torch.autograd.grad(expected, features))
+    assert torch.autograd.grad(actual, (q, pool), allow_unused=True) == (None, None)
+    torch.testing.assert_close(module.instance_acc, expected.detach() / coefficient)
+
+
+def test_kl_only_mtp_default_remat_and_sparse_checkpoint_handoff():
+    from torchtitan.models.glm5.dsa import DsaMetadata
+    from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+
+    config = build_model_config("glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(),
+                                seq_len=16, indexer_stage="warmup")
+    config.layers = config.layers[:4]
+    config.index_sources = (0, 1, 2, 2)
+    model = config.build()
+    model.init_states()
+    tokens, positions = torch.arange(16), torch.arange(16)
+    shifted, valid = roll_mtp_sequence(tokens, shift=1, positions=positions,
+                                      padding_mask=None, fill_value=0, return_valid_mask=True)
+    kwargs = dict(positions=positions, mtp_input_valid_masks=(valid,),
+                  mtp_attention_masks=(DsaMetadata.from_positions(positions, ~valid),),
+                  aux_loss_denominators=torch.tensor([16.0, 15.0]))
+    expected = model((tokens, shifted), **kwargs)
+    expected.backward()
+    gradients = {name: p.grad.clone() for name, p in model.named_parameters() if p.grad is not None}
+    assert any("mtp_layers.0.attention.indexer." in name for name in gradients)
+    model.zero_grad(set_to_none=True)
+    DefaultActivationRematConfig().apply(model)
+    actual = model((tokens, shifted), **kwargs)
+    actual.backward()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for name, parameter in model.named_parameters():
+        if name in gradients:
+            torch.testing.assert_close(parameter.grad, gradients[name], rtol=0, atol=0)
+    sparse_config = build_model_config("glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(),
+                                       seq_len=16, indexer_stage="sparse")
+    sparse_config.layers = sparse_config.layers[:4]
+    sparse_config.index_sources = config.index_sources
+    sparse_config.build().load_state_dict(model.state_dict(), strict=True)
+
+
+def test_kl_only_warmup_rejects_pipeline_before_build():
+    with pytest.raises(ValueError, match="warmup.*pipeline"):
+        build_model_config("glm5_2_debugmodel", parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+                           seq_len=16, indexer_stage="warmup")
+
+
 @pytest.mark.parametrize("query_offset", [0, 4])
 def test_teacher_matches_head_averaged_dense_probabilities_without_gradients(query_offset):
     from torchtitan.models.glm5.dsa import Glm5IndexerLoss
@@ -262,7 +375,7 @@ def test_flops_sequence_growth_counts_sparse_attention_and_unique_indexers(stage
         attention = layer.attention
         assert isinstance(attention, Glm5Attention.Config)
         if stage == "warmup":
-            expected_per_token += 6 * attention.n_heads * (
+            expected_per_token += 2 * attention.n_heads * (
                 2 * attention.kv_lora_rank
                 + attention.qk_rope_head_dim
             )
@@ -272,7 +385,7 @@ def test_flops_sequence_growth_counts_sparse_attention_and_unique_indexers(stage
                 expected_per_token += 2 * indexer.n_heads * (indexer.head_dim + 1)
             if stage == "warmup":
                 expected_per_token += 6 * indexer.n_heads * (indexer.head_dim + 1)
-                expected_per_token += 2 * attention.n_heads * (
+                expected_per_token += 4 * attention.n_heads * (
                     attention.kv_lora_rank + attention.qk_rope_head_dim
                 )
     estimates = [
@@ -305,15 +418,23 @@ def test_flops_match_explicit_dense_layer_operation_budget(stage):
                           if not name.startswith("tok_embeddings.") and ".indexer." not in name)
     indexer_params = sum(p.numel() for p in model.layers["0"].attention.indexer.parameters())
     keys = 128 if stage == "warmup" else attention.index_topk
-    parameter_ops = (4 if stage == "warmup" else 6) * backbone_params
+    parameter_ops = (2 if stage == "warmup" else 6) * backbone_params
+    replay_ops = 0
+    if stage == "warmup":
+        parameter_ops -= 2 * sum(p.numel() for module in (model.lm_head, model.norm) for p in module.parameters())
+        a = model.layers["0"].attention
+        replay_ops = 2 * sum(p.numel() for module in (
+            model.layers["0"].attention_norm, a.wq_a, a.q_norm, a.wq_b, a.wkv_a, a.kv_norm
+        ) for p in module.parameters())
+        replay_ops += 2 * a.n_heads * a.qk_nope_head_dim * a.kv_lora_rank
     parameter_ops += (2 if stage == "frozen" else 6) * indexer_params
-    attention_ops = 6 * attention.n_heads * (2 * attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
+    attention_ops = (2 if stage == "warmup" else 6) * attention.n_heads * (2 * attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
     selection_ops = 0 if stage == "warmup" else 2 * indexer.n_heads * (indexer.head_dim + 1) * 128
     kl_ops = 0 if stage == "frozen" else (
         6 * indexer.n_heads * (indexer.head_dim + 1) * keys
-        + 2 * attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
+        + (4 if stage == "warmup" else 2) * attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
     )
-    expected = 128 * (parameter_ops + attention_ops + selection_ops + kl_ops)
+    expected = 128 * (parameter_ops + attention_ops + selection_ops + kl_ops + replay_ops)
     assert config.build_flops_estimator(model, seq_len=128)(
         {"input": torch.ones(128, dtype=torch.int64)}
     ) == expected

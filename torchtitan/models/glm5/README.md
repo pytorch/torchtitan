@@ -22,10 +22,8 @@ shared PyTorch-native components for distributed training.
 
 Available flavors are defined in `flavors.py`:
 
-- `debugmodel`: small development model
 - `glm5_2_debugmodel`: small model preserving the released layer schedule
 - `glm5_2_debugmodel_mtp`: small model with one trainable NextN/MTP objective
-- `glm5_2_scaled_debugmodel`: larger validation model
 - `744B-A40B`: released GLM-5.2 architecture
 
 GLM-5.2 and GLM-5.3 use these same architecture configurations; separate
@@ -34,6 +32,36 @@ version aliases are not required for loading their checkpoints.
 Runnable development recipes live in
 `torchtitan_recipes/tests/models/glm5.py`. The released flavor describes the
 full architecture and is not intended for single-host smoke tests.
+The independent-indexer `debugmodel` and larger `glm5_2_scaled_debugmodel`
+are experiment configurations in `torchtitan_recipes/tests/models/glm5_configs.py`,
+not production flavors. Their historical test names, shapes, initializers and
+context defaults are unchanged. External experiments resolve them there rather
+than substituting the released-schedule debug model.
+
+### Indexer warmup
+
+`glm5_debugmodel_warmup` uses the ordinary Trainer with a model-local KL loss.
+The dense-attention teacher runs under `no_grad`; only indexer projections and
+KL participate in backward. The training forward returns the normalized scalar
+KL objective and skips the language-model head. Evaluation under `no_grad`
+retains teacher logits and cross-entropy. Sparse/frozen training is unchanged.
+
+The objective reuses DeepSeek V4's `SparseIndexerLoss` teacher, TP correction,
+normalization and auxiliary-metric lifecycle. It recomputes detached teacher
+projections for the KL target; eliminating teacher backward does not establish
+a measured speedup. Dense warmup still has quadratic compute. Chunking bounds
+each workspace, not the total work or all saved student activations.
+
+```text
+tokens -> frozen dense teacher (no activation backward) -> detached targets
+       -> trainable indexer -> KL -> indexer parameter gradients only
+```
+
+Model checkpoint keys are identical across warmup and sparse stages. Load the
+warmup model weights into the sparse recipe and initialize its optimizer for
+the newly trainable backbone; do not blindly resume indexer-only optimizer
+state as a joint-training optimizer. KL-only warmup rejects PP at configuration
+time. PP+MTP and CP load balancing remain unsupported.
 
 ## Training
 
@@ -135,10 +163,10 @@ The model checks model/indexer/attention/loss stage consistency again at build
 time, so a partial override fails rather than silently freezing all training.
 Warmup projects features but does not run top-k. Producer query chunks use the
 KL loss chunk budget; shared consumers cap dense support at 128 query rows.
-The current shared AuxLoss carrier still needs activation backward through the
-frozen backbone. Warmup is not a backward-free teacher pass; its step time and
-saved activations must be measured against sparse training. Indexer training
-convergence has not been established by the short numerical tests.
+Warmup uses the KL-only execution described above rather than an LM-loss
+carrier through the frozen backbone. Its step time and saved activations still
+need measurement against sparse training. Indexer training convergence has not
+been established by the short numerical tests.
 
 Attention specializes the shared `MLAAttention` backend in absorbed form.
 CP gathers normalized compressed KV and the shared rotary key, never per-head
@@ -226,6 +254,10 @@ not. Frozen/sparse stages cap the attended key count at
 warmup counts full attention. The indexer estimate separately includes
 projection and full-document scoring, plus distillation work in trainable
 stages, once per actual producer, including MTP indexers.
+KL-only warmup counts teacher forward without the LM head, indexer training,
+and the detached projection/teacher-score replay; it does not count a backbone
+backward that no longer runs. Evaluation retains the ordinary teacher path and
+is not the workload represented by this training estimate.
 
 Attention contractions use widths `kv_lora_rank + qk_rope_head_dim` and
 `kv_lora_rank`; projection parameters are counted separately as before.

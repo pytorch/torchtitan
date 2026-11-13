@@ -18,6 +18,7 @@ from torchtitan.models.deepseek_v3.mtp import (
     roll_mtp_sequence,
 )
 from .dsa import DsaMetadata
+from .model import Glm5TransformerBlock
 
 
 class Glm5MTPTransformerBlock(MTPTransformerBlock):
@@ -46,9 +47,22 @@ class Glm5MTPTransformerBlock(MTPTransformerBlock):
         # MTP reads the preceding decoder/depth output with a bare mask multiply.
         remat.recompute_needs_tensor(prev_embed)
         prev_embed = prev_embed * local_valid_T.unsqueeze(-1).to(prev_embed.dtype)
-        h_TD = self.eh_proj(
-            torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
+        kl_only = (
+            self.attention.inner_attention.inner_attention.training_stage == "warmup"
+            and self.training and torch.is_grad_enabled()
         )
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not kl_only):
+            h_TD = self.eh_proj(
+                torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
+            )
+        if kl_only:
+            hidden, _, objective = Glm5TransformerBlock.warmup_forward(
+                self, h_TD, attention_metadata, positions,
+                padding_mask=mtp_padding_mask_T, aux_loss_denominator=aux_loss_denominator,
+            )
+            with torch.no_grad():
+                hidden = self.mtp_norm(hidden)
+            return hidden, objective
         remat.recompute_needs_tensor(h_TD)
         attention_TD = self.attention(
             self.attention_norm(h_TD),

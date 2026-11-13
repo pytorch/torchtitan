@@ -404,6 +404,12 @@ class Glm5IndexerLoss(SparseIndexerLoss):
         Teacher activations are detached. Only projected indexer features and
         the small query-chunk KL graphs participate in backward.
         """
+        # The shared sparse teacher also treats gathered attention/KL as local
+        # arithmetic; its explicit TP reduction handles the replicated student.
+        with spmd.no_typecheck():
+            return self._warmup_objective(query_QHD, pool_KD, features, metadata, denominator)
+
+    def _warmup_objective(self, query_QHD, pool_KD, features, metadata, denominator):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
 
         qi_QNH, ki_KH, weights_QN = features

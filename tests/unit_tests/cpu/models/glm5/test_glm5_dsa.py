@@ -87,7 +87,7 @@ class TestGlm5Dsa(unittest.TestCase):
         )
         batch = collator([TextSequence(input_ids=[1, 2, 3], labels=[2, 3, 4])])
         model = build_model_config(
-            "debugmodel", parallelism=ParallelismConfig(), seq_len=8
+            "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=8
         ).build()
         metadata = model.get_attention_masks(batch.positions, batch.padding_mask)
         mask = (

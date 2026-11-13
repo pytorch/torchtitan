@@ -44,7 +44,7 @@ def test_bf16_indexer_training_with_default_remat(stage):
             inputs, positions=positions, padding_mask=padding,
             aux_loss_denominators=torch.tensor([126.0], device="cuda"),
         )
-        loss = logits.float().square().mean()
+        loss = logits if stage == "warmup" else logits.float().square().mean()
         loss.backward()
         gradients = {name: p.grad for name, p in model.named_parameters() if p.grad is not None}
         assert torch.isfinite(loss)

@@ -107,6 +107,27 @@ class Glm5Attention(DeepSeekMLAAttention):
         if positions is None:
             positions = torch.arange(T, device=x_TD.device)
 
+        q_TNH, kv_TR, k_shared_TR = self.prepare_mla(x_TD, q_resid_TR, positions)
+        # Selection and value computation are separate on purpose.
+        if topk_indices_TS is None:
+            if self.indexer is None:
+                raise ValueError("shared-indexer attention requires top-k indices")
+            selection = self.indexer(x_TD, q_resid_TR, positions, attention_masks)
+            if isinstance(selection, tuple):
+                topk_indices_TS, indexer_features = selection
+            else:
+                topk_indices_TS = selection
+        output_TNV = self.inner_attention(
+            q_TNH, kv_TR, k_shared_TR, attention_metadata=attention_masks,
+            topk_indices_QS=topk_indices_TS, scale=self.softmax_scale,
+            indexer_features=indexer_features, aux_loss_denominator=aux_loss_denominator,
+        )
+        remat.recompute_needs_tensor(output_TNV)
+        return self.wo(output_TNV.contiguous().view(T, -1))
+
+    def prepare_mla(self, x_TD, q_resid_TR, positions):
+        """Reuse the teacher projections for normal attention and KL warmup."""
+        T = x_TD.shape[0]
         q_TNH = self.wq_b(q_resid_TR)
         # The head view/split reads the saved projection output with bare ops.
         remat.recompute_needs_tensor(q_TNH)
@@ -133,30 +154,21 @@ class Glm5Attention(DeepSeekMLAAttention):
         q_TNH, k_rope_T1R = self._apply_rope_to_q_and_k_pe(q_TNH, k_rope_TR, positions)
         with spmd.local():
             k_shared_TR = k_rope_T1R.squeeze(1)
-        # Selection and value computation are separate on purpose: the indexer
-        # is discrete; the optional KL objective trains its feature projections.
-        if topk_indices_TS is None:
-            if self.indexer is None:
-                raise ValueError("shared-indexer attention requires top-k indices")
-            selection = self.indexer(x_TD, q_resid_TR, positions, attention_masks)
-            if isinstance(selection, tuple):
-                topk_indices_TS, indexer_features = selection
-            else:
-                topk_indices_TS = selection
-        output_TNV = self.inner_attention(
-            q_TNH,
-            kv_TR,
-            k_shared_TR,
-            attention_metadata=attention_masks,
-            topk_indices_QS=topk_indices_TS,
-            scale=self.softmax_scale,
-            indexer_features=indexer_features,
-            aux_loss_denominator=aux_loss_denominator,
-        )
-        # The contiguous view reads the attention output with bare ops.
-        remat.recompute_needs_tensor(output_TNV)
-        output_TD: torch.Tensor = self.wo(output_TNV.contiguous().view(T, -1))
-        return output_TD
+        return q_TNH, kv_TR, k_shared_TR
+
+    def warmup_objective(self, normalized_TD, positions, metadata, denominator):
+        if self.indexer is None:
+            return normalized_TD.new_zeros((), dtype=torch.float32)
+        if denominator is None:
+            raise ValueError("Indexer warmup requires a global token denominator")
+        with torch.no_grad():
+            prepared = self.prepare_query(normalized_TD)
+            q, latent, rope = self.prepare_mla(*prepared, positions)
+            query, pool, _ = self.inner_attention.prepare_absorbed(q, latent, rope)
+        _, features = self.indexer(*prepared, positions, metadata)
+        loss = self.inner_attention.inner_attention.indexer_loss
+        assert loss is not None
+        return loss.warmup_objective(query, pool, features, metadata, denominator)
 
     def prepare_query(self, x_TD):
         """Share the gathered input and normalized query with the indexer."""
@@ -173,8 +185,36 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
     class Config(DeepSeekV3TransformerBlock.Config):
         pass
 
+    def forward(
+        self, x_TD, attention_masks, positions=None, topk_indices_TS=None, **kwargs
+    ):
+        leaf = self.attention.inner_attention.inner_attention
+        if leaf.training_stage == "warmup" and self.training and torch.is_grad_enabled():
+            return self.warmup_forward(x_TD, attention_masks, positions, **kwargs)
+        return self._forward_decoder(
+            x_TD, attention_masks, positions, topk_indices_TS, **kwargs
+        )
+
+    def warmup_forward(self, x_TD, attention_masks, positions, **kwargs):
+        # The block remains the FSDP/remat owner. Never build a teacher backward
+        # graph, and return the scalar objective explicitly at this GLM boundary.
+        with torch.no_grad():
+            normalized = (
+                self.attention_norm(x_TD)
+                if self.attention.indexer is not None else x_TD
+            )
+            empty = x_TD.new_empty((x_TD.shape[0], 0), dtype=torch.int32)
+            teacher_kwargs = {**kwargs, "return_indices": True}
+            output, indices = Glm5TransformerBlock._forward_decoder(
+                self, x_TD, attention_masks, positions, empty, **teacher_kwargs
+            )
+        objective = self.attention.warmup_objective(
+            normalized, positions, attention_masks, kwargs.get("aux_loss_denominator")
+        )
+        return output, indices, objective
+
     # Index reuse is internal to GLM blocks, not a shared Module tuple hook.
-    def forward(  # pyrefly: ignore[bad-override]
+    def _forward_decoder(
         self,
         x_TD: torch.Tensor,
         attention_masks: DsaMetadata,
@@ -293,6 +333,38 @@ class Glm5Model(DeepSeekV3Model):
                 if isinstance(module, Glm5DsaIndexer) and id(module) not in excluded_ids
             ]
             excluded = (*excluded_submodules, *indexers)
+            if self.indexer_training_stage == "warmup":
+                # KL-only training has no teacher activation backward or LM head.
+                teacher = active_parameter_flops_per_token(
+                    model, excluded_submodules=(*excluded, model.lm_head, model.norm)
+                ) // 3
+                extra = sum(
+                    active_parameter_flops_per_token(module, excluded_submodules=excluded_submodules)
+                    for module in indexers
+                )
+                for layer in [*model.layers.values(), *(model.mtp_layers or ())]:
+                    attention = layer.attention
+                    if id(attention) in excluded_ids:
+                        continue
+                    teacher += 2 * attention.n_heads * (
+                        2 * attention.kv_lora_rank + attention.qk_rope_head_dim
+                    ) * seq_len
+                    if attention.indexer not in indexers:
+                        continue
+                    # The detached KL teacher replays its input projections, but
+                    # not wo or the value projection. Count this forward work.
+                    extra += sum(
+                        active_parameter_flops_per_token(module, excluded_submodules=excluded_submodules) // 3
+                        for module in (layer.attention_norm, attention.wq_a, attention.q_norm,
+                                       attention.wq_b, attention.wkv_a, attention.kv_norm)
+                    )
+                    extra += 2 * attention.n_heads * attention.qk_nope_head_dim * attention.kv_lora_rank
+                    idx = attention.indexer
+                    extra += (
+                        6 * idx.n_heads * (idx.head_dim + 1)
+                        + 4 * attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim)
+                    ) * seq_len
+                return lambda batch: (teacher + extra) * batch["input"].numel()
             base = super(Glm5Model.Config, self).build_flops_estimator(
                 model, seq_len=seq_len, excluded_submodules=excluded
             )
@@ -329,20 +401,6 @@ class Glm5Model(DeepSeekV3Model):
                         * (attention.kv_lora_rank + attention.qk_rope_head_dim)
                         * selected
                     )
-            if self.indexer_training_stage == "warmup":
-                # Frozen backbone projections still propagate carrier/input gradients.
-                extra -= (
-                    active_parameter_flops_per_token(
-                        model, excluded_submodules=excluded
-                    )
-                    // 3
-                )
-                if model.lm_head is not None:
-                    extra -= (
-                        2
-                        * len(self.mtp_layers or ())
-                        * sum(p.numel() for p in model.lm_head.parameters())
-                    )
             return lambda batch: base(batch) + extra * batch["input"].numel()
 
     def get_attention_masks(
@@ -362,9 +420,8 @@ class Glm5Model(DeepSeekV3Model):
         config.validate_indexer_training()
         super().__init__(config)
         if config.indexer_training_stage == "warmup":
-            # AuxLoss uses the shared backward carrier contract. Freezing weights
-            # does not remove activation backward; a KL-only training driver is a
-            # separate optimization (PR5578 discussion_r4545630656).
+            # The frozen teacher runs without an activation backward graph.
+            # Only producer indexers own gradients in the KL-only stage.
             self.requires_grad_(False)
             for module in self.modules():
                 if isinstance(module, Glm5DsaIndexer):
@@ -495,15 +552,20 @@ class Glm5Model(DeepSeekV3Model):
             positions = pipeline_indices_TS
             pipeline_indices_TS = None
         main_tokens = tokens[0] if isinstance(tokens, tuple) else tokens
+        kl_only = (
+            self.config.indexer_training_stage == "warmup"
+            and self.training and torch.is_grad_enabled()
+        )
         if positions is None:
             positions = torch.arange(main_tokens.shape[0], device=main_tokens.device)
         if attention_masks is None:
             attention_masks = self.get_attention_masks(positions, padding_mask)
-        hidden_TD = (
-            self.tok_embeddings(main_tokens)
-            if self.tok_embeddings is not None
-            else main_tokens
-        )
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not kl_only):
+            hidden_TD = (
+                self.tok_embeddings(main_tokens)
+                if self.tok_embeddings is not None else main_tokens
+            )
+        objectives = []
         index_sources = self.index_sources or tuple(range(len(self.config.layers)))
         local_layers = {int(name) for name in self.layers}
         external_sources = {
@@ -527,7 +589,7 @@ class Glm5Model(DeepSeekV3Model):
         for name, layer in self.layers.items():
             layer_id = int(name)
             source = index_sources[layer_id]
-            hidden_TD, indices_TS = layer(
+            result = layer(
                 hidden_TD,
                 attention_masks,
                 positions,
@@ -536,10 +598,16 @@ class Glm5Model(DeepSeekV3Model):
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
+            if kl_only:
+                hidden_TD, indices_TS, objective = result
+                objectives.append(objective)
+            else:
+                hidden_TD, indices_TS = result
             if source == layer_id:
                 indices_by_source[source] = indices_TS
         pre_norm_hidden_TD = hidden_TD
-        hidden_TD = self.norm(hidden_TD) if self.norm is not None else hidden_TD
+        if not kl_only:
+            hidden_TD = self.norm(hidden_TD) if self.norm is not None else hidden_TD
         if self.mtp_layers is not None:
             if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
                 raise ValueError(
@@ -569,8 +637,10 @@ class Glm5Model(DeepSeekV3Model):
                     if aux_loss_denominators is None
                     else aux_loss_denominators[depth]
                 )
-                prev_hidden = layer(
-                    self.tok_embeddings(depth_tokens),
+                with torch.set_grad_enabled(torch.is_grad_enabled() and not kl_only):
+                    mtp_embed = self.tok_embeddings(depth_tokens)
+                mtp_result = layer(
+                    mtp_embed,
                     prev_hidden,
                     valid_mask,
                     depth_attention_mask,
@@ -578,11 +648,20 @@ class Glm5Model(DeepSeekV3Model):
                     padding_mask=padding_mask,
                     aux_loss_denominator=aux_denom,
                 )
+                if kl_only:
+                    prev_hidden, objective = mtp_result
+                    objectives.append(objective)
+                else:
+                    prev_hidden = mtp_result
                 mtp_outputs.append(prev_hidden)
             outputs = (hidden_TD, *mtp_outputs)
+            if kl_only:
+                return torch.stack(objectives).sum()
             if self._skip_lm_head:
                 return outputs
             return tuple(self.lm_head(item) for item in outputs)
+        if kl_only:
+            return torch.stack(objectives).sum()
         if self._skip_lm_head or self.lm_head is None:
             if local_layers:
                 next_layer = max(local_layers) + 1

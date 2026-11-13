@@ -286,22 +286,37 @@ def build_glm5_layers(
     return layers
 
 
-def _debugmodel(
+def build_debug_model_config(
     *,
     num_dense_layers: int = 1,
     index_sources: tuple[int, ...] = (),
     seq_len: int = 128,
     parallelism: ParallelismConfig | None = None,
+    dim: int = 256,
+    vocab_size: int = 2048,
+    num_layers: int = 8,
+    n_heads: int = 8,
+    q_lora_rank: int = 128,
+    kv_lora_rank: int = 64,
+    qk_nope_head_dim: int = 32,
+    qk_rope_head_dim: int = 32,
+    v_head_dim: int = 64,
+    dense_hidden_dim: int = 1024,
+    moe_hidden_dim: int = 256,
+    num_experts: int = 8,
+    router_top_k: int = 2,
+    index_n_heads: int = 4,
+    index_head_dim: int = 64,
+    index_topk: int = 8,
 ) -> Glm5Model.Config:
-    dim = 256
-    vocab_size = 2048
+    """Build small GLM configurations without registering experiment flavors."""
     rope = ComplexRoPE.Config(
-        dim=32,
+        dim=qk_rope_head_dim,
         max_context_length=seq_len,
         theta=8_000_000,
         scaling="none",
     )
-    effective_index_sources = index_sources or tuple(range(8))
+    effective_index_sources = index_sources or tuple(range(num_layers))
     return Glm5Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
@@ -329,27 +344,27 @@ def _debugmodel(
             sharding_config=lm_head_sharding_config(),
         ),
         layers=build_glm5_layers(
-            num_layers=8,
+            num_layers=num_layers,
             index_sources=effective_index_sources,
             num_dense_layers=num_dense_layers,
             dim=dim,
-            n_heads=8,
-            q_lora_rank=128,
-            kv_lora_rank=64,
-            qk_nope_head_dim=32,
-            qk_rope_head_dim=32,
-            v_head_dim=64,
-            dense_hidden_dim=1024,
-            moe_hidden_dim=256,
-            num_experts=8,
+            n_heads=n_heads,
+            q_lora_rank=q_lora_rank,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            dense_hidden_dim=dense_hidden_dim,
+            moe_hidden_dim=moe_hidden_dim,
+            num_experts=num_experts,
             num_shared_experts=1,
-            router_top_k=2,
+            router_top_k=router_top_k,
             router_num_expert_groups=1,
             router_num_limited_groups=1,
             router_route_scale=2.5,
-            index_n_heads=4,
-            index_head_dim=64,
-            index_topk=8,
+            index_n_heads=index_n_heads,
+            index_head_dim=index_head_dim,
+            index_topk=index_topk,
             mla_norm_eps=1e-5,
             rope=rope,
             enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
@@ -364,7 +379,7 @@ def _glm5_2_debugmodel(
     parallelism: ParallelismConfig | None = None,
 ) -> Glm5Model.Config:
     """Build a small model that preserves GLM-5.2 layer-type transitions."""
-    return _debugmodel(
+    return build_debug_model_config(
         num_dense_layers=3,
         index_sources=(0, 1, 2, 2, 2, 2, 6, 6),
         seq_len=seq_len,
@@ -393,99 +408,6 @@ def _glm5_2_debugmodel_mtp(
             enable_sp=enable_sp,
         ),
     )
-
-
-def _glm5_2_scaled_debugmodel(
-    *,
-    seq_len: int = 4096,
-    parallelism: ParallelismConfig | None = None,
-) -> Glm5Model.Config:
-    """Build a larger GLM-5.2 validation model with the released structure.
-
-    This flavor is sized for single-device training on the smaller validation
-    accelerator while retaining enough depth for every eight-way topology.
-    Width, vocabulary, and routed-expert count are reduced because one released
-    256-expert MoE layer alone cannot fit the single-device validation contract.
-    """
-    dim = 768
-    vocab_size = 32768
-    num_layers = 16
-    index_sources = tuple(
-        (
-            layer_id
-            if layer_id < 3 or (layer_id - 2) % 4 == 0
-            else max(
-                source
-                for source in range(layer_id)
-                if source < 3 or (source - 2) % 4 == 0
-            )
-        )
-        for layer_id in range(num_layers)
-    )
-    rope = ComplexRoPE.Config(
-        dim=64,
-        max_context_length=seq_len,
-        theta=8_000_000,
-        scaling="none",
-    )
-    return Glm5Model.Config(
-        max_context_length=seq_len,
-        vocab_size=vocab_size,
-        dim=dim,
-        index_sources=index_sources,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size,
-            embedding_dim=dim,
-            param_init=_EMBEDDING_INIT,
-            sharding_config=token_embedding_sharding_config(
-                enable_sp=bool(parallelism and parallelism.enable_sequence_parallel)
-            ),
-        ),
-        norm=RMSNorm.Config(
-            normalized_shape=dim,
-            eps=1e-5,
-            param_init=_RMS_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
-                enable_sp=bool(parallelism and parallelism.enable_sequence_parallel)
-            ),
-        ),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-            sharding_config=lm_head_sharding_config(),
-        ),
-        layers=build_glm5_layers(
-            num_layers=num_layers,
-            index_sources=index_sources,
-            num_dense_layers=3,
-            dim=dim,
-            n_heads=8,
-            q_lora_rank=384,
-            kv_lora_rank=192,
-            qk_nope_head_dim=192,
-            qk_rope_head_dim=64,
-            v_head_dim=256,
-            dense_hidden_dim=1536,
-            moe_hidden_dim=384,
-            num_experts=24,
-            num_shared_experts=1,
-            router_top_k=8,
-            router_num_expert_groups=1,
-            router_num_limited_groups=1,
-            router_route_scale=2.5,
-            index_n_heads=8,
-            index_head_dim=128,
-            index_topk=512,
-            mla_norm_eps=1e-5,
-            norm_eps=1e-5,
-            rope=rope,
-            enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
-            enable_ep=bool(parallelism and parallelism.expert_parallel_degree > 1),
-        ),
-    )
-
-
 def _glm5_2_744b_a40b(
     *,
     seq_len: int = 1_048_576,
@@ -589,10 +511,8 @@ def _glm5_2_744b_a40b(
 
 MODEL_FLAVORS = {
     "744B-A40B": _glm5_2_744b_a40b,
-    "debugmodel": _debugmodel,
     "glm5_2_debugmodel": _glm5_2_debugmodel,
     "glm5_2_debugmodel_mtp": _glm5_2_debugmodel_mtp,
-    "glm5_2_scaled_debugmodel": _glm5_2_scaled_debugmodel,
 }
 
 
@@ -605,10 +525,6 @@ def build_model_config(
     indexer_loss_coeff: float = 1.0,
 ) -> Glm5Model.Config:
     """Build one GLM-5 flavor using TorchTitan's current model contract."""
-    if indexer_stage not in ("frozen", "warmup", "sparse"):
-        raise ValueError("GLM indexer_stage must be frozen, warmup or sparse")
-    if indexer_loss_coeff < 0:
-        raise ValueError("GLM indexer_loss_coeff must be non-negative")
     if flavor not in MODEL_FLAVORS:
         raise ValueError(
             f"Unknown glm5 flavor: {flavor}. Available: {list(MODEL_FLAVORS)}"
@@ -616,7 +532,6 @@ def build_model_config(
     get_config = MODEL_FLAVORS[flavor]
     max_context_len = {
         "744B-A40B": 1_048_576,
-        "glm5_2_scaled_debugmodel": 4096,
     }.get(flavor, DEFAULT_DEBUG_MODEL_SEQ_LEN)
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -624,11 +539,30 @@ def build_model_config(
             f"Requested seq_len {context_len} exceeds max context length "
             f"{max_context_len} for flavor {flavor}"
         )
-    if parallelism.context_parallel_load_balancer is not None:
-        raise ValueError(
-            "GLM DSA currently requires contiguous context parallel shards"
-        )
     config = get_config(seq_len=context_len, parallelism=parallelism)
+    return configure_glm5_training(
+        config,
+        parallelism=parallelism,
+        indexer_stage=indexer_stage,
+        indexer_loss_coeff=indexer_loss_coeff,
+    )
+
+
+def configure_glm5_training(
+    config: Glm5Model.Config,
+    *,
+    parallelism: ParallelismConfig,
+    indexer_stage: Literal["frozen", "warmup", "sparse"],
+    indexer_loss_coeff: float,
+) -> Glm5Model.Config:
+    """Apply the shared GLM stage and parallelism contract to a built config."""
+    if indexer_stage not in ("frozen", "warmup", "sparse"):
+        raise ValueError("GLM indexer_stage must be frozen, warmup or sparse")
+    if indexer_loss_coeff < 0:
+        raise ValueError("GLM indexer_loss_coeff must be non-negative")
+    if parallelism.context_parallel_load_balancer is not None:
+        raise ValueError("GLM DSA currently requires contiguous context parallel shards")
+    context_len = config.max_context_length
     config.indexer_training_stage = indexer_stage
     for layer in config.layers + list(config.mtp_layers or ()):
         attention = layer.attention
@@ -655,5 +589,7 @@ def build_model_config(
         ).transform(config)
     if config.mtp_layers and parallelism.pipeline_parallel_degree > 1:
         raise ValueError("GLM MTP does not support pipeline parallelism")
+    if indexer_stage == "warmup" and parallelism.pipeline_parallel_degree > 1:
+        raise ValueError("KL-only GLM warmup does not support pipeline parallelism")
     config.validate_indexer_training()
     return config

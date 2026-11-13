@@ -22,6 +22,7 @@ from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.glm5.dsa import Glm5CPMLAAttention
 from torchtitan.models.glm5.model import Glm5Attention, Glm5Model
 from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
+from torchtitan_recipes.tests.models.glm5_configs import resolve_model_config
 
 
 class TestGlm5Config(unittest.TestCase):
@@ -76,7 +77,7 @@ class TestGlm5Config(unittest.TestCase):
 
     def test_rejects_noncontiguous_index_sharing_at_config_time(self) -> None:
         config = build_model_config(
-            "debugmodel", parallelism=ParallelismConfig(), seq_len=8
+            "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=8
         )
         for sources, message in (
             ((0, 1, 0), "contiguous"),
@@ -266,7 +267,7 @@ class TestGlm5Config(unittest.TestCase):
     def test_rejects_context_beyond_flavor_limit(self) -> None:
         with self.assertRaisesRegex(ValueError, "exceeds max context length"):
             build_model_config(
-                "debugmodel",
+                "glm5_2_debugmodel",
                 parallelism=ParallelismConfig(),
                 seq_len=DEFAULT_DEBUG_MODEL_SEQ_LEN + 1,
             )
@@ -414,12 +415,12 @@ class TestGlm5Config(unittest.TestCase):
         self.assertEqual(two, 2 * one)
 
     def test_cp_selects_official_kv_all_gather_attention(self) -> None:
-        eager_config = build_model_config(
+        eager_config = resolve_model_config(
             "debugmodel",
             parallelism=ParallelismConfig(),
             seq_len=128,
         )
-        cp_config = build_model_config(
+        cp_config = resolve_model_config(
             "debugmodel",
             parallelism=ParallelismConfig(context_parallel_degree=2),
             seq_len=128,
