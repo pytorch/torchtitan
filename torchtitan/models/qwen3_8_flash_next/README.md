@@ -79,7 +79,7 @@ broader embedding stack.
 Adam, clipping and DCP use native DTensor support; HF conversion avoids
 gathering the full table. FP32 parameters, gradients and Adam state cost 95.37 GiB
 per owner at DP=8, before the backbone and activations.
-See [ROW_SHARDED_EMBEDDING.md](../../distributed/ROW_SHARDED_EMBEDDING.md)
+See [ROW_SHARDED_EMBEDDING.md](ROW_SHARDED_EMBEDDING.md)
 for details.
 
 Hash history resets after EOS. Document boundaries at position zero reset
