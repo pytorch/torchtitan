@@ -20,12 +20,12 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
-    Embedding,
     GELU,
     Identity,
     Linear,
     RowParallelLinear,
     Sigmoid,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -37,12 +37,12 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     head_norm_sharding_config,
     lm_head_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_activation_placement,
     replicated_input_colwise_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
+    token_embedding_sharding_config,
 )
 from torchtitan.models.common.moe.sharding import (
     router_gate_sharding_config,
@@ -50,9 +50,6 @@ from torchtitan.models.common.moe.sharding import (
     shared_experts_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.vision_encoder_sharding import (
-    multimodal_token_embedding_sharding_config,
-)
 from torchtitan.models.qwen3_5.flavors import (
     make_qwen35_deltanet_config,
     make_qwen35_vision_encoder_config,
@@ -205,7 +202,7 @@ def _ple_config(
                 state_shardings={"weight": dense_param_placement(tp=spmd.R)}
             ),
         ),
-        sharding_config=ple_sharding(enable_sp=enable_sp),
+        sharding_config=ple_sharding(),
     )
 
 
@@ -481,9 +478,7 @@ def _config(*, debug, multimodal, seq_len, parallelism, indexer_loss):
                 )
                 if layer_id == 1
                 else None,
-                sharding_config=block_sharding(
-                    enable_sp=enable_sp, first_layer=layer_id == 0
-                ),
+                sharding_config=block_sharding(enable_sp=enable_sp),
             )
         )
     vision_encoder = None
@@ -514,15 +509,13 @@ def _config(*, debug, multimodal, seq_len, parallelism, indexer_loss):
             enable_sp=enable_sp,
             use_combine=False,
         ),
-        # The final gated mixer owns the RMSNorm and restores the TP-replicated LM-head input.
-        norm=Identity.Config(
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp)
-        ),
-        tok_embeddings=Embedding.Config(
+        # The final gated mixer owns the RMSNorm.
+        norm=Identity.Config(),
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=multimodal_token_embedding_sharding_config(),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,

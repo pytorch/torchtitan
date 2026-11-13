@@ -20,14 +20,19 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     set_current_spmd_mesh,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.attention import AttentionMetadata, AttentionMetadataMap
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.models.common.decoder_sharding import token_id_placement
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.decoder_sharding import (
+    residual_activation_placement,
+    token_id_placement,
+)
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.models.common.multimodal import replicate_to_residual
 from torchtitan.models.common.nn_modules import Identity
 from torchtitan.models.qwen3_5.model import Qwen35Model
 
@@ -106,13 +111,16 @@ class Qwen38FlashNextBlock(TransformerBlock):
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.ple is not None:
-            x_TC = x_TC + self.ple(
-                x_TC,
+            # PLE runs TP-replicated: gather the residual stream in and restore
+            # the residual layout on the update.
+            update_TC = self.ple(
+                maybe_gather_tp_input(self.ple, x_TC),
                 input_ids_T=ple_input_ids_T,
                 document_positions_T=document_positions_T,
                 routing=ple_routing,
                 padding_mask_T=padding_mask_T,
             )
+            x_TC = x_TC + replicate_to_residual(update_TC)
         mixed_TD, residual_TC, write_TS = self.attn_hyper_connection(x_TC)
         mixed_TD = self.attention_norm(mixed_TD)
         if isinstance(self.attention, QSAAttention):
@@ -286,11 +294,13 @@ class Qwen38FlashNextModel(Qwen35Model):
                 x_TC = x_TD.repeat(1, self.num_streams)
             else:
                 x_TC = tokens
+        if self.tok_embeddings is not None and self.vision_encoder is not None:
+            # The vision scatter leaves the embeddings TP-Replicate.
+            x_TC = replicate_to_residual(x_TC)
         if spmd.is_type_checking():
             spmd.assert_type(
                 x_TC,
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
-                spmd.PartitionSpec(("dp", "cp"), None),
+                residual_activation_placement(enable_sp=spmd_dense_sp_enabled()),
             )
         with spmd.no_typecheck():
             denominator = (
@@ -310,7 +320,10 @@ class Qwen38FlashNextModel(Qwen35Model):
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=denominator,
             )
-        x_TD = self.norm(self.hyper_connection_mixer(x_TC))
+        # The vocab-sharded lm_head, or the chunked loss, needs TP-Replicate input.
+        x_TD = maybe_gather_tp_input(
+            self.norm, self.norm(self.hyper_connection_mixer(x_TC))
+        )
         if self._skip_lm_head:
             return x_TD
         return self.lm_head(x_TD) if self.lm_head is not None else x_TD
