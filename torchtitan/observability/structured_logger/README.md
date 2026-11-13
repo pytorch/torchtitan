@@ -170,9 +170,11 @@ from torchtitan.observability.structured_logger.gantt_generator import (
 )
 
 generate_gantt_trace("outputs/structured_logs/", "outputs/analysis/gantt.json")
+# Only the last 10 steps of a long run:
+generate_gantt_trace("outputs/structured_logs/", "outputs/analysis/gantt.json", last_steps=10)
 ```
 
-Reads every rank's JSONL, pairs `_start` / `_end`, and writes a Chrome Trace JSON. Open in [Perfetto](https://ui.perfetto.dev).
+Reads every rank's JSONL (with `last_steps`, only the end of each file), pairs `_start` / `_end`, and writes a Chrome Trace JSON. Open in [Perfetto](https://ui.perfetto.dev).
 
 Example dummy ASCII sketch:
 ```
@@ -190,4 +192,16 @@ reward                                       ▓▓▓                          
                   0s                         3s          4s                     7s
 ```
 
-Each `log_trace_span` becomes a bar. Every source file becomes a separate process row. Auto-named asyncio tasks are slot-packed into a contiguous `0..K-1` range where K is peak concurrency, so the track count stays readable even for long async runs (e.g. RL actors dispatching many concurrent RPCs).
+Each `log_trace_span` becomes a bar. Each JSONL file becomes a process, named `{source} rank {rank}`. Each asyncio task gets a row where its nested spans stack. A task is labeled by its name (`trainer`, `rollout_worker_3` -> `rollout_worker`), or by its first span if asyncio named it (`Task-812`). Tasks with the same label share rows, at most 8 per label (`max_rows_per_label`):
+
+```
+rl_generator rank 0
+  engine_loop                     an unnamed task whose first span is `engine_loop`
+  generate row 0                  one row per `generate` request in flight ...
+  ...
+  generate row 7 (+56 hidden rows)  ... up to 8 rows; the other 56 show only their errors here
+```
+
+A row named `<label> row <i>` can hold several tasks, one after another; hover a bar to see its task (`task_name` in its args). Markers and metrics have no task: they show on their thread's row when spans ran on that thread outside any task, else on the process's own track, which Perfetto names after the process.
+
+An RL run writes the last 10 steps of its own logs to `{dump_folder}/gantt.json` when it ends, unless `generate_gantt_on_shutdown=False` (`torchtitan/rl/train.py`). It reads the files in `{dump_folder}/structured_logs` on the controller's host, so a multi-host run without shared storage shows only that host's processes.

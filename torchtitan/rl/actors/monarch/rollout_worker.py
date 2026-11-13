@@ -68,14 +68,16 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
     ) -> RolloutGroup:
-        return await self._worker.run_group(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
-        )
+        # Opened at the call site, so a subclass that overrides run_group keeps the span.
+        with sl.log_trace_span("run_group"):
+            return await self._worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=group_size,
+                sampling=sampling,
+            )
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

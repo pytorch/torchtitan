@@ -304,6 +304,13 @@ class Controller(Configurable):
         dump_folder: str = "outputs/rl"
         """Root output folder for RL artifacts (temp weights, logs, etc.)."""
 
+        generate_gantt_on_shutdown: bool = True
+        """At the end of the run, write the last 10 steps of the structured logs to
+        ``{dump_folder}/gantt.json`` for Perfetto. Needs
+        ``trainer.debug.enable_structured_logging``. Turn it off when the render is too
+        slow: on local disk, a 46-process run with 9.5 GB of logs took 25 s and wrote
+        a 50 MB trace; slow network storage takes longer."""
+
         async_loop: AsyncLoopConfig = field(default_factory=AsyncLoopConfig)
         """How the data->rollout->batch->train loop is sized and coordinated."""
 

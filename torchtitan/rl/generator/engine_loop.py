@@ -528,7 +528,7 @@ class EngineLoop:
         decision.released_group_ids = released_group_ids
         return decision
 
-    @sl.log_trace_span("load_model_state_dict_copy")
+    @sl.log_trace_span("_load_model_state_dict")
     async def _load_model_state_dict(self, version: int) -> None:
         """ALL RANKS: collectively load the model state dict through `fetch_model_state_dict`,
         wait for every rank to finish, and bump the policy version.
