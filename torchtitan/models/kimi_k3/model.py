@@ -44,6 +44,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -450,21 +451,22 @@ class KimiK3Model(MultimodalModel):
         else:
             h_TD = tokens
 
-        if spmd.is_type_checking():
-            spmd.assert_type(
-                h_TD,
-                spmd.SpmdType(
-                    {
-                        MeshAxisName.DP: spmd.V,
-                        MeshAxisName.CP: spmd.V,
-                        MeshAxisName.TP: spmd.R,
-                    },
-                    partition_spec=spmd.PartitionSpec(
-                        (MeshAxisName.DP, MeshAxisName.CP), None
+        if self.tok_embeddings is not None and self.vision_encoder is not None:
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    h_TD,
+                    spmd.SpmdType(
+                        {
+                            MeshAxisName.DP: spmd.V,
+                            MeshAxisName.CP: spmd.V,
+                            MeshAxisName.TP: spmd.R,
+                        },
+                        partition_spec=spmd.PartitionSpec(
+                            (MeshAxisName.DP, MeshAxisName.CP), None
+                        ),
                     ),
-                ),
-            )
-
+                )
+            h_TD = replicate_to_residual(h_TD)
         if block_residual_TND is None:
             block_residual_TND = h_TD.unsqueeze(1)[:, :0]
         with spmd.no_typecheck():

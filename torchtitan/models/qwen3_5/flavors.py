@@ -498,7 +498,6 @@ def _build_qwen35_layers(
     full_attention_interval: int = 4,
     attn_backend: str,
     enable_sp: bool,
-    has_vision_encoder: bool,
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build sharded per-layer configs for dense Qwen3.5 models."""
     layers = []
@@ -546,10 +545,7 @@ def _build_qwen35_layers(
                 ffn_norm=_offset_norm(
                     dim, sharding_config=norm_sharding_config(enable_sp=enable_sp)
                 ),
-                sharding_config=transformer_block_sharding_config(
-                    enable_sp=enable_sp,
-                    after_vision_scatter=has_vision_encoder and layer_id == 0,
-                ),
+                sharding_config=transformer_block_sharding_config(enable_sp=enable_sp),
             )
         )
     return layers
@@ -576,7 +572,6 @@ def _build_qwen35_moe_layers(
     attn_backend: str,
     enable_sp: bool,
     enable_ep: bool,
-    has_vision_encoder: bool,
 ) -> list[Qwen35TransformerBlock.Config]:
     """Build sharded per-layer configs for MoE Qwen3.5 models with shared expert."""
     layers = []
@@ -645,10 +640,7 @@ def _build_qwen35_moe_layers(
                 ffn_norm=_offset_norm(
                     dim, sharding_config=norm_sharding_config(enable_sp=enable_sp)
                 ),
-                sharding_config=transformer_block_sharding_config(
-                    enable_sp=enable_sp,
-                    after_vision_scatter=has_vision_encoder and layer_id == 0,
-                ),
+                sharding_config=transformer_block_sharding_config(enable_sp=enable_sp),
             )
         )
     return layers
@@ -715,7 +707,6 @@ def _debugmodel(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -797,7 +788,6 @@ def _debugmodel_moe(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -880,7 +870,6 @@ def _0_8b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -963,7 +952,6 @@ def _2b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -1046,7 +1034,6 @@ def _4b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -1124,7 +1111,6 @@ def _9b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -1202,7 +1188,6 @@ def _27b(
             key_head_dim=128,
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -1284,7 +1269,6 @@ def _35b_a3b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -1366,7 +1350,6 @@ def _122b_a10b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
@@ -1448,7 +1431,6 @@ def _397b_a17b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=has_vision_encoder,
         ),
         vision_encoder=(
             _qwen35_vision_encoder_config(
