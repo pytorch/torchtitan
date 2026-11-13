@@ -369,6 +369,20 @@ class Module(nn.Module, Configurable):
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
+            # With TP/EP enabled, a module that owns parameters but declares
+            # no sharding_config would silently replicate them instead of
+            # sharding them. Buffers alone do not trip this: auxiliary
+            # modules such as the MoE load-balance losses own only
+            # per-rank statistics buffers that are intentionally replicated.
+            if (
+                parallelism_context.tp_enabled or parallelism_context.ep_enabled
+            ) and next(self.parameters(recurse=False), None) is not None:
+                raise RuntimeError(
+                    f"{type(self).__name__} owns parameters but declares no "
+                    "sharding_config, so they would be silently replicated "
+                    "over TP/EP. Add a sharding_config or move the parameters "
+                    "into a sharded module."
+                )
             return
 
         spmd_validate_redistributions(self._sharding_config)

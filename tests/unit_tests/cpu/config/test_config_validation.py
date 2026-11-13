@@ -13,14 +13,17 @@ from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.validation import validate_model_training_config
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
+from torchtitan_recipes.data import c4_document_capacity
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
+from torchtitan_recipes.tests.models.flux import flux_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
@@ -149,8 +152,18 @@ def test_accelerator_graphs_allow_pipeline_validation() -> None:
 
 
 def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
-    config = deepseek_v3_debugmodel()
-    config.parallelism.expert_parallel_degree = 2
+    # Build with the parallelism being validated: the MoE sharding (in
+    # particular the routed-expert EP placements) is derived at build time
+    # and must not be patched afterwards.
+    config = deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    # The builder disables accelerator graphs for EP > 1; this test needs
+    # them on to exercise the dispatcher check.
+    config.training.disable_accelerator_graphs = False
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="without CPU synchronization"
@@ -160,7 +173,6 @@ def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
 
 def test_accelerator_graphs_allow_nonblocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
-    config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True):
         config.__post_init__()
@@ -170,11 +182,58 @@ def test_accelerator_graphs_reject_blocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
     for _, dispatcher, _, _ in config.model.traverse(HybridEPTokenDispatcher.Config):
         dispatcher.non_blocking_capacity_factor = None
-    config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="non_blocking_capacity_factor"
     ):
+        config.__post_init__()
+
+
+def test_dist_moe_recipe_passes_parallel_axis_validation() -> None:
+    """Dist-MoE configs must validate after MoE routed_experts replacement."""
+    dist_moe = pytest.importorskip(
+        "dist_moe",
+        reason="Dist-MoE validation test requires the optional dist_moe package",
+    )
+    del dist_moe  # imported only to skip cleanly when missing
+    from torchtitan.config.parallelism import ParallelismConfig
+
+    from torchtitan_recipes.tests.models.deepseek_v3 import (
+        deepseek_v3_debugmodel_dist_moe_bf16,
+    )
+
+    config = deepseek_v3_debugmodel_dist_moe_bf16(
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+            data_parallel_shard_degree=2,
+            context_parallel_degree=1,
+        )
+    )
+    config.__post_init__()
+
+
+def test_ep_off_built_moe_rejects_ep_gt1() -> None:
+    # A MoE config built with expert_parallel_degree == 1 gets dense
+    # routed-expert weight placements; validating it at EP > 1 must raise
+    # instead of silently ignoring the EP degree.
+    config = deepseek_v3_debugmodel()
+    with pytest.raises(ValueError, match="declares no 'ep' sharding"):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(expert_parallel_degree=2),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+
+def test_flux_pipeline_parallel_degree_gt1_raises() -> None:
+    config = flux_debugmodel()
+    config.parallelism.pipeline_parallel_degree = 2
+
+    with pytest.raises(ValueError, match="does not support pipeline parallelism"):
         config.__post_init__()
 
 

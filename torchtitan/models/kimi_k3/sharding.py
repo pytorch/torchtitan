@@ -27,6 +27,7 @@ from torchtitan.models.common.decoder_sharding import (
 
 
 DP = MeshAxisName.DP
+CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
@@ -111,11 +112,12 @@ def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
     """Placement of the ``(tokens, entries, hidden)`` block-residual stack."""
     if isinstance(tp, spmd.Shard):
         return SpmdType(
-            {DP: spmd.V, TP: spmd.V},
-            partition_spec=spmd.PartitionSpec((DP, TP), None, None),
+            {DP: spmd.V, CP: spmd.V, TP: spmd.V},
+            partition_spec=spmd.PartitionSpec((DP, CP, TP), None, None),
         )
     return SpmdType(
-        {DP: spmd.V, TP: tp}, partition_spec=spmd.PartitionSpec(DP, None, None)
+        {DP: spmd.V, CP: spmd.V, TP: tp},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
     )
 
 
