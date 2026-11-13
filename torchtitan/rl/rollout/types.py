@@ -23,7 +23,10 @@ if TYPE_CHECKING:
 _TRUNCATED = frozenset(
     {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
 )
-_ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+_ERROR = frozenset(
+    {"error_parse", "error_timeout", "error_abort", "error", "error_infra"}
+)
+_NOT_TRAINABLE = frozenset({"error_abort", "error_infra"})
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -205,8 +208,39 @@ class ReleaseSessionFn(Protocol):
         """
 
 
+# TODO: let users add a status without editing this file. A StrEnum with members can't be
+# subclassed, and metrics list `RolloutStatus` members. One way: keep these kinds fixed and add a
+# free-form reason string on `Rollout` that metrics key on. To stop training more rollouts today,
+# override `BaseRolloutWorker.score_group` to return reward None.
 class RolloutStatus(StrEnum):
-    """Per-rollout status."""
+    """How a rollout ended. Scoring and training read it only through the predicates below:
+
+        status                           predicates           reward                    trained
+        COMPLETED                        -                    the rubric                yes
+        TRUNCATED_LENGTH, _MAX_TURNS,    is_truncated()       `truncation_reward` if    yes
+          _PROMPT_TOO_LONG                                    set, else the rubric
+        ERROR, ERROR_PARSE,              is_error()           `error_reward` if set,    yes
+          ERROR_TIMEOUT                                       else the rubric
+        ERROR_ABORT, ERROR_INFRA         is_error(),          None: not scored          no
+                                         not is_trainable()
+
+    Rule of thumb: if the policy messed up (too long, a bad tool call), train on it. If the infra
+    damaged the rollout (an unreachable generator, a crashed env), drop it: ERROR_INFRA.
+    ERROR_TIMEOUT trains: usually the policy took too long, e.g. it ran a command that never ends.
+    An env that hangs on its own lands here too.
+    ERROR_ABORT doesn't: the generator aborted the request.
+    `MessageEnvRolloutWorker._run_single_rollout` makes any exception ERROR_INFRA, and
+    `BaseRolloutWorker.make_scored_group` marks a sibling that raised past it. A subclass can set
+    ERROR_INFRA by its own rule.
+
+    A scored rollout with no completion tokens (e.g. a first prompt past the context) has nothing
+    to train: `TrainingSampleBuilder` drops its whole group. A rubric's reward None (e.g. a judge
+    that failed) also keeps a rollout out of training.
+
+    To add a status, add a member and put its value in the set of its kind: `_TRUNCATED` or
+    `_ERROR`. A status that must never be scored or trained also goes in `_NOT_TRAINABLE`. Metrics
+    record a rate per status: `rollout/status_rate/<value>`.
+    """
 
     ONGOING = "ongoing"
     COMPLETED = "completed"
@@ -217,12 +251,17 @@ class RolloutStatus(StrEnum):
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"
     ERROR = "error"
+    ERROR_INFRA = "error_infra"
 
     def is_truncated(self) -> bool:
         return self.value in _TRUNCATED
 
     def is_error(self) -> bool:
         return self.value in _ERROR
+
+    def is_trainable(self) -> bool:
+        """False: never scored or trained. True can still end untrained (reward None, no tokens)."""
+        return self.value not in _NOT_TRAINABLE
 
     def is_terminal(self) -> bool:
         return self is not RolloutStatus.ONGOING
@@ -387,7 +426,9 @@ class Rollout:
     """Rollout-level terminal status."""
 
     reward: float | None = None
-    """Final weighted reward, filled by the rubric."""
+    """Final weighted reward, filled by the rubric. None if the rollout wasn't scored (its status
+    isn't `is_trainable()`) or the rubric gave no reward: it then gets no advantage and isn't
+    trained."""
 
     reward_breakdown: dict[str, float] = field(default_factory=dict)
     """Raw per-reward-function values, filled by the rubric."""

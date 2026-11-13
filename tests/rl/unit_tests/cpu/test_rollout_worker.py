@@ -8,8 +8,10 @@
 
 import asyncio
 import random
+from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
 from renderers import (
     ParsedResponse,
     PlaceholderRange,
@@ -22,12 +24,13 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout import Prompt, PromptImage, RolloutStatus
+from torchtitan.rl.rollout import Prompt, PromptImage, RolloutGroup, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
-from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Rollout
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
 
@@ -244,6 +247,100 @@ class _CountingMessageEnv:
         pass
 
 
+class _RewardRolloutId(RewardFn):
+    """Rewards rollout_id + 1."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RewardFn.Config):
+        pass
+
+    async def __call__(self, rollout, env_input) -> float:
+        return float(rollout.rollout_id + 1)
+
+
+class _FirstRolloutFails(MessageEnvRolloutWorker):
+    """Rollout 0 fails in `fails_in`: its generate call, its own code, an aborted generation, or
+    the rubric."""
+
+    fails_in = ""
+
+    async def _run_single_rollout(self, *, rollout_id: int, **kwargs) -> Rollout:
+        if self.fails_in == "rollout code" and rollout_id == 0:
+            raise RuntimeError("env bug")
+        rollout = await super()._run_single_rollout(rollout_id=rollout_id, **kwargs)
+        if self.fails_in == "aborted generation" and rollout_id == 0:
+            # What `TokenEnv.step` returns for a completion with finish_reason "abort".
+            rollout.status = RolloutStatus.ERROR_ABORT
+        return rollout
+
+    async def score_group(self, rollouts, env_input) -> list[RubricOutput]:
+        outputs = await super().score_group(rollouts, env_input)
+        return [
+            RubricOutput(reward=None)
+            if self.fails_in == "rubric" and rollout.rollout_id == 0
+            else output
+            for rollout, output in zip(rollouts, outputs, strict=True)
+        ]
+
+
+@pytest.mark.parametrize(
+    "fails_in, status, error",
+    [
+        ("generate call", RolloutStatus.ERROR_INFRA, "generator unreachable"),
+        # Raised past `_run_single_rollout`: `make_scored_group` keeps it.
+        ("rollout code", RolloutStatus.ERROR_INFRA, "env bug"),
+        ("aborted generation", RolloutStatus.ERROR_ABORT, None),
+        ("rubric", RolloutStatus.COMPLETED, None),
+    ],
+)
+def test_a_failed_rollout_is_kept_but_left_out_of_the_advantage(
+    fails_in: str, status: RolloutStatus, error: str | None
+) -> None:
+    class _GenerateFnFailingRolloutZero(_GenerateFn):
+        async def __call__(self, prompt, **kwargs) -> Completion:
+            if fails_in == "generate call" and kwargs["request_id"].startswith(
+                "group=7/rollout=0/"
+            ):
+                raise ConnectionError("generator unreachable")
+            return await super().__call__(prompt, **kwargs)
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    async def run() -> RolloutGroup:
+        worker = _FirstRolloutFails(
+            SimpleNamespace(
+                # The stock rubric would give rollout 0 reward 1, had it scored it.
+                rubric=Rubric.Config(reward_fns=[_RewardRolloutId.Config()]),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=AdvantageEstimator.Config(),
+            )
+        )
+        worker.fails_in = fails_in
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        return await worker.run_group(
+            generate_fn=_GenerateFnFailingRolloutZero(),
+            release_session_fn=release_session_fn,
+            sample="sample",
+            group_id=7,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+
+    failed, *scored = asyncio.run(run()).rollouts
+    assert failed.status is status
+    if error is not None:
+        assert error in failed.logs["error"]
+    assert (failed.reward, failed.advantage) == (None, None)
+    # Rewards 2 and 3, centered on their mean 2.5.
+    assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
+
+
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
@@ -275,7 +372,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     async def run() -> None:
         for rollout_id in range(20):
             renderer = _RewritingRenderer(rng)
-            env = TokenEnv.Config().build(
+            env = TokenEnv.Config(max_rollout_tokens=32768).build(
                 message_env=_CountingMessageEnv(num_turns=rng.randint(1, 6)),
                 renderer=renderer,
             )
