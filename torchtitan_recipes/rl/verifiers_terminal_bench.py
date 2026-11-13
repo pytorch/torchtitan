@@ -141,6 +141,11 @@ def _terminal_bench_rollouter_config(
         # per worker, render wait and host RAM. The `VerifiersRollouter` docstring and the
         # Verifiers README's "Scaling" section copy 16: update them with it.
         worker_pool_size=16,
+        # The README's toy sandbox: task containers run on the controller's host, the one host
+        # whose Docker the example expects. On another host without Docker, every rollout would
+        # fail at once.
+        # TODO: spread the workers once every worker host runs Docker (or a real sandbox).
+        workers_on_controller_host=True,
         # 32 threads (Python's default on a host with 28+ CPUs) for the worker's `asyncio.to_thread`
         # calls. A render waiting for its renderer's lock holds a thread, and Verifiers' runtimes
         # clean up on these threads (e.g. `docker rm --force`). With the default 4, waiting renders
