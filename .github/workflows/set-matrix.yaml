@@ -30,8 +30,38 @@ on:
         value: ${{ jobs.set.outputs.docker-hash }}
 
 jobs:
+  # Only look up ROCm from test-infra when ROCm will actually be in the matrix.
+  # CUDA-only callers (gpu-arch: cuda) and ordinary PRs must not depend on this,
+  # so a ROCm/test-infra failure cannot block CUDA CI.
+  generate-rocm-matrix:
+    if: >-
+      inputs.is-experimental != true &&
+      inputs.gpu-arch != 'cuda' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+      (
+        inputs.gpu-arch == 'rocm' ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        github.event_name == 'schedule'
+      )
+    uses: pytorch/test-infra/.github/workflows/generate_binary_build_matrix.yml@main
+    with:
+      package-type: wheel
+      channel: nightly
+      os: linux
+      test-infra-repository: pytorch/test-infra
+      test-infra-ref: main
+      with-cpu: disable
+      with-xpu: disable
+      with-cuda: disable
+      with-rocm: enable
+      build-python-only: "disable"
+
   set:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    if: >-
+      !cancelled() &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
+      (needs.generate-rocm-matrix.result == 'success' || needs.generate-rocm-matrix.result == 'skipped')
+    needs: generate-rocm-matrix
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
@@ -48,6 +78,7 @@ jobs:
       # Input CUDA & ROCm runners
       ROCM_RUNNER_INPUT: ${{ inputs.runner-rocm }}
       CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
+      ROCM_BINARY_MATRIX: ${{ needs.generate-rocm-matrix.outputs.matrix }}
 
     steps:
       - uses: actions/checkout@v7
@@ -78,37 +109,54 @@ jobs:
           EOF
           )"
 
-          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
-            ROCM_MATRIX=""
-            FULL_MATRIX="$CUDA_MATRIX"
-          else
-            ROCM_MATRIX="$(cat <<EOF
-          {
-            "name": "rocm",
-            "runner": "${ROCM_RUNNER}",
-            "gpu-arch-type": "rocm",
-            "gpu-arch-version": "10.0",
-            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
-            "index-url": "https://download.pytorch.org/whl/nightly/rocm10.0",
-            "torch-version": ""
-          }
-          EOF
-            )"
-            FULL_MATRIX="$CUDA_MATRIX,$ROCM_MATRIX"
-          fi
-
           # Use default value as 'false' for unset environment variables
           IS_MAIN_PUSH="${IS_MAIN_PUSH:-false}"
           IS_SCHEDULE="${IS_SCHEDULE:-false}"
+          GPU_ARCH_INPUT="${{ inputs.gpu-arch }}"
 
           # Decide which matrix entries to include based on event type.
           # Runs CUDA and ROCm for push to main, cron schedules, or when
           # gpu-arch is explicitly set to rocm (e.g. ciflow/rocm/* tag runs).
           # Runs CUDA only as default, including pull requests.
-          GPU_ARCH_INPUT="${{ inputs.gpu-arch }}"
-          if [[ "$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true" || "${GPU_ARCH_INPUT}" == "rocm" ]]; then
+          # Only parse the test-infra ROCm matrix on the ROCm-selected path so
+          # CUDA-only runs never depend on it.
+          if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
             cat > matrix.json <<JSON
-          {"include": [$FULL_MATRIX]}
+          {"include": [$CUDA_MATRIX]}
+          JSON
+          elif [[ "$IS_MAIN_PUSH" == "true" || "$IS_SCHEDULE" == "true" || "${GPU_ARCH_INPUT}" == "rocm" ]]; then
+            # Latest ROCm from test-infra nightly binary matrix (single entry so
+            # expensive 8-GPU jobs do not multiply across every shipped version).
+            if [[ -z "${ROCM_BINARY_MATRIX}" ]]; then
+              echo "::error::ROCm binary matrix from test-infra is empty" >&2
+              exit 1
+            fi
+            ROCM_VERSION=$(echo "${ROCM_BINARY_MATRIX}" | jq -r '
+              [.include[].gpu_arch_version]
+              | unique
+              | sort_by(split(".") | map(tonumber))
+              | last
+            ')
+            if [[ -z "${ROCM_VERSION}" || "${ROCM_VERSION}" == "null" ]]; then
+              echo "::error::Could not derive ROCm version from test-infra matrix" >&2
+              echo "${ROCM_BINARY_MATRIX}" | jq . >&2
+              exit 1
+            fi
+            echo "Using ROCm version ${ROCM_VERSION} from test-infra generate_binary_build_matrix"
+            ROCM_MATRIX="$(cat <<EOF
+          {
+            "name": "rocm",
+            "runner": "${ROCM_RUNNER}",
+            "gpu-arch-type": "rocm",
+            "gpu-arch-version": "${ROCM_VERSION}",
+            "docker-image": "torchtitan-rocm-ubuntu-22.04-clang12",
+            "index-url": "https://download.pytorch.org/whl/nightly/rocm${ROCM_VERSION}",
+            "torch-version": ""
+          }
+          EOF
+            )"
+            cat > matrix.json <<JSON
+          {"include": [$CUDA_MATRIX,$ROCM_MATRIX]}
           JSON
           else
             cat > matrix.json <<JSON
