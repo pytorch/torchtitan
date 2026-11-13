@@ -371,11 +371,17 @@ class Glm5Model(DeepSeekV3Model):
         *,
         parallelism_context,
         parallelism,
+        max_num_documents: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ):
-        """Build compact document metadata and prepare rank-local CP queries."""
-        del kwargs
+        """Build compact document metadata and prepare rank-local CP queries.
+
+        Accept Decoder's max_num_documents capacity hint. Unlike varlen kernels,
+        DSA derives document IDs from positions with token-capacity buffers, so
+        it needs no separate document-capacity allocation.
+        """
+        del max_num_documents, kwargs
         loss_kwargs = input_dict.pop("loss_kwargs", {})
         positions = input_dict.get("positions")
         if positions is not None:

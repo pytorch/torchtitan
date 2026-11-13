@@ -137,10 +137,14 @@ class TestGlm5Config(unittest.TestCase):
                     },
                     parallelism_context=SimpleNamespace(cp_enabled=True),
                     parallelism=parallelism,
+                    max_num_documents=2,
                 )
             metadata = kwargs["attention_masks"]
             torch.testing.assert_close(metadata.positions_T, positions)
             torch.testing.assert_close(metadata.valid_T, ~padding)
+            torch.testing.assert_close(
+                metadata.documents_T, torch.tensor([1] * 4 + [2] * 4)
+            )
             torch.testing.assert_close(metadata.query_indices_Q, torch.arange(4, 8))
             if role == "mtp":
                 shifted = kwargs["mtp_attention_masks"][0]
