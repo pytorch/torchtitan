@@ -36,9 +36,14 @@ from .dsa import (
     KimiDSAIndexer,
     KimiSparseAttention,
 )
-from .model import KimiK31Model
+from .model import KimiK31Model, KimiK31MultimodalModel
 
-__all__ = ["build_model_config", "KimiK31Model", "MODEL_FLAVORS"]
+__all__ = [
+    "build_model_config",
+    "KimiK31Model",
+    "KimiK31MultimodalModel",
+    "MODEL_FLAVORS",
+]
 
 
 def _dsa_config(
@@ -120,11 +125,16 @@ def _dsa_config(
 
 
 def _debugmodel(
-    *, seq_len: int, indexer_loss_coeff: float, parallelism: ParallelismConfig
+    *,
+    seq_len: int,
+    indexer_loss_coeff: float,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> KimiK3Model.Config:
     dim = 256
     return kimi_k3_config(
         config_cls=KimiK31Model.Config,
+        multimodal_config_cls=KimiK31MultimodalModel.Config,
         max_context_length=seq_len,
         dim=dim,
         vocab_size=2048,
@@ -152,26 +162,35 @@ def _debugmodel(
         num_experts=8,
         top_k=2,
         num_shared_experts=2,
-        vision_encoder=vision_encoder_config(
-            text_dim=dim,
-            dim=256,
-            qkv_dim=512,
-            hidden_dim=512,
-            num_layers=2,
-            num_heads=4,
-            init_pos_emb_height=32,
-            init_pos_emb_width=32,
+        vision_encoder=(
+            vision_encoder_config(
+                text_dim=dim,
+                dim=256,
+                qkv_dim=512,
+                hidden_dim=512,
+                num_layers=2,
+                num_heads=4,
+                init_pos_emb_height=32,
+                init_pos_emb_width=32,
+            )
+            if has_vision_encoder
+            else None
         ),
         parallelism=parallelism,
     )
 
 
 def _kimi_k3_1_pro(
-    *, seq_len: int, indexer_loss_coeff: float, parallelism: ParallelismConfig
+    *,
+    seq_len: int,
+    indexer_loss_coeff: float,
+    parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> KimiK3Model.Config:
     dim = 7168
     return kimi_k3_config(
         config_cls=KimiK31Model.Config,
+        multimodal_config_cls=KimiK31MultimodalModel.Config,
         max_context_length=seq_len,
         dim=dim,
         vocab_size=163840,
@@ -199,23 +218,29 @@ def _kimi_k3_1_pro(
         num_experts=896,
         top_k=16,
         num_shared_experts=2,
-        vision_encoder=vision_encoder_config(
-            text_dim=dim,
-            dim=1024,
-            qkv_dim=1536,
-            hidden_dim=4096,
-            num_layers=27,
-            num_heads=12,
-            init_pos_emb_height=64,
-            init_pos_emb_width=64,
+        vision_encoder=(
+            vision_encoder_config(
+                text_dim=dim,
+                dim=1024,
+                qkv_dim=1536,
+                hidden_dim=4096,
+                num_layers=27,
+                num_heads=12,
+                init_pos_emb_height=64,
+                init_pos_emb_width=64,
+            )
+            if has_vision_encoder
+            else None
         ),
         parallelism=parallelism,
     )
 
 
 MODEL_FLAVORS = {
-    "debugmodel": (_debugmodel, 16384),
-    "Kimi-K3.1-Pro": (_kimi_k3_1_pro, 1_048_576),
+    "debugmodel": (partial(_debugmodel, has_vision_encoder=False), 16384),
+    "debugmodel_mm": (_debugmodel, 16384),
+    "Kimi-K3.1-Pro": (partial(_kimi_k3_1_pro, has_vision_encoder=False), 1_048_576),
+    "Kimi-K3.1-Pro_mm": (_kimi_k3_1_pro, 1_048_576),
 }
 
 

@@ -49,7 +49,7 @@ def kimi_k3_1_debugmodel(
     if parallelism is None:
         parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, parallelism=parallelism
+        "debugmodel_mm", seq_len=seq_len, parallelism=parallelism
     )
     indexer = cast(KimiDSAAttention.Config, model_config.first_full_attention).indexer
     # Same storage axes as the Kimi K3 layouts in ``_dist_muon_optimizer``.
