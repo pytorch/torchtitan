@@ -89,16 +89,17 @@ recipes.
 
 ## Local optimizer compilation
 
-Enable compilation of local momentum preparation, Newton-Schulz and direction
-writeback, and parameter updates in the TorchTitan optimizer config:
+In TorchTitan recipes, enable compilation of local momentum preparation,
+Newton-Schulz and direction writeback, and parameter updates with:
 
 ```python
-DistMuon.Config(..., compile=True)
+config.model.local_compile.regions.append("muon")
 ```
 
-The standalone FlexShard `DistMuon` constructor also accepts `compile=True`.
-The default is eager updates. Compilation requires accelerator-resident parameters,
-is lazy, and is independent of model compilation. Redistribution stays eager.
+TorchTitan forwards this selection to FlexShard as `compile=True`; model regions
+do not wrap optimizer functions. Standalone FlexShard users can pass `compile=True`
+directly. Compilation requires accelerator-resident parameters, is lazy, and is
+independent of model compilation. Redistribution stays eager.
 
 ## Package boundary
 

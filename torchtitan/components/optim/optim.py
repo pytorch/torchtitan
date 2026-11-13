@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import torch
@@ -22,7 +23,7 @@ from torchtitan.tools.utils import device_module, device_type
 
 from .ema import EMA
 from .lr_scheduler import LRSchedulersContainer
-from .optimizer import OptimizersContainer
+from .optimizer import DistMuon, OptimizersContainer
 
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class Optim(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
+        local_compile_regions: Sequence[str] = (),
         cuda_graph_annotation_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
@@ -122,7 +124,18 @@ class Optim(Configurable):
                 "Optim graph capture is disabled because the runtime or model "
                 "parameter device does not support graph capture."
             )
-        self.optimizers = config.optimizer.build(
+        optimizer_config = config.optimizer
+        if "muon" in local_compile_regions:
+            optimizer_config = replace(
+                optimizer_config,
+                optimizers=[
+                    replace(optimizer, compile=True)
+                    if isinstance(optimizer, DistMuon.Config)
+                    else optimizer
+                    for optimizer in optimizer_config.optimizers
+                ],
+            )
+        self.optimizers = optimizer_config.build(
             model_parts=model_parts,
             enable_accelerator_graph=enable_accelerator_graph,
         )

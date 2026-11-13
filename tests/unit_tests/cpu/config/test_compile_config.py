@@ -41,6 +41,7 @@ def reset_local_compile():
 
 
 def test_local_compile_config_rejects_unknown_name() -> None:
+    LocalCompileConfig(regions=["muon"]).apply()
     with pytest.raises(ValueError, match=r"foo.*registered values"):
         LocalCompileConfig(regions=["foo"]).apply()
 

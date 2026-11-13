@@ -886,6 +886,9 @@ def test_initialize_optim_builds_component() -> None:
                 training=SimpleNamespace(steps=10),
             ),
             model_parts=[MagicMock()],
+            model_config=SimpleNamespace(
+                local_compile=SimpleNamespace(regions=["muon"])
+            ),
             pp_has_last_stage=True,
             model_cls=SimpleNamespace(_register_optimizer_hooks=MagicMock()),
             parallelism_context=MagicMock(),
@@ -899,6 +902,7 @@ def test_initialize_optim_builds_component() -> None:
         parallelism_context=engine.parallelism_context,
         training_steps=10,
         pp_has_last_stage=True,
+        local_compile_regions=["muon"],
         cuda_graph_annotation_config=None,
     )
     engine.model_cls._register_optimizer_hooks.assert_called_once_with(
