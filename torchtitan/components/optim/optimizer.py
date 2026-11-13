@@ -11,7 +11,6 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from functools import partial
 from typing import Any, cast, Literal, overload
 
 import torch
@@ -28,7 +27,6 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
-from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
@@ -188,20 +186,6 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
             _register_bfloat16_moment_hooks(self)
 
 
-@local_compile(
-    "muon",
-    batch_invariant=False,
-    dynamic=False,
-    recompile_limit=256,
-    options={"emulate_precision_casts": True},
-)
-def _muon_local_update(
-    update: Callable[..., Tensor], *args: Any, **kwargs: Any
-) -> Tensor:
-    """Apply one FlexShard update through the configured compile region."""
-    return update(*args, **kwargs)
-
-
 class DistMuon(FlexShardDistMuon, BaseOptimizer):
     """Configurable TorchTitan wrapper around FlexShard's ``DistMuon``.
 
@@ -237,6 +221,8 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
+        compile: bool = False
+        """Compile local optimizer updates independently of model compilation."""
         max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
@@ -322,7 +308,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
-            compile_fn=lambda update: partial(_muon_local_update, update),
+            compile=config.compile,
         )
 
 

@@ -86,6 +86,7 @@ def _ns_coefficients_by_step(
 ) -> tuple[_NSCoefficients, ...]:
     if _is_ns_coefficient_triple(coefficients):
         return (cast(_NSCoefficients, coefficients),) * ns_steps
+    # Avoid evaluating the generic alias while Dynamo traces the NS loop.
     return cast("tuple[_NSCoefficients, ...]", coefficients)
 
 
@@ -230,8 +231,7 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
-        compile_fn: Callable[[Callable[..., Tensor]], Callable[..., Tensor]]
-        | None = None,
+        compile: bool = False,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
         self._prepare_input = _prepare_muon_input
@@ -257,11 +257,15 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
-        if compile_fn is not None and all(
-            parameter.device.type != "cpu"
-            for group in self.param_groups
-            for parameter in group["params"]
-        ):
+        if compile:
+            if any(
+                parameter.device.type == "cpu"
+                for group in self.param_groups
+                for parameter in group["params"]
+            ):
+                raise ValueError(
+                    "Compiled DistMuon updates require accelerator storage"
+                )
             if any(
                 parameter.dtype not in (torch.float32, torch.bfloat16)
                 for group in self.param_groups
@@ -270,6 +274,13 @@ class DistMuon(Optimizer):
                 raise ValueError(
                     "Compiled DistMuon updates require FP32 or BF16 storage"
                 )
+            compile_fn = partial(
+                torch.compile,
+                fullgraph=True,
+                dynamic=False,
+                recompile_limit=256,
+                options={"emulate_precision_casts": True},
+            )
             self._prepare_input = compile_fn(self._prepare_input)
             self._compute_direction = compile_fn(self._compute_direction)
             self._apply_parameter_update = compile_fn(self._apply_parameter_update)
@@ -1847,7 +1858,11 @@ def _prepare_muon_input(
 ) -> Tensor:
     """Update momentum and prepare the Tensor passed to Muon computation."""
     if torch.compiler.is_compiling():
-        # Tensor weights retain FP32 scalar rounding under Inductor.
+        # TODO: Remove when Inductor scalar lerp matches eager CUDA rounding.
+        # Related upstream work: https://github.com/pytorch/pytorch/pull/176797
+        # Eager CUDA rounds the scalar weight to FP32 before lerp arithmetic;
+        # Inductor can fold Python scalars before that rounding. Tensor weights
+        # preserve it, and the buffer copy preserves BF16 rounding before Nesterov.
         gradient = gradient.float()
         weight = gradient.new_tensor(1 - momentum)
         momentum_buffer.copy_(torch.lerp(momentum_buffer.float(), gradient, weight))
