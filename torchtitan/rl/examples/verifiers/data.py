@@ -19,7 +19,7 @@ from torchtitan.rl.rollout.data import RLDataset
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class VerifiersTaskSample:
-    """Serialized task data dispatched to a stateless Verifiers EnvServer."""
+    """Task data that a rollout worker rebuilds into the Verifiers task to run."""
 
     verifiers_task_data: dict[str, Any]
 

@@ -345,9 +345,19 @@ def _parse_sampling_config(value: object):
         "skip_special_tokens",
         "routed_experts_prompt_start",
     }
-    unsupported = set(value) - supported - protocol_fields
+    # Verifiers' train client always sends these switched off, so vLLM ignores the model's
+    # generation_config. TorchTitan's generator samples the full vocabulary, which is the
+    # same; it can't honor any other value.
+    disabled_values = {"top_k": -1, "min_p": 0.0}
+    unsupported = set(value) - supported - protocol_fields - set(disabled_values)
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
+    for name, disabled_value in disabled_values.items():
+        if name in value and value[name] != disabled_value:
+            raise ValueError(
+                f"sampling_params.{name}={value[name]!r} is unsupported: the generator "
+                f"samples from the full vocabulary ({name}={disabled_value!r})"
+            )
 
     # The generator stops only on these ids; the renderer client always sends them.
     stop_token_ids = _validate_token_ids(
