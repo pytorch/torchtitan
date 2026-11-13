@@ -40,6 +40,16 @@ describe the released model.
 | Quantization | MXFP4 weights and MXFP8 activations with quantization-aware training |
 | Modality | Text and image |
 
+## Optimizer
+
+The K3 test recipe uses DistMuon for decoder and vision linear weights. Vision
+Q/K/V projections use per-head orthogonalization; attention output, MLP, patch
+embedding, and multimodal projector weights use whole-matrix orthogonalization.
+Norms and learned position embeddings stay on AdamW.
+
+This changes the vision optimizer assignment from older recipes. Model weights
+remain compatible, but old AdamW vision states must be reinitialized for DistMuon.
+
 ## Supported Parallelisms
 
 | Feature | Notes |
