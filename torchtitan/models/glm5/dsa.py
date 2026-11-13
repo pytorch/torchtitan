@@ -76,7 +76,7 @@ class Glm5MLAAttention(MLAAttention):
     def _prepare_latents(self, latent_TL, rope_TR):
         return latent_TL, rope_TR
 
-    def forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs):
+    def prepare_absorbed(self, q_THK, kv_c_normed_TL, k_shared_TR):
         latent_KL, rope_KR = self._prepare_latents(kv_c_normed_TL, k_shared_TR)
         # The pool concatenation reads the saved CP communication outputs.
         remat.recompute_needs_tensor(latent_KL, rope_KR, q_THK)
@@ -96,6 +96,12 @@ class Glm5MLAAttention(MLAAttention):
         remat.recompute_needs_tensor(q_latent_THL)
         q_abs_THD = torch.cat((q_latent_THL, q_rope_THR), dim=-1)
         pool_KD = torch.cat((latent_KL, rope_KR), dim=-1)
+        return q_abs_THD, pool_KD, value_weight_HVL
+
+    def forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs):
+        q_abs_THD, pool_KD, value_weight_HVL = self.prepare_absorbed(
+            q_THK, kv_c_normed_TL, k_shared_TR
+        )
         output_THD = remat.region(
             self.inner_attention, self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
@@ -104,14 +110,14 @@ class Glm5MLAAttention(MLAAttention):
         return remat.region(
             torch.einsum, self.remat_region_name("v_project"),
             recompute=self.remat_should_recompute("v_project"),
-        )("thl,hvl->thv", output_THD[..., :latent_KL.shape[-1]], value_weight_HVL)
+        )("thl,hvl->thv", output_THD[..., :value_weight_HVL.shape[-1]], value_weight_HVL)
 
 
 class Glm5CPMLAAttention(Glm5MLAAttention, AllGatherKVMLAFlexAttention):
     """Reuse upstream compact KV communication with GLM document metadata."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(AllGatherKVMLAFlexAttention.Config):
+    class Config(Glm5MLAAttention.Config, AllGatherKVMLAFlexAttention.Config):
         def __post_init__(self) -> None:
             Glm5MLAAttention.Config.__post_init__(self)
 
@@ -392,6 +398,44 @@ class Glm5IndexerLoss(SparseIndexerLoss):
     class Config(SparseIndexerLoss.Config):
         compress_ratio: int = 1
 
+    def warmup_objective(self, query_QHD, pool_KD, features, metadata, denominator):
+        """KL-only objective using the shared teacher, normalization and metrics.
+
+        Teacher activations are detached. Only projected indexer features and
+        the small query-chunk KL graphs participate in backward.
+        """
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        qi_QNH, ki_KH, weights_QN = features
+        objective = query_QHD.new_zeros((), dtype=torch.float32)
+        keys_K = torch.arange(pool_KD.shape[0], device=pool_KD.device)
+        for start in range(0, query_QHD.shape[0], self.chunk_size):
+            stop = min(start + self.chunk_size, query_QHD.shape[0])
+            queries_Q = metadata.query_indices_Q[start:stop]
+            with torch.no_grad(), torch.autocast(device_type=pool_KD.device.type, enabled=False):
+                valid_QK = (
+                    metadata.valid_T[queries_Q, None] & metadata.valid_T[None, :]
+                    & (metadata.documents_T[queries_Q, None] == metadata.documents_T[None, :])
+                    & (metadata.positions_T[queries_Q, None] >= metadata.positions_T[None, :])
+                )
+                indices_QK = keys_K.expand(stop - start, -1).masked_fill(~valid_QK, -1)
+                logits_QHK = torch.einsum(
+                    "qhd,kd->qhk", query_QHD[start:stop].float(), pool_KD.float()
+                ) * self.softmax_scale
+                lse_QH = logits_QHK.masked_fill(~valid_QK[:, None], -torch.inf).logsumexp(-1)
+                p_QK = self._teacher(query_QHD[start:stop], pool_KD, indices_QK, lse_QH, None)
+                targets_QK = p_QK / p_QK.sum(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+            with torch.autocast(device_type=pool_KD.device.type, enabled=False):
+                student_QNK = torch.einsum("qnh,kh->qnk", qi_QNH[start:stop].float(), ki_KH.float())
+                scores_QK = (student_QNK.relu() * weights_QN[start:stop].float()[:, :, None]).sum(1)
+                scores_QK = scores_QK / (qi_QNH.shape[1] * qi_QNH.shape[2]) ** 0.5
+                raw_sum = self._logged_kl(p_QK, targets_QK, scores_QK, valid_QK).sum()
+                # Same TP student-gradient correction as SparseIndexerLoss.forward.
+                raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / spmd_mesh_size("tp")
+                carrier = (raw_sum * self.coeff / denominator.clamp_min(1)).detach()
+                objective = objective + self.inject(raw_sum, carrier=carrier, denominator=denominator)
+        return objective
+
 
 class Glm5SparseAttention(InnerAttention):
     """Gather selected keys and values directly from one shared latent pool.
@@ -505,7 +549,7 @@ class Glm5SparseAttention(InnerAttention):
     ):
         Q = q_THK.shape[0]
         K = k_KH.shape[0]
-        train_indexer = self.training and self.indexer_loss is not None
+        train_indexer = self.training and torch.is_grad_enabled() and self.indexer_loss is not None
         with spmd.no_typecheck():
             query_1HQD = q_THK.transpose(0, 1).unsqueeze(0)
             pool_1HKD = k_KH[None, None]
