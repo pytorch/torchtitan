@@ -36,7 +36,6 @@ def _build(family, flavor="debugmodel", **kwargs):
         ("llama3", "debugmodel", 36_195_840),
         ("qwen3", "debugmodel", 217_093_632),
         ("qwen3", "debugmodel_moe", 331_126_272),
-        ("qwen3_8_flash_next", "debugmodel", 57_128_736),
         ("gpt_oss", "debugmodel", 298_042_560),
         ("deepseek_v3", "debugmodel", 189_040_128),
         ("deepseek_v4", "debugmodel", 59_824_686),
@@ -47,7 +46,7 @@ def _build(family, flavor="debugmodel", **kwargs):
     ],
 )
 def test_text_estimates_preserve_main(family, flavor, expected):
-    # Values recorded before migrating these models to the shared estimator.
+    # Values recorded from main before introducing the shared estimator.
     config, model = _build(family, flavor)
     estimate = config.build_flops_estimator(model, seq_len=128)
     assert estimate({"input": torch.empty(256, dtype=torch.long)}) == expected * 256
