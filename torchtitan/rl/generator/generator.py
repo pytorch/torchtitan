@@ -265,7 +265,7 @@ class Generator(Configurable):
                     output_dir=output_dir,
                 )
             )
-            # The prefetch buffers below and each prefetch's read pin memory through
+            # The prefetch buffers below and each prefetch's TorchStore read pin memory through
             # the CUDA runtime, on the calling thread's device. Both run on this thread, which
             # would otherwise use device 0, rank 0's GPU.
             torch.accelerator.set_device_index(
@@ -462,21 +462,21 @@ class Generator(Configurable):
         self,
         config: ModelStateDictTransport.Config,
         *,
-        sources: list[TrainerSource],
+        trainer_sources: list[TrainerSource],
         generator_index: int,
     ) -> None:
         """Connect to every trainer rank's staging buffer for prefetches to read.
 
         Args:
             config: The transport config.
-            sources: Every trainer rank's staging buffer.
+            trainer_sources: Every trainer rank's staging buffer.
             generator_index: Index of this generator.
         """
         assert self._prefetched_model_state_dict is not None
         self._model_state_dict_transport = config.build()
         self._model_state_dict_transport.connect_generator(
             self._prefetched_model_state_dict,
-            sources=sources,
+            sources=trainer_sources,
             rank=self._rank,
             generator_index=generator_index,
         )

@@ -144,9 +144,6 @@ class Trainer(Configurable):
         )
         # Set by `register_model_state_dict_source`; None pushes through TorchStore.
         self._model_state_dict_transport: ModelStateDictTransport | None = None
-        # Whether the transport staged the model state dict since the last
-        # optimizer step.
-        self._model_state_dict_staged = False
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -202,7 +199,6 @@ class Trainer(Configurable):
 
     def _mark_model_state_dict_ready_for_push(self) -> None:
         """Order the push stream after the latest model-weight updates."""
-        self._model_state_dict_staged = False
         if self._push_model_state_dict_stream is None:
             return
 
@@ -297,9 +293,6 @@ class Trainer(Configurable):
             f"{os.getpid()=} Trainer forward_backward "
             f"policy_version={self.policy_version}"
         )
-        # Staging issues collectives: stage before this step's, whichever of
-        # this call and the push reaches each rank first.
-        self._stage_model_state_dict()
         engine = self.engine
         self._step_compute_start = time.perf_counter()
         microbatches = [
@@ -471,14 +464,20 @@ class Trainer(Configurable):
         its pinned staging buffer, which generators read directly; the same
         ordering applies, and the next push overwrites the staging buffer.
         Staging issues collectives, so it runs on the push stream from this
-        thread, by whichever of the push and the next forward/backward runs
-        first; only the wait for it is off the event loop.
+        thread before the first ``await``: the controller sends the push before
+        the next forward/backward, and Monarch starts concurrent endpoints from
+        one sender in send order, so every rank issues the staging collectives
+        before forward/backward's. Only the wait for staging is off the event
+        loop.
         """
-        if self._model_state_dict_transport is not None:
-            self._stage_model_state_dict()
+        transport = self._model_state_dict_transport
+        if transport is not None:
+            stream = self._push_model_state_dict_stream
+            with stream if stream is not None else nullcontext():
+                transport.stage(self._model_state_dict())
             # Generators read the staging buffer outside stream order.
-            if self._push_model_state_dict_stream is not None:
-                await asyncio.to_thread(self._push_model_state_dict_stream.synchronize)
+            if stream is not None:
+                await asyncio.to_thread(stream.synchronize)
             return
         model_state_dict = self._model_state_dict()
         await asyncio.to_thread(
@@ -486,16 +485,6 @@ class Trainer(Configurable):
             model_state_dict,
             self._preserve_dtype_keys(model_state_dict),
         )
-
-    def _stage_model_state_dict(self) -> None:
-        """Stage the model state dict on the push stream, once per optimizer
-        step."""
-        if self._model_state_dict_transport is None or self._model_state_dict_staged:
-            return
-        stream = self._push_model_state_dict_stream
-        with stream if stream is not None else nullcontext():
-            self._model_state_dict_transport.stage(self._model_state_dict())
-        self._model_state_dict_staged = True
 
     def _put_model_state_dict(
         self,

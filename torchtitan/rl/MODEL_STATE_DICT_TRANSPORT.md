@@ -85,9 +85,9 @@ does not cover every element of a generator shard, or on `Partial` and uneven
    (`connect_generator`).
 2. Push: the trainer casts and, where needed, restages its shards and copies
    them into the staging buffer (`stage`). Restaging is a collective, so it
-   runs once per optimizer step on the actor thread, by whichever of the push
-   and the next forward/backward reaches each rank first; ranks then issue it
-   in the same order relative to their training collectives.
+   runs on the actor thread before the push's first `await`. The controller
+   sends the push before the next forward/backward and Monarch starts them in
+   that order, so every rank issues it before its training collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
    raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
    restart the job.

@@ -108,23 +108,14 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
     asyncio.run(run())
 
 
-def test_push_model_state_dict_stages_once_per_optimizer_step() -> None:
+def test_push_model_state_dict_stages_before_first_await() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         weight_part = Module()
         weight_part.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
-        trainer.engine = SimpleNamespace(
-            model_parts=[weight_part],
-            forward_backward=MagicMock(side_effect=RuntimeError),
-            num_completed_steps=0,
-            device=torch.device("cpu"),
-        )
-        trainer.config = SimpleNamespace(
-            training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=1)
-        )
+        trainer.engine = SimpleNamespace(model_parts=[weight_part])
         stream = MagicMock()
         trainer._push_model_state_dict_stream = stream
-        trainer._model_state_dict_staged = False
         main_thread_id = threading.get_ident()
         staged = []
         sync_thread_ids = []
@@ -142,27 +133,17 @@ def test_push_model_state_dict_stages_once_per_optimizer_step() -> None:
         )
         trainer._model_state_dict_transport = SimpleNamespace(stage=stage)
 
-        # Forward/backward stages if it reaches a rank before the push, and the
-        # push then does not stage again but still waits for it off the event
-        # loop.
-        with pytest.raises(RuntimeError):
-            await trainer.forward_backward([], torch.zeros(1), torch.zeros(1))
-        trainer.engine.forward_backward.assert_called_once()
+        # Staging must finish before the push's first await: Monarch starts the
+        # next forward/backward on this rank once the push yields.
+        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
+        push = asyncio.create_task(trainer.push_model_state_dict())
         assert len(staged) == 1
         assert staged[0]["weight"].data_ptr() == weight_part.weight.data_ptr()
-        await trainer.push_model_state_dict()
-        assert len(staged) == 1
+        assert not push.done()
+        await push
+        # The wait for staging is off the event loop.
         assert len(sync_thread_ids) == 1
         assert sync_thread_ids[0] != main_thread_id
-
-        stream.reset_mock()
-        with patch("torch.accelerator.current_stream") as current_stream:
-            trainer._mark_model_state_dict_ready_for_push()
-        stream.wait_stream.assert_called_once_with(current_stream.return_value)
-        await trainer.push_model_state_dict()
-        trainer._stage_model_state_dict()
-        assert len(staged) == 2
-        assert len(sync_thread_ids) == 2
 
     asyncio.run(run())
 

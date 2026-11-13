@@ -1267,7 +1267,7 @@ class Controller(Configurable):
                     pull_s = await pull_task if pull_task is not None else 0.0
 
                 # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
-                push_task = asyncio.create_task(self._push_model_state_dict())
+                push_task = self._start_push_model_state_dict()
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
                         optimizer_result.policy_version, after=push_task
@@ -1317,12 +1317,18 @@ class Controller(Configurable):
             await push_task
             await pull_task
 
-    async def _push_model_state_dict(self) -> float:
-        """Push the trainer's model state dict for generators to pull; returns its wall time in seconds."""
-        with sl.log_trace_span("trainer_push_model_state_dict"):
-            start = time.perf_counter()
-            await self.trainer.all_ranks.push_model_state_dict.call()
+    def _start_push_model_state_dict(self) -> asyncio.Task[float]:
+        """Send the trainer's model state dict push now, so each trainer rank starts it before the next
+        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
+        start = time.perf_counter()
+        push = self.trainer.all_ranks.push_model_state_dict.call()
+
+        async def wait() -> float:
+            with sl.log_trace_span("trainer_push_model_state_dict"):
+                await push
             return time.perf_counter() - start
+
+        return asyncio.create_task(wait())
 
     async def _pull_model_state_dict_and_release_groups(
         self, version: int, *, after: asyncio.Task[float]

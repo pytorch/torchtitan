@@ -56,11 +56,11 @@ class _GeneratorActorEndpoints:
         self,
         config: ModelStateDictTransport.Config,
         *,
-        sources: list[TrainerSource],
+        trainer_sources: list[TrainerSource],
         generator_index: int,
     ) -> None:
         await super().connect_model_state_dict_transport(
-            config, sources=sources, generator_index=generator_index
+            config, trainer_sources=trainer_sources, generator_index=generator_index
         )
 
     @concurrent_endpoint

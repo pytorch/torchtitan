@@ -227,7 +227,7 @@ class MonarchActorSystem(ActorSystem):
         generator_rank_layouts = shared_rank_layouts(
             [list(r.values()) for r in results]
         )
-        sources = list(
+        trainer_sources = list(
             (
                 await self._trainer.register_model_state_dict_source.call(
                     config, generator_rank_layouts=generator_rank_layouts
@@ -237,7 +237,9 @@ class MonarchActorSystem(ActorSystem):
         await asyncio.gather(
             *(
                 generator.all_ranks.connect_model_state_dict_transport.call(
-                    config, sources=sources, generator_index=generator_index
+                    config,
+                    trainer_sources=trainer_sources,
+                    generator_index=generator_index,
                 )
                 for generator_index, generator in enumerate(self._generators)
             )
