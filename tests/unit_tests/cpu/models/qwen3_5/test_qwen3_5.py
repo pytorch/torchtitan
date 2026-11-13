@@ -56,27 +56,25 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     )
 
     assert shared_experts.sharding_config is not None
-    assert shared_experts.sharding_config.in_src_shardings is not None
-    assert shared_experts.sharding_config.in_dst_shardings is None
+    assert shared_experts.sharding_config.input_shardings is not None
     assert shared_experts.w13.sharding_config is not None
-    assert shared_experts.w13.sharding_config.in_src_shardings is not None
+    assert shared_experts.w13.sharding_config.input_shardings is not None
     assert shared_experts.gate.sharding_config is not None
-    assert shared_experts.gate.sharding_config.in_src_shardings is not None
+    assert shared_experts.gate.sharding_config.input_shardings is not None
     assert shared_experts.w2.sharding_config is not None
 
-    projection_input = shared_experts.w13.sharding_config.in_src_shardings["input"]
-    assert shared_experts.gate.sharding_config.in_src_shardings["input"] == (
+    projection_input = shared_experts.w13.sharding_config.input_shardings["input"]
+    assert shared_experts.gate.sharding_config.input_shardings["input"] == (
         projection_input
     )
-    assert shared_experts.w2.sharding_config.out_src_shardings is not None
-    assert _per_axis_types(shared_experts.w2.sharding_config.out_src_shardings)[
+    assert shared_experts.w2.sharding_config.output_shardings is not None
+    assert _per_axis_types(shared_experts.w2.sharding_config.output_shardings)[
         MeshAxisName.TP
     ] == (spmd.S(0) if enable_sp else spmd.P)
     assert (
-        shared_experts.w2.sharding_config.out_src_shardings
-        == shared_experts.sharding_config.out_src_shardings
+        shared_experts.w2.sharding_config.output_shardings
+        == shared_experts.sharding_config.output_shardings
     )
-    assert shared_experts.w2.sharding_config.out_dst_shardings is None
 
 
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
@@ -102,7 +100,6 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     for projection in (vision_encoder.block.mlp.fc1, vision_encoder.merger.fc1):
         sharding = projection.sharding_config
         assert sharding is not None
-        assert sharding.in_dst_shardings is None
 
     for projection in (
         vision_encoder.block.mlp.fc2,
@@ -111,8 +108,7 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     ):
         sharding = projection.sharding_config
         assert sharding is not None
-        assert sharding.out_dst_shardings is None
-        output_layout = sharding.out_src_shardings
+        output_layout = sharding.output_shardings
         assert isinstance(output_layout, SpmdType)
         assert output_layout.local_type[MeshAxisName.CP] == spmd.R
         assert output_layout.local_type[MeshAxisName.TP] == spmd.I
@@ -141,8 +137,8 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
         assert attention.sharding_config is not None
         assert output_projection.sharding_config is not None
         assert (
-            attention.sharding_config.out_src_shardings
-            == output_projection.sharding_config.out_src_shardings
+            attention.sharding_config.output_shardings
+            == output_projection.sharding_config.output_shardings
         )
 
 

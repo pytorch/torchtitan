@@ -142,8 +142,8 @@ def build_and_swap_native_moe(
         )
         moe_config.sharding_config = replace(
             root_sharding,
-            in_src_shardings={"hidden_states": hf_sp_layout},
-            out_src_shardings=hf_sp_layout,
+            input_shardings={"hidden_states": hf_sp_layout},
+            output_shardings=hf_sp_layout,
         )
 
         with torch.device("meta"):

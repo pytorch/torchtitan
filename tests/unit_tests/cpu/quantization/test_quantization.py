@@ -361,8 +361,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
     sc = module._sharding_config
     assert sc.local_spmd
     input_layout = dense_activation_placement(tp=input_tp, cp=spmd.S(0))
-    assert sc.in_src_shardings == {"input": input_layout}
-    assert sc.in_dst_shardings == {"input": input_layout}
+    assert sc.input_shardings == {"input": input_layout}
     assert list(inspect.signature(module.forward).parameters) == ["input"]
     assert "weight" in sc.state_shardings
     assert sc.state_shardings["_sr_seed"] == SpmdType(
@@ -393,11 +392,9 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
     ).build()
 
     assert not module._sharding_config.local_spmd
-    assert module._sharding_config.in_src_shardings == (
-        sharding_config.in_src_shardings
-    )
-    assert module._sharding_config.out_src_shardings == (
-        sharding_config.out_src_shardings
+    assert module._sharding_config.input_shardings == (sharding_config.input_shardings)
+    assert module._sharding_config.output_shardings == (
+        sharding_config.output_shardings
     )
     assert "_sr_seed" in module._sharding_config.state_shardings
 
