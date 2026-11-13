@@ -52,7 +52,7 @@ The pipeline has three layers.
 
 **2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [controller/WINDOWED_FIFO.md](controller/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
-**3. Distributed execution.** A router sends requests to one or more vLLM generator replicas. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
+**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
 `torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
@@ -78,14 +78,16 @@ The package is organized by responsibility and dependency boundary:
 - `generator/` contains the standalone generator service (`generator.py`), the
   SPMD engine loop that drives it (`engine_loop.py`), request dispatch across
   data-parallel replicas (`dispatcher.py`), the inference engine interface
-  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), and
-  inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
+  (`engine.py`, `GenerationEngine`), engine-agnostic types (`types.py`), the
+  generator model's build and model state dict loads (`model.py`),
+  and inference parallelism. `generator/vllm/` holds everything vLLM-specific: the
   `VLLMEngine` implementation and its config (`Generator.Config.engine`), and
-  the model-side adapters that run TorchTitan models in vLLM.
+  the model-side adapters that run TorchTitan models in vLLM. `generator/sglang/`
+  holds the same for SGLang (`SGLangEngine`).
 - `rollout/` contains rollout execution (`rollouter.py`), the user extension
   APIs for environments (`message_env.py`, `token_env.py`) and rewards
   (`rubric.py`), advantages, data loading, rollout recording, and the rollout
-  data types including the generation contract (`types.py`: `GenerateFn`,
+  data types including the generation contract (`types.py`: `GenerateFn`, `Prompt`,
   `Completion`). Renderers are shared with SFT and live in core
   `torchtitan/components/renderer.py`.
 - `routing/` contains request routing across and within generators.

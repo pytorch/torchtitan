@@ -93,7 +93,7 @@ def router_sharding_config() -> ShardingConfig:
         state_shardings={
             "tokens_per_expert_E": _tokens_per_expert_placement(),
         },
-        in_src_shardings={
+        input_shardings={
             "x_TD": dense_sequence_parallel_placement(),
             "padding_mask_T": token_id_placement(enable_sp=True),
         },
@@ -117,10 +117,10 @@ def shared_expert_rowwise_sharding_config(*, output_layout: SpmdType) -> Shardin
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={
+        input_shardings={
             "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
         },
-        out_src_shardings=output_layout,
+        output_shardings=output_layout,
     )
 
 
@@ -138,8 +138,8 @@ def shared_experts_output_placement(*, enable_sp: bool) -> SpmdType:
 def shared_experts_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Shared DenseFeedForward boundary inside an MoE."""
     return ShardingConfig(
-        in_src_shardings={"x": residual_activation_placement(enable_sp=enable_sp)},
-        out_src_shardings=shared_experts_output_placement(enable_sp=enable_sp),
+        input_shardings={"x": residual_activation_placement(enable_sp=enable_sp)},
+        output_shardings=shared_experts_output_placement(enable_sp=enable_sp),
     )
 
 
@@ -151,13 +151,13 @@ def routed_experts_sharding_config() -> ShardingConfig:
     """
     experts_input_layout = dense_sequence_parallel_placement()
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "x_TD": experts_input_layout,
             "topk_scores_TK": experts_input_layout,
             "topk_expert_ids_TK": experts_input_layout,
             "routing_map_TE": experts_input_layout,
         },
-        out_src_shardings=experts_input_layout,
+        output_shardings=experts_input_layout,
         local_spmd=True,
     )
 
@@ -191,9 +191,9 @@ def moe_sharding_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings={
             "expert_bias_E": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={
+        input_shardings={
             "x_TD": layout,
             "padding_mask_T": token_id_placement(),
         },
-        out_src_shardings=layout,
+        output_shardings=layout,
     )

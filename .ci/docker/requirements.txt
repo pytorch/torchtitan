@@ -10,6 +10,8 @@ safetensors
 einops
 pillow
 spmd_types == 0.3.1
-attn-gym[linear,cudnn]==0.0.18
-torch_remat == 0.2.2
+attn-gym[linear,cudnn]==0.0.20
+# TODO: pin a release once torch_remat publishes one with SavedTensorInfo.region
+# (meta-pytorch/remat 6c05e8d), which per-region activation offload needs.
+torch_remat @ git+https://github.com/meta-pytorch/remat.git@6c05e8d8d6895a60dcc02674af0774b28155b5af
 torch_checkpointing == 0.1.1

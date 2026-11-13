@@ -10,9 +10,14 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
+    PixelBudgetResize,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -20,7 +25,12 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Linear,
+    RowParallelLinear,
+    VocabParallelEmbedding,
+)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
@@ -37,7 +47,6 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
@@ -67,16 +76,68 @@ from .model import (
 from .sharding import (
     attention_sharding_config,
     cp_replicated_vision_sharding_config,
-    perception_emb_norm_sharding_config,
     scaleless_head_norm_sharding_config,
 )
 
 __all__ = [
+    "MUSE_GLIMMER_30B_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS",
+    "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
     "MODEL_FLAVORS",
     "build_model_config",
     "muse_glimmer_vision_configs",
 ]
+
+
+# Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
+# (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
+# debugmodel_mm's vocab_size=2048), so no asset change is needed.
+MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+    "pad_token": "<|endoftext|>",
+}
+
+# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
+MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``), and raster order matches its row-major patch layout.
+MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": PixelBudgetResize.Config(min_pixels=784, max_pixels=3136),
+    "patch_order": "raster",
+}
+
+# The released Muse Glimmer 30B image processor: closest-aspect patch grid up to
+# 4096 merged tokens, LANCZOS. Images only.
+MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "patch_order": "raster",
+    "image_interpolation_mode": "lanczos",
+}
 
 
 # The query is scaled by this tuned constant divided by sqrt(head_dim) after
@@ -351,7 +412,7 @@ def _muse_glimmer_config(
         perception_emb_norm = _scaleless_norm(
             dim,
             _NORM_EPS,
-            sharding_config=perception_emb_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=cp_replicated_vision_sharding_config(),
         )
 
     return MuseGlimmerModel.Config(
@@ -364,7 +425,7 @@ def _muse_glimmer_config(
         # all-reduce happens before the scaleless norm (normalizing a Partial
         # sum would be wrong); the norm runs on the reduced activation.
         tok_embeddings=EmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
@@ -394,7 +455,7 @@ def _muse_glimmer_config(
                 dim,
                 _NORM_EPS,
                 gain_center=0.0,
-                sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+                sharding_config=norm_sharding_config(enable_sp=enable_sp),
             ),
             param_init={"weight": nn.init.ones_},
         ),

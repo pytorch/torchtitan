@@ -54,6 +54,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
+from torchtitan.rl.rollout.types import Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -134,7 +135,7 @@ def _request(
 ) -> EngineRequest:
     return EngineRequest(
         request_id=request_id,
-        prompt_token_ids=prompt_token_ids or [1, 2],
+        prompt=Prompt(token_ids=prompt_token_ids or [1, 2]),
         sampling=SamplingConfig(stop_token_ids=[]),
         group_id=group_id,
         routing_session_id=routing_session_id or request_id,
@@ -144,9 +145,7 @@ def _request(
 
 def _message(engine_request: EngineRequest) -> GenerationMessage:
     return GenerationMessage(
-        engine_request=engine_request,
-        metrics_prefix="generator",
-        reply=concurrent.futures.Future(),
+        engine_request=engine_request, reply=concurrent.futures.Future()
     )
 
 
@@ -653,7 +652,7 @@ class _RejectingEngine(_FakeEngine):
     max_prompt_len = 2
 
     def admit(self, request: EngineRequest) -> None:
-        if len(request.prompt_token_ids) > self.max_prompt_len:
+        if len(request.prompt.token_ids) > self.max_prompt_len:
             raise ValueError(f"prompt of {request.request_id} is too long")
         super().admit(request)
 
@@ -740,9 +739,7 @@ def _loading_engine(monkeypatch, load_pre_hook=None) -> _FakeEngine:
 
 
 def _generate(engine_loop: EngineLoop, request_id: str, **kwargs: Any) -> asyncio.Task:
-    return asyncio.create_task(
-        engine_loop.generate(_request(request_id, **kwargs), metrics_prefix="generator")
-    )
+    return asyncio.create_task(engine_loop.generate(_request(request_id, **kwargs)))
 
 
 async def _on_engine_loop(engine_loop: EngineLoop, fn: Callable[[], Any]) -> Any:
@@ -889,7 +886,7 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
         waiting = asyncio.create_task(generator.wait_engine_loop())
         with pytest.raises(AssertionError, match="stop_token_ids must be set"):
             await generator.generate(
-                [1, 2],
+                Prompt(token_ids=[1, 2]),
                 request_id="r0",
                 group_id=4,
                 routing_session_id="s0",
@@ -898,13 +895,16 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
 
         completion = await asyncio.wait_for(
             generator.generate(
-                [1, 2, 3], request_id="r1", group_id=4, routing_session_id="s1"
+                Prompt(token_ids=[1, 2, 3]),
+                request_id="r1",
+                group_id=4,
+                routing_session_id="s1",
             ),
             _TIMEOUT_S,
         )
         assert completion.request_id == "r1"
         [request] = admitted
-        assert request.prompt_token_ids == [1, 2, 3]
+        assert request.prompt.token_ids == [1, 2, 3]
         assert request.sampling is sampling
         assert (request.group_id, request.routing_session_id) == (4, "s1")
 
@@ -1494,7 +1494,7 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
             with pytest.raises(
                 RuntimeError, match="generator is closed; cannot call generate"
             ):
-                await engine_loop.generate(_request("r1"), metrics_prefix="generator")
+                await engine_loop.generate(_request("r1"))
         else:
             completion = await asyncio.wait_for(
                 _generate(engine_loop, "r0"), _TIMEOUT_S

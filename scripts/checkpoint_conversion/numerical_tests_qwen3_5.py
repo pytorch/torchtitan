@@ -16,7 +16,7 @@ Usage:
     python -m scripts.checkpoint_conversion.numerical_tests_qwen3_5 \
         --hf_model_path hf_assets/Qwen/Qwen3.5-2B \
         --tt_checkpoint_path outputs/Qwen/qwen3_5_2b_dcp \
-        --model_flavor 2B
+        --model_flavor 2B_mm
 """
 
 import argparse
@@ -322,7 +322,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             layer.attention.inner_attention = _SDPA(is_causal=True)
 
     for blk in model.vision_encoder.layers.values():
-        blk.attn.flex_attention = _SDPA(is_causal=False)
+        blk.attn.inner_attention = _SDPA(is_causal=False)
 
     model.eval()
 
@@ -398,7 +398,7 @@ def main():
     )
     parser.add_argument("--hf_model_path", type=str, required=True)
     parser.add_argument("--tt_checkpoint_path", type=str, required=True)
-    parser.add_argument("--model_flavor", type=str, default="4B")
+    parser.add_argument("--model_flavor", type=str, default="4B_mm")
     parser.add_argument("--num_samples", type=int, default=10)
     args = parser.parse_args()
 

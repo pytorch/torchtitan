@@ -96,7 +96,7 @@ Both production and debug flavors use MoE in every layer.
 | --- | --- |
 | Single device | Supported |
 | FSDP | Supported alone or together with EP/TP+EP; active encoders use dummy inputs to keep participation aligned across DP ranks |
-| Expert parallelism | Supported with the standard all-to-all dispatcher or Dist-MoE |
+| Expert parallelism | Supported with the standard all-to-all dispatcher, DeepEP, HybridEP, or Dist-MoE |
 | Tensor parallelism | Supported with `EP >= TP`, including unequal degrees |
 | Async tensor parallelism | Supported with BF16 projections |
 | Sequence parallelism | Supported when both TP and EP are enabled |
@@ -106,9 +106,8 @@ Both production and debug flavors use MoE in every layer.
 | Activation checkpointing | Full and region policies through `torch_remat` |
 | Loss compilation | Supported |
 | Model compilation | Regional compilation |
-| CUDA graphs | Text-only with Dist-MoE; multimodal support is a TorchTitan gap; standard all-to-all EP requires graphs to be disabled |
+| CUDA graphs | Text-only with Dist-MoE or HybridEP; multimodal support is a TorchTitan gap; standard all-to-all EP and DeepEP training require graphs to be disabled |
 | TP without EP | Not supported |
-| DeepEP, HybridEP, and MinimalAsyncEP | Not supported |
 
 Production TP must divide the 16 KV heads. EP must be at least TP and divide
 both the 256 experts and `dp_shard * CP * TP` ranks.
@@ -123,8 +122,29 @@ across CP; token-aligned bank indices select each rank's local embeddings.
 Dist-MoE requires Blackwell GPUs and the optional
 `dist_moe` package. Dist-MoE owns dispatch, expert computation, and combine.
 
+On Hopper, where Dist-MoE is not available, HybridEP is the EP path that
+supports CUDA graphs. With capacity factor `1.0`, it uses about 2x the memory of
+the standard all-to-all dispatcher. In a scaled-up debug run on 8x H100, it was
+about 15% faster than all-to-all without graphs and about 60% faster with them.
+`muse_spark_debugmodel_hybridep` in `torchtitan_recipes/tests/models/muse_spark.py`
+shows the setup with `TokenDispatcherTransform` and CUDA graphs. Its non-blocking
+capacity factor of `1.0` reserves the worst case, so no tokens are dropped, at
+the cost of memory. See [`models/common/moe/README.md`](../common/moe/README.md)
+for choosing a lower factor. HybridEP is verified with FSDP, with TP+EP, and
+with Ulysses CP+EP.
+HybridEP's combine rounds the routing scores to BF16 before weighting the
+expert outputs.
+
+DeepEP uses its compact, host-synced path in training, so CUDA graphs must be
+disabled. Its combine kernel requires the MoE compressed dimension to be a
+multiple of 256: the production flavors use 4096, but `debugmodel` uses 128 and
+cannot run with DeepEP. DeepEP is verified with FSDP, with TP+EP, and with
+Ulysses CP+EP.
+
 ## TODO
 
+- Reject a DeepEP hidden size that is not a multiple of 256 at config time, in
+  `DeepEPTokenDispatcher.Config`, instead of at the first forward.
 - Add non-synthetic audio and video training recipes.
 - Benchmark CP load balancing and PP/CP communication at longer contexts and
   production scale. Add native and Hugging Face checkpoint save/resume tests

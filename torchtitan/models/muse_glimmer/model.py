@@ -18,9 +18,11 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.base.model import FlopsEstimator
@@ -33,7 +35,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
@@ -246,10 +248,9 @@ class EmbeddingWithNorm(Module):
     the default PP module split instead of being pruned to ``None``.
 
     The norm is a sibling child that runs *after* the embedding child so that,
-    under TP, it sees the embedding's already-reduced output. (Vocab-parallel
-    embedding emits a ``Partial`` result; the embedding child's sharding
-    all-reduces it at the child boundary before the norm runs -- normalizing a
-    partial sum would be incorrect.)
+    under TP, it sees the embedding's already-reduced output.
+    (``VocabParallelEmbedding`` reduces its ``Partial`` lookup before
+    returning, so the norm never normalizes a partial sum.)
 
     Contrast with :class:`SoftCappedLinear` at the other end of the model. That
     transform is *elementwise per logit*, so it commutes with both vocab
@@ -264,7 +265,7 @@ class EmbeddingWithNorm(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        embedding: Embedding.Config
+        embedding: VocabParallelEmbedding.Config
         norm: RMSNorm.Config
 
     def __init__(self, config: Config) -> None:
@@ -309,14 +310,15 @@ class MuseGlimmerModel(MultimodalModel):
                 ]
             )
         )
-        # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
-        # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
+        # Narrows the base Decoder.Config.tok_embeddings
+        # (VocabParallelEmbedding.Config) to the bundled embedding+norm unit
+        # whose .embedding/.norm children carry the sharding.
         # Dataclass fields are invariant, so pyrefly flags the (intentional) override.
         # pyrefly: ignore [bad-override]
         tok_embeddings: EmbeddingWithNorm.Config
         # Optional LLM-side multimodal injection. Preprocessing builds absolute
         # packed-bank indices before CP; forward gathers the corresponding vision
-        # rows into the TP-replicated token embeddings.
+        # rows into the token embeddings.
         vision_projection: Linear.Config | None = None
         perception_emb_norm: RMSNorm.Config | None = None
         # Optional owned vision stack. When set, ``MuseGlimmerModel`` builds the encoder
@@ -527,10 +529,20 @@ class MuseGlimmerModel(MultimodalModel):
                 f"grid_thw describes {num_patches} patches, but pixel_values contains "
                 f"{pixel_values.shape[0]}"
             )
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_VD = self.vision_adapter(
-            self.vision_encoder(pixel_values, grid_thw=grid_thw)
+            invariant_to_replicate(
+                self.vision_encoder(pixel_values, grid_thw=grid_thw), MeshAxisName.CP
+            )
         )
-        return self.perception_emb_norm(self.vision_projection(vision_features_VD))
+        vision_embeds_VD = self.perception_emb_norm(
+            self.vision_projection(vision_features_VD)
+        )
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_VD = invariant_to_replicate(vision_embeds_VD, MeshAxisName.TP)
+        return vision_embeds_VD
 
     def _prepare_multimodal_embeds(
         self,
@@ -610,7 +622,7 @@ class MuseGlimmerModel(MultimodalModel):
                 positions,
             )
 
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        h_TD = self._pre_lm_head_norm_and_gather(h_TD)
 
         # _skip_lm_head is an attribute (not a kwarg) because PP backward calls
         # .requires_grad on all stage inputs, which fails on bool kwargs.

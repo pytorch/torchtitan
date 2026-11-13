@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -166,6 +167,7 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
         if self._worker_actors is not None:
@@ -181,6 +183,7 @@ class Rollouter(Configurable):
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            vision_processor_config=vision_processor_config,
         )
 
     async def close(self) -> None:
@@ -191,8 +194,8 @@ class Rollouter(Configurable):
             generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
             run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
 
-        Why wait: if a worker stops while the generator router still owes it a reply, Monarch fails the
-        router and the finished job exits 130.
+        Why wait: if a worker stops while a generator (or the generator router) still owes it a reply,
+        Monarch fails that actor and the finished job exits 130.
         """
         actor_system = self._actor_system
         self._worker_actors = None
@@ -313,10 +316,22 @@ class RolloutWorker(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
-        """Build runtime dependencies after the worker actor is spawned."""
+        """Build runtime dependencies after the worker actor is spawned.
+
+        ``vision_processor_config``: `Controller.Config.vision_processor`, for a renderer that
+        reads image files; None for text prompts.
+        """
         tokenizer = tokenizer_config.build(tokenizer_path=hf_assets_path)
-        self._renderer = renderer_config.build(tokenizer=tokenizer)
+        vision_processor = (
+            vision_processor_config.build()
+            if vision_processor_config is not None
+            else None
+        )
+        self._renderer = renderer_config.build(
+            tokenizer=tokenizer, vision_processor=vision_processor
+        )
 
     def make_env_group(
         self,
@@ -483,7 +498,7 @@ class RolloutWorker(Configurable):
 
                 # generator call
                 completion = await generate_fn(
-                    prompt_token_ids=env_step.next_prompt_token_ids,
+                    prompt=env_step.next_prompt,
                     request_id=turn_rollout_id.to_string(),
                     group_id=group_id,
                     routing_session_id=routing_session_id,
@@ -499,6 +514,10 @@ class RolloutWorker(Configurable):
                         rollout_id=turn_rollout_id,
                         prompt_prefix_len=env_step.next_prompt_prefix_len,
                         prompt_delta_token_ids=env_step.next_prompt_delta_token_ids,
+                        prompt_delta_images=env_step.next_prompt_delta_images,
+                        prompt_delta_image_placeholders=(
+                            env_step.next_prompt_delta_image_placeholders
+                        ),
                         prompt_messages=env_step.next_prompt_messages or [],
                         completion_token_ids=np.asarray(
                             completion.token_ids, dtype=np.int32

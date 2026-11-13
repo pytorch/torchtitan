@@ -5,16 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
-import os
 import unittest
 
 from unittest.mock import patch
 
 import pytest
 import torch
-import torch.utils.deterministic
 import torch_remat as remat
 from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.common_utils import DeterministicGuard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -35,6 +34,7 @@ from torchtitan.models.common.activation import (
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
@@ -43,7 +43,9 @@ from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 deep_ep = pytest.importorskip("deep_ep")
 # DeepEP < 2.5 named the unified buffer ``ElasticBuffer``.
-_EP_BUFFER = getattr(deep_ep, "EPBuffer", None) or deep_ep.ElasticBuffer
+_EP_BUFFER = getattr(deep_ep, "EPBuffer", None) or getattr(
+    deep_ep, "ElasticBuffer", None
+)
 
 pytestmark = pytest.mark.multi_gpu
 
@@ -210,7 +212,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
             activation_fn,
             output_postprocess,
         ) in itertools.product(ac_configs, expert_configs):
+            # Spawned ranks run the test method without setUp, so set determinism
+            # here, matching set_determinism in torchtitan/distributed/utils.py.
+            # Filling empty outputs must stay off: it races with comm streams.
             with (
+                DeterministicGuard(True, fill_uninitialized_memory=False),
                 self.subTest(
                     ac=type(activation_remat).__qualname__,
                     linear=grouped_linear_cls.__name__,
@@ -239,12 +245,25 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     )
                 ).to(self.device_type, torch.bfloat16)
                 ac_model.load_state_dict(baseline.state_dict())
+                # DeepEP: compare with router scores applied after W2. HybridEP:
+                # compare with AllToAll, which has no capacity rows past the last
+                # expert offset that could reach the postprocess weight grad.
+                is_deepep = isinstance(dispatcher_config, DeepEPTokenDispatcher.Config)
                 reference = None
-                if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
+                if is_deepep or isinstance(
+                    dispatcher_config, HybridEPTokenDispatcher.Config
+                ):
+                    reference_block = _PostW2 if is_deepep else _EPBlock
                     reference = _Model(
-                        _PostW2(
+                        reference_block(
                             num_experts,
-                            dispatcher_config,
+                            (
+                                dispatcher_config
+                                if is_deepep
+                                else AllToAllTokenDispatcher.Config(
+                                    num_experts=num_experts, top_k=_TOP_K
+                                )
+                            ),
                             grouped_linear_cls=grouped_linear_cls,
                             activation_fn=activation_fn,
                             output_postprocess=output_postprocess,
@@ -314,10 +333,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
 
                 if reference is not None:
                     reference_values = _run_forward_backward(reference, x_TD)
-                    # Compare pre-W2 absorption with the previous post-W2 scoring.
+                    # Normwise within BF16 rounding: a wrong postprocess weight grad
+                    # has a relative error near 1.
                     bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
                     for value, reference_value in zip(expected, reference_values):
-                        if output_postprocess is not None and exact:
+                        if is_deepep and output_postprocess is not None and exact:
                             torch.testing.assert_close(
                                 value, reference_value, rtol=0, atol=0
                             )
@@ -356,7 +376,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
 
 
 @unittest.skipUnless(
-    torch.cuda.device_count() >= 2 and hasattr(deep_ep, "ElasticBuffer"),
+    torch.cuda.device_count() >= 2 and _EP_BUFFER is not None,
     "requires two CUDA devices and DeepEP v2",
 )
 class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
@@ -385,7 +405,7 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
                     RMSNorm.Config(normalized_shape=_MODEL_DIM),
                 ),
             ),
-            buffer_type=deep_ep.ElasticBuffer,
+            buffer_type=_EP_BUFFER,
             dispatch_method="dispatch",
             combine_method="combine",
             exact=bool(num_replays),
@@ -414,25 +434,6 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
     "requires two CUDA devices and HybridEP",
 )
 class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(
-            torch.use_deterministic_algorithms,
-            torch.are_deterministic_algorithms_enabled(),
-        )
-        torch.use_deterministic_algorithms(True)
-        # Match set_determinism: filling empty outputs races with comm streams.
-        self.addCleanup(
-            setattr,
-            torch.utils.deterministic,
-            "fill_uninitialized_memory",
-            torch.utils.deterministic.fill_uninitialized_memory,
-        )
-        torch.utils.deterministic.fill_uninitialized_memory = False
-        env = patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"})
-        env.start()
-        self.addCleanup(env.stop)
-
     def _check_hybridep_activation_checkpointing(
         self, ac_configs, *, num_replays, capture=False
     ):
@@ -449,7 +450,14 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
                     ),
-                    expert_configs=((GroupedLinear, SwiGLU.Config(), None),),
+                    expert_configs=(
+                        (GroupedLinear, SwiGLU.Config(), None),
+                        (
+                            GroupedLinear,
+                            SwiGLU.Config(),
+                            RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                        ),
+                    ),
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",

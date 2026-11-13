@@ -20,7 +20,10 @@ import spmd_types as spmd
 
 import torch
 import torch.nn as nn
+from spmd_types import SpmdType
 
+from torchtitan.distributed.local_compile import compile
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 
@@ -28,6 +31,8 @@ from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
+
+TP = MeshAxisName.TP
 
 __all__ = [
     "get_lora_dist_moe_routed_experts",
@@ -38,7 +43,8 @@ __all__ = [
 
 # TODO: Support checkpoint interoperability for LoRA adapter state. Native DCP
 # base checkpoints cannot initialize LoRA models because lora_a/lora_b keys are
-# absent, and Hugging Face state-dict adapters omit those keys during export.
+# absent. HF export raises in BaseCheckpointManager._validate_hf_export until a
+# PEFT adapter export exists.
 class _LoRAMixin:
     _lora_scaling: float
 
@@ -58,28 +64,9 @@ class _LoRALinearMixin(_LoRAMixin):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        if config.num_linears > 1:
-            # A stacked base projection shares one A matrix across its logical
-            # linears and stacks their B matrices along the same output axis as
-            # the base weight. The adapters inherit only parameter sharding;
-            # the base projection remains responsible for TP collectives.
-            replicated_weight = ShardingConfig(
-                state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-            )
-            lora_a_sharding = (
-                replicated_weight if config.sharding_config is not None else None
-            )
-            lora_b_sharding = (
-                ShardingConfig(
-                    state_shardings=dict(config.sharding_config.state_shardings),
-                )
-                if config.sharding_config is not None
-                else None
-            )
-        else:
-            lora_a_sharding, lora_b_sharding = self._adapter_sharding(
-                config.sharding_config
-            )
+        lora_a_sharding, lora_b_sharding = self._adapter_sharding(
+            config.sharding_config, num_linears=config.num_linears
+        )
         self.lora_a = Linear.Config(
             in_features=config.in_features,
             out_features=config.rank,
@@ -121,28 +108,46 @@ class _LoRALinearMixin(_LoRAMixin):
     @staticmethod
     def _adapter_sharding(
         base_sharding: ShardingConfig | None,
+        *,
+        num_linears: int,
     ) -> tuple[ShardingConfig | None, ShardingConfig | None]:
-        """Derive adapter sharding from the base linear's TP sharding."""
-        base_weight_sharding = (
+        """Derive adapter weight sharding from the base weight, changing only TP.
+
+        A column-wise base gets a TP-replicated A and a B sharded like the base.
+        A row-wise base gets an A sharded like the base and a TP-replicated B.
+        A TP-replicated or TP-invariant base is copied to both adapters; other TP
+        types raise ValueError. The adapters inherit only parameter sharding; the
+        base projection owns the TP collectives.
+        """
+        base_weight = (
             base_sharding.state_shardings.get("weight") if base_sharding else None
         )
-        if base_weight_sharding is None:
+        if base_weight is None:
             return None, None
 
-        replicated_weight = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        )
-        if base_weight_sharding == dense_param_placement(tp=spmd.S(0)):
-            lora_b_sharding = ShardingConfig(
-                state_shardings={"weight": base_weight_sharding},
-            )
-            return replicated_weight, lora_b_sharding
+        # Parameter shardings use S(i), not a PartitionSpec.
+        assert base_weight.partition_spec is None
+        original_sharding = ShardingConfig(state_shardings={"weight": base_weight})
+        local_type = base_weight.local_type
 
-        assert base_weight_sharding == dense_param_placement(tp=spmd.S(1))
-        lora_a_sharding = ShardingConfig(
-            state_shardings={"weight": dense_param_placement(tp=spmd.S(1))},
-        )
-        return lora_a_sharding, replicated_weight
+        def with_tp(tp: spmd.PerMeshAxisSpmdType) -> ShardingConfig:
+            weight = SpmdType({**local_type, TP: tp})
+            return ShardingConfig(state_shardings={"weight": weight})
+
+        # The base weight is [O, I], or [num_linears, O, I] when stacked. A stacked
+        # base shares one A [L, I] and stacks B [num_linears, O, L].
+        output_dim = 0 if num_linears == 1 else 1
+        base_tp = local_type.get(TP)
+        if base_tp == spmd.S(output_dim):
+            return with_tp(spmd.R), original_sharding
+        if base_tp == spmd.S(output_dim + 1):
+            return with_tp(spmd.S(1)), with_tp(spmd.R)
+        if base_tp not in (None, spmd.R, spmd.I):
+            raise ValueError(
+                f"LoRA does not support base weight TP type {base_tp} with "
+                f"num_linears={num_linears}."
+            )
+        return original_sharding, original_sharding
 
 
 def _grouped_lora_adapter_sharding(
@@ -242,6 +247,88 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
         return base_out_RO + self._lora_scaling * lora_out_RO
 
 
+def _merge_expert_lora(
+    weight_EOI: torch.Tensor,
+    lora_b_EOL: torch.Tensor,
+    lora_a_ELI: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    """Return ``W + scale * (B @ A)`` without copying the full weight W.
+
+    Out-of-place ``torch.baddbmm(W, B, A)`` makes two passes over W-sized memory:
+    a copy kernel reads W and writes the output buffer, then the GEMM reads that
+    buffer as C and writes the result back into it. Here the GEMM writes only
+    ``scale * (B @ A)`` (``beta=0`` ignores the empty buffer), and the compiled
+    add reads W once and writes the result once. cuBLAS baddbmm also rounds
+    ``scale * (B @ A)`` to the weight dtype before adding W, so the rounding
+    matches ``torch.baddbmm``.
+
+    TODO: Call ``torch.baddbmm(W, B, A)`` directly once out-of-place baddbmm
+    passes self to cuBLASLt as C and writes D without copying self first.
+    """
+    lora_delta_EOI = torch.baddbmm(
+        torch.empty_like(weight_EOI), lora_b_EOL, lora_a_ELI, beta=0, alpha=scale
+    )
+    return weight_EOI + lora_delta_EOI
+
+
+# GEMM autotuning can fuse the add into a Triton GEMM epilogue, so W is read
+# once and the result written once. It benchmarks kernels in each process, so
+# the chosen kernel can differ between runs.
+_autotuned_merge_expert_lora = compile(
+    _merge_expert_lora,
+    fullgraph=True,
+    dynamic=False,
+    options={"max_autotune_gemm": True},
+)
+# Deterministic mode skips benchmarking: a cuBLAS GEMM, then an in-place add.
+_deterministic_merge_expert_lora = compile(
+    _merge_expert_lora,
+    fullgraph=True,
+    dynamic=False,
+    options={"deterministic": True},
+)
+
+
+class _MergeExpertLoRA(torch.autograd.Function):
+    """Compile only the merge forward.
+
+    The backward stays eager and uses the ``torch.baddbmm`` derivative formulas,
+    so the gradients do not depend on kernel choices.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore [bad-override]
+        ctx,
+        weight_EOI: torch.Tensor,
+        lora_b_EOL: torch.Tensor,
+        lora_a_ELI: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(lora_b_EOL, lora_a_ELI)
+        ctx.scale = scale
+        # NOTE: Only Dist-MoE routed expert weights reach this merge. They are
+        # never spmd.I, so ranks may pick different autotuned kernels.
+        # TODO(fegin): Always use the deterministic merge once it is as fast as
+        # the autotuned one.
+        merge = (
+            _deterministic_merge_expert_lora
+            if torch.are_deterministic_algorithms_enabled()
+            else _autotuned_merge_expert_lora
+        )
+        return merge(weight_EOI, lora_b_EOL, lora_a_ELI, scale)
+
+    @staticmethod
+    def backward(  # pyrefly: ignore [bad-override]
+        ctx, grad_EOI: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor, None]:
+        lora_b_EOL, lora_a_ELI = ctx.saved_tensors
+        grad_weight_EOI = grad_EOI if ctx.needs_input_grad[0] else None
+        grad_b_EOL = grad_EOI.bmm(lora_a_ELI.transpose(1, 2)) * ctx.scale
+        grad_a_ELI = lora_b_EOL.transpose(1, 2).bmm(grad_EOI) * ctx.scale
+        return grad_weight_EOI, grad_b_EOL, grad_a_ELI, None
+
+
 class _LoRADistMoeRoutedExpertsMixin:
     """Materialize child GroupedLinear LoRA updates into weight operands.
 
@@ -255,7 +342,7 @@ class _LoRADistMoeRoutedExpertsMixin:
     and scaling; this mixin only detects adapted children and materializes a
     full-sized ``W + scale * (B @ A)`` tensor for each one. Dist-MoE saves each
     effective weight until its backward and, with in-place WGRAD accumulation
-    disabled, returns a fresh full-sized gradient for it. The baddbmm backward
+    disabled, returns a fresh full-sized gradient for it. The merge backward
     then contracts that gradient into A and B gradients; only after that can the
     effective weight and its gradient be released.
 
@@ -285,22 +372,20 @@ class _LoRADistMoeRoutedExpertsMixin:
         w13_EFD = base_w13_EFD
         w13 = self.w13
         if isinstance(w13, _LoRAGroupedLinearMixin):
-            w13_EFD = torch.baddbmm(
+            w13_EFD = _MergeExpertLoRA.apply(
                 base_w13_EFD,
                 w13.lora_b.weight.flatten(1, -2),
                 w13.lora_a.weight,
-                beta=1,
-                alpha=w13._lora_scaling,
+                w13._lora_scaling,
             )
         w2_EDF = base_w2_EDF
         w2 = self.w2
         if isinstance(w2, _LoRAGroupedLinearMixin):
-            w2_EDF = torch.baddbmm(
+            w2_EDF = _MergeExpertLoRA.apply(
                 base_w2_EDF,
                 w2.lora_b.weight,
                 w2.lora_a.weight,
-                beta=1,
-                alpha=w2._lora_scaling,
+                w2._lora_scaling,
             )
         return w13_EFD, w2_EDF
 

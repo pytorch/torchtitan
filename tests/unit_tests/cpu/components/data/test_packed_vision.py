@@ -329,6 +329,8 @@ class TestPackedVision(unittest.TestCase):
         torch.testing.assert_close(result_TD[:2], vision_TD[:2])
         torch.testing.assert_close(result_TD[3:], vision_TD[2:])
         torch.testing.assert_close(result_TD[2], torch.zeros(2))
+        # The input can alias a no-op TP gather's input, so it is not written.
+        torch.testing.assert_close(inputs_TD, torch.zeros(5, 2))
 
     def test_gather_vision_embeds_uses_packed_bank_indices(self) -> None:
         inputs_TD = torch.tensor(

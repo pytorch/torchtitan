@@ -13,7 +13,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def force_logprobs_fn_for_batch_invariance() -> None:
+def force_trainer_logprobs_for_batch_invariance() -> None:
     """Make vLLM's v2 logprob path dispatch.
 
     The v2 GPU sampler computes per-token logprobs with a fused Triton kernel

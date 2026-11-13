@@ -22,7 +22,8 @@ from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
@@ -274,11 +275,17 @@ def scatter_vision_embeds(
 ) -> torch.Tensor:
     """Copy packed vision features into the text sequence at placeholder runs.
 
+    Returns a copy of ``inputs_embeds`` with the vision rows written in.
+    ``inputs_embeds`` is left unchanged: it can alias its producer's input,
+    e.g. the output of a no-op TP ``Invariant -> Replicate`` gather, which
+    autograd does not allow writing in place.
+
     Args:
-        inputs_embeds: ``(T, D)`` text embeddings, modified in place.
+        inputs_embeds: ``(T, D)`` text embeddings.
         vision_embeds: Packed vision features ``(total_tokens, dim)``.
         vision_positions: from ``get_vision_positions``.
     """
+    inputs_embeds = inputs_embeds.clone()
     vision_offset = 0
     for _, vision_start, num_tokens in vision_positions:
         inputs_embeds[vision_start : vision_start + num_tokens] = vision_embeds[
@@ -292,3 +299,27 @@ def scatter_vision_embeds(
             f"the packed vision output contains {vision_embeds.shape[0]}."
         )
     return inputs_embeds
+
+
+def replicate_to_residual(x_TD: torch.Tensor) -> torch.Tensor:
+    """Convert the TP-``Replicate`` multimodal stream to the decoder residual layout.
+
+    The residual layout is ``residual_activation_placement``: TP-``Shard(0)``
+    under sequence parallelism, TP-``Invariant`` otherwise. Multimodal models
+    gather the token embeddings to TP-``Replicate`` with
+    ``maybe_gather_tp_input`` so the vision scatter can write any position;
+    this undoes it afterwards. ``Replicate -> Shard(0)`` under sequence
+    parallelism is a local slice, and ``Replicate -> Invariant`` otherwise is a
+    type change; neither communicates in forward or backward. Returns ``x_TD``
+    unchanged without TP.
+    """
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.R,
+        dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        backward_options={"op_dtype": x_TD.dtype},
+    )

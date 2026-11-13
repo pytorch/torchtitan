@@ -22,6 +22,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
+    invariant_to_replicate,
     spmd_local_context,
 )
 from torchtitan.models.common import Linear
@@ -35,6 +36,7 @@ from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
 )
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -42,6 +44,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -227,6 +230,7 @@ class KimiK3Model(MultimodalModel):
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
                     "attention_residual",
+                    "mla_kv",
                 ]
             )
         )
@@ -357,6 +361,10 @@ class KimiK3Model(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
+        if self.vision_encoder is not None:
+            # The vision scatter writes arbitrary positions, so every TP rank
+            # needs the full sequence.
+            embeddings_TD = maybe_gather_tp_input(self.tok_embeddings, embeddings_TD)
         if (pixel_values is None) != (grid_thw is None):
             raise ValueError(
                 "pixel_values and grid_thw must either both be provided or "
@@ -378,6 +386,11 @@ class KimiK3Model(MultimodalModel):
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        # The encoder output is TP- and CP-invariant; the decoder consumes it in
+        # TP-sharded computation on CP-sharded tokens, so its gradient is summed
+        # across both. Converting TP first reduces CP first in backward.
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
 
@@ -438,21 +451,22 @@ class KimiK3Model(MultimodalModel):
         else:
             h_TD = tokens
 
-        if spmd.is_type_checking():
-            spmd.assert_type(
-                h_TD,
-                spmd.SpmdType(
-                    {
-                        MeshAxisName.DP: spmd.V,
-                        MeshAxisName.CP: spmd.V,
-                        MeshAxisName.TP: spmd.R,
-                    },
-                    partition_spec=spmd.PartitionSpec(
-                        (MeshAxisName.DP, MeshAxisName.CP), None
+        if self.tok_embeddings is not None and self.vision_encoder is not None:
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    h_TD,
+                    spmd.SpmdType(
+                        {
+                            MeshAxisName.DP: spmd.V,
+                            MeshAxisName.CP: spmd.V,
+                            MeshAxisName.TP: spmd.R,
+                        },
+                        partition_spec=spmd.PartitionSpec(
+                            (MeshAxisName.DP, MeshAxisName.CP), None
+                        ),
                     ),
-                ),
-            )
-
+                )
+            h_TD = replicate_to_residual(h_TD)
         if block_residual_TND is None:
             block_residual_TND = h_TD.unsqueeze(1)[:, :0]
         with spmd.no_typecheck():
@@ -481,7 +495,7 @@ class KimiK3Model(MultimodalModel):
             self.output_res_proj,
             self.output_res_norm,
         )
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        h_TD = self._pre_lm_head_norm_and_gather(h_TD)
         if self._skip_lm_head:
             return h_TD
         return self.lm_head(h_TD) if self.lm_head is not None else h_TD

@@ -124,12 +124,12 @@ def graph_trainer_deepseek_v3_debugmodel_deepep(
     base.model = build_model_config(
         "debugmodel",
         attn_backend="flex",
-        seq_len=base.training.max_context_length,
+        seq_len=base.model.max_context_length,
         parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return apply_transforms(
         config,
         [

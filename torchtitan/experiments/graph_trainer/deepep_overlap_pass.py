@@ -92,7 +92,9 @@ def _op_args(node: fx.Node) -> tuple:
 def _value_producer(node: fx.Node) -> fx.Node:
     """Return the call node behind a ``getitem`` of a multi-output op."""
     if node.op == "call_function" and node.target is operator.getitem:
-        return node.args[0]
+        producer = node.args[0]
+        if isinstance(producer, fx.Node):
+            return producer
     return node
 
 
@@ -249,7 +251,7 @@ def deepep_dispatch_overlap_pass(
     for launch, filler, wait in expected:
         first = min(new_order[n] for n in filler)
         last = max(new_order[n] for n in filler)
-        if not new_order[launch] < first and last < new_order[wait]:
+        if not (new_order[launch] < first and last < new_order[wait]):
             raise ValueError(
                 "deepep_dispatch_overlap failed to place filler between "
                 f"{launch.name} and {wait.name}"
