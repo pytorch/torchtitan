@@ -471,12 +471,8 @@ class Trainer(Configurable):
         With a ``ModelStateDictTransport``, the push instead stages the tensors in
         its pinned staging buffer, which generators read directly; the same
         ordering applies, and the next push overwrites the staging buffer.
-        Staging issues collectives, so it runs on the push stream from this
-        thread before the first ``await``: the controller sends the push before
-        the next forward/backward, and Monarch starts concurrent endpoints from
-        one sender in send order, so every rank issues the staging collectives
-        before forward/backward's. Only the wait for staging is off the event
-        loop.
+        Staging enqueues its copies on the push stream from this thread; only
+        the wait for them is off the event loop.
         """
         transport = self._model_state_dict_transport
         if transport is not None:

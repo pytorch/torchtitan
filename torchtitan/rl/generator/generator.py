@@ -535,6 +535,8 @@ class Generator(Configurable):
 
         Called on the engine loop thread during a load.
         """
+        if self._model_state_dict_transport is not None:
+            return self._model_state_dict_transport.copy_prefetched_(state_dict)
         with torch.no_grad():
             for key, tensor in state_dict.items():
                 tensor.copy_(self._prefetched_model_state_dict[key])
