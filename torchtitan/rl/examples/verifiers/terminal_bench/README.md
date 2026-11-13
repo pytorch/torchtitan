@@ -146,8 +146,11 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
   ref for numbers you want to compare; Terminal-Bench 2.0 and 2.1 are not
   interchangeable.
 - Without Harbor Hub access, pre-populate `~/.cache/harbor` with an exported task tree.
-- To use other datasets, change the ids passed to `_terminal_bench_rollouter_config` in the recipe file.
-  The training and validation datasets must differ.
+- To use other datasets, change the ids passed to `terminal_bench_rollouter_config` in the recipe file.
+  The training and validation datasets must differ. For another sandbox or agent, set
+  `worker.environment.agent.runtime` or `.harness` on the returned config.
+  For another env, pass `taskset_id`: the name of your own top-level package that exports
+  a `TerminalTaskset` subclass in `__all__` (and an Env, only if it needs its own).
 
 ## If every reward is 0
 

@@ -30,7 +30,7 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarnessConfig,
 )
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
-    _terminal_bench_rollouter_config,
+    terminal_bench_rollouter_config,
 )
 from verifiers.v1.agent import resolve_rollout_timeouts
 from verifiers.v1.runtimes import ProgramResult, Runtime
@@ -48,12 +48,13 @@ MAX_CONTEXT_LENGTH = 32768
 MAX_TURNS = 64
 
 
-def _rollouter_config(train_dataset: str, validation_dataset: str):
-    return _terminal_bench_rollouter_config(
+def _rollouter_config(train_dataset: str, validation_dataset: str, **options):
+    return terminal_bench_rollouter_config(
         train_dataset,
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
         max_turns=MAX_TURNS,
+        **options,
     )
 
 
@@ -239,6 +240,36 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert isinstance(
         load_harness(env.config.agent.harness), TerminalBenchTerminusHarness
     )
+
+
+def test_taskset_id_picks_the_taskset_config_and_env(tmp_path, monkeypatch) -> None:
+    """A caller's own top-level package, passed as ``taskset_id``, supplies the taskset and
+    the env."""
+    (tmp_path / "caller_terminal_bench").mkdir()
+    (tmp_path / "caller_terminal_bench" / "__init__.py").write_text(
+        "import verifiers.v1 as vf\n"
+        "from verifiers.v1.tasksets.harbor import HarborTask\n"
+        "from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (\n"
+        "    TerminalTaskset,\n"
+        "    TerminalTasksetConfig,\n"
+        ")\n\n\n"
+        "class CallerTasksetConfig(TerminalTasksetConfig):\n"
+        "    pass\n\n\n"
+        "class CallerTaskset(TerminalTaskset, vf.Taskset[HarborTask, CallerTasksetConfig]):\n"
+        "    config: CallerTasksetConfig\n\n\n"
+        "class CallerEnv(vf.SingleAgentEnv):\n"
+        "    pass\n\n\n"
+        "__all__ = ['CallerEnv', 'CallerTaskset']\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _rollouter_config(
+        TRAIN_DATASET, EVAL_DATASET, taskset_id="caller_terminal_bench"
+    )
+
+    # What each rollout worker loads.
+    env = load_environment(resolve_env_config(config.worker.environment))
+    assert type(env).__name__ == "CallerEnv"
+    assert type(env.taskset).__name__ == "CallerTaskset"
 
 
 def _write_harbor_task(task_dir, *, task_toml: str, dockerfile: str | None) -> None:
