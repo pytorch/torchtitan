@@ -6,10 +6,12 @@
 
 import pytest
 import torch
-import torch_remat as remat
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
+from torchtitan.distributed.activation_remat import (
+    ActivationRematConfig,
+    DefaultActivationRematConfig,
+)
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 from torchtitan.models.glm5 import build_model_config
 from torchtitan.models.glm5.dsa import DsaMetadata
@@ -44,8 +46,6 @@ def test_shared_mla_and_mtp_checkpoint_outputs_and_gradients(save, mtp_only):
     model = config.build()
     model.init_states()
     model._skip_lm_head = True
-    if save != "default":
-        model.configure_remat_regions(save, [])
     tokens = torch.arange(16)
     positions = torch.cat((torch.arange(12), torch.arange(4)))
     padding = torch.zeros(16, dtype=torch.bool)
@@ -69,14 +69,16 @@ def test_shared_mla_and_mtp_checkpoint_outputs_and_gradients(save, mtp_only):
 
     def run(checkpoint):
         model.zero_grad(set_to_none=True)
-        if checkpoint and save == "default":
-            DefaultActivationRematConfig().apply(model)
-        forward = (
-            remat.checkpoint()(model)
-            if checkpoint and save != "default"
-            else model
-        )
-        outputs = forward((tokens, shifted), **kwargs)
+        if checkpoint:
+            # Policies own one checkpoint/name scope per decoder block.
+            # One checkpoint around the whole model aliases routing regions.
+            policy = (
+                DefaultActivationRematConfig()
+                if save == "default"
+                else ActivationRematConfig(save_regions=save)
+            )
+            policy.apply(model)
+        outputs = model((tokens, shifted), **kwargs)
         objectives = outputs[1:] if mtp_only else outputs
         sum(output.square().mean() for output in objectives).backward()
         gradients = {

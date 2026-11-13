@@ -102,6 +102,10 @@ class Glm5MLAAttention(MLAAttention):
         q_abs_THD, pool_KD, value_weight_HVL = self.prepare_absorbed(
             q_THK, kv_c_normed_TL, k_shared_TR
         )
+        return self.attend_absorbed(q_abs_THD, pool_KD, value_weight_HVL, **kwargs)
+
+    def attend_absorbed(self, q_abs_THD, pool_KD, value_weight_HVL, **kwargs):
+        """Consume one prepared teacher pool without repeating projections."""
         output_THD = remat.region(
             self.inner_attention, self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
@@ -111,6 +115,39 @@ class Glm5MLAAttention(MLAAttention):
             torch.einsum, self.remat_region_name("v_project"),
             recompute=self.remat_should_recompute("v_project"),
         )("thl,hvl->thv", output_THD[..., :value_weight_HVL.shape[-1]], value_weight_HVL)
+
+    def warmup_teacher(self, q_THK, latent_TL, rope_TR, **kwargs):
+        """Return dense output and detached inputs for KL-only block training.
+
+        Unlike DSV4's joint-training output carrier, KL-only training must
+        expose the already prepared teacher inputs without replaying projections.
+        This is a GLM-local layout boundary, not a second teacher model.
+        """
+        function = self._warmup_teacher
+        if spmd.is_type_checking():
+            from torchtitan.models.common.decoder_sharding import (
+                attention_activation_placement,
+                dense_activation_placement,
+            )
+
+            head = attention_activation_placement()
+            local_kv = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+            global_kv = dense_activation_placement(tp=spmd.R, cp=spmd.R)
+            function = spmd.local_map(
+                in_types=tuple((layout.local_type, layout.partition_spec)
+                               for layout in (head, local_kv, local_kv)),
+                out_types=tuple((layout.local_type, layout.partition_spec)
+                                for layout in (head, head, global_kv)),
+            )(function)
+        return function(q_THK, latent_TL, rope_TR, **kwargs)
+
+    def _warmup_teacher(self, q_THK, latent_TL, rope_TR, **kwargs):
+        query, pool, value_weight = self.prepare_absorbed(q_THK, latent_TL, rope_TR)
+        empty = q_THK.new_empty((q_THK.shape[0], 0), dtype=torch.int32)
+        output = self.attend_absorbed(
+            query, pool, value_weight, topk_indices_QS=empty, **kwargs
+        )
+        return output, query, pool
 
 
 class Glm5CPMLAAttention(Glm5MLAAttention, AllGatherKVMLAFlexAttention):
@@ -413,7 +450,7 @@ class Glm5IndexerLoss(SparseIndexerLoss):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
 
         qi_QNH, ki_KH, weights_QN = features
-        objective = query_QHD.new_zeros((), dtype=torch.float32)
+        raw_sum = query_QHD.new_zeros((), dtype=torch.float32)
         keys_K = torch.arange(pool_KD.shape[0], device=pool_KD.device)
         for start in range(0, query_QHD.shape[0], self.chunk_size):
             stop = min(start + self.chunk_size, query_QHD.shape[0])
@@ -435,12 +472,11 @@ class Glm5IndexerLoss(SparseIndexerLoss):
                 student_QNK = torch.einsum("qnh,kh->qnk", qi_QNH[start:stop].float(), ki_KH.float())
                 scores_QK = (student_QNK.relu() * weights_QN[start:stop].float()[:, :, None]).sum(1)
                 scores_QK = scores_QK / (qi_QNH.shape[1] * qi_QNH.shape[2]) ** 0.5
-                raw_sum = self._logged_kl(p_QK, targets_QK, scores_QK, valid_QK).sum()
-                # Same TP student-gradient correction as SparseIndexerLoss.forward.
-                raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / spmd_mesh_size("tp")
-                carrier = (raw_sum * self.coeff / denominator.clamp_min(1)).detach()
-                objective = objective + self.inject(raw_sum, carrier=carrier, denominator=denominator)
-        return objective
+                raw_sum = raw_sum + self._logged_kl(p_QK, targets_QK, scores_QK, valid_QK).sum()
+        # One retained aux-loss region per module invocation, not per query chunk.
+        raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / spmd_mesh_size("tp")
+        carrier = (raw_sum * self.coeff / denominator.clamp_min(1)).detach()
+        return self.inject(raw_sum, carrier=carrier, denominator=denominator)
 
 
 class Glm5SparseAttention(InnerAttention):

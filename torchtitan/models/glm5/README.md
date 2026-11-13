@@ -47,9 +47,9 @@ KL objective and skips the language-model head. Evaluation under `no_grad`
 retains teacher logits and cross-entropy. Sparse/frozen training is unchanged.
 
 The objective reuses DeepSeek V4's `SparseIndexerLoss` teacher, TP correction,
-normalization and auxiliary-metric lifecycle. It recomputes detached teacher
-projections for the KL target; eliminating teacher backward does not establish
-a measured speedup. Dense warmup still has quadratic compute. Chunking bounds
+normalization and auxiliary-metric lifecycle. It shares detached teacher
+projections between dense attention and KL; eliminating teacher backward does
+not establish a measured speedup. Dense warmup still has quadratic compute. Chunking bounds
 each workspace, not the total work or all saved student activations.
 
 ```text
@@ -255,7 +255,7 @@ warmup counts full attention. The indexer estimate separately includes
 projection and full-document scoring, plus distillation work in trainable
 stages, once per actual producer, including MTP indexers.
 KL-only warmup counts teacher forward without the LM head, indexer training,
-and the detached projection/teacher-score replay; it does not count a backbone
+and the detached teacher-score replay; it does not count a backbone
 backward that no longer runs. Evaluation retains the ordinary teacher path and
 is not the workload represented by this training estimate.
 

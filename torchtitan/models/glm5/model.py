@@ -156,15 +156,13 @@ class Glm5Attention(DeepSeekMLAAttention):
             k_shared_TR = k_rope_T1R.squeeze(1)
         return q_TNH, kv_TR, k_shared_TR
 
-    def warmup_objective(self, normalized_TD, positions, metadata, denominator):
+    def warmup_objective(self, prepared, absorbed, positions, metadata, denominator):
         if self.indexer is None:
-            return normalized_TD.new_zeros((), dtype=torch.float32)
+            return prepared[0].new_zeros((), dtype=torch.float32)
         if denominator is None:
             raise ValueError("Indexer warmup requires a global token denominator")
-        with torch.no_grad():
-            prepared = self.prepare_query(normalized_TD)
-            q, latent, rope = self.prepare_mla(*prepared, positions)
-            query, pool, _ = self.inner_attention.prepare_absorbed(q, latent, rope)
+        query, pool = absorbed
+        remat.recompute_needs_tensor(query, pool)
         _, features = self.indexer(*prepared, positions, metadata)
         loss = self.inner_attention.inner_attention.indexer_loss
         assert loss is not None
@@ -199,17 +197,24 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
         # The block remains the FSDP/remat owner. Never build a teacher backward
         # graph, and return the scalar objective explicitly at this GLM boundary.
         with torch.no_grad():
-            normalized = (
-                self.attention_norm(x_TD)
-                if self.attention.indexer is not None else x_TD
+            normalized = self.attention_norm(x_TD)
+            prepared = self.attention.prepare_query(normalized)
+            q, latent, rope = self.attention.prepare_mla(*prepared, positions)
+            empty = x_TD.new_empty((q.shape[0], 0), dtype=torch.int32)
+            attended, query, pool = self.attention.inner_attention.warmup_teacher(
+                q, latent, rope,
+                attention_metadata=attention_masks,
+                scale=self.attention.softmax_scale,
             )
-            empty = x_TD.new_empty((x_TD.shape[0], 0), dtype=torch.int32)
+            remat.recompute_needs_tensor(attended)
+            attention_TD = self.attention.wo(attended.contiguous().view(q.shape[0], -1))
             teacher_kwargs = {**kwargs, "return_indices": True}
             output, indices = Glm5TransformerBlock._forward_decoder(
-                self, x_TD, attention_masks, positions, empty, **teacher_kwargs
+                self, x_TD, attention_masks, positions, empty,
+                attention_TD=attention_TD, **teacher_kwargs
             )
         objective = self.attention.warmup_objective(
-            normalized, positions, attention_masks, kwargs.get("aux_loss_denominator")
+            prepared, (query, pool), positions, attention_masks, kwargs.get("aux_loss_denominator")
         )
         return output, indices, objective
 
@@ -224,28 +229,30 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
         return_indices: bool = False,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        attention_TD: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        normalized_TD = self.attention_norm(x_TD)
-        assert isinstance(self.attention, Glm5Attention)
-        prepared = self.attention.prepare_query(normalized_TD)
-        indexer_features = None
-        if topk_indices_TS is None:
-            if self.attention.indexer is None:
-                raise ValueError("shared-indexer block requires producer indices")
-            selection = self.attention.indexer(*prepared, positions, attention_masks)
-            if isinstance(selection, tuple):
-                topk_indices_TS, indexer_features = selection
-            else:
-                topk_indices_TS = selection
-        attention_TD = self.attention(
-            normalized_TD,
-            attention_masks,
-            positions,
-            topk_indices_TS=topk_indices_TS,
-            prepared_query=prepared,
-            indexer_features=indexer_features,
-            aux_loss_denominator=aux_loss_denominator,
-        )
+        if attention_TD is None:
+            normalized_TD = self.attention_norm(x_TD)
+            assert isinstance(self.attention, Glm5Attention)
+            prepared = self.attention.prepare_query(normalized_TD)
+            indexer_features = None
+            if topk_indices_TS is None:
+                if self.attention.indexer is None:
+                    raise ValueError("shared-indexer block requires producer indices")
+                selection = self.attention.indexer(*prepared, positions, attention_masks)
+                if isinstance(selection, tuple):
+                    topk_indices_TS, indexer_features = selection
+                else:
+                    topk_indices_TS = selection
+            attention_TD = self.attention(
+                normalized_TD,
+                attention_masks,
+                positions,
+                topk_indices_TS=topk_indices_TS,
+                prepared_query=prepared,
+                indexer_features=indexer_features,
+                aux_loss_denominator=aux_loss_denominator,
+            )
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attention_TD)
         x_TD = x_TD + attention_TD
@@ -351,14 +358,7 @@ class Glm5Model(DeepSeekV3Model):
                     ) * seq_len
                     if attention.indexer not in indexers:
                         continue
-                    # The detached KL teacher replays its input projections, but
-                    # not wo or the value projection. Count this forward work.
-                    extra += sum(
-                        active_parameter_flops_per_token(module, excluded_submodules=excluded_submodules) // 3
-                        for module in (layer.attention_norm, attention.wq_a, attention.q_norm,
-                                       attention.wq_b, attention.wkv_a, attention.kv_norm)
-                    )
-                    extra += 2 * attention.n_heads * attention.qk_nope_head_dim * attention.kv_lora_rank
+                    # The KL teacher reuses this block's detached projections.
                     idx = attention.indexer
                     extra += (
                         6 * idx.n_heads * (idx.head_dim + 1)

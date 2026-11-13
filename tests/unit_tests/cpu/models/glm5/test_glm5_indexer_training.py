@@ -76,6 +76,12 @@ def backward(model, *, checkpoint=False):
 @pytest.mark.parametrize("stage", ["warmup", "sparse"])
 def test_stage_gradient_ownership_and_rematerialization(stage):
     _, model = build_stage(stage)
+    if stage == "warmup":
+        # Cross several KL chunks within one checkpoint/aux-loss name scope.
+        for layer in model.layers.values():
+            loss = layer.attention.inner_attention.inner_attention.indexer_loss
+            if loss is not None:
+                loss.chunk_size = 5
     expected = backward(model)
     assert any(
         ".indexer." in name and value.abs().sum() > 0
@@ -419,14 +425,8 @@ def test_flops_match_explicit_dense_layer_operation_budget(stage):
     indexer_params = sum(p.numel() for p in model.layers["0"].attention.indexer.parameters())
     keys = 128 if stage == "warmup" else attention.index_topk
     parameter_ops = (2 if stage == "warmup" else 6) * backbone_params
-    replay_ops = 0
     if stage == "warmup":
         parameter_ops -= 2 * sum(p.numel() for module in (model.lm_head, model.norm) for p in module.parameters())
-        a = model.layers["0"].attention
-        replay_ops = 2 * sum(p.numel() for module in (
-            model.layers["0"].attention_norm, a.wq_a, a.q_norm, a.wq_b, a.wkv_a, a.kv_norm
-        ) for p in module.parameters())
-        replay_ops += 2 * a.n_heads * a.qk_nope_head_dim * a.kv_lora_rank
     parameter_ops += (2 if stage == "frozen" else 6) * indexer_params
     attention_ops = (2 if stage == "warmup" else 6) * attention.n_heads * (2 * attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
     selection_ops = 0 if stage == "warmup" else 2 * indexer.n_heads * (indexer.head_dim + 1) * 128
@@ -434,7 +434,7 @@ def test_flops_match_explicit_dense_layer_operation_budget(stage):
         6 * indexer.n_heads * (indexer.head_dim + 1) * keys
         + (4 if stage == "warmup" else 2) * attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
     )
-    expected = 128 * (parameter_ops + attention_ops + selection_ops + kl_ops + replay_ops)
+    expected = 128 * (parameter_ops + attention_ops + selection_ops + kl_ops)
     assert config.build_flops_estimator(model, seq_len=128)(
         {"input": torch.ones(128, dtype=torch.int64)}
     ) == expected
@@ -449,8 +449,11 @@ def test_warmup_never_runs_selector_but_still_trains_indexer():
     with (
         patch.object(DSAIndexerTopK, "forward", side_effect=AssertionError("warmup must not rank keys")),
         patch.object(leaf, "_attend", wraps=leaf._attend) as attend,
+        patch.object(model.layers["0"].attention.wq_a, "forward",
+                     wraps=model.layers["0"].attention.wq_a.forward) as projection,
     ):
         backward(model)
+    assert projection.call_count == 1
     assert [call.args[0].shape[0] for call in attend.call_args_list] == [5, 5, 5, 1]
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for name, p in model.named_parameters() if ".indexer." in name)
