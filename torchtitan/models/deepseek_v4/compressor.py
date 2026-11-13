@@ -38,13 +38,12 @@ def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tenso
 
 
 def compressed_cu_seqlens(cu_seqlens: torch.Tensor, ratio: int) -> torch.Tensor:
-    """Offsets of each document's compressed entries: ``len_d // ratio`` per document.
+    """Offsets of each document's compressed entries in the packed pool.
 
-    A document's trailing partial group forms no entry, matching Attention Gym's
-    packed ``cu_seqlens_k`` convention.
+    Documents are packed aligned to ``ratio``, so every query offset divides
+    evenly and a document's entry count is ``len_d // ratio``.
     """
-    counts = torch.diff(cu_seqlens) // ratio
-    return F.pad(counts.cumsum(0, dtype=torch.int32), (1, 0))
+    return cu_seqlens // ratio
 
 
 def compressed_gather_indices(topk_indices_TK, cu_seqlens, ratio):
@@ -122,27 +121,33 @@ class Compressor(Module):
         curr = tensor[:, :, d:]
         return torch.cat([prev, curr], dim=1)
 
-    def forward(self, x, positions, cu_seqlens=None):
+    def forward(self, x, positions):
         """Compress hidden states into compressed KV states.
+
+        Documents are packed aligned to ``compress_ratio``, so regrouping the
+        whole stream is exactly per-document grouping: a group never straddles a
+        document boundary, and a group starts a document exactly when its first
+        token has position 0.
 
         Args:
             x: Hidden states of shape ``[L, D_model]``.
-            positions: Position IDs of shape ``[L]``.
-            cu_seqlens: Optional packed document offsets ``[N + 1]``. Groups then
-                restart at each document start, a document's trailing partial
-                group forms no entry, and the overlap candidate never crosses a
-                document boundary.
+            positions: Position IDs of shape ``[L]``, reset to 0 at each
+                document start. This is the single source of truth for document
+                boundaries: it must describe the same documents the attention
+                metadata was built from, so ``None`` means one document.
 
         Returns:
-            Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``. With
-            ``cu_seqlens``, entries are packed by document at
-            ``compressed_cu_seqlens(cu_seqlens, compress_ratio)`` and later slots
-            are unused.
+            Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``.
         """
         seqlen = x.size(0)
         rd = self.rope_head_dim
         ratio = self.compress_ratio
         dtype = x.dtype
+        if seqlen % ratio != 0:
+            raise ValueError(
+                f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio}); "
+                "packed documents must be aligned to the compression ratio."
+            )
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             kv = self.wkv(x)
             score = self.wgate(x)
@@ -152,39 +157,15 @@ class Compressor(Module):
         # Compressed entry j summarizes tokens [j * ratio, (j + 1) * ratio) of its
         # document and takes the position of its first token, as in the
         # DeepSeek-V4 reference.
-        first_G = None
-        if cu_seqlens is None:
-            if seqlen % ratio != 0:
-                raise ValueError(
-                    f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
-                )
-            comp_positions = (
-                positions[::ratio]
-                if positions is not None
-                else torch.arange(0, seqlen, ratio, device=x.device)
-            )
-            kv = kv.unflatten(0, (-1, ratio))
-            score = score.unflatten(0, (-1, ratio))
-        else:
-            if seqlen < ratio:
-                # Shorter than one group: no document has a compressed entry.
-                return x.new_zeros(0, self.head_dim)
-            # Entries are packed by document at compressed_cu_seqlens offsets in
-            # a fixed pool of seqlen // ratio slots, so no host sync is needed.
-            # Slots past the last complete group are unused and read token 0.
-            cmp_cu = compressed_cu_seqlens(cu_seqlens, ratio)
-            slot_G = torch.arange(seqlen // ratio, dtype=torch.int32, device=x.device)
-            doc_G = torch.searchsorted(cmp_cu[1:], slot_G, right=True, out_int32=True)
-            group_G = slot_G - cmp_cu[doc_G]
-            start_G = torch.where(
-                slot_G < cmp_cu[-1], cu_seqlens[doc_G] + group_G * ratio, 0
-            )
-            token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
-            kv, score = kv[token_GR], score[token_GR]
-            comp_positions = (
-                positions[start_G] if positions is not None else group_G * ratio
-            )
-            first_G = group_G == 0
+        kv = kv.unflatten(0, (-1, ratio))
+        score = score.unflatten(0, (-1, ratio))
+        comp_positions = (
+            positions[::ratio]
+            if positions is not None
+            else torch.arange(0, seqlen, ratio, device=x.device)
+        )
+        # The first group of a document has no previous group to overlap with.
+        first_G = None if positions is None else comp_positions == 0
         score = score + self.ape
         if self.overlap:
             kv = self._overlap_transform(kv, 0, first_G)
@@ -242,7 +223,6 @@ class Indexer(Module):
         qr,
         *,
         positions,
-        cu_seqlens=None,
     ):
         """Project raw indexer queries, keys, and per-head weights."""
         seqlen = x.size(0)
@@ -255,7 +235,7 @@ class Indexer(Module):
         q_rope = self.rope(q_rope, positions=positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
-        k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
+        k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
         weights = self.weights_proj(x)
         # The scale reads the weights_proj output with bare ops.

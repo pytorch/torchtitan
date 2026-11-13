@@ -7,7 +7,7 @@
 """DeepSeek V4 model configurations used by tests."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.tensor import Shard
@@ -275,6 +275,19 @@ def _dist_muon_optimizer(
 class _DeepSeekV4TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
+        # Packed document segments must end on compression-group boundaries.
+        alignment = cast(DeepSeekV4Model.Config, self.model).per_sample_pad_multiple
+        for loader in (self.dataloader, getattr(self.validator, "dataloader", None)):
+            if loader is None:
+                continue
+            if not isinstance(loader, GrainDataLoader.Config):
+                raise ValueError(
+                    "DeepSeek V4 requires a GrainDataLoader for document alignment."
+                )
+            if (loader.per_sample_pad_multiple or 1) != (alignment or 1):
+                raise ValueError(
+                    f"DeepSeek V4 loaders must set per_sample_pad_multiple={alignment}."
+                )
         if (
             self.parallelism.tensor_parallel_degree > 1
             or self.parallelism.pipeline_parallel_degree > 1
@@ -321,6 +334,7 @@ def deepseek_v4_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            per_sample_pad_multiple=model_config.per_sample_pad_multiple,
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -393,6 +407,7 @@ def deepseek_v4_mtp_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            per_sample_pad_multiple=model_config.per_sample_pad_multiple,
             num_mtp_layers=num_mtp_layers,
         ),
         optim=Optim.Config(
@@ -448,6 +463,7 @@ def deepseek_v4_flash(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            per_sample_pad_multiple=model_config.per_sample_pad_multiple,
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -502,6 +518,7 @@ def deepseek_v4_pro(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            per_sample_pad_multiple=model_config.per_sample_pad_multiple,
         ),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
