@@ -40,7 +40,7 @@ from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.runtime_context import publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
-from sglang.srt.utils.common import next_power_of_2
+from sglang.srt.utils.triton_utils import next_power_of_2
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
