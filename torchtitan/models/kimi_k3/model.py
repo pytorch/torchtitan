@@ -35,6 +35,7 @@ from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
 )
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -358,6 +359,10 @@ class KimiK3Model(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
+        if self.vision_encoder is not None:
+            # The vision scatter writes arbitrary positions, so every TP rank
+            # needs the full sequence.
+            embeddings_TD = maybe_gather_tp_input(self.tok_embeddings, embeddings_TD)
         if (pixel_values is None) != (grid_thw is None):
             raise ValueError(
                 "pixel_values and grid_thw must either both be provided or "
@@ -482,7 +487,7 @@ class KimiK3Model(MultimodalModel):
             self.output_res_proj,
             self.output_res_norm,
         )
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
+        h_TD = self._pre_lm_head_norm_and_gather(h_TD)
         if self._skip_lm_head:
             return h_TD
         return self.lm_head(h_TD) if self.lm_head is not None else h_TD

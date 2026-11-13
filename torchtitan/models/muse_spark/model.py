@@ -35,7 +35,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
@@ -378,7 +378,7 @@ class MuseSparkNormPreservingResidualConnection(Module):
 class MuseSparkEmbeddingWithNorm(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        embedding: Embedding.Config
+        embedding: VocabParallelEmbedding.Config
         norm: MuseSparkRMSNorm.Config | None = None
         multiplier: float = 1.0
 
@@ -1031,9 +1031,9 @@ class MuseSparkModel(MultimodalModel):
                 if self.final_norm_input_dtype is not None
                 else torch.bfloat16
             )
-            hidden_TD = self.norm(hidden_TD.to(final_norm_input_dtype)).to(
-                torch.bfloat16
-            )
+            hidden_TD = self._pre_lm_head_norm_and_gather(
+                hidden_TD.to(final_norm_input_dtype)
+            ).to(torch.bfloat16)
 
         if self._skip_lm_head:
             return hidden_TD

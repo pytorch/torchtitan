@@ -22,17 +22,17 @@ from torchtitan.config.transform import (
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
     Linear,
     RMSNorm,
     RowParallelLinear,
     Sigmoid,
     Softmax,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
-    pre_lm_head_norm_sharding_config,
+    norm_sharding_config,
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
@@ -44,7 +44,6 @@ from torchtitan.models.common.vision_encoder import (
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_sharding_config,
-    multimodal_token_embedding_sharding_config,
     vision_attention_sharding_config,
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
@@ -169,17 +168,10 @@ def _vl_layernorm(dim: int, eps: float = 1e-5) -> LayerNorm.Config:
     )
 
 
-def _token_embedding_sharding(*, enable_sp: bool, multimodal: bool) -> ShardingConfig:
-    """Keep the embedding ``Replicate`` for the vision scatter under SP."""
-    if multimodal and enable_sp:
-        return multimodal_token_embedding_sharding_config()
-    return token_embedding_sharding_config(enable_sp=enable_sp)
-
-
 def _first_layer_sharding(
     *, enable_sp: bool, multimodal: bool
 ) -> ShardingConfig | None:
-    """Resume SP at layer 0 after a ``Replicate`` multimodal embedding."""
+    """Resume SP at layer 0 after the ``Replicate`` multimodal scatter."""
     if multimodal and enable_sp:
         return sequence_parallel_first_layer_sharding_config()
     return None
@@ -355,18 +347,16 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=_token_embedding_sharding(
-                enable_sp=enable_sp, multimodal=True
-            ),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -442,18 +432,16 @@ def _moonlight_16b_a3b_config(
         max_context_length=max_context_length,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=_token_embedding_sharding(
-                enable_sp=enable_sp, multimodal=multimodal
-            ),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -580,18 +568,16 @@ def _kimi_k2_5(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=_token_embedding_sharding(
-                enable_sp=enable_sp, multimodal=True
-            ),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
