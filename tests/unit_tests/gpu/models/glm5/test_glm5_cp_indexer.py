@@ -90,6 +90,13 @@ class TestGlm5CPIndexer(DTensorTestBase):
             ):
                 spmd.assert_type(value, global_metadata_type)
             self.assertEqual(local_metadata.query_indices_Q.numel(), 32)
+            spmd.assert_type(
+                local_metadata.query_indices_Q,
+                spmd.SpmdType(
+                    {"dp": spmd.R, "cp": spmd.V, "tp": spmd.R},
+                    partition_spec=spmd.PartitionSpec("cp"),
+                ),
+            )
             for name, value in (
                 ("q_QNH", q), ("k_KH", gathered_k), ("weights_QN", weights)
             ):
