@@ -67,7 +67,6 @@ class ActorSystem(Configurable, abc.ABC):
     - ``.call(...)``: on every actor of the handle; the result holds each rank's
       value, read with ``.get(rank)``;
     - ``.call_one(...)``: on a single-actor handle; returns its value;
-    - ``.choose(...)``: on any one actor of the handle;
     - ``.stream(...)``: on every actor, yielding each rank's value as it arrives;
     - ``.broadcast(...)``: on every actor, without waiting for or returning a result.
 
@@ -117,9 +116,9 @@ class ActorSystem(Configurable, abc.ABC):
     @abc.abstractmethod
     async def spawn_rollout_workers(
         self, config: BaseRolloutWorker.Config, *, num_workers: int, num_threads: int
-    ) -> Any:
-        """Spawn a pool of ``num_workers`` rollout worker processes on the
-        controller host, each running ``num_threads`` rollout threads."""
+    ) -> list[Any]:
+        """Spawn ``num_workers`` rollout worker processes on the controller host, each
+        running ``num_threads`` rollout threads; returns one single-actor handle per worker."""
 
     @abc.abstractmethod
     async def stop_rollout_workers(self) -> None:

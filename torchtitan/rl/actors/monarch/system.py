@@ -172,15 +172,16 @@ class MonarchActorSystem(ActorSystem):
 
     async def spawn_rollout_workers(
         self, config: BaseRolloutWorker.Config, *, num_workers: int, num_threads: int
-    ) -> Any:
+    ) -> list[Any]:
         self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
-        return self._rollout_worker_mesh.spawn(
+        actors = self._rollout_worker_mesh.spawn(
             "rollout_worker",
             RolloutWorkerActor,
             worker_config=config,
             num_threads=num_threads,
             structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
+        return [actors.flatten("rank").slice(rank=rank) for rank in range(num_workers)]
 
     async def stop_rollout_workers(self) -> None:
         worker_mesh = self._rollout_worker_mesh

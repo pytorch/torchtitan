@@ -496,8 +496,9 @@ class _WorkerConfig:
         return _Worker(self.marker_dir)
 
 
-def test_stopping_the_rollout_workers_closes_each_worker(tmp_path):
-    """Stopping 5 workers closes each one (Monarch's `__cleanup__`)."""
+def test_spawn_rollout_workers_returns_one_handle_per_worker(tmp_path):
+    """5 workers on this host come back as 5 single-actor handles (`call_one` raises on a
+    handle to several actors). Stopping them closes each worker (Monarch's `__cleanup__`)."""
 
     async def run():
         system = MonarchActorSystem(MonarchActorSystem.Config())
@@ -507,7 +508,10 @@ def test_stopping_the_rollout_workers_closes_each_worker(tmp_path):
             workers = await system.spawn_rollout_workers(
                 _WorkerConfig(str(tmp_path)), num_workers=5, num_threads=1
             )
-            await workers.sync_log_step.call(1)
+            assert len(workers) == 5
+            await asyncio.gather(
+                *(worker.sync_log_step.call_one(1) for worker in workers)
+            )
             await system.stop_rollout_workers()
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
