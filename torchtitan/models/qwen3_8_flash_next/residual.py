@@ -51,21 +51,23 @@ class GatedResidual(Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         x_norm_TC = self.hc_norm(x_TC)
         remat.recompute_needs_tensor(x_norm_TC)
-        mix_TR = F.silu(self.input_mix_weight_down(x_norm_TC) / self.num_streams)
+        # Bare ops read the projections below, so selective remat must keep
+        # their outputs.
+        down_TR = self.input_mix_weight_down(x_norm_TC)
+        remat.recompute_needs_tensor(down_TR)
+        mix_TR = F.silu(down_TR / self.num_streams)
         remat.recompute_needs_tensor(mix_TR)
-        read_TSD = (
-            self.input_mix_weight_up(mix_TR)
-            .sigmoid()
-            .unflatten(-1, (self.num_streams, self.dim))
-        )
+        up_TC = self.input_mix_weight_up(mix_TR)
+        remat.recompute_needs_tensor(up_TC)
+        read_TSD = up_TC.sigmoid().unflatten(-1, (self.num_streams, self.dim))
         mixed_TD = (
             read_TSD * x_norm_TC.unflatten(-1, (self.num_streams, self.dim))
         ).mean(-2)
         if self.block_inject_weight is None:
             return mixed_TD
-        write_TS = (
-            2 * (self.block_inject_weight(x_norm_TC) / self.num_streams).sigmoid()
-        )
+        inject_TS = self.block_inject_weight(x_norm_TC)
+        remat.recompute_needs_tensor(inject_TS)
+        write_TS = 2 * (inject_TS / self.num_streams).sigmoid()
         return mixed_TD, x_TC, write_TS
 
 

@@ -320,9 +320,10 @@ class PLELayer(Module):
             routing=routing,
             dtype=x_TC.dtype,
         )
-        key_TSD = self.norm_key(self.key_proj(embedding_TE)).unflatten(
-            -1, (self.num_streams, self.dim)
-        )
+        key_TC = self.key_proj(embedding_TE)
+        # The grouped norm reads the projection with bare ops.
+        remat.recompute_needs_tensor(key_TC)
+        key_TSD = self.norm_key(key_TC).unflatten(-1, (self.num_streams, self.dim))
         query_TSD = self.norm_query(x_TC).unflatten(-1, (self.num_streams, self.dim))
         score_TS = (key_TSD * query_TSD).sum(-1) * self.dim**-0.5
         score_TS = score_TS.abs().clamp_min(1e-6).sqrt() * score_TS.sign()

@@ -14,11 +14,17 @@ import torch.nn.functional as F
 import torch_remat as remat
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_remat import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
+from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.qwen3_8_flash_next import build_model_config
 from torchtitan.models.qwen3_8_flash_next.attention import (
     QSAIndexerLoss,
     QSAIndexMetadata,
 )
+from torchtitan.models.qwen3_8_flash_next.residual import add_residuals
 from torchtitan.models.qwen3_8_flash_next.state_dict_adapter import (
     Qwen38FlashNextStateDictAdapter,
 )
@@ -183,6 +189,59 @@ def test_fresh_ngram_initialization_matches_pinned_hf(config):
         20109073645365,
         8052911324071,
     )
+
+
+def test_selective_remat_matches_no_remat_for_ple_and_gated_residuals(config):
+    """Saved projection regions feed bare ops; selective remat must keep them."""
+    layer = config.layers[1]
+
+    class _Block(Module):
+        def __init__(self):
+            super().__init__()
+            self.ple = layer.ple.build()
+            self.attn_hyper_connection = layer.attn_hyper_connection.build()
+
+        def forward(self, x_TC, ids_T, positions_T):
+            x_TC = x_TC + self.ple(
+                x_TC, input_ids_T=ids_T, document_positions_T=positions_T
+            )
+            mixed_TD, residual_TC, write_TS = self.attn_hyper_connection(x_TC)
+            return add_residuals(mixed_TD, residual_TC, write_TS)
+
+    class _Model(Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = ModuleDict({"0": _Block()})
+
+        def forward(self, *args):
+            return self.layers["0"](*args)
+
+    torch.manual_seed(42)
+    reference = _Model()
+    for module in reference.modules():
+        if hasattr(module, "init_states"):
+            module.init_states()
+    x = torch.randn(22, 1024)
+    ids = torch.randint(0, 63, (22,))
+    positions = torch.arange(11).repeat(2)
+
+    def gradients(activation_remat):
+        model = _Model()
+        model.load_state_dict(reference.state_dict())
+        model.train()
+        if activation_remat is not None:
+            activation_remat.apply(model)
+        x_TC = x.clone().requires_grad_()
+        model(x_TC, ids, positions).square().sum().backward()
+        return [x_TC.grad] + [p.grad for p in model.parameters()]
+
+    expected = gradients(None)
+    for activation_remat in (
+        FullActivationRematConfig(),
+        DefaultActivationRematConfig(),
+    ):
+        for actual, want in zip(gradients(activation_remat), expected, strict=True):
+            torch.testing.assert_close(actual, want, rtol=0, atol=0)
 
 
 def test_ple_dilated_convolution_and_gradients_respect_documents(config):
