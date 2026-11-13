@@ -24,6 +24,7 @@ import torch
 from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.data.padding import append_padded_segment
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
@@ -37,6 +38,7 @@ from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSampleBuilder,
     TrainingSampleGroup,
 )
+from torchtitan.tools.utils import round_up
 
 logger = logging.getLogger(__name__)
 
@@ -256,8 +258,8 @@ class Batcher(Configurable):
         num_mtp_layers: int = 0
         """Model-derived MTP depth used while preparing token counts."""
         per_sample_pad_multiple: int | None = None
-        """When non-zero, pad each sample to a multiple of this value
-        before packing. Used by flex attention in batch-invariant mode
+        """Pad each sample to this multiple after shifting labels, before packing.
+        None or 1 leaves lengths unchanged. Used by flex attention in batch-invariant mode
         so that block boundaries align regardless of batch composition."""
         max_num_documents: int | None = None
         """Maximum non-padding document segments per local trainer microbatch.
@@ -286,6 +288,11 @@ class Batcher(Configurable):
         def __post_init__(self) -> None:
             if self.num_mtp_layers < 0:
                 raise ValueError("num_mtp_layers must be non-negative")
+            if (
+                self.per_sample_pad_multiple is not None
+                and self.per_sample_pad_multiple <= 0
+            ):
+                raise ValueError("per_sample_pad_multiple must be positive")
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
             if (
@@ -333,7 +340,7 @@ class Batcher(Configurable):
             )
         self.pad_id = pad_id
         self._temperature = temperature
-        self._per_sample_pad_multiple = config.per_sample_pad_multiple
+        self._per_sample_pad_multiple = config.per_sample_pad_multiple or 1
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
         self._build_mrope_positions = config.build_mrope_positions
@@ -897,10 +904,7 @@ class Batcher(Configurable):
             # token_ids of length 6, per_sample_pad_multiple=8     -> 8
         """
         num_tokens = len(training_sample.token_ids) - 1
-        if self._per_sample_pad_multiple:
-            multiple = self._per_sample_pad_multiple
-            num_tokens = ((num_tokens + multiple - 1) // multiple) * multiple
-        return num_tokens
+        return round_up(num_tokens, self._per_sample_pad_multiple)
 
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality, and move the image path (`_pack_image_inputs`, the
@@ -922,9 +926,10 @@ class Batcher(Configurable):
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
-        packed_fields: dict[str, list[np.ndarray]] = {key: [] for key in keys}
-        positions: list[np.ndarray] = []
-        padding_mask: list[np.ndarray] = []
+        packed_fields: dict[str, list[np.ndarray]] = {
+            key: [] for key in (*keys, "positions", "padding_mask")
+        }
+        sample_lens: list[int] = []
 
         def pad(key: str, num_tokens: int) -> np.ndarray:
             return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
@@ -938,40 +943,40 @@ class Batcher(Configurable):
                 "loss_mask": training_sample.loss_mask[1:],
                 "advantages": training_sample.advantage[1:],
             }
-            sample_len = len(sample["input_ids"])
-            unpadded_len = sample_len
-
-            # pad to multiple
-            if self._per_sample_pad_multiple:
-                align = self._per_sample_pad_multiple
-                sample_len = ((sample_len + align - 1) // align) * align
-
-            # extend row
-            for key in keys:
-                packed_fields[key] += [sample[key], pad(key, sample_len - unpadded_len)]
-            positions.append(np.arange(sample_len, dtype=np.int64))
-            padding_mask.append(np.arange(sample_len) >= unpadded_len)
+            sample_len = append_padded_segment(
+                packed_fields,
+                sample,
+                per_sample_pad_multiple=self._per_sample_pad_multiple,
+                pad_values=pad_values,
+                padding_mask=None,
+            )
+            sample_lens.append(sample_len)
 
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
-        sample_lens = [len(sample_positions) for sample_positions in positions]
         pad_len = num_tokens_per_rank - sum(sample_lens)
         assert pad_len >= 0
         if pad_len > 0:
             for key in keys:
                 packed_fields[key].append(pad(key, pad_len))
-            positions.append(np.arange(pad_len, dtype=np.int64) % self.seq_len)
-            padding_mask.append(np.ones(pad_len, dtype=bool))
+            packed_fields["positions"].append(
+                np.arange(pad_len, dtype=np.int64) % self.seq_len
+            )
+            packed_fields["padding_mask"].append(np.ones(pad_len, dtype=bool))
 
         # Concatenate into the packed dtype (e.g. float64 logprobs -> float32); torch.from_numpy doesn't copy
         packed = {
-            key: torch.from_numpy(np.concatenate(arrays, dtype=_DTYPES[key]))
-            for key, arrays in packed_fields.items()
+            key: torch.from_numpy(
+                np.concatenate(packed_fields[key], dtype=_DTYPES[key])
+            )
+            for key in keys
         }
         generator_logprobs = packed["generator_logprobs"]
         loss_mask = packed["loss_mask"]
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
-        positions_tensor = torch.from_numpy(np.concatenate(positions))
-        padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
+        positions_tensor = torch.from_numpy(np.concatenate(packed_fields["positions"]))
+        padding_mask_tensor = torch.from_numpy(
+            np.concatenate(packed_fields["padding_mask"])
+        )
         loss_token_counts, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions_tensor,
