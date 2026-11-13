@@ -53,7 +53,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
 )
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
 from torchtitan.models.deepseek_v3.model import DeepSeekV3TransformerBlock
-from .model import KimiK25Model
+from .model import KimiK25Model, KimiK2Model
 from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
     moonvit_encoder_sharding_config,
@@ -68,6 +68,7 @@ from .vision_encoder import (
 )
 
 __all__ = [
+    "KimiK2Model",
     "KimiK25Model",
     "KimiK25VisionEncoder",
     "VisionProjector",
@@ -380,9 +381,9 @@ def _moonlight_16b_a3b_config(
     attn_backend: str,
     rope_theta: float,
     max_context_length: int,
-    vision_encoder: "KimiK25VisionEncoder.Config | None" = None,
+    vision_encoder: "KimiK25VisionEncoder.Config | None",
     parallelism: ParallelismConfig,
-) -> KimiK25Model.Config:
+) -> KimiK2Model.Config:
     """Shared Moonshot 16B-A3B DeepSeekV3 text tower (MLA + sigmoid-routed MoE).
 
     Used by both Moonlight (text-only) and Kimi-VL (with a vision encoder): they
@@ -420,7 +421,7 @@ def _moonlight_16b_a3b_config(
         enable_sp=enable_sp,
         enable_ep=parallelism.expert_parallel_degree > 1,
     )
-    return KimiK25Model.Config(
+    fields: dict[str, Any] = dict(
         max_context_length=max_context_length,
         vocab_size=vocab_size,
         dim=dim,
@@ -442,8 +443,10 @@ def _moonlight_16b_a3b_config(
             sharding_config=lm_head_sharding_config(),
         ),
         layers=layers,
-        vision_encoder=vision_encoder,
     )
+    if vision_encoder is None:
+        return KimiK2Model.Config(**fields)
+    return KimiK25Model.Config(vision_encoder=vision_encoder, **fields)
 
 
 def _moonlight_16b_a3b(
@@ -451,7 +454,7 @@ def _moonlight_16b_a3b(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
-) -> KimiK25Model.Config:
+) -> KimiK2Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
         attn_backend=attn_backend,
@@ -490,6 +493,7 @@ def _kimi_vl_a3b(
         ),
         parallelism=parallelism,
     )
+    assert isinstance(config, KimiK25Model.Config)
     return config
 
 
@@ -603,7 +607,7 @@ def build_model_config(
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> KimiK25Model.Config:
+) -> KimiK2Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:

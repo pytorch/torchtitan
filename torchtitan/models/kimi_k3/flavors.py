@@ -81,7 +81,12 @@ from torchtitan.models.kimi_k2_7.sharding import (
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .attention import KimiMLAAttention
-from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
+from .model import (
+    AttentionResidual,
+    KimiK3Model,
+    KimiK3MultimodalModel,
+    KimiK3TransformerBlock,
+)
 from .moe import KimiLatentMoE
 from .sharding import (
     inner_kda_sharding_config,
@@ -98,6 +103,7 @@ __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
     "KIMI_K3_VISION_PROCESSOR_KWARGS",
     "KimiK3Model",
+    "KimiK3MultimodalModel",
     "KimiK3VisionEncoder",
     "MODEL_FLAVORS",
     "build_model_config",
@@ -679,7 +685,7 @@ def _kimi_k3_config(
             )
         )
 
-    return KimiK3Model.Config(
+    fields: dict[str, Any] = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
@@ -699,8 +705,10 @@ def _kimi_k3_config(
         ),
         output_res_norm=residual_norm(),
         output_res_proj=residual_proj(),
-        vision_encoder=vision_encoder,
     )
+    if vision_encoder is None:
+        return KimiK3Model.Config(**fields)
+    return KimiK3MultimodalModel.Config(vision_encoder=vision_encoder, **fields)
 
 
 def _debugmodel(

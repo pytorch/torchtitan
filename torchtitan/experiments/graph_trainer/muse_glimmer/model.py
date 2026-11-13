@@ -12,17 +12,12 @@ from ..model import GraphTrainerModel
 
 
 class GraphTrainerMuseGlimmerModel(GraphTrainerModel, MuseGlimmerModel):
+    # TODO: Support MuseGlimmerMultimodalModel. Its vision encoder reads image
+    # grids on the host and builds per-batch shapes, which one static-shape trace
+    # cannot capture.
     @dataclass(kw_only=True, slots=True)
     class Config(MuseGlimmerModel.Config):
-        def __post_init__(self) -> None:
-            MuseGlimmerModel.Config.__post_init__(self)
-            # TODO: The vision encoder reads image grids on the host and builds
-            # per-batch shapes, which one static-shape trace cannot capture.
-            if self.vision_encoder is not None:
-                raise ValueError(
-                    "GraphTrainer MuseGlimmer supports text-only flavors; got a "
-                    "vision encoder."
-                )
+        pass
 
     def __init__(self, config: Config):
         super().__init__(config)

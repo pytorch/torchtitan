@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
+from torchtitan.models.qwen3_5 import build_model_config, Qwen35MultimodalModel
 
 
 class _LinearVisionEncoder(nn.Module):
@@ -33,9 +33,9 @@ class _LinearVisionEncoder(nn.Module):
         return self.patch_embed(pixel_values)
 
 
-def _embeddings_only_model() -> Qwen35Model:
+def _embeddings_only_model() -> Qwen35MultimodalModel:
     config = cast(
-        Qwen35Model.Config,
+        Qwen35MultimodalModel.Config,
         build_model_config("debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()),
     )
     config = replace(
@@ -44,7 +44,6 @@ def _embeddings_only_model() -> Qwen35Model:
         tok_embeddings=replace(config.tok_embeddings, num_embeddings=8),
         lm_head=replace(config.lm_head, out_features=8),
         layers=[],
-        vision_encoder=None,
     )
     model = config.build()
     model.init_states()

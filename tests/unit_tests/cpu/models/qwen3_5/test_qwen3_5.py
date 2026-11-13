@@ -15,7 +15,12 @@ pytest.importorskip("fla")
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.qwen3_5 import build_model_config, MODEL_FLAVORS, Qwen35Model
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    MODEL_FLAVORS,
+    Qwen35Model,
+    Qwen35MultimodalModel,
+)
 from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.models.qwen3_8 import build_model_config as build_qwen3_8_model_config
 
@@ -84,11 +89,10 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 
     config = cast(
-        Qwen35Model.Config,
+        Qwen35MultimodalModel.Config,
         build_model_config("debugmodel_mm", parallelism=ParallelismConfig()),
     )
     vision_encoder = config.vision_encoder
-    assert vision_encoder is not None
 
     assert type(vision_encoder.block.mlp.fc1) is ColumnParallelLinear.Config
     assert type(vision_encoder.block.mlp.fc2) is RowParallelLinear.Config
@@ -157,9 +161,9 @@ class _RecordingVisionEncoder(nn.Module):
         return self.patch_embed(pixel_values)
 
 
-def _small_qwen35_model() -> Qwen35Model:
+def _small_qwen35_model() -> Qwen35MultimodalModel:
     config = cast(
-        Qwen35Model.Config,
+        Qwen35MultimodalModel.Config,
         build_model_config("debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()),
     )
     config = replace(
@@ -168,7 +172,6 @@ def _small_qwen35_model() -> Qwen35Model:
         tok_embeddings=replace(config.tok_embeddings, num_embeddings=8),
         lm_head=replace(config.lm_head, out_features=8),
         layers=[],
-        vision_encoder=None,
     )
     model = config.build()
     model.init_states()

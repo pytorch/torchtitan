@@ -38,10 +38,11 @@ vLLM requires a registered processor for a multimodal model (`register_multimoda
 it serves only vLLM's startup: the vision processor's largest image (`_largest_patch_grid`)
 sizes the encoder budget, and a dummy image of that size profiles the encoder's memory.
 
-Supported models: a ``vision_encoder`` behind ``get_vision_embeds`` and merged patches as
-placeholder tokens; image tokens take 3D positions with ``MRoPE.Config`` attention
-(Qwen3.5) and 1D positions otherwise (Muse Spark). Before the engine is built, the
-controller checks that the model is a `MultimodalModel` with a vision encoder.
+Supported models: a `MultimodalModel` with a ``vision_encoder`` behind ``get_vision_embeds``
+(``Qwen35MultimodalModel``, ``MuseSparkMultimodalModel``) and merged patches as placeholder
+tokens; image tokens take 3D positions with ``MRoPE.Config`` attention (Qwen3.5) and 1D
+positions otherwise (Muse Spark). Before the engine is built, the controller checks that the
+model is a `MultimodalModel` with a vision encoder.
 """
 
 from __future__ import annotations

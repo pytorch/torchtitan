@@ -23,6 +23,15 @@ The folder should be organized as follows
       config type, redeclare `layers` (and the block's `attention`) with that
       type and `# pyrefly: ignore [bad-override]`, rather than narrowing with
       `isinstance` at each read.
+  - A model with modality encoders has two classes: the text-only model (a
+    `Decoder` subclass, e.g. `Qwen35Model`) and a multimodal subclass of it
+    and `MultimodalModel` (e.g. `Qwen35MultimodalModel`) that adds the
+    encoders, which its `Config` requires. List the text class first in both
+    the model's and the `Config`'s bases: dataclass fields resolve over the
+    reversed MRO, so `MultimodalModel.Config`'s copies of `Decoder.Config`
+    fields would otherwise override the text `Config`'s defaults.
+    (`KimiK25Model` still lists `MultimodalModel` first; see the TODO in
+    `kimi_k2_7/model.py`.)
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - List parameters whose numerics need master precision (e.g. ones the HF checkpoint stores in float32) in `preserve_dtype_params` on their module's `Config`; FSDP mixed precision, checkpoint export and RL weight sync never lower their precision. Default it on the component's `Config` when the component always needs it (e.g. GDN `A_log`), or set it in the flavor builder for one instance of a generic module (e.g. Qwen3.5's GDN `GatedRMSNorm`).

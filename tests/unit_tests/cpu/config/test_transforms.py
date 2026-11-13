@@ -547,7 +547,7 @@ class TestTransformModel(unittest.TestCase):
     def test_transforms_nested_kda_backend(self):
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
         from torchtitan.models.common.attention.kda import InnerKDA, KDA
-        from torchtitan.models.kimi_k3 import build_model_config
+        from torchtitan.models.kimi_k3 import build_model_config, KimiK3MultimodalModel
 
         model = build_model_config(
             "debugmodel_mm",
@@ -563,7 +563,7 @@ class TestTransformModel(unittest.TestCase):
             }
         ).transform(model)
 
-        assert model.vision_encoder is not None
+        assert isinstance(model, KimiK3MultimodalModel.Config)
         self.assertIsInstance(
             model.vision_encoder.block.attn.inner_attention,
             FlexInnerAttention.Config,

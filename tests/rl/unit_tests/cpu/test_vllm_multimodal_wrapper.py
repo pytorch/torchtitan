@@ -315,18 +315,17 @@ def test_hf_config_keeps_1d_positions_for_images_without_mrope():
     assert not uses_mrope(image)
 
 
-def test_controller_rejects_a_vision_processor_without_a_vision_encoder():
+def test_controller_requires_a_vision_processor_exactly_for_multimodal_models():
+    from torchtitan_recipes.rl.geometry3k import rl_grpo_qwen3_5_0_8b_geometry3k
     from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
 
-    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
-    without_encoder = dataclasses.replace(config.generator.model, vision_encoder=None)
+    text_config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
     with pytest.raises(ValueError, match="multimodal model with a vision encoder"):
         dataclasses.replace(
-            config,
-            generator=dataclasses.replace(config.generator, model=without_encoder),
-            trainer=dataclasses.replace(
-                config.trainer,
-                model=dataclasses.replace(config.trainer.model, vision_encoder=None),
-            ),
+            text_config,
             vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
         )
+    # A text-only generator would build and load the vision encoder for nothing.
+    multimodal_config = rl_grpo_qwen3_5_0_8b_geometry3k()
+    with pytest.raises(ValueError, match="vision_processor is not set"):
+        dataclasses.replace(multimodal_config, vision_processor=None)

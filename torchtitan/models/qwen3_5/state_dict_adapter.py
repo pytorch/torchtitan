@@ -32,6 +32,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 
 from torchtitan.models.base.state_dict_adapter import StateDictAdapter
+from torchtitan.models.common.multimodal import MultimodalModel
 
 if TYPE_CHECKING:
     from .model import Qwen35Model
@@ -41,6 +42,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen35Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
+        has_vision_encoder = isinstance(model_config, MultimodalModel.Config)
         # Multimodal HF checkpoints nest the decoder under ``model.language_model``.
         # A text-only flavor (no vision encoder) can still load one, so read the
         # layout from the checkpoint index when there is one.
@@ -50,7 +52,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 for key in self.fqn_to_index_mapping
             )
         else:
-            multimodal_checkpoint = model_config.vision_encoder is not None
+            multimodal_checkpoint = has_vision_encoder
         self.hf_language_model_prefix = (
             "model.language_model" if multimodal_checkpoint else "model"
         )
@@ -123,7 +125,7 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.visual.merger.linear_fc2.weight": "vision_encoder.merger.linear_fc2.weight",
             "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
         }
-        if model_config.vision_encoder is None:
+        if not has_vision_encoder:
             self.from_hf_map = {
                 hf_key: tt_key
                 for hf_key, tt_key in self.from_hf_map.items()

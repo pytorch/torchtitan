@@ -71,7 +71,13 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_invariant_linear_sharding_config,
     vision_rowwise_sharding_config,
 )
-from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
+from .model import (
+    OffsetRMSNorm,
+    Qwen35Attention,
+    Qwen35Model,
+    Qwen35MultimodalModel,
+    Qwen35TransformerBlock,
+)
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
 from .sharding import (
@@ -93,6 +99,7 @@ from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedd
 
 __all__ = [
     "Qwen35Model",
+    "Qwen35MultimodalModel",
     "MODEL_FLAVORS",
     "QWEN3_5_SPECIAL_TOKENS",
     "QWEN3_5_VISION_PROCESSOR_KWARGS",
@@ -646,6 +653,15 @@ def _build_qwen35_moe_layers(
     return layers
 
 
+def _model_config(
+    *, vision_encoder: Qwen35VisionEncoder.Config | None, **fields: Any
+) -> Qwen35Model.Config:
+    """Return the multimodal config with a vision encoder, else the text-only one."""
+    if vision_encoder is None:
+        return Qwen35Model.Config(**fields)
+    return Qwen35MultimodalModel.Config(vision_encoder=vision_encoder, **fields)
+
+
 def _debugmodel(
     attn_backend: str,
     *,
@@ -661,11 +677,10 @@ def _debugmodel(
     vocab_size = 248320
     # mrope_section sum must equal rotary_dim / 2 (8 for rotary_dim=16).
     # Real models use [11, 11, 10] with rotary_dim=64.
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -739,11 +754,10 @@ def _debugmodel_moe(
     rotary_dim = 16
     n_layers = 4
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -824,11 +838,10 @@ def _0_8b(
     rotary_dim = 64  # partial_rotary_factor=0.25 → head_dim * 0.25
     n_layers = 24
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -906,11 +919,10 @@ def _2b(
     rotary_dim = 64  # partial_rotary_factor=0.25
     n_layers = 24
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -988,11 +1000,10 @@ def _4b(
     rotary_dim = 64
     n_layers = 32
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -1066,11 +1077,10 @@ def _9b(
     rotary_dim = 64
     n_layers = 32
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -1143,11 +1153,10 @@ def _27b(
     rotary_dim = 64
     n_layers = 64
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -1220,11 +1229,10 @@ def _35b_a3b(
     rotary_dim = 64
     n_layers = 40
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -1301,11 +1309,10 @@ def _122b_a10b(
     rotary_dim = 64
     n_layers = 48
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(
@@ -1382,11 +1389,10 @@ def _397b_a17b(
     rotary_dim = 64
     n_layers = 60
     vocab_size = 248320
-    return Qwen35Model.Config(
+    return _model_config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
             sharding_config=norm_sharding_config(

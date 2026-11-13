@@ -69,6 +69,7 @@ from .model import (
     Attention,
     EmbeddingWithNorm,
     MuseGlimmerModel,
+    MuseGlimmerMultimodalModel,
     MuseGlimmerTransformerBlock,
     RMSGainCenterNorm,
     SoftCappedLinear,
@@ -85,6 +86,7 @@ __all__ = [
     "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
     "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
+    "MuseGlimmerMultimodalModel",
     "MODEL_FLAVORS",
     "build_model_config",
     "muse_glimmer_vision_configs",
@@ -394,28 +396,11 @@ def _muse_glimmer_config(
     output_multiplier: float,
     attn_backend: str,
     enable_sp: bool,
-    vision_adapter_dim: int | None = None,
-    vision_encoder: NaViTEncoder.Config | None = None,
-    vision_adapter: MuseSparkNaViTAdapter.Config | None = None,
+    vision: tuple[NaViTEncoder.Config, MuseSparkNaViTAdapter.Config] | None = None,
 ) -> MuseGlimmerModel.Config:
-    # LLM-side multimodal injection: project adapter output -> model dim, then
-    # apply a scaleless norm. Left as None for the text-only model.
-    vision_projection = None
-    perception_emb_norm = None
-    if vision_adapter_dim is not None:
-        vision_projection = Linear.Config(
-            in_features=vision_adapter_dim,
-            out_features=dim,
-            param_init=_LINEAR_INIT,
-            sharding_config=cp_replicated_vision_sharding_config(),
-        )
-        perception_emb_norm = _scaleless_norm(
-            dim,
-            _NORM_EPS,
-            sharding_config=cp_replicated_vision_sharding_config(),
-        )
-
-    return MuseGlimmerModel.Config(
+    """Build the multimodal config when ``vision`` (encoder, adapter) is given,
+    else the text-only one."""
+    fields = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
@@ -470,10 +455,27 @@ def _muse_glimmer_config(
             attn_backend=attn_backend,
             enable_sp=enable_sp,
         ),
-        vision_projection=vision_projection,
-        perception_emb_norm=perception_emb_norm,
+    )
+    if vision is None:
+        return MuseGlimmerModel.Config(**fields)
+    vision_encoder, vision_adapter = vision
+    return MuseGlimmerMultimodalModel.Config(
+        **fields,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
+        # LLM-side multimodal injection: project adapter output -> model dim,
+        # then apply a scaleless norm.
+        vision_projection=Linear.Config(
+            in_features=vision_adapter.c_proj.out_features,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+            sharding_config=cp_replicated_vision_sharding_config(),
+        ),
+        perception_emb_norm=_scaleless_norm(
+            dim,
+            _NORM_EPS,
+            sharding_config=cp_replicated_vision_sharding_config(),
+        ),
     )
 
 
@@ -502,14 +504,6 @@ def _muse_glimmer_30b(
     seq_len: int,
     parallelism: ParallelismConfig,
 ) -> MuseGlimmerModel.Config:
-    vision_adapter_dim = None
-    vision_encoder = None
-    vision_adapter = None
-    if with_vision:
-        vision_adapter_dim = 4096
-        vision_encoder, vision_adapter = muse_glimmer_vision_configs(
-            vision_adapter_dim=vision_adapter_dim
-        )
     return _muse_glimmer_config(
         dim=6656,
         n_layers=52,
@@ -522,9 +516,11 @@ def _muse_glimmer_30b(
         output_multiplier=0.19611613513,
         attn_backend=attn_backend,
         enable_sp=parallelism.enable_sequence_parallel,
-        vision_adapter_dim=vision_adapter_dim,
-        vision_encoder=vision_encoder,
-        vision_adapter=vision_adapter,
+        vision=(
+            muse_glimmer_vision_configs(vision_adapter_dim=4096)
+            if with_vision
+            else None
+        ),
     )
 
 
@@ -536,8 +532,8 @@ def _muse_glimmer_debugmodel_mm(
 
     The encoder is small (few layers, ``num_heads`` divisible by intended TP) and
     its ``output_dim`` (``latent_dim * downsample_factor**2 = 256``) feeds the
-    adapter, whose ``output_dim`` equals ``vision_adapter_dim`` so the LLM-side
-    ``vision_projection`` (``vision_adapter_dim -> dim``) lines up.
+    adapter, and the LLM-side ``vision_projection`` maps the adapter's
+    ``output_dim`` to ``dim``.
     """
     encoder = muse_spark_navit_encoder_config(
         latent_dim=64,
@@ -566,9 +562,7 @@ def _muse_glimmer_debugmodel_mm(
         output_multiplier=1.0,
         attn_backend=attn_backend,
         enable_sp=parallelism.enable_sequence_parallel,
-        vision_adapter_dim=adapter_dim,
-        vision_encoder=encoder,
-        vision_adapter=adapter,
+        vision=(encoder, adapter),
     )
 
 

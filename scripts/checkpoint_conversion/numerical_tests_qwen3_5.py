@@ -42,6 +42,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.qwen3_5 import (
     build_model_config,
+    Qwen35MultimodalModel,
     QWEN3_5_SPECIAL_TOKENS,
     QWEN3_5_VISION_PROCESSOR_KWARGS,
 )
@@ -96,8 +97,9 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     processor: Any = AutoProcessor.from_pretrained(hf_model_path)
 
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
+    if not isinstance(model_config, Qwen35MultimodalModel.Config):
+        raise ValueError(f"{model_flavor!r} has no vision encoder; pass an _mm flavor.")
     encoder_config = model_config.vision_encoder
-    assert encoder_config is not None
     patch_size = encoder_config.patch_size
     temporal_patch_size = encoder_config.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
