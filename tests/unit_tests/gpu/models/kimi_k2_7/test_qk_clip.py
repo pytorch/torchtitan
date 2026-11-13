@@ -17,8 +17,9 @@ import torch
 import torch.nn as nn
 import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
-from torch.distributed.tensor import distribute_tensor, Shard
+from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 from torch.distributed.tensor.debug import CommDebugMode
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.nn.attention.flex_attention import create_block_mask
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -31,6 +32,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 from torchtitan.models.kimi_k2_7.qk_clip import (
+    _scale_mla_heads,
     qk_clip,
     QKClipFlexInnerAttention,
     register_qk_clip_hook,
@@ -365,3 +367,80 @@ class QKClipDistributedTest(DTensorTestBase):
                     -1, in_features
                 ),
             )
+
+
+@pytest.mark.multi_gpu
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class QKClipTensorParallelTest(DTensorTestBase):
+    mesh_shape = (2, 2)
+
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    @property
+    def device_type(self) -> str:
+        return "cuda"
+
+    @with_comms
+    def test_qk_clip_uses_tp_local_heads_with_fsdp_split_rows(self) -> None:
+        mesh = init_device_mesh(
+            self.device_type, self.mesh_shape, mesh_dim_names=("dp_shard", "tp")
+        )
+        device = torch.device(self.device_type, self.rank)
+        values = torch.arange(48, device=device).float().reshape(24, 2)
+        weight = distribute_tensor(
+            values.clone(), mesh, (_StridedShard(0, split_factor=2), Shard(0))
+        )
+        scales_H = torch.tensor([0.04, 0.16, 0.36, 0.64, 0.81, 1.0], device=device)
+        local_scales_H = scales_H.chunk(mesh["tp"].size())[mesh["tp"].get_local_rank()]
+        # Three TP-local heads have twelve rows; FSDP's six-row shard splits
+        # a head. Scale logical rows rather than reshaping the local weight.
+        for remaining_exponent in (0.0, 1.0):
+            weight.to_local().copy_(
+                distribute_tensor(values.clone(), mesh, weight.placements).to_local()
+            )
+            _scale_mla_heads(
+                weight,
+                local_scales_H,
+                rows_per_head=4,
+                nope_rows_per_head=2,
+                nope_scale_exponent=0.5,
+                remaining_scale_exponent=remaining_exponent,
+            )
+            expected_scales_R1 = torch.cat(
+                [
+                    scales_H.pow(0.5)[:, None].expand(-1, 2),
+                    scales_H.pow(remaining_exponent)[:, None].expand(-1, 2),
+                ],
+                dim=1,
+            ).reshape(-1, 1)
+            torch.testing.assert_close(
+                weight.full_tensor(), values * expected_scales_R1, rtol=0, atol=0
+            )
+
+        for invalid_values, head_scales, placements in (
+            (
+                torch.tensor(1.0, device=device),
+                local_scales_H,
+                (Replicate(), Replicate()),
+            ),
+            (values[:, 0].contiguous(), local_scales_H, weight.placements),
+            (values.unsqueeze(-1), local_scales_H, weight.placements),
+            (values, local_scales_H[:-1], weight.placements),
+        ):
+            with self.subTest(
+                weight_shape=tuple(invalid_values.shape), num_heads=head_scales.numel()
+            ):
+                invalid_weight = distribute_tensor(invalid_values, mesh, placements)
+                with self.assertRaisesRegex(
+                    ValueError, "QK clip scales do not match the MLA weight shape"
+                ):
+                    _scale_mla_heads(
+                        invalid_weight,
+                        head_scales,
+                        rows_per_head=4,
+                        nope_rows_per_head=2,
+                        nope_scale_exponent=0.5,
+                        remaining_scale_exponent=1.0,
+                    )

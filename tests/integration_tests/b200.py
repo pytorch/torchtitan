@@ -31,8 +31,7 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     config = kimi_k3_debugmodel(
         attn_backend="flex", parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
-    # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
-    # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
+    # AdamW TP baseline; kimi_k3_debugmodel_mm_muon covers the default optimizer.
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
     )
@@ -104,11 +103,9 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     split[0][:0] = KimiK3MultimodalModel.pipeline_first_stage_module_fqns
     split[-1].extend(KimiK3MultimodalModel.pipeline_last_stage_module_fqns)
     parallelism.pipeline_parallel_module_fqns_per_model_part = split
-    # DistMuon does not support tensor parallelism yet (#3353), so this cell
-    # keeps AdamW the way kimi_k3_debugmodel_mm does.
-    config.optim.optimizer = OptimizersContainer.Config(
-        optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-    )
+    # Keeps the recipe's DistMuon with its CTA cap: covers the TP compute
+    # layouts, QK-Clip on TP-local heads, and transport group creation across
+    # interleaved stages.
     return config
 
 

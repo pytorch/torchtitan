@@ -284,8 +284,9 @@ class _DeepSeekV4TrainerConfig(Trainer.Config):
         ):
             raise ValueError(
                 "DeepSeek V4 DistMuon requires tensor_parallel_degree=1 and "
-                "pipeline_parallel_degree=1: TP _StridedShard and PP stage-local "
-                "parameter groups are not supported yet."
+                "pipeline_parallel_degree=1: its compute layouts do not declare "
+                "the tp axis, and PP stage-local parameter groups are not "
+                "supported yet."
             )
 
 

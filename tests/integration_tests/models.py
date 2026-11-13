@@ -469,8 +469,7 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     """One four-GPU smoke path covering PP=2, FSDP=2, and EP=2.
 
     Each PP stage consumes its local subset of the global DistMuon
-    compute-sharding map. DistMuon rejects tensor parallel: it produces
-    _StridedShard storage.
+    compute-sharding map.
     """
     from torchtitan_recipes.tests.models.kimi_k2_7 import kimi_k2_5_debugmodel
 

@@ -289,10 +289,12 @@ class BucketConfig:
     """Ordered optimizer-work bucket selected by canonical FQN patterns.
 
     ``mesh`` may override the process groups used for redistribution. It must
-    have a named axis matching the storage-mesh axis that the bucket
-    redistributes along, with the same ranks in the same order. It may be a 1D
-    mesh or a storage-shaped mesh. DistMuon communicates on
-    ``mesh[axis].get_group()``. ``None`` uses the parameter storage mesh.
+    have the same ranks in the same order as the selected storage axes. For
+    one transport axis, its name must match and a storage-shaped mesh is also
+    accepted. For multiple axes, supply a 1D mesh named by joining the axis
+    names, for example ``dp_shard_tp``. The caller creates and owns these
+    communicators. ``None`` reuses the storage group for a single transport
+    axis; combined transports require an explicit mesh.
     """
 
     patterns: tuple[str, ...]
