@@ -365,6 +365,7 @@ class Glm5DsaIndexer(Module):
                 cp_group,
                 src=spmd.S(0),
                 dst=spmd.R,
+                backward_options={"op_dtype": k_TH.dtype},
             )
 
         # The learned per-token head weights turn N head-specific similarities
