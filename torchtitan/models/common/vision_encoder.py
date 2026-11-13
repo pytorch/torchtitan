@@ -36,7 +36,7 @@ from torchtitan.models.common.attention import (
     local_head_split,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 
 compiled_create_block_mask = compile(create_block_mask)
@@ -156,6 +156,8 @@ class VisionAttention(Module):
         attention_mask: BlockMask | VarlenAttentionMetadata,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
+        # The q/k/v projections share one TP-replicated input.
+        x = maybe_gather_tp_input(self, x)
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).

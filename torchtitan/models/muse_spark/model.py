@@ -18,9 +18,11 @@ from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.base.model import FlopsEstimator
@@ -754,14 +756,19 @@ class MuseSparkModel(MultimodalModel):
         assert vision_projection is not None and perception_emb_norm is not None
         tok_embeddings = self.tok_embeddings
         assert tok_embeddings is not None
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_TO = vision_adapter(
-            vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3)
+            invariant_to_replicate(
+                vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3),
+                MeshAxisName.CP,
+            )
         )
-        vision_embeds_TD = (
-            perception_emb_norm(vision_projection(vision_features_TO))
-            * tok_embeddings.multiplier
-        )
-        return vision_embeds_TD
+        vision_embeds_TD = perception_emb_norm(vision_projection(vision_features_TO))
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_TD = invariant_to_replicate(vision_embeds_TD, MeshAxisName.TP)
+        return vision_embeds_TD * tok_embeddings.multiplier
 
     def get_vision_embeds(
         self,
@@ -805,10 +812,14 @@ class MuseSparkModel(MultimodalModel):
             waveforms_SC,
             waveform_padded_lengths_N=waveform_padded_lengths_N,
         )
-        audio_embeds_TD = (
-            perception_emb_norm(audio_features_TD) * tok_embeddings.multiplier
-        )
-        return audio_embeds_TD
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
+        audio_features_TD = invariant_to_replicate(audio_features_TD, MeshAxisName.CP)
+        audio_embeds_TD = perception_emb_norm(audio_features_TD)
+        if spmd_dense_sp_enabled():
+            # Each rank selects audio rows for its own token shard.
+            audio_embeds_TD = invariant_to_replicate(audio_embeds_TD, MeshAxisName.TP)
+        return audio_embeds_TD * tok_embeddings.multiplier
 
     def _prepare_visual_embeds(
         self,

@@ -831,7 +831,7 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
         ):
             parallelism_context.build_mesh()
         vision_config = VisionMLP.Config(
-            fc1=Linear.Config(
+            fc1=ColumnParallelLinear.Config(
                 in_features=16,
                 out_features=32,
                 bias=True,

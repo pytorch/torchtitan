@@ -15,12 +15,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
 )
 from torchtitan.models.common.moe.sharding import replicated_param_placement_sparse
-from torchtitan.models.common.vision_encoder_sharding import (
-    invariant_norm_sharding_config,
-)
-from torchtitan.models.muse_spark.vision_encoder_sharding import (
-    cp_replicated_vision_sharding_config,
-)
 
 
 DP = MeshAxisName.DP
@@ -125,17 +119,5 @@ def audio_encoder_sharding_config() -> ShardingConfig:
             "waveforms_SC": invariant,
             "waveform_padded_lengths_N": invariant,
         },
-        in_dst_shardings={
-            "waveforms_SC": invariant,
-            "waveform_padded_lengths_N": invariant,
-        },
         out_src_shardings=invariant,
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )
-
-
-def perception_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    config = cp_replicated_vision_sharding_config(invariant_norm_sharding_config())
-    if enable_sp:
-        config.out_dst_shardings = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
-    return config
