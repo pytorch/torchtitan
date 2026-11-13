@@ -395,7 +395,7 @@ class Trainer(Configurable):
             mean_num_flops = dist_utils.dist_mean(
                 torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
                 engine.parallelism_context.get_mesh("dp"),
-            )
+            ).item()
 
         performance = compute_training_performance_metrics(
             num_tokens=self._step_num_tokens_per_dp_rank,
@@ -434,7 +434,12 @@ class Trainer(Configurable):
                     device_mem_stats.num_alloc_retries
                 ),
                 "trainer/memory/num_ooms": float(device_mem_stats.num_ooms),
-                **collect_aux_loss_metrics(engine.parallelism_context),
+                **{
+                    key: value.item()
+                    for key, value in collect_aux_loss_metrics(
+                        engine.parallelism_context
+                    ).items()
+                },
                 **(
                     {"trainer/mfu_percent": performance["mfu_percent"]}
                     if "mfu_percent" in performance
