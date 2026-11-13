@@ -24,18 +24,23 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    residual_activation_placement,
+    token_id_placement,
+)
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 
 class TestEmbeddingConfig(unittest.TestCase):
-    """Tests for the Embedding class used in the codebase."""
+    """Tests for VocabParallelEmbedding outside tensor parallelism."""
 
     def test_config_build(self):
-        """Embedding.Config.build() creates a working embedding."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config.build() creates a working embedding."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
         self.assertIsNone(emb.padding_idx)
@@ -44,7 +49,7 @@ class TestEmbeddingConfig(unittest.TestCase):
         """Native config preserves nn.Embedding initialization and padding gradients."""
         for padding_idx in (0, 3, -1, -8):
             with self.subTest(padding_idx=padding_idx):
-                config = Embedding.Config(
+                config = VocabParallelEmbedding.Config(
                     num_embeddings=8, embedding_dim=4, padding_idx=padding_idx
                 )
                 torch.manual_seed(42)
@@ -77,13 +82,13 @@ class TestEmbeddingConfig(unittest.TestCase):
                 )
 
     def test_config_build_without_fields_raises(self):
-        """Embedding.Config() raises TypeError when required fields are not provided."""
+        """VocabParallelEmbedding.Config() raises TypeError when required fields are not provided."""
         with self.assertRaises(TypeError):
-            Embedding.Config()
+            VocabParallelEmbedding.Config()
 
     def test_init_states(self):
         """init_states re-initializes the weight tensor."""
-        config = Embedding.Config(
+        config = VocabParallelEmbedding.Config(
             num_embeddings=50,
             embedding_dim=16,
             param_init={"weight": partial(nn.init.trunc_normal_, std=0.02)},
@@ -97,7 +102,7 @@ class TestEmbeddingConfig(unittest.TestCase):
 
     def test_custom_init_std(self):
         """Embedding respects custom mean and std."""
-        config = Embedding.Config(
+        config = VocabParallelEmbedding.Config(
             num_embeddings=1000,
             embedding_dim=160,
             param_init={"weight": partial(nn.init.normal_, mean=0.1, std=0.02)},
@@ -113,30 +118,30 @@ class TestEmbeddingConfig(unittest.TestCase):
         self.assertAlmostEqual(emb.weight.std().item(), 0.02, places=3)
 
     def test_config_pre_specified_build(self):
-        """Embedding.Config with both fields pre-specified builds with no kwargs."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config with both fields pre-specified builds with no kwargs."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_partial_pre_specified(self):
-        """Embedding.Config with fields specified at construction builds correctly."""
-        config = Embedding.Config(num_embeddings=100, embedding_dim=32)
+        """VocabParallelEmbedding.Config with fields specified at construction builds correctly."""
+        config = VocabParallelEmbedding.Config(num_embeddings=100, embedding_dim=32)
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
     def test_config_inheritance_preset(self):
-        """Inheriting Embedding.Config can put fields back in __init__."""
+        """Inheriting VocabParallelEmbedding.Config can put fields back in __init__."""
 
         @dataclass(kw_only=True, slots=True)
-        class PresetConfig(Embedding.Config):
+        class PresetConfig(VocabParallelEmbedding.Config):
             num_embeddings: int = 100
             embedding_dim: int = 32
 
         config = PresetConfig()
         emb = config.build()
-        self.assertIsInstance(emb, Embedding)
+        self.assertIsInstance(emb, VocabParallelEmbedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
 
 
@@ -195,7 +200,7 @@ class TestEmbedding(DTensorTestBase):
                 # HF conversion retains the constructor-normalized padding index.
                 convert_hf_to_module(hf_model)
                 embedding = hf_model.get_input_embeddings()
-                self.assertIsInstance(embedding, Embedding)
+                self.assertIsInstance(embedding, VocabParallelEmbedding)
                 self.assertEqual(embedding.padding_idx, reference.padding_idx)
                 embedding.weight = nn.Parameter(
                     distribute_tensor(
@@ -204,8 +209,10 @@ class TestEmbedding(DTensorTestBase):
                 )
                 expected = reference(tokens)
                 expected.sum().backward()
+                # The masked vocab-shard lookup, before the reduction that
+                # HFVocabParallelEmbedding.forward adds.
                 with set_current_spmd_mesh(mesh):
-                    partial_output = embedding(tokens)
+                    partial_output = embedding._lookup_vocab_shard(tokens)
                 partial_output.sum().backward()
                 output = partial_output.detach().clone()
                 dist.all_reduce(output, group=mesh.get_group("tp"))
@@ -222,84 +229,69 @@ class TestEmbedding(DTensorTestBase):
 
     @with_comms
     def test_vocab_parallel_embedding_parity(self):
-        """Validate local vocab-parallel embedding against DTensor and full embedding."""
-        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
-        tp_group = mesh.get_group("tp")
+        """Match DTensor's vocab-parallel embedding and the unsharded embedding."""
+        mesh = init_device_mesh(
+            self.device_type, (1, 1, 4), mesh_dim_names=("dp", "cp", "tp")
+        )
+        tp_mesh = mesh["tp"]
+        tp_rank = tp_mesh.get_local_rank()
 
-        for vocab_size in (128, 131):
-            for enable_sp in (False, True):
-                with self.subTest(vocab_size=vocab_size, enable_sp=enable_sp):
-                    torch.manual_seed(42)
+        for vocab_size, enable_sp in product((128, 131), (False, True)):
+            with self.subTest(vocab_size=vocab_size, enable_sp=enable_sp):
+                torch.manual_seed(42)
+                global_weight = torch.randn(vocab_size, 32, device=self.device_type)
+                tokens = torch.randint(0, vocab_size, (16,), device=self.device_type)
+                reference = nn.Embedding.from_pretrained(global_weight, freeze=False)
+                expected = reference(tokens)
+                expected.backward(torch.ones_like(expected))
 
-                    # Build global inputs, then derive DTensor and local views from them.
-                    global_weight = torch.randn(
-                        vocab_size,
-                        32,
-                        device=self.device_type,
-                    )
-                    global_tokens = torch.randint(
-                        0,
-                        vocab_size,
-                        (3, 16),
-                        device=self.device_type,
-                    )
+                # Native DTensor embedding is the bitwise oracle for the local
+                # masked lookup plus its reduction to the residual layout.
+                weight_dtensor = distribute_tensor(global_weight, tp_mesh, (Shard(0),))
+                tokens_dtensor = distribute_tensor(tokens, tp_mesh, (Replicate(),))
+                native_dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
+                self.assertIsInstance(native_dtensor_output.placements[0], _MaskPartial)
+                dtensor_output = native_dtensor_output.redistribute(
+                    placements=(Shard(0) if enable_sp else Replicate(),)
+                )
 
-                    # Native DTensor embedding is the bitwise oracle for the
-                    # local masked implementation, but it uses MaskPartial
-                    # internally before the final redistribution.
-                    weight_dtensor = distribute_tensor(global_weight, mesh, (Shard(0),))
-                    tokens_dtensor = distribute_tensor(
-                        global_tokens, mesh, (Replicate(),)
+                embedding = (
+                    VocabParallelEmbedding.Config(
+                        num_embeddings=vocab_size, embedding_dim=32
                     )
-                    full_output = F.embedding(global_tokens, global_weight)
-                    expected_placement = Shard(1) if enable_sp else Replicate()
-                    native_dtensor_output = F.embedding(tokens_dtensor, weight_dtensor)
-                    self.assertTrue(
-                        isinstance(native_dtensor_output.placements[0], _MaskPartial)
+                    .build()
+                    .to(self.device_type)
+                )
+                embedding.weight = nn.Parameter(weight_dtensor.to_local())
+                set_spmd_meshes(
+                    dense_mesh=mesh, sparse_mesh=None, dense_sp_enabled=enable_sp
+                )
+                with (
+                    set_current_spmd_mesh(mesh),
+                    typecheck(strict_mode="strict", local=False),
+                ):
+                    embedding._parameters["weight"] = spmd.assert_type(
+                        embedding.weight, dense_param_placement(tp=spmd.S(0))
                     )
-                    dtensor_output = native_dtensor_output.redistribute(
-                        placements=(expected_placement,)
+                    output = embedding(spmd.assert_type(tokens, token_id_placement()))
+                    spmd.assert_type(
+                        output, residual_activation_placement(enable_sp=enable_sp)
                     )
+                    output.backward(torch.ones_like(output))
 
-                    # Setup the manual vocab-parallel embedding.
-                    embedding = Embedding(
-                        Embedding.Config(
-                            num_embeddings=vocab_size,
-                            embedding_dim=32,
-                        )
-                    ).to(self.device_type)
-                    embedding.weight = nn.Parameter(weight_dtensor.to_local())
-                    local_tokens = tokens_dtensor.to_local()
-
-                    # The embedding boundary converts replicated token ids to
-                    # R@TP before the local masked embedding region.
-                    # The module returns P@TP; the Module sharding wrapper owns
-                    # the final P -> S(1)/I redistribution.
-                    out_type = spmd.S(1) if enable_sp else spmd.I
-                    with set_current_spmd_mesh(mesh):
-                        with typecheck(strict_mode="strict", local=True):
-                            local_tokens = spmd.assert_type(
-                                local_tokens, {tp_group: spmd.R}
-                            )
-                            spmd.assert_type(local_tokens, {tp_group: spmd.R})
-                            embedding._parameters["weight"] = spmd.assert_type(
-                                embedding.weight, {tp_group: spmd.S(0)}
-                            )
-                            local_partial = embedding(local_tokens)
-                            spmd.assert_type(local_partial, {tp_group: spmd.P})
-                            local_output = spmd.redistribute(
-                                local_partial,
-                                tp_group,
-                                src=spmd.P,
-                                dst=out_type,
-                            )
-
-                    # local matches DTensor bitwise and no-parallel embedding
-                    self.assertTrue(
-                        torch.equal(local_output, dtensor_output.to_local())
-                    )
-                    if not enable_sp:
-                        self.assertTrue(torch.equal(local_output, full_output))
+                self.assertTrue(torch.equal(output, dtensor_output.to_local()))
+                expected_output = expected.chunk(4)[tp_rank] if enable_sp else expected
+                self.assertEqual(output, expected_output, atol=0, rtol=0)
+                # The rank losses cover every token once: under SP each rank owns
+                # a sequence shard, and the P -> S(0) backward all-gathers.
+                self.assertEqual(
+                    embedding.weight.grad,
+                    distribute_tensor(
+                        reference.weight.grad, tp_mesh, (Shard(0),)
+                    ).to_local(),
+                    atol=0,
+                    rtol=0,
+                )
 
 
 if __name__ == "__main__":

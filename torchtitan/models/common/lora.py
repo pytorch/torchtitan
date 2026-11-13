@@ -43,7 +43,8 @@ __all__ = [
 
 # TODO: Support checkpoint interoperability for LoRA adapter state. Native DCP
 # base checkpoints cannot initialize LoRA models because lora_a/lora_b keys are
-# absent, and Hugging Face state-dict adapters omit those keys during export.
+# absent. HF export raises in BaseCheckpointManager._validate_hf_export until a
+# PEFT adapter export exists.
 class _LoRAMixin:
     _lora_scaling: float
 

@@ -37,18 +37,16 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
-    dense_sequence_parallel_placement,
     gqa_attention_sharding_config,
     head_norm_sharding_config,
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     rope_cache_sharding_config,
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -69,7 +67,6 @@ from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -109,7 +106,6 @@ from .sharding import (
     audio_wrapper_sharding_config,
     compressed_moe_linear_sharding_config,
     muse_spark_activation_placement,
-    perception_norm_sharding_config,
     post_expert_norm_sharding_config,
     residual_gate_sharding_config,
     transformer_block_sharding_config,
@@ -523,7 +519,6 @@ def _moe_config(
 ) -> MuseSparkMoE.Config:
     grouped_linear_init = _grouped_linear_init(layer_id)
     experts_sharding = routed_experts_sharding_config()
-    experts_sharding.out_dst_shardings = dense_sequence_parallel_placement()
     return MuseSparkMoE.Config(
         num_experts=num_experts,
         router=TokenChoiceTopKRouter.Config(
@@ -630,7 +625,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
         ),
-        proj=InvariantRowParallelLinear.Config(
+        proj=RowParallelLinear.Config(
             in_features=latent_dim,
             out_features=latent_dim,
             bias=True,
@@ -646,13 +641,13 @@ def _muse_spark_navit_mlp_config(
     mlp_hidden_dim: int,
 ) -> VisionMLP.Config:
     return VisionMLP.Config(
-        fc1=Linear.Config(
+        fc1=ColumnParallelLinear.Config(
             in_features=latent_dim,
             out_features=mlp_hidden_dim,
             bias=True,
             sharding_config=vision_colwise_sharding_config(),
         ),
-        fc2=InvariantRowParallelLinear.Config(
+        fc2=RowParallelLinear.Config(
             in_features=mlp_hidden_dim,
             out_features=latent_dim,
             bias=True,
@@ -836,7 +831,9 @@ def _muse_spark_config(
     perception_emb_norm = _gain_norm(
         dim,
         elementwise_affine=False,
-        sharding_config=perception_norm_sharding_config(enable_sp=enable_sp),
+        sharding_config=cp_replicated_vision_sharding_config(
+            invariant_norm_sharding_config()
+        ),
     )
 
     layers = []
@@ -921,7 +918,7 @@ def _muse_spark_config(
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=MuseSparkEmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
@@ -947,7 +944,7 @@ def _muse_spark_config(
                 if final_norm_gain_center == 0.0
                 else _GAIN_NORM_INIT
             ),
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=MuseSparkLMHead.Config(
             in_features=dim,

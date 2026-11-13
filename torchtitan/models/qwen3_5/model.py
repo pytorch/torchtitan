@@ -22,6 +22,7 @@ from torchtitan.distributed.local_compile import local_compile, LocalCompileConf
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
     spmd_local_context,
 )
 from torchtitan.models.base.module import Module
@@ -50,6 +51,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -586,11 +588,12 @@ class Qwen35Model(MultimodalModel):
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
         """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
+        inputs_embeds = self.tok_embeddings(tokens)
         if self.vision_encoder is None:
             return inputs_embeds
+        # The vision scatter writes arbitrary positions, so every TP rank needs
+        # the full sequence.
+        inputs_embeds = maybe_gather_tp_input(self.tok_embeddings, inputs_embeds)
 
         # TODO: Configure the job-wide modality set from the dataset so
         # single-modality jobs can avoid the second encoder call.
@@ -605,6 +608,11 @@ class Qwen35Model(MultimodalModel):
         vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values, grid_thw=grid_thw
         )
+        # The encoder output is TP- and CP-invariant; the decoder consumes it in
+        # TP-sharded computation on CP-sharded tokens, so its gradient is summed
+        # across both. Converting TP first reduces CP first in backward.
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if image_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
@@ -638,6 +646,8 @@ class Qwen35Model(MultimodalModel):
         vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values_videos, grid_thw=grid_thw_videos
         )
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if video_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
@@ -699,28 +709,16 @@ class Qwen35Model(MultimodalModel):
                 {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
                 spmd.PartitionSpec(("dp", "cp"), None),
             )
+        if self.tok_embeddings is not None and self.vision_encoder is not None:
+            x = replicate_to_residual(x)
 
         # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
         # forward. The per-layer MRoPE dispatches on rank.
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            x = layer(
-                x,
-                (
-                    attention_metadata.get(type(layer.attention.inner_attention))
-                    if attention_metadata is not None
-                    else None
-                ),
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        x = self.norm(x) if self.norm is not None else x
-        if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        return self.forward_embeddings(
+            x,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )

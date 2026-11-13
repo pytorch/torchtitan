@@ -45,10 +45,7 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
-    VisionMLP,
-)
+from torchtitan.models.common.vision_encoder import VisionMLP
 from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_invariant_linear_sharding_config,
@@ -383,10 +380,8 @@ def test_grouped_lora_adapters_follow_expert_sharding():
         assert adapter._sharding_config is not None
         assert adapter._sharding_config is not base_sharding
         assert adapter._sharding_config.state_shardings == {"weight": expert_placement}
-        assert adapter._sharding_config.in_src_shardings is None
-        assert adapter._sharding_config.in_dst_shardings is None
-        assert adapter._sharding_config.out_src_shardings is None
-        assert adapter._sharding_config.out_dst_shardings is None
+        assert adapter._sharding_config.input_shardings is None
+        assert adapter._sharding_config.output_shardings is None
 
 
 def test_grouped_lora_rejects_feature_axis_sharding():
@@ -434,10 +429,8 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
         tp=spmd.S(1)
     )
-    assert lora_b_sharding.in_src_shardings is None
-    assert lora_b_sharding.in_dst_shardings is None
-    assert lora_b_sharding.out_src_shardings is None
-    assert lora_b_sharding.out_dst_shardings is None
+    assert lora_b_sharding.input_shardings is None
+    assert lora_b_sharding.output_shardings is None
 
 
 def test_lora_class_is_reused_for_the_same_parent():
@@ -470,26 +463,6 @@ def test_lora_matches_linear_config_subclass():
     assert not model.weight.requires_grad
     assert model.lora_a.weight.requires_grad
     assert model.lora_b.weight.requires_grad
-
-
-@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
-def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
-    config = parallel_cls.Config(
-        in_features=4,
-        out_features=3,
-        bias=True,
-    )
-    transformed = LoRATransform(
-        rank=2,
-        alpha=4.0,
-    ).transform(config)
-    linear = transformed.build()
-
-    assert isinstance(linear, parallel_cls)
-    x = torch.randn(5, 4)
-    expected = F.linear(x, linear.weight, linear.bias)
-    expected += 2 * linear.lora_b(linear.lora_a(x))
-    torch.testing.assert_close(linear(x), expected)
 
 
 def test_lora_transform_targets_full_fqn_suffix():
@@ -854,13 +827,13 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
         ):
             parallelism_context.build_mesh()
         vision_config = VisionMLP.Config(
-            fc1=Linear.Config(
+            fc1=ColumnParallelLinear.Config(
                 in_features=16,
                 out_features=32,
                 bias=True,
                 sharding_config=vision_colwise_sharding_config(),
             ),
-            fc2=InvariantRowParallelLinear.Config(
+            fc2=RowParallelLinear.Config(
                 in_features=32,
                 out_features=16,
                 # With a bias, the forward skips SPMD type checking.

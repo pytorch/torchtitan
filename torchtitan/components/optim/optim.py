@@ -152,10 +152,14 @@ class Optim(Configurable):
 
     def step(self, loss: torch.Tensor, *, current_step: int) -> torch.Tensor:
         """Validate loss and gradients, update parameters, then advance eager state."""
-        if self._is_first_step_call:
+        # TODO(https://github.com/intel/torch-xpu-ops/issues/6125): skip on XPU
+        # until XCCL lets the driver reclaim memory that empty_cache() releases
+        # after XCCL collectives. Today that memory stays allocated, and later
+        # steps run out of device memory.
+        if self._is_first_step_call and device_type != "xpu":
             # Finish GPU work before freeing cached memory for NCCL buffers.
             # https://github.com/pytorch/torchtitan/issues/5019
-            # The sync is skipped while a lazily initialized device (CUDA, XPU)
+            # The sync is skipped while a lazily initialized device (CUDA)
             # is untouched, so a model on CPU never creates a device context.
             # torch.mps has no is_initialized(): MPS is not lazily initialized.
             if torch.accelerator.is_available() and (
@@ -164,7 +168,7 @@ class Optim(Configurable):
             ):
                 device_module.synchronize()
             device_module.empty_cache()
-            self._is_first_step_call = False
+        self._is_first_step_call = False
         grad_norm = self._run_update(loss)
         self.lr_schedulers.step()
         if self.ema is not None:

@@ -273,6 +273,7 @@ class SGLangEngine(GenerationEngine):
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            hf_assets_path=model_path,
         )
         server_args = self._build_server_args(
             model,

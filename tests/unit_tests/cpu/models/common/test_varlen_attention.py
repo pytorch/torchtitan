@@ -382,20 +382,16 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         sharding = model_config.layers[0].attention.inner_attention.sharding_config
         assert sharding is not None
         self.assertEqual(
-            set(sharding.in_src_shardings or {}),
+            set(sharding.input_shardings or {}),
             {"q_THK", "k_THK", "v_THV"},
         )
-        q_layout = (sharding.in_src_shardings or {})["q_THK"]
-        k_dst_layout = (sharding.in_dst_shardings or {})["k_THK"]
+        q_layout = (sharding.input_shardings or {})["q_THK"]
+        k_layout = (sharding.input_shardings or {})["k_THK"]
         axis_types = _per_axis_types(q_layout)
         self.assertEqual(axis_types[MeshAxisName.DP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.CP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.TP], spmd.S(1))
-        self.assertEqual(_per_axis_types(k_dst_layout)[MeshAxisName.CP], spmd.S(0))
-        self.assertEqual(
-            _per_axis_types(k_dst_layout),
-            _per_axis_types((sharding.in_src_shardings or {})["k_THK"]),
-        )
+        self.assertEqual(_per_axis_types(k_layout)[MeshAxisName.CP], spmd.S(0))
 
     def test_out_transform_receives_th_lse(self):
         num_tokens, num_heads, head_dim = 5, 2, 4

@@ -456,8 +456,12 @@ class Trainer(Configurable):
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           overwrites the TorchStore key.
+
+        Every push carries the trainable parameters and the buffers. Generators load the
+        frozen parameters from `generator.checkpointer`: for LoRA the base, so a push
+        carries only the adapters (`lora_a`, `lora_b`) and the buffers.
         """
-        model_state_dict = self._model_state_dict()
+        model_state_dict = self._trainable_model_state_dict()
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
@@ -489,16 +493,24 @@ class Trainer(Configurable):
                 )
             )
 
-    def _model_state_dict(self) -> dict[str, torch.Tensor]:
-        """Merge the state dicts of this rank's model parts.
+    def _trainable_model_state_dict(self) -> dict[str, torch.Tensor]:
+        """Merge the state dicts of this rank's model parts, leaving out the parameters
+        that do not train.
 
         Under PP each rank holds only its own stages, so every stage publishes
         a partial state dict into the same TorchStore key.
         """
+        frozen = frozenset(
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, param in model_part.named_parameters(remove_duplicate=False)
+            if not param.requires_grad
+        )
         return {
             name: tensor
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
+            if canonical_fqn(name) not in frozen
         }
 
     def _preserve_dtype_keys(

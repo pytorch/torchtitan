@@ -32,12 +32,17 @@ from torchtitan.rl.generator.vllm.multimodal_wrapper import (
     _ImageProcessingInfo,
     _largest_patch_grid,
     image_prompt_to_engine_input,
+    keep_prefix_cached_image_data,
     VLLMMultimodalModelWrapper,
 )
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 from torchtitan.rl.rollout.types import Prompt, PromptImage
+from vllm import SamplingParams
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.transformers_utils.config import PretrainedConfig, uses_mrope
+from vllm.v1.core.sched import output as vllm_scheduler_output
+from vllm.v1.core.sched.output import NewRequestData
+from vllm.v1.request import Request
 
 QWEN3_5_SMALL_IMAGES = dataclasses.replace(
     VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
@@ -173,6 +178,54 @@ def test_mrope_input_positions_follow_placeholders():
     assert delta == -2
 
 
+def test_scheduler_sends_prefix_cached_image_data_to_the_worker(monkeypatch):
+    # A GRPO sample admitted after its group's first prefill: its prefix-cache hit (6
+    # tokens) covers its image (tokens 2-5). If it is preempted, it resumes from what the
+    # worker got here, and may need the encoder then.
+    image = PromptImage(
+        hash_value="k", source_path="k.png", grid_thw=(1, 4, 4), data=b"k"
+    )
+    prompt = image_prompt_to_engine_input(
+        Prompt(
+            token_ids=[0] * 8,
+            images=(image,),
+            image_placeholders=(PlaceholderRange(offset=2, length=4),),
+        ),
+        [torch.zeros(16, 1536)],
+        cache_salt="3",
+    )
+    [item] = prompt["mm_kwargs"]["image"]
+    [mm_hash] = prompt["mm_hashes"]["image"]
+    [placeholder] = prompt["mm_placeholders"]["image"]
+    request = Request(
+        request_id="group=0/rollout=1/turn=0",
+        prompt_token_ids=prompt["prompt_token_ids"],
+        sampling_params=SamplingParams(),
+        pooling_params=None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                data=item,
+                modality="image",
+                identifier=mm_hash,
+                mm_position=placeholder,
+                mm_hash=mm_hash,
+            )
+        ],
+    )
+    request.num_computed_tokens = 6
+    # Restore vLLM's function after the test.
+    monkeypatch.setattr(
+        vllm_scheduler_output,
+        "strip_covered_mm_data",
+        vllm_scheduler_output.strip_covered_mm_data,
+    )
+
+    keep_prefix_cached_image_data()
+    [feature] = NewRequestData.from_request(request, block_ids=([0],)).mm_features
+
+    assert feature.data is item
+
+
 def test_largest_patch_grid() -> None:
     # 128 x 128 pixels in 32-pixel merged tokens: at most 4 x 4 = 16 tokens.
     assert _largest_patch_grid(PROCESSOR, 10_000) == (1, 8, 8)
@@ -230,7 +283,7 @@ def test_profiling_uses_the_vision_processors_largest_grid():
 
 def test_hf_config_declares_mrope_only_for_image_prompts():
     config = build_model_config(
-        "0.8B", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
+        "0.8B_mm", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
     )
 
     text = PretrainedConfig.from_dict(model_config_to_hf_config_dict(config))
@@ -243,6 +296,23 @@ def test_hf_config_declares_mrope_only_for_image_prompts():
     assert image.rope_parameters["mrope_section"] == list(
         config.first_full_attention.rope.mrope_section
     )
+
+
+def test_hf_config_keeps_1d_positions_for_images_without_mrope():
+    from torchtitan.models.muse_spark import (
+        build_model_config as build_muse_spark_model_config,
+    )
+
+    config = build_muse_spark_model_config(
+        "debugmodel_mm", seq_len=256, attn_backend="varlen"
+    )
+
+    image = PretrainedConfig.from_dict(
+        model_config_to_hf_config_dict(config, serves_images=True)
+    )
+
+    # Muse Spark's image tokens take 1D positions like text: vLLM keeps 1D positions.
+    assert not uses_mrope(image)
 
 
 def test_controller_rejects_a_vision_processor_without_a_vision_encoder():
