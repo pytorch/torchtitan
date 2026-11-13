@@ -38,6 +38,12 @@ maintained; it has to earn its cost.
 - Don't put GPU-only (`skipUnless(cuda)`) tests in CPU-only suites: they never run.
 - Don't guard tests on packages that are already in `requirements-dev.txt`.
 
+## Optimizers
+- Construct every `torch.optim` optimizer with an explicit `foreach=` or
+  `fused=` argument. The Meta-internal lint `missing_for_each_optimizer` flags
+  calls that have neither. Use `foreach=True` unless the test needs another
+  path. `torch.optim.Muon` has neither argument; construct it without one.
+
 ## Golden Numerics
 - Golden loss files capture any numerics change; never loosen tolerances to make
   a change pass. An expected change must be explained in the PR and regenerated
