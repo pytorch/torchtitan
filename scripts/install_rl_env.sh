@@ -15,7 +15,7 @@
 #
 # Usage (from anywhere; requires uv):
 #   scripts/install_rl_env.sh [--cuda cu132] [--skip-base]
-#       [--flash-attn auto|none|3|4|3,4] [--nvcc] [--constraint FILE]...
+#       [--flash-attn auto|none|3|4|3,4] [--nvcc] [--constraint FILE]... [--sglang]
 #
 #   --cuda         PyTorch nightly CUDA tag (default: cu132). Only cu132 has
 #                  the pinned vLLM wheel.
@@ -26,6 +26,8 @@
 #   --nvcc         Install nvidia-cuda-nvcc so FlashInfer can JIT-compile its
 #                  kernels when no CUDA toolkit is installed.
 #   --constraint   Extra constraint file for the nightly resolve (repeatable).
+#   --sglang       Also install SGLang for torchtitan/rl/generator/sglang, keeping
+#                  this environment's PyTorch.
 
 set -euo pipefail
 
@@ -33,6 +35,7 @@ cuda="cu132"
 skip_base=0
 flash_attn="auto"
 install_nvcc=0
+install_sglang=0
 constraints=(--constraint requirements.txt)
 
 while [[ $# -gt 0 ]]; do
@@ -42,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --flash-attn) flash_attn="$2"; shift 2 ;;
     --nvcc) install_nvcc=1; shift ;;
     --constraint) constraints+=(--constraint "$(realpath "$2")"); shift 2 ;;
+    --sglang) install_sglang=1; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -129,4 +133,23 @@ uv pip uninstall tilelang || true
 
 if [[ "$install_nvcc" == "1" ]]; then
   uv pip install nvidia-cuda-nvcc
+fi
+
+if [[ "$install_sglang" == "1" ]]; then
+  # The SGLang engine uses private SGLang APIs and is verified only at this
+  # commit, which no SGLang release contains yet.
+  sglang_commit="851642ade7d02002cf6c73a43a22987ba7511a4b"
+  overrides="$(mktemp)"
+  # Keep this environment's PyTorch, Monarch and openai (vLLM needs a newer one
+  # than SGLang pins).
+  uv pip freeze | grep -E "^(torch|torchvision|torchmonarch|openai)==" > "$overrides"
+  # SGLang depends on torchaudio, which the engine never imports: drop it (a uv
+  # override whose marker is never true removes the dependency).
+  echo "torchaudio ; sys_platform == 'never'" >> "$overrides"
+  # The engine does not use SGLang's Rust extensions: the radix tree falls back
+  # to its Python implementation.
+  SGLANG_BUILD_RUST_EXTS=none uv pip install \
+    "sglang @ git+https://github.com/sgl-project/sglang.git@${sglang_commit}#subdirectory=python" \
+    --override "$overrides" --prerelease allow
+  rm "$overrides"
 fi

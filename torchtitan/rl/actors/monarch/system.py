@@ -40,7 +40,7 @@ from torchtitan.rl.model_state_dict_transport import (
     ModelStateDictTransport,
     shared_rank_layouts,
 )
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
@@ -175,7 +175,7 @@ class MonarchActorSystem(ActorSystem):
         return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
 
     async def spawn_rollout_workers(
-        self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
+        self, config: BaseRolloutWorker.Config, *, num_workers: int, num_threads: int
     ) -> Any:
         self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
         return self._rollout_worker_mesh.spawn(

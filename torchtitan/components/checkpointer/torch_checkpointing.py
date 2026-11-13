@@ -309,6 +309,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             raise ValueError(
                 "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
+        self._validate_hf_export(model_parts, last_save_in_hf=self.last_save_in_hf)
 
         self._manager = self._manager_config.build()
 

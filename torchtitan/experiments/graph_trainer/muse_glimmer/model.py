@@ -12,6 +12,9 @@ from ..model import GraphTrainerModel
 
 
 class GraphTrainerMuseGlimmerModel(GraphTrainerModel, MuseGlimmerModel):
+    # TODO: Support MuseGlimmerMultimodalModel. Its vision encoder reads image
+    # grids on the host and builds per-batch shapes, which one static-shape trace
+    # cannot capture.
     @dataclass(kw_only=True, slots=True)
     class Config(MuseGlimmerModel.Config):
         pass

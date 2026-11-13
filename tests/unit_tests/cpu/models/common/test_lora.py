@@ -45,10 +45,7 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe.sharding import expert_param_placement_sparse
-from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
-    VisionMLP,
-)
+from torchtitan.models.common.vision_encoder import VisionMLP
 from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_invariant_linear_sharding_config,
@@ -93,8 +90,14 @@ def test_qwen35_moe_lora_model_config():
     }
 
 
-def test_lora_model_builds():
-    """LoRA debug model builds, has trainable adapters and frozen base."""
+@pytest.mark.parametrize(
+    "trainable_modules", [[], ["tok_embeddings", "layers.1.feed_forward"]]
+)
+def test_lora_model_builds(trainable_modules):
+    """LoRA debug model builds, has trainable adapters and frozen base.
+
+    Parameters under ``trainable_modules`` stay trainable.
+    """
     model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config = transform_model_config_(
         model_config,
@@ -103,6 +106,7 @@ def test_lora_model_builds():
                 rank=8,
                 alpha=16.0,
                 target_modules=["wqkv", "wo"],
+                trainable_modules=trainable_modules,
             )
         ],
     )
@@ -141,7 +145,11 @@ def test_lora_model_builds():
         for n, p in model.named_parameters()
         if p.requires_grad and "lora_a" not in n and "lora_b" not in n
     }
-    assert non_lora_trainable == set()
+    assert non_lora_trainable == {
+        n
+        for n, _ in model.named_parameters()
+        if any(n.startswith(f"{root}.") for root in trainable_modules)
+    }
 
 
 def test_lora_forward():
@@ -372,10 +380,8 @@ def test_grouped_lora_adapters_follow_expert_sharding():
         assert adapter._sharding_config is not None
         assert adapter._sharding_config is not base_sharding
         assert adapter._sharding_config.state_shardings == {"weight": expert_placement}
-        assert adapter._sharding_config.in_src_shardings is None
-        assert adapter._sharding_config.in_dst_shardings is None
-        assert adapter._sharding_config.out_src_shardings is None
-        assert adapter._sharding_config.out_dst_shardings is None
+        assert adapter._sharding_config.input_shardings is None
+        assert adapter._sharding_config.output_shardings is None
 
 
 def test_grouped_lora_rejects_feature_axis_sharding():
@@ -423,10 +429,8 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     assert lora_b_sharding.state_shardings["weight"] == dense_param_placement(
         tp=spmd.S(1)
     )
-    assert lora_b_sharding.in_src_shardings is None
-    assert lora_b_sharding.in_dst_shardings is None
-    assert lora_b_sharding.out_src_shardings is None
-    assert lora_b_sharding.out_dst_shardings is None
+    assert lora_b_sharding.input_shardings is None
+    assert lora_b_sharding.output_shardings is None
 
 
 def test_lora_class_is_reused_for_the_same_parent():
@@ -459,26 +463,6 @@ def test_lora_matches_linear_config_subclass():
     assert not model.weight.requires_grad
     assert model.lora_a.weight.requires_grad
     assert model.lora_b.weight.requires_grad
-
-
-@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
-def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
-    config = parallel_cls.Config(
-        in_features=4,
-        out_features=3,
-        bias=True,
-    )
-    transformed = LoRATransform(
-        rank=2,
-        alpha=4.0,
-    ).transform(config)
-    linear = transformed.build()
-
-    assert isinstance(linear, parallel_cls)
-    x = torch.randn(5, 4)
-    expected = F.linear(x, linear.weight, linear.bias)
-    expected += 2 * linear.lora_b(linear.lora_a(x))
-    torch.testing.assert_close(linear(x), expected)
 
 
 def test_lora_transform_targets_full_fqn_suffix():
@@ -580,6 +564,39 @@ def test_lora_allows_other_targets_with_weight_tying():
 
     assert not hasattr(transformed.lm_head, "rank")
     assert all(hasattr(layer.attention.wo, "rank") for layer in transformed.layers)
+
+
+@pytest.mark.parametrize(
+    ("target_modules", "trainable_modules", "share_feed_forward", "tie", "error"),
+    [
+        (["wo"], ["layers.0.attention"], False, False, "inside trainable module"),
+        (None, ["layers.0"], False, False, "target_modules=None targets every"),
+        (["wo"], ["layers.0.attn"], False, False, "match no module config"),
+        (["wo"], ["layers.0.feed_forward"], True, False, "shared config"),
+        # A list container has no config of its own but matches its children.
+        (["lm_head"], ["layers"], False, False, None),
+        (["wo"], ["tok_embeddings"], False, True, "share a weight under weight"),
+        (["wo"], ["tok_embeddings", "lm_head"], False, True, None),
+    ],
+)
+def test_lora_validates_trainable_modules(
+    target_modules, trainable_modules, share_feed_forward, tie, error
+):
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
+    model_config.enable_weight_tying = tie
+    if share_feed_forward:
+        model_config.layers[1].feed_forward = model_config.layers[0].feed_forward
+
+    transform = LoRATransform(
+        rank=2,
+        target_modules=target_modules,
+        trainable_modules=trainable_modules,
+    )
+    if error is None:
+        transform.transform(model_config)
+    else:
+        with pytest.raises(ValueError, match=error):
+            transform.transform(model_config)
 
 
 def test_lora_rank_validation():
@@ -810,13 +827,13 @@ class TestLoRATensorParallelTypecheck(DTensorTestBase):
         ):
             parallelism_context.build_mesh()
         vision_config = VisionMLP.Config(
-            fc1=Linear.Config(
+            fc1=ColumnParallelLinear.Config(
                 in_features=16,
                 out_features=32,
                 bias=True,
                 sharding_config=vision_colwise_sharding_config(),
             ),
-            fc2=InvariantRowParallelLinear.Config(
+            fc2=RowParallelLinear.Config(
                 in_features=32,
                 out_features=16,
                 # With a bias, the forward skips SPMD type checking.

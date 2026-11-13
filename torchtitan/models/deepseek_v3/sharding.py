@@ -29,8 +29,8 @@ def mla_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={"x": layout},
-        out_src_shardings=layout,
+        input_shardings={"x": layout},
+        output_shardings=layout,
     )
 
 
@@ -39,7 +39,7 @@ def mtp_block_sharding_config(*, enable_sp: bool) -> ShardingConfig | None:
     if not enable_sp:
         return None
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "mtp_input_valid_mask": token_id_placement(),
         },
     )
@@ -52,6 +52,6 @@ def mtp_projection_sharding_config(*, enable_sp: bool) -> ShardingConfig:
         state_shardings={
             "weight": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={"input": activation},
-        out_src_shardings=activation,
+        input_shardings={"input": activation},
+        output_shardings=activation,
     )

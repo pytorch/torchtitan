@@ -21,7 +21,7 @@ from torchstore import RankRole
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -133,7 +133,6 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._resume_state = MirroredState()
-        maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
         # Send parameters in the dtype the generator computes with, as FSDP casts
         # them for the trainer's forward. Only cast when it differs.
@@ -324,6 +323,11 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
+        else:
+            microbatch_groups = [
+                [microbatch.preprocess_images() for microbatch in group]
+                for group in microbatch_groups
+            ]
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
@@ -460,6 +464,10 @@ class Trainer(Configurable):
           the model, and awaits the generators' pull of it before the next push
           overwrites the TorchStore key.
 
+        Every push carries the trainable parameters and the buffers. Generators load the
+        frozen parameters from `generator.checkpointer`: for LoRA the base, so a push
+        carries only the adapters (`lora_a`, `lora_b`) and the buffers.
+
         With a ``ModelStateDictTransport``, the push instead stages the tensors in
         its pinned staging buffer, which generators read directly; the same
         ordering applies, and the next push overwrites the staging buffer.
@@ -470,12 +478,12 @@ class Trainer(Configurable):
         if transport is not None:
             stream = self._push_model_state_dict_stream
             with stream if stream is not None else nullcontext():
-                transport.stage(self._model_state_dict())
+                transport.stage(self._trainable_model_state_dict())
             # Generators read the staging buffer outside stream order.
             if stream is not None:
                 await asyncio.to_thread(stream.synchronize)
             return
-        model_state_dict = self._model_state_dict()
+        model_state_dict = self._trainable_model_state_dict()
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
@@ -521,7 +529,7 @@ class Trainer(Configurable):
                 rank order.
         """
         self._model_state_dict_transport = config.build()
-        model_state_dict = self._model_state_dict()
+        model_state_dict = self._trainable_model_state_dict()
         return self._model_state_dict_transport.register_trainer_source(
             model_state_dict,
             generator_rank_layouts=generator_rank_layouts,
@@ -529,16 +537,24 @@ class Trainer(Configurable):
             preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
         )
 
-    def _model_state_dict(self) -> dict[str, torch.Tensor]:
-        """Merge the state dicts of this rank's model parts.
+    def _trainable_model_state_dict(self) -> dict[str, torch.Tensor]:
+        """Merge the state dicts of this rank's model parts, leaving out the parameters
+        that do not train.
 
         Under PP each rank holds only its own stages, so every stage publishes
         a partial state dict.
         """
+        frozen = frozenset(
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, param in model_part.named_parameters(remove_duplicate=False)
+            if not param.requires_grad
+        )
         return {
             name: tensor
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
+            if canonical_fqn(name) not in frozen
         }
 
     def _preserve_dtype_keys(
