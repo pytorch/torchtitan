@@ -333,7 +333,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
         self.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, topology, dump_folder=self.output_dir
+            config.parallelism,
+            topology,
+            dump_folder=self.output_dir,
+            axis_backend_overrides={
+                axis: options.build().backend_override
+                for axis, options in config.comm.process_group_options.items()
+            },
         )
         # DeviceMesh subgroups do not inherit the world group's timeout.
         dist_utils.set_pg_timeouts(
