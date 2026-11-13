@@ -28,13 +28,13 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.flops import (
     active_parameter_flops_per_token,
     get_parameter_counts,
 )
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -86,7 +86,7 @@ class Decoder(BaseModel):
         dim: int
         vocab_size: int
         lm_head: Linear.Config
-        tok_embeddings: Embedding.Config
+        tok_embeddings: VocabParallelEmbedding.Config
         norm: RMSNorm.Config
         layers: list[TransformerBlock.Config]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
@@ -328,7 +328,26 @@ class Decoder(BaseModel):
         # attention_metadata slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        return self.forward_embeddings(
+            h,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
 
+    def forward_embeddings(
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ):
+        """`forward` after the token embedding: the layers, the final norm and the LM head
+        (unless ``_skip_lm_head``). For callers that build the input embeddings
+        themselves, e.g. the RL generator merging image embeddings into a prompt."""
         with spmd.no_typecheck():
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
@@ -347,7 +366,7 @@ class Decoder(BaseModel):
                 aux_loss_denominator=aux_loss_denominator,
             )
 
-        h = self.norm(h) if self.norm is not None else h
+        h = self._pre_lm_head_norm_and_gather(h)
 
         # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
         # calls .requires_grad on all stage inputs, which fails on bool kwargs.
@@ -356,6 +375,22 @@ class Decoder(BaseModel):
             return h
         output = self.lm_head(h) if self.lm_head is not None else h
         return output
+
+    def _pre_lm_head_norm_and_gather(self, h: torch.Tensor) -> torch.Tensor:
+        """Apply the root norm and gather its output to TP-``Replicate``.
+
+        The vocab-sharded ``lm_head`` needs the full hidden states on every TP
+        rank. The gather runs once here, after the norm, rather than inside
+        ``lm_head``, which ``ChunkedLossWrapper`` calls once per chunk.
+        Pipeline stages without the root norm return ``h`` unchanged.
+
+        TODO: issue the gather from its consumer instead: inside ``lm_head``
+        (a column-parallel linear), with ``ChunkedLossWrapper`` gathering once
+        before it chunks.
+        """
+        if self.norm is None:
+            return h
+        return maybe_gather_tp_input(self.norm, self.norm(h))
 
     def preprocess_inputs(
         self,

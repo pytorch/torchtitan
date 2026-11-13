@@ -53,18 +53,24 @@ jobs:
         bash scripts/install_rl_env.sh --skip-base --flash-attn none \
           --constraint torchtitan/rl/examples/dapo_math/requirements.txt
 
-        # The shared HF cache is read-only and does not contain this tokenizer.
-        # Fetch only tokenizer files into a writable cache (no model weights).
-        export MUSE_GLIMMER_TOKENIZER="$(python -c '
+        # The shared HF cache is read-only and lacks these tokenizers. Fetch only their
+        # tokenizer files (no model weights) into a writable cache and export each path.
+        TOKENIZER_EXPORTS="$(python -c '
         import os
         from huggingface_hub import snapshot_download
 
-        print(snapshot_download(
-            "meta-models/Muse-Glimmer-30B",
-            cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
-            allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
-        ))
+        for env_var, repo in [
+            ("MUSE_GLIMMER_TOKENIZER", "meta-models/Muse-Glimmer-30B"),
+            ("QWEN3_5_TOKENIZER", "Qwen/Qwen3.5-0.8B"),
+        ]:
+            path = snapshot_download(
+                repo,
+                cache_dir=os.path.join(os.environ["RUNNER_TEMP"], "rl-hf-cache"),
+                allow_patterns=["config.json", "tokenizer*.json", "chat_template.jinja"],
+            )
+            print(f"export {env_var}={path}")
         ')"
+        eval "${TOKENIZER_EXPORTS}"
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv

@@ -104,9 +104,6 @@ class MuseSparkStateDictAdapterTest(unittest.TestCase):
                 config = self.config
                 if dense_text_only:
                     config = build_model_config("debugmodel", seq_len=8)
-                    config.vision_encoder = config.vision_adapter = None
-                    config.vision_projection = config.perception_emb_norm = None
-                    config.audio_encoder = None
                     config.layers[0].feed_forward = DenseFeedForward.Config(
                         w13=Linear.Config(
                             in_features=config.dim, out_features=64, num_linears=2

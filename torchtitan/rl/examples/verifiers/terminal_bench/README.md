@@ -18,7 +18,7 @@ them.
 
 ```text
 +------------------------- GPU actors (Monarch) -------------------------+
-|  router -> vLLM generators  <-- new weights --  trainer (GRPO loss)    |
+|  vLLM generators (router picks one) <-- new weights -- trainer (GRPO)  |
 +-------^-----------------------------------------------------^----------+
         | 4. generate                                         | 7. batch
 +-------|-------- controller process (torchtitan.rl.train) ---|----------+
@@ -55,8 +55,8 @@ them.
 7. **Training.** The batcher feeds the trainer, and the generators load the new weights
    after each step.
 
-Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task, at
-the start and end of training.
+Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task. A validation
+starts with training and runs beside it (`ValidationConfig`).
 
 | What | Where |
 | --- | --- |

@@ -10,9 +10,14 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
+    PixelBudgetResize,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -20,7 +25,12 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Linear,
+    RowParallelLinear,
+    VocabParallelEmbedding,
+)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
@@ -37,7 +47,6 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
@@ -60,6 +69,7 @@ from .model import (
     Attention,
     EmbeddingWithNorm,
     MuseGlimmerModel,
+    MuseGlimmerMultimodalModel,
     MuseGlimmerTransformerBlock,
     RMSGainCenterNorm,
     SoftCappedLinear,
@@ -67,16 +77,69 @@ from .model import (
 from .sharding import (
     attention_sharding_config,
     cp_replicated_vision_sharding_config,
-    perception_emb_norm_sharding_config,
     scaleless_head_norm_sharding_config,
 )
 
 __all__ = [
+    "MUSE_GLIMMER_30B_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS",
+    "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
+    "MuseGlimmerMultimodalModel",
     "MODEL_FLAVORS",
     "build_model_config",
     "muse_glimmer_vision_configs",
 ]
+
+
+# Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
+# (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
+# debugmodel_mm's vocab_size=2048), so no asset change is needed.
+MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+    "pad_token": "<|endoftext|>",
+}
+
+# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
+MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``), and raster order matches its row-major patch layout.
+MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": PixelBudgetResize.Config(min_pixels=784, max_pixels=3136),
+    "patch_order": "raster",
+}
+
+# The released Muse Glimmer 30B image processor: closest-aspect patch grid up to
+# 4096 merged tokens, LANCZOS. Images only.
+MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "patch_order": "raster",
+    "image_interpolation_mode": "lanczos",
+}
 
 
 # The query is scaled by this tuned constant divided by sqrt(head_dim) after
@@ -333,28 +396,11 @@ def _muse_glimmer_config(
     output_multiplier: float,
     attn_backend: str,
     enable_sp: bool,
-    vision_adapter_dim: int | None = None,
-    vision_encoder: NaViTEncoder.Config | None = None,
-    vision_adapter: MuseSparkNaViTAdapter.Config | None = None,
+    vision: tuple[NaViTEncoder.Config, MuseSparkNaViTAdapter.Config] | None = None,
 ) -> MuseGlimmerModel.Config:
-    # LLM-side multimodal injection: project adapter output -> model dim, then
-    # apply a scaleless norm. Left as None for the text-only model.
-    vision_projection = None
-    perception_emb_norm = None
-    if vision_adapter_dim is not None:
-        vision_projection = Linear.Config(
-            in_features=vision_adapter_dim,
-            out_features=dim,
-            param_init=_LINEAR_INIT,
-            sharding_config=cp_replicated_vision_sharding_config(),
-        )
-        perception_emb_norm = _scaleless_norm(
-            dim,
-            _NORM_EPS,
-            sharding_config=perception_emb_norm_sharding_config(enable_sp=enable_sp),
-        )
-
-    return MuseGlimmerModel.Config(
+    """Build the multimodal config when ``vision`` (encoder, adapter) is given,
+    else the text-only one."""
+    fields = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
@@ -364,7 +410,7 @@ def _muse_glimmer_config(
         # all-reduce happens before the scaleless norm (normalizing a Partial
         # sum would be wrong); the norm runs on the reduced activation.
         tok_embeddings=EmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
@@ -394,7 +440,7 @@ def _muse_glimmer_config(
                 dim,
                 _NORM_EPS,
                 gain_center=0.0,
-                sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+                sharding_config=norm_sharding_config(enable_sp=enable_sp),
             ),
             param_init={"weight": nn.init.ones_},
         ),
@@ -409,10 +455,27 @@ def _muse_glimmer_config(
             attn_backend=attn_backend,
             enable_sp=enable_sp,
         ),
-        vision_projection=vision_projection,
-        perception_emb_norm=perception_emb_norm,
+    )
+    if vision is None:
+        return MuseGlimmerModel.Config(**fields)
+    vision_encoder, vision_adapter = vision
+    return MuseGlimmerMultimodalModel.Config(
+        **fields,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
+        # LLM-side multimodal injection: project adapter output -> model dim,
+        # then apply a scaleless norm.
+        vision_projection=Linear.Config(
+            in_features=vision_adapter.c_proj.out_features,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+            sharding_config=cp_replicated_vision_sharding_config(),
+        ),
+        perception_emb_norm=_scaleless_norm(
+            dim,
+            _NORM_EPS,
+            sharding_config=cp_replicated_vision_sharding_config(),
+        ),
     )
 
 
@@ -441,14 +504,6 @@ def _muse_glimmer_30b(
     seq_len: int,
     parallelism: ParallelismConfig,
 ) -> MuseGlimmerModel.Config:
-    vision_adapter_dim = None
-    vision_encoder = None
-    vision_adapter = None
-    if with_vision:
-        vision_adapter_dim = 4096
-        vision_encoder, vision_adapter = muse_glimmer_vision_configs(
-            vision_adapter_dim=vision_adapter_dim
-        )
     return _muse_glimmer_config(
         dim=6656,
         n_layers=52,
@@ -461,9 +516,11 @@ def _muse_glimmer_30b(
         output_multiplier=0.19611613513,
         attn_backend=attn_backend,
         enable_sp=parallelism.enable_sequence_parallel,
-        vision_adapter_dim=vision_adapter_dim,
-        vision_encoder=vision_encoder,
-        vision_adapter=vision_adapter,
+        vision=(
+            muse_glimmer_vision_configs(vision_adapter_dim=4096)
+            if with_vision
+            else None
+        ),
     )
 
 
@@ -475,8 +532,8 @@ def _muse_glimmer_debugmodel_mm(
 
     The encoder is small (few layers, ``num_heads`` divisible by intended TP) and
     its ``output_dim`` (``latent_dim * downsample_factor**2 = 256``) feeds the
-    adapter, whose ``output_dim`` equals ``vision_adapter_dim`` so the LLM-side
-    ``vision_projection`` (``vision_adapter_dim -> dim``) lines up.
+    adapter, and the LLM-side ``vision_projection`` maps the adapter's
+    ``output_dim`` to ``dim``.
     """
     encoder = muse_spark_navit_encoder_config(
         latent_dim=64,
@@ -505,9 +562,7 @@ def _muse_glimmer_debugmodel_mm(
         output_multiplier=1.0,
         attn_backend=attn_backend,
         enable_sp=parallelism.enable_sequence_parallel,
-        vision_adapter_dim=adapter_dim,
-        vision_encoder=encoder,
-        vision_adapter=adapter,
+        vision=(encoder, adapter),
     )
 
 

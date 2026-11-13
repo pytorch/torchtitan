@@ -12,7 +12,7 @@ pytest.importorskip("attn_gym")
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.qwen3_5 import Qwen35Model
+from torchtitan.models.qwen3_5 import Qwen35Model, Qwen35MultimodalModel
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_6 import build_model_config, MODEL_FLAVORS
 
@@ -36,12 +36,12 @@ def test_qwen36_registry_builds_every_flavor(flavor: str) -> None:
 
 def test_qwen36_27b_matches_hugging_face_config() -> None:
     config = cast(
-        Qwen35Model.Config, build_model_config("27B", parallelism=ParallelismConfig())
+        Qwen35MultimodalModel.Config,
+        build_model_config("27B", parallelism=ParallelismConfig()),
     )
 
     assert config.dim == 5120
     assert len(config.layers) == 64
-    assert config.vision_encoder is not None
     assert config.vision_encoder.merger.fc2.out_features == 5120
 
     linear_layer = config.layers[0]
@@ -57,13 +57,12 @@ def test_qwen36_27b_matches_hugging_face_config() -> None:
 
 def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
     config = cast(
-        Qwen35Model.Config,
+        Qwen35MultimodalModel.Config,
         build_model_config("35B-A3B", parallelism=ParallelismConfig()),
     )
 
     assert config.dim == 2048
     assert len(config.layers) == 40
-    assert config.vision_encoder is not None
     assert config.vision_encoder.merger.fc2.out_features == 2048
 
     linear_layer = config.layers[0]

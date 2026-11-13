@@ -104,14 +104,14 @@ def parallelize_hf_transformers(
     # Bind local implementations early; torch.compile traces on first use.
     local_compile.apply()
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
-    # the flex kernel's local SPMD boundary redistributes
-    # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel
-    # in hf_sharding.py. The CP-sharded BlockMask is built and sharded on its Q
-    # axis upstream (trainer, ptrr balancer). Note: the ptrr balancer requires
-    # the number of Q blocks (seq_len / flex BLOCK_SIZE) to be divisible by the
-    # CP degree; too-short sequences raise "num_tasks N must be divisible by
-    # group_size" from the balancer -- this is a CP+ptrr constraint, independent
-    # of PP.
+    # _wrap_flex_kernel_cp all-gathers k/v across the CP axis with an explicit
+    # funcol call inside the flex kernel's local SPMD region (see
+    # _attach_flex_kernel in hf_sharding.py). The CP-sharded BlockMask is built
+    # and sharded on its Q axis upstream (trainer, ptrr balancer). Note: the
+    # ptrr balancer requires the number of Q blocks (seq_len / flex BLOCK_SIZE)
+    # to be divisible by the CP degree; too-short sequences raise "num_tasks N
+    # must be divisible by group_size" from the balancer -- this is a CP+ptrr
+    # constraint, independent of PP.
 
     # 0. Un-tie embedding/lm_head weights for FSDP compatibility.
     # Some models (Gemma4) share the embedding and lm_head weight
@@ -145,7 +145,7 @@ def parallelize_hf_transformers(
 
     # 2. Convert HF modules to Module protocol.
     # The spmd_types backend uses the Module protocol for state distribution,
-    # activation checks, and any TP/EP/CP redistribution.
+    # activation checks, and local SPMD regions.
     from torchtitan.experiments.transformers_modeling_backend.hf_sharding import (
         set_hf_sharding_configs,
     )
