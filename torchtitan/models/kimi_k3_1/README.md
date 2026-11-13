@@ -25,9 +25,9 @@ pairs. Its fused kernel needs 16 to 128 heads, so the debug model has 16.
 |---------|-------|
 | FSDP2 | Tested with EP 2 on 2 H100s |
 | Expert parallelism | Tested with FSDP 2 on 2 H100s |
-| Tensor / sequence parallelism | Not tested; each rank needs 16 to 128 query heads for the Attention Gym pair kernel |
+| Tensor / sequence parallelism | Tested TP 2 with EP 2 on 2 H200s, with a 32-head debug model; each rank needs 16 to 128 query heads for the Attention Gym pair kernel |
 | Context parallel | Not supported |
-| Pipeline parallelism | Not tested |
+| Pipeline parallelism | Tested PP 2 (Interleaved1F1B) on 2 H200s |
 
 ## Numerical Parity
 
