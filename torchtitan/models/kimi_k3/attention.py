@@ -114,8 +114,11 @@ class KimiMLAAttention(Attention):
         | VarlenAttentionMetadata
         | None = None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del positions
+        del positions, padding_mask, aux_loss_denominator
 
         # The MLA and gate projections all consume x. Gather once at their
         # common attention boundary.

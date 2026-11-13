@@ -131,6 +131,20 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     )
 
 
+def kimi_k3_1_debugmodel_fsdp2_ep2() -> Trainer.Config:
+    from torchtitan.config.parallelism import ParallelismConfig
+
+    from torchtitan_recipes.tests.models.kimi_k3_1 import kimi_k3_1_debugmodel
+
+    config = kimi_k3_1_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        )
+    )
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
 def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
     from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
@@ -251,6 +265,12 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             configs=[kimi_k3_debugmodel_mm_ulysses_cp2],
             test_descr="Kimi K3 multimodal Ulysses context parallelism",
             test_name="kimi_k3_mm_ulysses_cp",
+            ngpu=2,
+        ),
+        IntegrationTestDefinition(
+            configs=[kimi_k3_1_debugmodel_fsdp2_ep2],
+            test_descr="Kimi K3.1 FSDP+EP",
+            test_name="kimi_k3_1_fsdp+ep",
             ngpu=2,
         ),
         IntegrationTestDefinition(

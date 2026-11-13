@@ -137,6 +137,7 @@ def _dist_muon_optimizer(
     muon_lr: float,
     adamw_lr: float,
     parallelism: ParallelismConfig,
+    extra_full_attention_block_sizes: dict[str, tuple[int, ...]] | None = None,
 ) -> OptimizersContainer.Config:
     attention = cast(KimiMLAAttention.Config, model_config.first_full_attention)
     delta_attention = next(
@@ -179,6 +180,10 @@ def _dist_muon_optimizer(
         ),
         "gate": blocks_of(attention.v_head_dim),
         "wo": owned,
+    }
+    attention_shardings |= {
+        projection: blocks_of(*block_sizes) if block_sizes else owned
+        for projection, block_sizes in (extra_full_attention_block_sizes or {}).items()
     }
     per_kda_head = blocks_of(delta_attention.head_dim)
     # forget_a is the shared low-rank down projection and output_proj mixes
