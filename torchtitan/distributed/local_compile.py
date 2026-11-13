@@ -85,11 +85,8 @@ class LocalCompileConfig:
 
     def apply(self) -> None:
         """Bind named regions and always-compiled helpers using this config."""
-        # Muon compilation is selected by the optimizer, not a model callback.
         unknown = [
-            name
-            for name in self.regions
-            if name != "muon" and name not in _LOCAL_COMPILE_CALLBACKS
+            name for name in self.regions if name not in _LOCAL_COMPILE_CALLBACKS
         ]
         if unknown:
             raise ValueError(

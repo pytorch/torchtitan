@@ -493,7 +493,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
-            local_compile_regions=self.model_config.local_compile.regions,
             cuda_graph_annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
         )
         self.model_cls._register_optimizer_hooks(

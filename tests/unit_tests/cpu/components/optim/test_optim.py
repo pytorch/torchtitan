@@ -120,7 +120,6 @@ def test_optim_builds_owned_components(enable_accelerator_graph: bool) -> None:
             parallelism_context=MagicMock(),
             training_steps=10,
             pp_has_last_stage=True,
-            local_compile_regions=("muon",),
         )
 
     optimizer_config.build.assert_called_once_with(
