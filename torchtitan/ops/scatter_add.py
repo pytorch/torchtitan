@@ -46,3 +46,37 @@ deterministic_scatter_add.register_autograd(
     _backward,
     setup_context=_setup_context,
 )
+
+
+# Weights routed rows by their router scores and adds them into their tokens.
+# out: (T, D) zeros that receive the sums. routed: (N, D) routed expert outputs.
+# scores: (N,) router score of each routed row. token_indices: (N,) output row
+# of each routed row. Backends can override this op under their own dispatch
+# key, e.g. "AutogradPrivateUse1", to run a fused combine kernel.
+_lib = torch.library.Library("torchtitan", "FRAGMENT")
+_lib.define(
+    "score_and_scatter_add(Tensor out, Tensor routed, Tensor scores, "
+    "Tensor token_indices) -> Tensor"
+)
+
+
+def _score_and_scatter_add(
+    out: torch.Tensor,
+    routed: torch.Tensor,
+    scores: torch.Tensor,
+    token_indices: torch.Tensor,
+) -> torch.Tensor:
+    # Type promotion computes the product in float32 without materializing a
+    # float32 copy of the routed output, which the multiply would save for
+    # backward (twice the bytes of the routed output itself).
+    scored = (routed * scores.reshape(-1, 1).to(torch.float32)).to(routed.dtype)
+    return deterministic_scatter_add(
+        out,
+        token_indices.reshape(-1, 1).expand(-1, out.shape[-1]),
+        scored,
+    )
+
+
+_lib.impl("score_and_scatter_add", _score_and_scatter_add, "CompositeImplicitAutograd")
+
+score_and_scatter_add = torch.ops.torchtitan.score_and_scatter_add
