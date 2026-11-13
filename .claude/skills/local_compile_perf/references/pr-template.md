@@ -12,7 +12,7 @@ Reader: a tired junior engineer. They should get each PR in one read, without op
   - end the Problem with the cost (a number); end the Solution with what stays unchanged.
 - **Name real things:** the function, the tensor and its shape, the config field.
 - **Diagram** when data moves between stages: eager vs region, fwd vs bwd, before vs after.
-- **Numbers in code blocks:** `before -> after`, one line per workload, conditions on one line above.
+- **Numbers in code blocks:** `before -> after`, one line per workload, conditions on one line above. Always several shapes, training and inference (prefill, decode), and a numerics line: bitwise or not, output and grads, and why.
 - **Plain words:** explain a term on first use or say what it does ("autograd copies the two grads back into one tensor", not `UnbindBackward0`).
 - **Direction and both numbers:** "prevents a 2.7x slower backward (1089 vs 2987 us)", not "makes backward ~2x slower".
 - **Say whether real runs hit it:** which recipes enable the path. If none today, call it headroom.
@@ -43,7 +43,9 @@ Reader: a tired junior engineer. They should get each PR in one read, without op
 <model, layers, tokens/rank, fwd+bwd, wall or kernel, hardware, median of N fresh processes>
 <workload>              <before> -> <after> ms (<delta>)
 <workload> CUDA graphs  <before> -> <after> ms (<delta>)
-correctness: outputs + all grads vs eager, bf16 and fp32: <...>; vs fp64: <...>
+(rows for train fwd+bwd 2k/4k/16k, prefill no_grad 2k/16k, decode no_grad T=1/8/64/256 under CUDA graphs)
+Numerics: <bitwise identical (output and all grads) | not bitwise: output ..., grads ..., why ...>
+          max rel L2 vs fp64: main <a> | this PR <b> | 1-ulp noise <c>   (bf16; fp32 too)
 graphs: <region> N for <shapes> + no_grad (limit L)
 ```
 
