@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
@@ -24,6 +25,164 @@ from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
 
 
 class TestGlm5Config(unittest.TestCase):
+    def test_named_stage_recipes_build_independent_training_models(self) -> None:
+        from torchtitan_recipes.tests.models.glm5 import (
+            glm5_debugmodel_sparse,
+            glm5_debugmodel_warmup,
+        )
+
+        for factory, expected in (
+            (glm5_debugmodel_warmup, "warmup"),
+            (glm5_debugmodel_sparse, "sparse"),
+        ):
+            with self.subTest(stage=expected), torch.device("meta"):
+                config = factory()
+                model = config.model.build()
+                self.assertIsNotNone(config.activation_remat)
+                self.assertTrue(any(p.requires_grad for p in model.parameters()))
+                trainable_backbone = any(
+                    p.requires_grad for name, p in model.named_parameters()
+                    if ".indexer." not in name
+                )
+                self.assertEqual(trainable_backbone, expected == "sparse")
+
+    def test_indexer_mixing_weights_build_in_fp32_with_fsdp_policy(self) -> None:
+        from torchtitan.distributed.fsdp import mixed_precision_policy
+        from torchtitan.tools.utils import set_default_dtype
+
+        config = build_model_config(
+            "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=8
+        )
+        indexer_config = config.layers[0].attention.indexer
+        assert indexer_config is not None
+        original_dtype = torch.get_default_dtype()
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype), torch.device("meta"):
+                with set_default_dtype(dtype):
+                    indexer = indexer_config.build()
+                    self.assertEqual(torch.get_default_dtype(), dtype)
+                self.assertEqual(torch.get_default_dtype(), original_dtype)
+                self.assertEqual(indexer.weights_proj.weight.dtype, torch.float32)
+                self.assertEqual(indexer.wq_b.weight.dtype, dtype)
+                policy = mixed_precision_policy(
+                    indexer,
+                    param_dtype=torch.bfloat16,
+                    reduce_dtype=torch.float32,
+                )
+                override = policy.param_dtype_override_fn
+                assert override is not None
+                self.assertEqual(override(indexer.weights_proj.weight), torch.float32)
+                self.assertIsNone(override(indexer.wq_b.weight))
+
+    def test_rejects_noncontiguous_index_sharing_at_config_time(self) -> None:
+        config = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig(), seq_len=8
+        )
+        for sources, message in (
+            ((0, 1, 0), "contiguous"),
+            ((0, 2, 2), "current/earlier producer"),
+            ((0, 0), "one source per layer"),
+        ):
+            with self.subTest(sources=sources), self.assertRaisesRegex(
+                ValueError, message
+            ):
+                replace(config, layers=config.layers[:3], index_sources=sources)
+
+    def test_pipeline_and_mtp_prepare_context_parallel_metadata(self) -> None:
+        parallelism = ParallelismConfig(
+            pipeline_parallel_degree=2, context_parallel_degree=2
+        )
+        config = build_model_config(
+            "glm5_2_debugmodel", parallelism=parallelism, seq_len=8
+        )
+        for role in ("embedding", "output", "mtp"):
+            if role == "mtp":
+                parallelism = ParallelismConfig(context_parallel_degree=2)
+                config = build_model_config(
+                    "glm5_2_debugmodel_mtp", parallelism=parallelism, seq_len=8
+                )
+            with self.subTest(role=role), torch.device("meta"):
+                model = config.build()
+            if role != "mtp":
+                for name in list(model.layers):
+                    del model.layers[name]
+            if role == "embedding":
+                model.norm = model.lm_head = None
+            elif role == "output":
+                model.tok_embeddings = None
+            positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+            padding = torch.tensor([False] * 7 + [True])
+            group = SimpleNamespace(size=lambda: 2, rank=lambda: 1)
+            # Exercise Decoder._cp_shard and the real GLM metadata preparation;
+            # only distributed transport and SPMD annotations need a process group.
+            with (
+                patch(
+                    "torchtitan.models.glm5.dsa.spmd_mesh_group", return_value=group
+                ),
+                patch(
+                    "torchtitan.distributed.context_parallel.shard_tensors",
+                    side_effect=lambda inputs, **kwargs: inputs,
+                ),
+                patch(
+                    "torchtitan.models.glm5.model.annotate_input_spmd_types",
+                    side_effect=lambda context, inputs, shardings: inputs,
+                ),
+            ):
+                _, _, kwargs, _ = model.preprocess_inputs(
+                    {
+                        "input": torch.arange(8),
+                        "labels": torch.arange(8),
+                        "positions": positions,
+                        "padding_mask": padding,
+                    },
+                    parallelism_context=SimpleNamespace(cp_enabled=True),
+                    parallelism=parallelism,
+                )
+            metadata = kwargs["attention_masks"]
+            torch.testing.assert_close(metadata.positions_T, positions)
+            torch.testing.assert_close(metadata.valid_T, ~padding)
+            torch.testing.assert_close(metadata.query_indices_Q, torch.arange(4, 8))
+            if role == "mtp":
+                shifted = kwargs["mtp_attention_masks"][0]
+                torch.testing.assert_close(
+                    shifted.query_indices_Q, metadata.query_indices_Q
+                )
+                self.assertFalse(shifted.valid_T[3].item())
+                self.assertFalse(shifted.valid_T[7].item())
+
+    def test_pipeline_forwards_contiguous_shared_indices(self) -> None:
+        config = build_model_config(
+            "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=8
+        )
+        layers = copy.deepcopy(config.layers[:4])
+        # This two-group PP fixture does not need a separately registered flavor.
+        layers[1].attention.indexer = None
+        config = replace(
+            config, layers=layers, index_sources=(0, 0, 2, 2)
+        )
+        torch.manual_seed(42)
+        model = config.build()
+        model.init_states()
+        stages = [copy.deepcopy(model) for _ in range(3)]
+        for stage, keep in zip(stages, ({0}, {1, 2}, {3}), strict=True):
+            for name in list(stage.layers):
+                if int(name) not in keep:
+                    del stage.layers[name]
+        for stage in stages[:-1]:
+            stage.norm = stage.lm_head = None
+        for stage in stages[1:]:
+            stage.tok_embeddings = None
+        tokens = torch.arange(8)
+        positions = torch.arange(8)
+        metadata = model.get_attention_masks(positions)
+        expected = model(tokens, positions=positions, attention_masks=metadata)
+        hidden, indices = stages[0](
+            tokens, positions=positions, attention_masks=metadata
+        )
+        hidden, indices = stages[1](hidden, indices, positions, metadata)
+        actual = stages[2](hidden, indices, positions, metadata)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_sparse_attention_flops_saturate_for_shared_consumers(self) -> None:
         config = build_model_config(
             "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128
@@ -36,6 +195,14 @@ class TestGlm5Config(unittest.TestCase):
         self.assertEqual(producer.index_topk, consumer.index_topk)
         for attention in (producer, consumer):
             topk = attention.index_topk
+            attention_width = (
+                2 * attention.kv_lora_rank
+                + attention.qk_rope_head_dim
+            )
+            self.assertEqual(
+                attention.flops_per_token(topk * 8),
+                6 * attention.n_heads * attention_width * topk,
+            )
             self.assertEqual(
                 attention.flops_per_token(topk), attention.flops_per_token(topk * 8)
             )
@@ -120,7 +287,6 @@ class TestGlm5Config(unittest.TestCase):
         )
         self.assertEqual(len(config.mtp_layers), 1)
         self.assertIsInstance(config.mtp_layers[0], Glm5MTPTransformerBlock.Config)
-        self.assertTrue(all(layer.preserve_output_for_mtp for layer in config.layers))
         model = config.build()
         model.init_states()
         self.assertEqual(len(model.mtp_layers), 1)

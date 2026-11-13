@@ -86,6 +86,44 @@ def test_stage_gradient_ownership_and_rematerialization(stage):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("stage", ["frozen", "sparse"])
+def test_shared_indices_match_sorted_support_without_consumer_filtering(stage):
+    from torchtitan.models.glm5 import dsa
+
+    _, model = build_stage(stage)
+    consumed = []
+
+    def capture_indices(module, args, kwargs):
+        consumed.append(kwargs["topk_indices_QS"])
+
+    handles = [
+        module.register_forward_pre_hook(capture_indices, with_kwargs=True)
+        for module in model.modules()
+        if isinstance(module, dsa.Glm5SparseAttention)
+    ]
+    try:
+        actual = backward(model)
+        assert len(consumed) == 4
+        assert consumed[2] is consumed[3]
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    original_forward = dsa.Glm5SparseAttention.forward
+
+    def sort_each_layer(module, *args, **kwargs):
+        indices = kwargs["topk_indices_QS"]
+        capacity = kwargs["attention_metadata"].positions_T.numel()
+        indices = indices.masked_fill(indices < 0, capacity).sort(-1).values
+        kwargs["topk_indices_QS"] = indices.masked_fill(indices == capacity, -1)
+        return original_forward(module, *args, **kwargs)
+
+    # The old filter sorted valid keys. Removing that sort can change FP rounding.
+    with patch.object(dsa.Glm5SparseAttention, "forward", sort_each_layer):
+        expected = backward(model)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
 def test_zero_coefficient_does_not_leak_lm_gradients_into_indexer():
     _, model = build_stage("sparse", coefficient=0.0)
     _, gradients, _ = backward(model)
@@ -127,23 +165,32 @@ def test_warmup_weights_load_strictly_into_sparse_stage():
     backward(sparse)
 
 
-def test_teacher_matches_head_averaged_dense_probabilities_without_gradients():
+@pytest.mark.parametrize("query_offset", [0, 4])
+def test_teacher_matches_head_averaged_dense_probabilities_without_gradients(query_offset):
     from torchtitan.models.glm5.dsa import Glm5IndexerLoss
 
     torch.manual_seed(42)
     q = torch.randn(4, 2, 8, requires_grad=True)
-    k = torch.randn(4, 2, 8, requires_grad=True)
-    indices = torch.arange(4).expand(4, -1).clone()
-    valid = indices <= torch.arange(4)[:, None]
+    k = torch.randn(8, 8, requires_grad=True)
+    indices = (torch.arange(4) + query_offset).expand(4, -1).clone()
+    valid = indices <= (torch.arange(4) + query_offset)[:, None]
+    padding = torch.tensor([False, False, False, True])
+    valid &= ~padding[:, None]
     indices.masked_fill_(~valid, -1)
-    logits = torch.einsum("qhd,khd->qhk", q, k) * 0.25
-    logits = logits.masked_fill(~valid[:, None], -torch.inf)
+    logits = torch.einsum("qhd,kd->qhk", q, k) * 0.25
+    allowed = (
+        (torch.arange(8)[None, :] >= query_offset)
+        & (torch.arange(8)[None, :] <= (torch.arange(4) + query_offset)[:, None])
+        & ~padding[:, None]
+    )
+    logits = logits.masked_fill(~allowed[:, None], -torch.inf)
     lse = logits.logsumexp(-1)
-    expected = logits.softmax(-1).mean(1)
+    expected = logits.softmax(-1).nan_to_num().mean(1)
     loss = Glm5IndexerLoss.Config(
         coeff=1.0, num_heads=2, softmax_scale=0.25, chunk_size=2
     ).build()
-    actual = loss._teacher(q, k, indices, lse, None)
+    # Global pool IDs and no document offsets are also the CP teacher contract.
+    actual = loss._teacher(q, k, indices, lse, None, padding_mask_T=padding)
     expected = expected.gather(1, indices.clamp_min(0)).masked_fill(~valid, 0)
     torch.testing.assert_close(actual, expected)
     assert not actual.requires_grad
@@ -154,8 +201,7 @@ def test_warmup_chunk_boundary_matches_packed_dense_attention_and_gradients():
 
     torch.manual_seed(42)
     q = torch.randn(129, 2, 4, requires_grad=True)
-    k = torch.randn(129, 2, 4, requires_grad=True)
-    v = torch.randn(129, 2, 3, requires_grad=True)
+    k = torch.randn(129, 4, requires_grad=True)
     positions = torch.cat((torch.arange(80), torch.arange(49)))
     padding = torch.zeros(129, dtype=torch.bool)
     padding[[79, 128]] = True
@@ -169,7 +215,6 @@ def test_warmup_chunk_boundary_matches_packed_dense_attention_and_gradients():
         actual = attention(
             q,
             k,
-            v,
             attention_metadata=metadata,
             topk_indices_QS=torch.full((129, 1), -1, dtype=torch.int32),
             scale=0.5,
@@ -184,43 +229,126 @@ def test_warmup_chunk_boundary_matches_packed_dense_attention_and_gradients():
     )
     expected = torch.nn.functional.scaled_dot_product_attention(
         q.transpose(0, 1),
-        k.transpose(0, 1),
-        v.transpose(0, 1),
+        k.unsqueeze(0).expand(2, -1, -1),
+        k.unsqueeze(0).expand(2, -1, -1),
         attn_mask=allowed,
         scale=0.5,
     ).transpose(0, 1)
     torch.testing.assert_close(actual, expected)
-    actual_grads = torch.autograd.grad(actual.square().sum(), (q, k, v))
-    expected_grads = torch.autograd.grad(expected.square().sum(), (q, k, v))
+    actual_grads = torch.autograd.grad(actual.square().sum(), (q, k))
+    expected_grads = torch.autograd.grad(expected.square().sum(), (q, k))
     torch.testing.assert_close(actual_grads, expected_grads)
 
 
 @pytest.mark.parametrize("stage", ["frozen", "warmup", "sparse"])
-def test_main_and_mtp_indexer_flops_exclusions_are_additive(stage):
-    from torchtitan.models.glm5.dsa import Glm5DsaIndexer
+def test_flops_sequence_growth_counts_sparse_attention_and_unique_indexers(stage):
+    from torchtitan.models.glm5.model import Glm5Attention
 
     config = build_model_config(
-        "glm5_2_debugmodel_mtp",
+        "glm5_2_debugmodel",
         parallelism=ParallelismConfig(),
         seq_len=128,
         indexer_stage=stage,
     )
     with torch.device("meta"):
         model = config.build()
-    indexers = [
-        module for module in model.modules() if isinstance(module, Glm5DsaIndexer)
+    # Both lengths exceed top-k. Parameter projections have the same cost;
+    # only full-document indexer scores grow outside the warmup stage.
+    short, long = 64, 128
+    tokens = 128
+    batch = {"input": torch.ones(tokens, dtype=torch.int64)}
+    expected_per_token = 0
+    for layer in config.layers:
+        attention = layer.attention
+        assert isinstance(attention, Glm5Attention.Config)
+        if stage == "warmup":
+            expected_per_token += 6 * attention.n_heads * (
+                2 * attention.kv_lora_rank
+                + attention.qk_rope_head_dim
+            )
+        indexer = attention.indexer
+        if indexer is not None:
+            if stage != "warmup":
+                expected_per_token += 2 * indexer.n_heads * (indexer.head_dim + 1)
+            if stage == "warmup":
+                expected_per_token += 6 * indexer.n_heads * (indexer.head_dim + 1)
+                expected_per_token += 2 * attention.n_heads * (
+                    attention.kv_lora_rank + attention.qk_rope_head_dim
+                )
+    estimates = [
+        config.build_flops_estimator(model, seq_len=length)(batch)
+        for length in (short, long)
     ]
-    assert any(
-        isinstance(module, Glm5DsaIndexer) for module in model.mtp_layers.modules()
+    assert estimates[1] - estimates[0] == (
+        expected_per_token * (long - short) * tokens
     )
-    batch = {"input": torch.ones(128, dtype=torch.int64)}
 
-    def estimate(excluded):
-        return config.build_flops_estimator(
-            model, seq_len=128, excluded_submodules=excluded
-        )(batch)
 
-    full = estimate(())
-    deltas = [full - estimate((module,)) for module in indexers]
-    assert all(delta > 0 for delta in deltas)
-    assert sum(deltas) == full - estimate(tuple(indexers))
+@pytest.mark.parametrize("stage", ["frozen", "warmup", "sparse"])
+def test_flops_match_explicit_dense_layer_operation_budget(stage):
+    config = build_model_config(
+        "glm5_2_debugmodel",
+        parallelism=ParallelismConfig(),
+        seq_len=128,
+        indexer_stage=stage,
+    )
+    config.layers = config.layers[:1]
+    config.index_sources = (0,)
+    with torch.device("meta"):
+        model = config.build()
+    attention = config.layers[0].attention
+    indexer = attention.indexer
+    assert indexer is not None
+    # One dense layer: no expert weighting or shared parameters. Embedding is
+    # a lookup, so exclude it. Count parameters directly, not via FLOPs helpers.
+    backbone_params = sum(p.numel() for name, p in model.named_parameters()
+                          if not name.startswith("tok_embeddings.") and ".indexer." not in name)
+    indexer_params = sum(p.numel() for p in model.layers["0"].attention.indexer.parameters())
+    keys = 128 if stage == "warmup" else attention.index_topk
+    parameter_ops = (4 if stage == "warmup" else 6) * backbone_params
+    parameter_ops += (2 if stage == "frozen" else 6) * indexer_params
+    attention_ops = 6 * attention.n_heads * (2 * attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
+    selection_ops = 0 if stage == "warmup" else 2 * indexer.n_heads * (indexer.head_dim + 1) * 128
+    kl_ops = 0 if stage == "frozen" else (
+        6 * indexer.n_heads * (indexer.head_dim + 1) * keys
+        + 2 * attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim) * keys
+    )
+    expected = 128 * (parameter_ops + attention_ops + selection_ops + kl_ops)
+    assert config.build_flops_estimator(model, seq_len=128)(
+        {"input": torch.ones(128, dtype=torch.int64)}
+    ) == expected
+
+
+def test_warmup_never_runs_selector_but_still_trains_indexer():
+    from torchtitan.models.glm5.dsa import DSAIndexerTopK
+
+    _, model = build_stage("warmup")
+    leaf = model.layers["0"].attention.inner_attention.inner_attention
+    leaf.indexer_loss.chunk_size = 5
+    with (
+        patch.object(DSAIndexerTopK, "forward", side_effect=AssertionError("warmup must not rank keys")),
+        patch.object(leaf, "_attend", wraps=leaf._attend) as attend,
+    ):
+        backward(model)
+    assert [call.args[0].shape[0] for call in attend.call_args_list] == [5, 5, 5, 1]
+    assert any(p.grad is not None and p.grad.abs().sum() > 0
+               for name, p in model.named_parameters() if ".indexer." in name)
+    assert all(p.grad is None for name, p in model.named_parameters() if ".indexer." not in name)
+
+
+@pytest.mark.parametrize("mutation", ["model", "indexer", "attention", "loss", "consumer"])
+def test_config_overrides_cannot_silently_desynchronize_stages(mutation):
+    config = build_model_config("glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128, indexer_stage="sparse")
+    producer = config.layers[0].attention
+    if mutation == "model":
+        config.indexer_training_stage = "warmup"
+    elif mutation == "indexer":
+        producer.indexer.training_stage = "frozen"
+    elif mutation == "attention":
+        producer.inner_attention.inner_attention.training_stage = "frozen"
+    elif mutation == "loss":
+        producer.inner_attention.inner_attention.indexer_loss = None
+    else:
+        config.layers[3].attention.inner_attention.inner_attention.indexer_loss = producer.inner_attention.inner_attention.indexer_loss
+    with pytest.raises(ValueError, match="disagree"), torch.device("meta"):
+        config.build()

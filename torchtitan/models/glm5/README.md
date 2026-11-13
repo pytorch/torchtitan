@@ -23,7 +23,6 @@ shared PyTorch-native components for distributed training.
 Available flavors are defined in `flavors.py`:
 
 - `debugmodel`: small development model
-- `shared_dsa_debugmodel`: development model exercising index sharing
 - `glm5_2_debugmodel`: small model preserving the released layer schedule
 - `glm5_2_debugmodel_mtp`: small model with one trainable NextN/MTP objective
 - `glm5_2_scaled_debugmodel`: larger validation model
@@ -68,6 +67,11 @@ python -m tests.integration_tests.run_tests \
 | Expert parallelism | Routed experts use TorchTitan's common MoE implementation; shared experts remain replicated across the EP axis. |
 | Pipeline parallelism | Decoder layers are split through the common pipeline lifecycle; shared DSA selections are forwarded when their consumer is on a later stage. |
 
+Index-sharing groups must be contiguous: a layer may use its own producer or
+continue the preceding layer's group, but cannot return to an older group.
+Pipeline boundaries carry one live producer's indices. Empty embedding-only or
+output-only stages still prepare CP metadata from the global input.
+
 DSA gathers the selected keys and values through Attention Gym. It does
 not use the packed-sequence `varlen` attention contract because DSA selects an
 arbitrary learned Top-K key set for each query.
@@ -75,15 +79,24 @@ arbitrary learned Top-K key set for each query.
 The indexer delegates discrete weighted-ReLU Top-K selection to Attention Gym's
 `lightning_indexer`, using the repository's existing `attn-gym==0.0.17`
 dependency. Like DeepSeek V4, it selects the fused implementation for FP16/BF16
-query features on NVIDIA SM90 or newer; other inputs use the FP32 reference
-implementation. Mixing-weight parameters and projection remain FP32; weights
+query features on NVIDIA SM90 or newer; other inputs use the model-local
+FP32 tiled reference selector without a full query/key score tensor.
+Mixing-weight parameters and projection remain FP32; weights
 are cast to the query dtype at the indexer kernel boundary, as required by
 Attention Gym. Valid tokens are packed by document
 before selection, and the returned
 document-local indices are mapped back to global key indices. Under CP, the
-indexer gathers query features and weights in addition to keys to satisfy
-Attention Gym's complete-document input contract, then returns local queries'
-selections. This currently repeats indexer selection across CP ranks.
+indexer keeps queries and mixing weights local and gathers only indexer keys.
+Device-resident candidate bounds describe each local query's valid document
+prefix in the packed global key pool; only local queries are ranked.
+
+CP uses a model-local streaming selector: CUDA FP16/BF16 scores key tiles and
+merges a bounded running top-k in one kernel per local query. The PyTorch
+reference path bounds query/key tiles rather than materializing full scores.
+This requires neither modified Attention Gym nor DeepSelect/cuDNN dependencies;
+the attention still uses the existing `gather_attn` interface. The selector's
+new CPU/GPU and distributed validation is pending; no performance claim is made.
+
 The default continued-training recipe keeps the pretrained indexer frozen.
 Explicit `indexer_stage` settings also provide dense-attention `warmup`, which
 freezes the backbone and trains indexers, and `sparse`, which jointly trains
@@ -107,17 +120,36 @@ config = glm5_debugmodel(seq_len=128, indexer_stage="sparse")
 ```
 
 The native CLI loads a named, zero-argument recipe factory, not a Python call
-expression. Stage changes rebuild the
+expression. Named launchable stage recipes are provided:
+
+```bash
+MODULE=torchtitan_recipes.tests.models.glm5 CONFIG=glm5_debugmodel_warmup ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.glm5 CONFIG=glm5_debugmodel_sparse ./run_train.sh
+```
+
+These are separate runs, not an automatic handoff. Stage changes rebuild the
 optimizer; load the warmup model weights for sparse training using the normal
 checkpoint path. There is no automatic step-based stage switch.
-Attention uses the shared `MLAAttention` backend, or
-the GLM compact-KV adapter under CP. CP gathers normalized compressed KV
-and the shared rotary key before KV expansion. Q/KV projections, RoPE,
+
+The model checks model/indexer/attention/loss stage consistency again at build
+time, so a partial override fails rather than silently freezing all training.
+Warmup projects features but does not run top-k. Producer query chunks use the
+KL loss chunk budget; shared consumers cap dense support at 128 query rows.
+The current shared AuxLoss carrier still needs activation backward through the
+frozen backbone. Warmup is not a backward-free teacher pass; its step time and
+saved activations must be measured against sparse training. Indexer training
+convergence has not been established by the short numerical tests.
+
+Attention specializes the shared `MLAAttention` backend in absorbed form.
+CP gathers normalized compressed KV and the shared rotary key, never per-head
+expanded K/V. Q/KV projections, RoPE,
 TP column/row projections, dense/MoE layer construction, routing, and MTP
-blocks reuse DeepSeek-V3 implementations. GLM retains its indexer,
-selection filtering, and cross-layer selection schedule. Gathered attention
-encodes queries as `[q, 0]` and the shared key/value pool as `[k, v]`, retaining
-the original query-key scale and returning the value tail. The CUDA backend
+blocks reuse DeepSeek-V3 implementations. GLM retains its indexer
+and cross-layer selection schedule. The K part of `wkv_b` is contracted into
+each query; gathered attention uses a single-head `[kv_latent, k_rope]` pool.
+The V part of `wkv_b` projects the weighted latent after attention. This keeps
+the original query-key scale and the original checkpoint parameter layout,
+without `[q, 0]` padding or per-head K/V materialization. The CUDA backend
 uses Attention Gym's fused kernel; the reference implementation materializes
 selected slots and is intended for correctness checks rather than large-model
 training. Device-specific implementations belong in out-of-tree integrations.
@@ -184,6 +216,24 @@ and label sequence, the GLM block builds the corresponding DSA metadata, and
 contracts.
 
 ## Validation
+
+### FLOPs and MFU
+
+Attention follows TorchTitan's model-FLOPs convention: forward and backward
+contractions count, while causal triangular savings and rematerialization do
+not. Frozen/sparse stages cap the attended key count at
+`min(seq_len, index_topk)` in every layer, including shared-index consumers;
+warmup counts full attention. The indexer estimate separately includes
+projection and full-document scoring, plus distillation work in trainable
+stages, once per actual producer, including MTP indexers.
+
+Attention contractions use widths `kv_lora_rank + qk_rope_head_dim` and
+`kv_lora_rank`; projection parameters are counted separately as before.
+These are model FLOPs, not measured hardware instructions. Temporary tensors,
+the unused weighted RoPE output channels and communication can increase
+execution cost without increasing useful model FLOPs.
+Use measured step time, throughput and peak memory alongside MFU; no speedup
+is implied by the FLOPs estimate alone.
 
 Run the CPU model tests with:
 

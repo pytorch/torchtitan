@@ -37,7 +37,11 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_mtp,
 )
-from torchtitan_recipes.tests.models.glm5 import glm5_2_debugmodel_mtp
+from torchtitan_recipes.tests.models.glm5 import (
+    glm5_2_debugmodel_mtp,
+    glm5_debugmodel_sparse,
+    glm5_debugmodel_warmup,
+)
 from torchtitan_recipes.tests.models.gpt_oss import (
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
@@ -747,6 +751,14 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             # step 1. The same config trains cleanly on a real 4-GPU PG
             # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
             # collective aliasing under spmd_types is fixed.
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[glm5_debugmodel_warmup, glm5_debugmodel_sparse],
+            test_descr="GLM-5 indexer dense warmup and sparse joint training",
+            test_name="glm5_indexer_training",
+            ngpu=1,
+            skip_rocm_test=True,
             use_real_pg=True,
         ),
         IntegrationTestDefinition(

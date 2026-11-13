@@ -12,7 +12,7 @@ Read this file from the outside in:
    language-model head inherited from ``Decoder``.
 2. ``Glm5TransformerBlock`` composes pre-norm DSA attention with either a
    dense FFN or the common TorchTitan MoE implementation.
-3. ``Glm5Attention`` expands MLA's low-rank Q/KV representations, asks the
+3. ``Glm5Attention`` prepares MLA's low-rank Q/KV representations, asks the
    ``Glm5DsaIndexer`` which keys each query may attend to, and delegates
    score/value computation to ``Glm5SparseAttention`` in ``dsa.py``.
 4. ``dsa.py`` contains the indexer and selected-key gathering.
@@ -35,6 +35,7 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.flops import quadratic_attention_flops_per_token
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
@@ -56,10 +57,10 @@ class Glm5Attention(DeepSeekMLAAttention):
     """Multi-head latent attention (MLA) gated by DSA top-k indices.
 
     Q follows ``D -> q_lora_rank -> N * (nope + rope)``. KV follows
-    ``D -> (kv_lora_rank + rope)`` and expands only after the low-rank norm.
+    ``D -> (kv_lora_rank + rope)`` and remains a single-head latent pool.
     The indexer consumes the same token states and returns ``[T, topk]`` key
     indices. ``inner_attention`` applies token-selected sparse attention to
-    the expanded Q/K/V tensors.
+    absorbed K/query contraction and the post-attention V projection.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -68,12 +69,19 @@ class Glm5Attention(DeepSeekMLAAttention):
         index_topk: int
 
         def flops_per_token(self, seq_len: int) -> int:
+            """Useful absorbed attention FLOPs, excluding remat and kernel overhead."""
             leaf = self.inner_attention.inner_attention
             assert isinstance(leaf, Glm5SparseAttention.Config)
-            return super(Glm5Attention.Config, self).flops_per_token(
+            attended_keys = (
                 seq_len
                 if leaf.training_stage == "warmup"
                 else min(seq_len, self.index_topk)
+            )
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
+                v_head_dim=self.kv_lora_rank,
+                seq_len=attended_keys,
             )
 
     def __init__(self, config: Config):
@@ -105,8 +113,8 @@ class Glm5Attention(DeepSeekMLAAttention):
         with spmd.local():
             q_TNH = q_TNH.view(T, -1, self.qk_head_dim)
         # KV path: keep content in a compressed latent representation and keep
-        # one shared rotary key. The expensive per-head expansion happens only
-        # after normalization.
+        # one shared rotary key. The backend absorbs K into Q and projects V
+        # after attention, without expanding the key/value sequence per head.
         compressed_kv_TC = self.wkv_a(x_TD)
         # The latent split and RMSNorm read this projection with bare ops.
         remat.recompute_needs_tensor(compressed_kv_TC)
@@ -157,11 +165,7 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(DeepSeekV3TransformerBlock.Config):
-        preserve_output_for_mtp: bool = False
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.preserve_output_for_mtp = config.preserve_output_for_mtp
+        pass
 
     # Index reuse is internal to GLM blocks, not a shared Module tuple hook.
     def forward(  # pyrefly: ignore[bad-override]
@@ -208,23 +212,11 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
             )
         else:
             ffn_output_TD = self.feed_forward(normalized_TD)
-        if self.preserve_output_for_mtp:
-            # The saved residual add is a bare consumer of the MoE/FFN result.
-            # MTP's auxiliary backward branch replays this boundary, so declare
-            # the input dependency before entering the non-recomputed region.
-            remat.recompute_needs_tensor(ffn_output_TD)
         # Trailing add, always saved: it saves nothing for backward, so replay skips
         # it and its inputs need no persisting, matching checkpoint early stop.
         output_TD: torch.Tensor = remat.region(
             torch.add, self.remat_region_name("ffn_residual"), recompute=False
         )(x_TD, ffn_output_TD)
-        if self.preserve_output_for_mtp:
-            # MTP adds an extra backward branch through the main decoder. Keep
-            # each saved residual boundary materialized for MTP flavors so
-            # selective-AC replay never exposes a metadata placeholder to a
-            # bare consumer. Non-MTP flavors leave this disabled.
-            remat.recompute_needs_tensor(output_TD)
-            output_TD = output_TD.clone()
         if return_indices:
             assert topk_indices_TS is not None
             return output_TD, topk_indices_TS
@@ -247,6 +239,37 @@ class Glm5Model(DeepSeekV3Model):
         vocab_size: int = 154880
         index_sources: tuple[int, ...] = ()
         indexer_training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
+
+        def __post_init__(self) -> None:
+            super(Glm5Model.Config, self).__post_init__()
+            self.validate_indexer_training()
+            if self.index_sources:
+                if len(self.index_sources) != len(self.layers):
+                    raise ValueError("index_sources must contain one source per layer")
+                for layer, source in enumerate(self.index_sources):
+                    if not 0 <= source <= layer or self.index_sources[source] != source:
+                        raise ValueError(
+                            "index source must be a current/earlier producer layer"
+                        )
+                    # PP forwards one live producer's indices across each boundary.
+                    if layer and source < self.index_sources[layer - 1]:
+                        raise ValueError("index sharing groups must be contiguous")
+
+        def validate_indexer_training(self) -> None:
+            stage = self.indexer_training_stage
+            if stage not in ("frozen", "warmup", "sparse"):
+                raise ValueError("Unknown GLM indexer training stage")
+            for layer in self.layers + list(self.mtp_layers or ()):
+                attention = layer.attention
+                leaf = attention.inner_attention.inner_attention
+                if leaf.training_stage != stage:
+                    raise ValueError("GLM model and attention indexer stages disagree")
+                indexer = attention.indexer
+                if indexer is not None and indexer.training_stage != stage:
+                    raise ValueError("GLM model and indexer stages disagree")
+                needs_loss = indexer is not None and stage != "frozen"
+                if (leaf.indexer_loss is not None) != needs_loss:
+                    raise ValueError("GLM indexer stage and auxiliary loss disagree")
 
         def build_flops_estimator(self, model, *, seq_len, excluded_submodules=()):
             from torchtitan.models.common.flops import active_parameter_flops_per_token
@@ -277,7 +300,10 @@ class Glm5Model(DeepSeekV3Model):
                     if module.training_stage == "frozen"
                     else projection_flops
                 )
-                extra += 2 * module.n_heads * (module.head_dim + 1) * seq_len
+                # Discrete selection is forward-only even in trainable stages.
+                # Count QK and head mixing over the full document, not top-k.
+                if module.training_stage != "warmup":
+                    extra += 2 * module.n_heads * (module.head_dim + 1) * seq_len
             for attention in model.modules():
                 if (
                     isinstance(attention, Glm5Attention)
@@ -292,7 +318,11 @@ class Glm5Model(DeepSeekV3Model):
                         else min(seq_len, idx.topk.index_topk)
                     )
                     extra += 6 * idx.n_heads * (idx.head_dim + 1) * selected
-                    extra += 2 * attention.n_heads * attention.qk_head_dim * selected
+                    extra += (
+                        2 * attention.n_heads
+                        * (attention.kv_lora_rank + attention.qk_rope_head_dim)
+                        * selected
+                    )
             if self.indexer_training_stage == "warmup":
                 # Frozen backbone projections still propagate carrier/input gradients.
                 extra -= (
@@ -313,32 +343,27 @@ class Glm5Model(DeepSeekV3Model):
         self,
         positions: torch.Tensor,
         padding_mask: torch.Tensor | None = None,
-    ) -> DsaMetadata | None:
-        # Pipeline partitioning may create an embedding-only or output-only
-        # stage. Such a stage has no attention operation and needs no mask.
-        if len(self.layers) == 0:
-            return None
-
+    ) -> DsaMetadata:
+        # Like Decoder's CP lifecycle, empty PP stages still prepare metadata
+        # from the global input and retained full-model config.
         if positions.ndim != 1:
             raise ValueError("GLM-5 positions must have shape [T].")
         return DsaMetadata.from_positions(positions, padding_mask)
 
     def __init__(self, config):
+        # Overrides mutate nested configs after their dataclass construction.
+        # Reject inconsistent stages before freezing any parameters.
+        config.validate_indexer_training()
         super().__init__(config)
         if config.indexer_training_stage == "warmup":
+            # AuxLoss uses the shared backward carrier contract. Freezing weights
+            # does not remove activation backward; a KL-only training driver is a
+            # separate optimization (PR5578 discussion_r4545630656).
             self.requires_grad_(False)
             for module in self.modules():
                 if isinstance(module, Glm5DsaIndexer):
                     module.requires_grad_(True)
         self.index_sources = config.index_sources
-        if self.index_sources:
-            if len(self.index_sources) != len(config.layers):
-                raise ValueError("index_sources must contain one source per layer")
-            for layer, source in enumerate(self.index_sources):
-                if not 0 <= source <= layer or self.index_sources[source] != source:
-                    raise ValueError(
-                        "index source must be a current/earlier producer layer"
-                    )
 
     def preprocess_inputs(
         self,
@@ -415,7 +440,7 @@ class Glm5Model(DeepSeekV3Model):
             for depth in depths:
                 key = f"mtp_attention_masks_{depth}"
                 input_dict[key] = backend.prepare_cp_metadata(
-                    input_dict[key], permutation=metadata.order_T
+                    input_dict[key], permutation=None
                 )
         input_dict = annotate_input_spmd_types(
             parallelism_context, input_dict, input_shardings

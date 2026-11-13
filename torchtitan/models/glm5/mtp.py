@@ -43,6 +43,8 @@ class Glm5MTPTransformerBlock(MTPTransformerBlock):
         if padding_mask is not None:
             mtp_padding_mask_T = mtp_padding_mask_T | padding_mask
         local_valid_T = self._maybe_shard_mtp_valid_mask_across_tp(mtp_input_valid_mask)
+        # MTP reads the preceding decoder/depth output with a bare mask multiply.
+        remat.recompute_needs_tensor(prev_embed)
         prev_embed = prev_embed * local_valid_T.unsqueeze(-1).to(prev_embed.dtype)
         h_TD = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)

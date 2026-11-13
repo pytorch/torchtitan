@@ -4,12 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GLM sparse attention with Attention Gym indexing and gathered attention.
+"""GLM sparse attention with local CP selection and gathered attention.
 
 T/Q/K are token/query/key counts; S is selected keys per query; N is heads.
 D/H/R/P are model/head/latent-or-rotary/pass-through widths; V is value width.
 Document metadata is linear in tokens. Attention delegates to the common
-gathered backend; Attention Gym owns the weighted-ReLU top-k selection.
+gathered backend; CP selection keeps query work local to each rank.
 """
 
 from dataclasses import dataclass
@@ -19,13 +19,12 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
-from torchtitan.distributed.context_parallel import cp_all_gather_tensors
-
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import ComplexRoPE, LayerNorm, Linear
-from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.attn_gym import (
     AuxRequest,
@@ -34,7 +33,9 @@ from torchtitan.models.common.attn_gym import (
     require_attn_gym,
 )
 from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import has_cuda_capability, set_default_dtype
+
+from .indexer import select_local_topk
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,6 @@ class DsaMetadata:
     documents_T: torch.Tensor  # noqa: N815
     valid_T: torch.Tensor  # noqa: N815
     query_indices_Q: torch.Tensor  # noqa: N815
-    order_T: torch.Tensor  # noqa: N815
 
     @classmethod
     def from_positions(cls, positions, padding_mask=None):
@@ -55,23 +55,80 @@ class DsaMetadata:
             else ~padding_mask
         )
         order = torch.arange(positions.numel(), device=positions.device)
-        return cls(positions, (positions == 0).cumsum(0), valid, order, order)
+        return cls(positions, (positions == 0).cumsum(0), valid, order)
 
 
-class Glm5CPMLAAttention(AllGatherKVMLAFlexAttention):
+class Glm5MLAAttention(MLAAttention):
+    """Absorb K into Q and project V after attention over one latent pool."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MLAAttention.Config):
+        def __post_init__(self) -> None:
+            if not isinstance(self.inner_attention, Glm5SparseAttention.Config):
+                raise ValueError("GLM MLA requires Glm5SparseAttention.Config")
+            if (
+                type(self.wkv_b) is not Linear.Config
+                or self.wkv_b.bias
+                or self.wkv_b.num_linears != 1
+            ):
+                raise ValueError("Absorbed GLM MLA requires a dense bias-free wkv_b")
+
+    def _prepare_latents(self, latent_TL, rope_TR):
+        return latent_TL, rope_TR
+
+    def forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs):
+        latent_KL, rope_KR = self._prepare_latents(kv_c_normed_TL, k_shared_TR)
+        # The pool concatenation reads the saved CP communication outputs.
+        remat.recompute_needs_tensor(latent_KL, rope_KR, q_THK)
+        with spmd.local():
+            heads = q_THK.shape[1]
+            nope = q_THK.shape[-1] - rope_KR.shape[-1]
+            weight_HPL = self.wkv_b.weight.view(heads, self.packed_kv_head_dim, -1)
+            weight_HPL = weight_HPL.to(q_THK.dtype)
+            key_weight_HNL, value_weight_HVL = weight_HPL.split(
+                [nope, self.packed_kv_head_dim - nope], dim=1
+            )
+            q_nope_THN, q_rope_THR = q_THK.split([nope, rope_KR.shape[-1]], dim=-1)
+        q_latent_THL = remat.region(
+            torch.einsum, self.remat_region_name("q_absorb"),
+            recompute=self.remat_should_recompute("q_absorb"),
+        )("thn,hnl->thl", q_nope_THN, key_weight_HNL)
+        remat.recompute_needs_tensor(q_latent_THL)
+        q_abs_THD = torch.cat((q_latent_THL, q_rope_THR), dim=-1)
+        pool_KD = torch.cat((latent_KL, rope_KR), dim=-1)
+        output_THD = remat.region(
+            self.inner_attention, self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(q_abs_THD, pool_KD, **kwargs)
+        remat.recompute_needs_tensor(output_THD)
+        return remat.region(
+            torch.einsum, self.remat_region_name("v_project"),
+            recompute=self.remat_should_recompute("v_project"),
+        )("thl,hvl->thv", output_THD[..., :latent_KL.shape[-1]], value_weight_HVL)
+
+
+class Glm5CPMLAAttention(Glm5MLAAttention, AllGatherKVMLAFlexAttention):
     """Reuse upstream compact KV communication with GLM document metadata."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(AllGatherKVMLAFlexAttention.Config):
         def __post_init__(self) -> None:
-            # Communication is shared; only the leaf attention/metadata differ.
-            if not isinstance(self.inner_attention, Glm5SparseAttention.Config):
-                raise ValueError("GLM CP MLA requires Glm5SparseAttention.Config")
+            Glm5MLAAttention.Config.__post_init__(self)
+
+    def _prepare_latents(self, latent_TL, rope_TR):
+        # Reuse the public compact-MLA communication primitive and remat policy;
+        # the common forward would expand K/V, so only its gather is needed here.
+        return remat.region(
+            cp_all_gather_tensors, self.remat_region_name("cp_all_gather"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )((latent_TL, rope_TR), reduce_dtype=self.reduce_dtype)
 
     @staticmethod
     def prepare_cp_metadata(  # pyrefly: ignore[bad-override]
         attention_metadata: DsaMetadata, *, permutation: torch.Tensor | None
     ) -> DsaMetadata:
+        if permutation is not None:
+            raise ValueError("GLM DSA CP requires contiguous shards without a permutation")
         metadata = attention_metadata
         group = spmd_mesh_group(MeshAxisName.CP)
         if group is None:
@@ -79,31 +136,26 @@ class Glm5CPMLAAttention(AllGatherKVMLAFlexAttention):
         count = metadata.positions_T.numel()
         if count % group.size():
             raise ValueError("DSA token count must divide evenly across CP ranks")
-        order = (
-            torch.arange(count, device=metadata.positions_T.device)
-            if permutation is None
-            else permutation.reshape(-1)
-        )
         local = count // group.size()
         queries = torch.arange(
-            group.rank() * local, (group.rank() + 1) * local, device=order.device
+            group.rank() * local,
+            (group.rank() + 1) * local,
+            device=metadata.positions_T.device,
         )
         return DsaMetadata(
-            metadata.positions_T[order],
-            metadata.documents_T[order],
-            metadata.valid_T[order],
+            metadata.positions_T,
+            metadata.documents_T,
+            metadata.valid_T,
             queries,
-            metadata.order_T[order],
         )
 
 
 class DSAIndexerTopK(Module):
     """Compute local-query top-k indices against a global key sequence.
 
-    Attention Gym processes complete packed documents and returns indices local
-    to each document. Compact valid tokens before selection, then map selections
-    back to the global key sequence consumed by gathered attention. CP gathers query
-    features as well as keys because the indexer API requires complete documents.
+    Compact valid tokens before selection, then map document-relative selections
+    back to the global key sequence consumed by gathered attention. Under CP,
+    explicit candidate bounds retain local queries against the global key pool.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -126,31 +178,57 @@ class DSAIndexerTopK(Module):
     ) -> torch.Tensor:
         K = metadata.positions_T.numel()
         cp_group = spmd_mesh_group(MeshAxisName.CP)
-        if cp_group is not None:
-            # TODO: Keep queries local once Attention Gym supports query chunks.
-            q_QNH, weights_QN = cp_all_gather_tensors(
-                (q_QNH, weights_QN),
-                reduce_dtype=torch.float32,
-            )
-        if q_QNH.shape[0] != K:
+        if cp_group is None and q_QNH.shape[0] != K:
             raise ValueError("DSA indexing requires complete query and key sequences")
 
         # Keep token order within each document while moving padding to the end.
         # Fixed-capacity offsets use repeated endpoints for empty documents.
-        # Restore original document/token order after any CP load-balancer permutation.
-        token_order_K = metadata.positions_T.argsort(stable=True)
-        token_order_K = token_order_K[
-            metadata.documents_T[token_order_K].argsort(stable=True)
-        ]
-        token_order_K = token_order_K[
-            (~metadata.valid_T[token_order_K]).to(torch.int32).argsort(stable=True)
-        ]
+        token_order_K = (~metadata.valid_T).to(torch.int32).argsort(stable=True)
         valid_K = metadata.valid_T[token_order_K]
         document_starts_K = metadata.documents_T[token_order_K]
         token_indices_K = torch.arange(K, device=q_QNH.device, dtype=torch.int32)
         starts_K = valid_K & (
             (token_indices_K == 0) | (document_starts_K != document_starts_K.roll(1))
         )
+        document_offsets_K = torch.where(starts_K, token_indices_K, 0).cummax(0).values
+        fused = (
+            q_QNH.is_cuda
+            and q_QNH.dtype in (torch.float16, torch.bfloat16)
+            and has_cuda_capability(9, 0)
+        )
+        if cp_group is not None or not fused:
+            # Local query rows retain their original order. In the packed key
+            # pool, each valid row sees its document prefix through that query.
+            packed_rows_K = torch.empty_like(token_indices_K).scatter_(
+                0, token_order_K, token_indices_K
+            )
+            queries_Q = metadata.query_indices_Q
+            packed_queries_Q = packed_rows_K[queries_Q].long()
+            valid_Q = metadata.valid_T[queries_Q]
+            starts_Q = torch.where(valid_Q, document_offsets_K[packed_queries_Q], 0)
+            ends_Q = torch.where(valid_Q, packed_rows_K[queries_Q] + 1, 0)
+            bounds_Q2 = torch.stack((starts_Q, ends_Q), dim=-1)
+            kernel_weights_QN = (
+                weights_QN.to(q_QNH.dtype)
+                if cp_group is not None and q_QNH.is_cuda
+                and q_QNH.dtype in (torch.float16, torch.bfloat16)
+                else weights_QN
+            )
+            # The non-fused whole-document path uses the same bounded selector
+            # as CP, avoiding the stock reference's full query/key score tensor.
+            # Preserve the former FP32 reference arithmetic outside CP.
+            reference = cp_group is None
+            indices_QS = select_local_topk(
+                q_QNH.float() if reference else q_QNH,
+                k_KH[token_order_K].float() if reference else k_KH[token_order_K],
+                kernel_weights_QN,
+                bounds_Q2,
+                min(self.index_topk, K),
+            )
+            return token_order_K[indices_QS.clamp_min(0).long()].to(torch.int32).masked_fill(
+                indices_QS < 0, -1
+            )
+        # Whole-document offsets are only used by the CP=1 Attention Gym path.
         num_valid = valid_K.sum(dtype=torch.int32)
         cu_seqlens = torch.cat(
             (
@@ -158,15 +236,6 @@ class DSAIndexerTopK(Module):
                 num_valid[None],
             )
         )
-        document_offsets_K = torch.where(starts_K, token_indices_K, 0).cummax(0).values
-        # Match DSV4: fused selection requires low-precision inputs on SM90+.
-        fused = (
-            q_QNH.is_cuda
-            and q_QNH.dtype in (torch.float16, torch.bfloat16)
-            and has_cuda_capability(9, 0)
-        )
-        q_QNH = q_QNH if fused else q_QNH.float()
-        k_KH = k_KH if fused else k_KH.float()
         indices_KS = lightning_indexer(
             q_QNH[token_order_K].unsqueeze(0),
             k_KH[token_order_K].unsqueeze(0),
@@ -175,16 +244,16 @@ class DSAIndexerTopK(Module):
             causal=True,
             cu_seqlens=cu_seqlens,
             cu_seqlens_k=cu_seqlens,
-            impl="fused" if fused else "reference",
+            impl="fused",
         ).squeeze(0)
+        # Packed causal top-k already guarantees unique legal keys and -1 for
+        # invalid rows. This bijection preserves that contract in the global pool.
         packed_indices_KS = document_offsets_K[:, None] + indices_KS.clamp_min(0)
         global_indices_KS = token_order_K[packed_indices_KS.long()].to(torch.int32)
         global_indices_KS = global_indices_KS.masked_fill(indices_KS < 0, -1)
         indices_KS = torch.empty_like(global_indices_KS).index_copy_(
             0, token_order_K, global_indices_KS
         )
-        if cp_group is not None:
-            return spmd.redistribute(indices_KS, cp_group, src=spmd.R, dst=spmd.S(0))
         return indices_KS
 
 
@@ -223,7 +292,10 @@ class Glm5DsaIndexer(Module):
         self.wq_b = config.wq_b.build()
         self.wk = config.wk.build()
         self.k_norm = config.k_norm.build()
-        self.weights_proj = config.weights_proj.build().float()
+        # TrainingEngine may build the model with a low default parameter dtype.
+        # Create mixing weights in FP32; config preserves this dtype under FSDP.
+        with set_default_dtype(torch.float32):
+            self.weights_proj = config.weights_proj.build()
         self.rope = config.rope.build()
         self.topk = config.topk.build()
         self.training_stage = config.training_stage
@@ -246,6 +318,12 @@ class Glm5DsaIndexer(Module):
             )
         if attention_mask_TK is None:
             attention_mask_TK = DsaMetadata.from_positions(positions_T)
+        if self.training_stage == "warmup":
+            # Dense teacher attention ignores selection. A zero-width support
+            # preserves the block/index-sharing transport contract without ranking.
+            return features[0].new_empty(
+                (features[0].shape[0], 0), dtype=torch.int32
+            ), features
         indices = self.topk(*features, metadata=attention_mask_TK)
         return indices if self.training_stage == "frozen" else (indices, features)
 
@@ -304,90 +382,20 @@ class Glm5DsaIndexer(Module):
 
 
 class Glm5IndexerLoss(SparseIndexerLoss):
-    """Reuse DSV4 normalized KL and injection with GLM's per-head key pool."""
+    """Use DSV4 distillation without compression or document-relative indices.
+
+    GLM passes global pool IDs and cu_seqlens=None to the shared teacher.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(SparseIndexerLoss.Config):
         compress_ratio: int = 1
 
-    @torch.no_grad()
-    def _teacher(
-        self,
-        q_THD: torch.Tensor,
-        cmp_k_SD: torch.Tensor,
-        topk_indices_TK: torch.Tensor,
-        attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
-        padding_mask_T: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        from torch.distributed._functional_collectives import all_reduce, wait_tensor
-
-        from torchtitan.distributed.spmd_types import spmd_mesh_size
-
-        if q_THD.shape[1] * spmd_mesh_size("tp") != self.num_heads:
-            raise ValueError("Teacher head count does not match TP-sharded GLM queries")
-        targets = []
-        with torch.autocast(device_type=q_THD.device.type, enabled=False):
-            for start in range(0, q_THD.shape[0], self.chunk_size):
-                stop = start + self.chunk_size
-                indices_QS = topk_indices_TK[start:stop]
-                keys_QSHD = cmp_k_SD[indices_QS.clamp_min(0).long()].float()
-                logits_QHS = (
-                    torch.einsum("qhd,qshd->qhs", q_THD[start:stop].float(), keys_QSHD)
-                    * self.softmax_scale
-                )
-                logits_QHS = logits_QHS - attn_lse_TH[start:stop, :, None].float()
-                valid_QS = indices_QS >= 0
-                if padding_mask_T is not None:
-                    valid_QS = valid_QS & ~padding_mask_T[start:stop, None]
-                targets.append(
-                    logits_QHS.masked_fill(~valid_QS[:, None], -torch.inf)
-                    .exp()
-                    .sum(dim=1)
-                    / self.num_heads
-                )
-        targets_QS = torch.cat(targets)
-        group = spmd_mesh_group("tp")
-        if group is not None:
-            targets_QS = wait_tensor(all_reduce(targets_QS, "sum", group))
-        return targets_QS
-
-
-def filter_dsa_indices(
-    indices_QS: torch.Tensor,
-    metadata: DsaMetadata,
-) -> torch.Tensor:
-    """Keep unique selected keys satisfying packed-document and padding rules."""
-    _, S = indices_QS.shape
-    if S == 0:
-        raise ValueError("DSA selection width must be positive")
-    K = metadata.positions_T.numel()
-    valid_QS = (indices_QS >= 0) & (indices_QS < K)
-    safe_QS = indices_QS.clamp(0, K - 1).long()
-    queries_Q = metadata.query_indices_Q
-    valid_QS = valid_QS & metadata.valid_T[queries_Q, None] & metadata.valid_T[safe_QS]
-    valid_QS = valid_QS & (
-        metadata.documents_T[queries_Q, None] == metadata.documents_T[safe_QS]
-    )
-    valid_QS = valid_QS & (
-        metadata.positions_T[queries_Q, None] >= metadata.positions_T[safe_QS]
-    )
-    selected_QS = torch.where(valid_QS, indices_QS, K).sort(dim=-1).values
-    first_QS = torch.cat(
-        (
-            torch.ones_like(selected_QS[:, :1], dtype=torch.bool),
-            selected_QS[:, 1:] != selected_QS[:, :-1],
-        ),
-        dim=-1,
-    )
-    return torch.where((selected_QS < K) & first_QS, selected_QS, -1)
-
 
 class Glm5SparseAttention(InnerAttention):
-    """Gather exactly the selected expanded MLA keys and values.
-
-    Attention Gym shares its K/V pool. Encoding query as [q, 0] and pool as
-    [k, v] preserves q @ k and returns the weighted values in the output tail.
+    """Gather selected keys and values directly from one shared latent pool.
+    The indexer supplies unique causal, document-local selections mapped to
+    global pool IDs, with -1 padding. Consumers do not re-sort or revalidate them.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -418,8 +426,7 @@ class Glm5SparseAttention(InnerAttention):
     def forward(
         self,
         q_THK: torch.Tensor,
-        k_THK: torch.Tensor,
-        v_THV: torch.Tensor,
+        k_KH: torch.Tensor,
         *,
         attention_metadata: DsaMetadata,
         topk_indices_QS: torch.Tensor,
@@ -433,24 +440,30 @@ class Glm5SparseAttention(InnerAttention):
             assert self.max_context_length is not None
             outputs = []
             offsets_S = torch.arange(
-                min(self.max_context_length, k_THK.shape[0]), device=q_THK.device
+                min(self.max_context_length, k_KH.shape[0]),
+                device=q_THK.device,
+                dtype=torch.int32,
             )
-            for start in range(0, q_THK.shape[0], 128):
-                stop = min(start + 128, q_THK.shape[0])
+            # Producers share the KL chunk budget. Shared-index consumers have
+            # no KL module; cap their dense-support workspace at 128 query rows.
+            chunk_size = self.indexer_loss.chunk_size if self.indexer_loss else 128
+            for start in range(0, q_THK.shape[0], chunk_size):
+                stop = min(start + chunk_size, q_THK.shape[0])
                 queries_Q = attention_metadata.query_indices_Q[start:stop]
                 document_starts_Q = (
                     queries_Q - attention_metadata.positions_T[queries_Q]
                 )
                 indices_QS = document_starts_Q[:, None] + offsets_S
-                # Reuse the same causal, document and padding contract as top-k.
-                metadata = DsaMetadata(
-                    attention_metadata.positions_T,
-                    attention_metadata.documents_T,
-                    attention_metadata.valid_T,
-                    queries_Q,
-                    attention_metadata.order_T,
+                # Unlike top-k, warmup creates dense support itself. Each row
+                # starts at its document boundary and ends at its query, so
+                # only padding and the causal endpoint need masking; no dedup.
+                safe_QS = indices_QS.clamp(0, k_KH.shape[0] - 1).long()
+                valid_QS = (
+                    (indices_QS <= queries_Q[:, None])
+                    & attention_metadata.valid_T[queries_Q, None]
+                    & attention_metadata.valid_T[safe_QS]
                 )
-                indices_QS = filter_dsa_indices(indices_QS, metadata)
+                indices_QS = indices_QS.masked_fill(~valid_QS, -1)
                 features = (
                     None
                     if indexer_features is None
@@ -463,8 +476,7 @@ class Glm5SparseAttention(InnerAttention):
                 outputs.append(
                     self._attend(
                         q_THK[start:stop],
-                        k_THK,
-                        v_THV,
+                        k_KH,
                         indices_QS,
                         scale,
                         features,
@@ -472,12 +484,10 @@ class Glm5SparseAttention(InnerAttention):
                     )
                 )
             return torch.cat(outputs)
-        indices_QS = filter_dsa_indices(topk_indices_QS, attention_metadata)
         return self._attend(
             q_THK,
-            k_THK,
-            v_THV,
-            indices_QS,
+            k_KH,
+            topk_indices_QS,
             scale,
             indexer_features,
             aux_loss_denominator,
@@ -486,28 +496,23 @@ class Glm5SparseAttention(InnerAttention):
     def _attend(
         self,
         q_THK,
-        k_THK,
-        v_THV,
+        k_KH,
         indices_QS,
         scale,
         indexer_features,
         aux_loss_denominator,
     ):
-        Q, H, _ = q_THK.shape
-        K, _, V = v_THV.shape
+        Q = q_THK.shape[0]
+        K = k_KH.shape[0]
         train_indexer = self.training and self.indexer_loss is not None
         with spmd.no_typecheck():
-            query_1HQD = (
-                torch.cat((q_THK, q_THK.new_zeros(Q, H, V)), dim=-1)
-                .transpose(0, 1)
-                .unsqueeze(0)
-            )
-            pool_1HKD = torch.cat((k_THK, v_THV), dim=-1).transpose(0, 1).unsqueeze(0)
+            query_1HQD = q_THK.transpose(0, 1).unsqueeze(0)
+            pool_1HKD = k_KH[None, None]
             # No local window: real document/causal rules are already in indices.
             # Explicit offsets select the gathered (not dense) reference path.
             output_1HQD, aux = gather_attn(
                 query_1HQD,
-                query_1HQD.new_zeros(()).expand_as(query_1HQD),
+                k_KH.new_zeros(()).expand(1, 1, Q, k_KH.shape[-1]),
                 pool_1HKD,
                 indices_QS.unsqueeze(0),
                 sliding_window_size=0,
@@ -518,7 +523,7 @@ class Glm5SparseAttention(InnerAttention):
                 impl="fused" if q_THK.device.type == "cuda" else "reference",
                 return_aux=AuxRequest(lse=train_indexer),
             )
-            output_THV = output_1HQD[..., -V:].squeeze(0).transpose(0, 1)
+            output_THV = output_1HQD.squeeze(0).transpose(0, 1)
             if train_indexer:
                 assert self.indexer_loss is not None
                 assert indexer_features is not None
@@ -549,7 +554,7 @@ class Glm5SparseAttention(InnerAttention):
                 scores_QS = scores_QS.masked_fill(indices_QS < 0, -torch.inf)
                 output_THV = self.indexer_loss(
                     q_THK.detach(),
-                    k_THK.detach(),
+                    k_KH.detach(),
                     indices_QS,
                     scores_QS,
                     aux.lse.squeeze(0).transpose(0, 1).detach(),

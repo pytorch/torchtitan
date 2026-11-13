@@ -29,6 +29,7 @@ from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.glm5 import build_model_config, MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
+from torchtitan_recipes.tests import _set_spmd_typechecking
 
 
 def glm5_debugmodel(
@@ -95,6 +96,20 @@ def glm5_debugmodel(
         checkpointer=None,
         activation_remat=DefaultActivationRematConfig(),
     )
+
+
+def glm5_debugmodel_warmup() -> Trainer.Config:
+    """CLI recipe for training the indexer with a frozen dense-attention teacher."""
+    config = glm5_debugmodel(seq_len=128, indexer_stage="warmup")
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
+def glm5_debugmodel_sparse() -> Trainer.Config:
+    """CLI recipe for joint backbone and indexer training with sparse attention."""
+    config = glm5_debugmodel(seq_len=128, indexer_stage="sparse")
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
 
 
 def glm5_2_scaled_debugmodel(

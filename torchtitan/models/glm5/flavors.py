@@ -29,7 +29,6 @@ from torchtitan.models.common import (
     RMSNorm,
     Sigmoid,
 )
-from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
@@ -51,6 +50,7 @@ from .dsa import (
     Glm5CPMLAAttention,
     Glm5DsaIndexer,
     Glm5IndexerLoss,
+    Glm5MLAAttention,
     Glm5SparseAttention,
 )
 
@@ -146,7 +146,7 @@ def _make_glm5_attention_config(
     base.kv_norm.eps = mla_norm_eps
     mla = base.inner_attention
     mla.sharding_config = glm5_inner_attention_sharding_config()
-    base.inner_attention = mla
+    base.inner_attention = derive(mla, Glm5MLAAttention.Config)
     base.sharding_config = glm5_attention_sharding_config(enable_sp=enable_sp)
     return Glm5Attention.Config(
         **{field.name: getattr(base, field.name) for field in dataclasses.fields(base)},
@@ -227,22 +227,6 @@ def build_glm5_layers(
         raise ValueError("num_dense_layers must be in [0, num_layers].")
     if len(index_sources) != num_layers:
         raise ValueError("index_sources must contain one source per layer")
-    if router_num_expert_groups <= 0:
-        raise ValueError("router_num_expert_groups must be > 0.")
-    if num_experts % router_num_expert_groups != 0:
-        raise ValueError("num_experts must divide evenly into router expert groups.")
-    experts_per_group = num_experts // router_num_expert_groups
-    if experts_per_group < 2:
-        raise ValueError("experts_per_group must be >= 2.")
-    if not 0 < router_num_limited_groups <= router_num_expert_groups:
-        raise ValueError(
-            "router_num_limited_groups must be in [1, router_num_expert_groups]."
-        )
-    if not 0 < router_top_k <= num_experts:
-        raise ValueError("router_top_k must be in [1, num_experts].")
-    if router_top_k > experts_per_group * router_num_limited_groups:
-        raise ValueError("router_top_k exceeds the experts in limited groups.")
-
     base_layers = build_mla_moe_layers(
         n_layers=num_layers,
         n_dense_layers=num_dense_layers,
@@ -374,18 +358,6 @@ def _debugmodel(
     )
 
 
-def _shared_dsa_debugmodel(
-    *,
-    seq_len: int = 128,
-    parallelism: ParallelismConfig | None = None,
-) -> Glm5Model.Config:
-    return _debugmodel(
-        index_sources=(0, 0, 2, 2, 4, 4, 6, 6),
-        seq_len=seq_len,
-        parallelism=parallelism,
-    )
-
-
 def _glm5_2_debugmodel(
     *,
     seq_len: int = 128,
@@ -408,17 +380,12 @@ def _glm5_2_debugmodel_mtp(
     """Small GLM-5.2 training model with one faithful NextN/MTP block."""
     config = _glm5_2_debugmodel(seq_len=seq_len, parallelism=parallelism)
     enable_sp = bool(parallelism and parallelism.enable_sequence_parallel)
-    layers = [
-        dataclasses.replace(layer, preserve_output_for_mtp=True)
-        for layer in config.layers
-    ]
     source_indexer = config.layers[config.index_sources[-1]].attention.indexer
     assert source_indexer is not None
     return dataclasses.replace(
         config,
-        layers=layers,
         mtp_layers=build_glm5_mtp_layers(
-            layers[-1],
+            config.layers[-1],
             indexer=source_indexer,
             dim=config.dim,
             num_mtp_layers=1,
@@ -577,9 +544,6 @@ def _glm5_2_744b_a40b(
         enable_sp=bool(parallelism and parallelism.enable_sequence_parallel),
         enable_ep=bool(parallelism and parallelism.expert_parallel_degree > 1),
     )
-    layers: list[Glm5TransformerBlock.Config] = [
-        dataclasses.replace(layer, preserve_output_for_mtp=True) for layer in layers
-    ]
     source_attention = layers[index_sources[-1]].attention
     assert isinstance(source_attention, Glm5Attention.Config)
     source_indexer = source_attention.indexer
@@ -629,7 +593,6 @@ MODEL_FLAVORS = {
     "glm5_2_debugmodel": _glm5_2_debugmodel,
     "glm5_2_debugmodel_mtp": _glm5_2_debugmodel_mtp,
     "glm5_2_scaled_debugmodel": _glm5_2_scaled_debugmodel,
-    "shared_dsa_debugmodel": _shared_dsa_debugmodel,
 }
 
 
@@ -688,8 +651,9 @@ def build_model_config(
                 )
     if parallelism.context_parallel_degree > 1:
         ContextParallelTransform(
-            inner_attention_map={MLAAttention: Glm5CPMLAAttention}
+            inner_attention_map={Glm5MLAAttention: Glm5CPMLAAttention}
         ).transform(config)
     if config.mtp_layers and parallelism.pipeline_parallel_degree > 1:
         raise ValueError("GLM MTP does not support pipeline parallelism")
+    config.validate_indexer_training()
     return config
