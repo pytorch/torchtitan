@@ -1,0 +1,4 @@
+== python kb_profiler_slows_graph_replay.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+static   T=34, 16 kernels: before profiling  25.3 us, after one profiler session  29.9 us
+dynamic  T=34, 16 kernels: before profiling  25.0 us, after one profiler session  31.6 us

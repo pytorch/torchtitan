@@ -1,0 +1,16 @@
+== GMM_EXT_DIR=$GMM_EXT_DIR python ask02_ptr_array_vs_moe_kernel.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+w13 T=   8: ptr-array   49.5 us ( 61%)   moe   47.2 us ( 64%)   bitwise equal True
+w13 T=  34: ptr-array  118.5 us ( 77%)   moe  116.4 us ( 79%)   bitwise equal True
+w13 T= 128: ptr-array  165.6 us ( 81%)   moe  169.5 us ( 79%)   bitwise equal True
+w2 T=   8: ptr-array   27.9 us ( 54%)   moe   24.5 us ( 62%)   bitwise equal True
+w2 T=  34: ptr-array   68.9 us ( 67%)   moe   65.5 us ( 70%)   bitwise equal True
+w2 T= 128: ptr-array   94.0 us ( 71%)   moe   91.3 us ( 73%)   bitwise equal True
+== GMM_EXT_DIR=$GMM_EXT_DIR python ask02_ptr_array_vs_moe_kernel.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+w13 T=   8: ptr-array   49.4 us ( 62%)   moe   47.3 us ( 64%)   bitwise equal True
+w13 T=  34: ptr-array  118.4 us ( 77%)   moe  116.2 us ( 79%)   bitwise equal True
+w13 T= 128: ptr-array  165.7 us ( 81%)   moe  169.4 us ( 79%)   bitwise equal True
+w2 T=   8: ptr-array   28.0 us ( 54%)   moe   24.1 us ( 63%)   bitwise equal True
+w2 T=  34: ptr-array   68.9 us ( 67%)   moe   65.5 us ( 70%)   bitwise equal True
+w2 T= 128: ptr-array   93.9 us ( 71%)   moe   91.2 us ( 74%)   bitwise equal True

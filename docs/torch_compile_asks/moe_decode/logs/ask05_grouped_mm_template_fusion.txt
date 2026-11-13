@@ -1,0 +1,57 @@
+== python ask05_grouped_mm_template_fusion.py default
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+mode=default T=34: graph  237.2 us, 11 kernels, GEMM  210.6 us, glue  18.1 us, rel L2 vs eager 3.1e-06
+       2.27 us       triton_per_fused__to_copy_arange_cumsum_eq_sum_unsqueeze_view_0
+       1.47 us       triton_per_fused_cumsum_select_1
+       1.66 us       triton_poi_fused_add_arange_gather_index_index_put_select_squeeze_sub_unsqueeze_view_2
+       1.44 us       triton_per_fused__grouped_mm__to_copy_cumsum_floor_divide_index_mul_silu_slice_transpose_3
+       1.98 us       triton_poi_fused__grouped_mm__to_copy_floor_divide_index_transpose_4
+       1.66 us       void at::cuda::detail::prepare_grouped_gemm_data<cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::
+     130.62 us  GEMM _ZN7cutlass13device_kernelIN2at4cuda6detail25enable_3x_kernel_for_sm10INS_4gemm6kernel13GemmUniversa
+       1.70 us       triton_poi_fused__grouped_mm__to_copy_mul_silu_slice_transpose_5
+       1.86 us       void at::cuda::detail::prepare_grouped_gemm_data<cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::
+      80.00 us  GEMM _ZN7cutlass13device_kernelIN2at4cuda6detail25enable_3x_kernel_for_sm10INS_4gemm6kernel13GemmUniversa
+       4.06 us       triton_per_fused__to_copy_add_gather_index_mul_select_squeeze_sub_sum_unsqueeze_view_6
+mode=default T=256: graph  364.0 us, 11 kernels, GEMM  315.7 us, glue  35.1 us, rel L2 vs eager 8.2e-07
+       6.08 us       triton_red_fused__to_copy_arange_cumsum_eq_sum_unsqueeze_view_0
+       1.44 us       triton_per_fused_cumsum_select_1
+       1.73 us       triton_poi_fused_add_arange_gather_index_index_put_select_squeeze_sub_unsqueeze_view_2
+       1.41 us       triton_per_fused__grouped_mm__to_copy_cumsum_floor_divide_index_mul_silu_slice_transpose_3
+       3.42 us       triton_poi_fused__grouped_mm__to_copy_floor_divide_index_transpose_4
+       1.82 us       void at::cuda::detail::prepare_grouped_gemm_data<cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::
+     203.42 us  GEMM _ZN7cutlass13device_kernelIN2at4cuda6detail25enable_3x_kernel_for_sm10INS_4gemm6kernel13GemmUniversa
+       2.56 us       triton_poi_fused__grouped_mm__to_copy_mul_silu_slice_transpose_5
+       2.21 us       void at::cuda::detail::prepare_grouped_gemm_data<cutlass::bfloat16_t, cutlass::bfloat16_t, cutlass::
+     112.26 us  GEMM _ZN7cutlass13device_kernelIN2at4cuda6detail25enable_3x_kernel_for_sm10INS_4gemm6kernel13GemmUniversa
+      14.46 us       triton_per_fused__to_copy_add_gather_index_mul_select_squeeze_sub_sum_unsqueeze_view_6
+== python ask05_grouped_mm_template_fusion.py triton
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+mode=triton T=34: graph  225.1 us, 9 kernels, GEMM  200.1 us, glue  15.0 us, rel L2 vs eager 3.1e-06
+       2.37 us       triton_per_fused__to_copy_arange_cumsum_eq_sum_unsqueeze_view_0
+       1.54 us       triton_per_fused_cumsum_select_1
+       1.73 us       triton_poi_fused_add_arange_gather_index_index_put_select_squeeze_sub_unsqueeze_view_2
+       1.47 us       triton_per_fused__grouped_mm__to_copy_cumsum_floor_divide_index_mul_silu_slice_transpose_3
+       1.95 us       triton_poi_fused__grouped_mm__to_copy_floor_divide_index_transpose_4
+     127.26 us  GEMM triton_tem_fused__grouped_mm__to_copy_floor_divide_index_transpose_5
+       1.63 us       triton_poi_fused__grouped_mm__to_copy_mul_silu_slice_transpose_6
+      72.83 us  GEMM triton_tem_fused__grouped_mm__to_copy_mul_silu_slice_transpose_7
+       4.32 us       triton_per_fused__to_copy_add_gather_index_mul_select_squeeze_sub_sum_unsqueeze_view_8
+mode=triton T=256: graph  327.3 us, 9 kernels, GEMM  281.2 us, glue  31.0 us, rel L2 vs eager 1.2e-06
+       8.38 us       triton_red_fused__to_copy_arange_cumsum_eq_sum_unsqueeze_view_0
+       1.54 us       triton_per_fused_cumsum_select_1
+       1.73 us       triton_poi_fused_add_arange_gather_index_index_put_select_squeeze_sub_unsqueeze_view_2
+       1.31 us       triton_per_fused__grouped_mm__to_copy_cumsum_floor_divide_index_mul_silu_slice_transpose_3
+       7.26 us       triton_poi_fused__grouped_mm__to_copy_floor_divide_index_transpose_4
+     181.02 us  GEMM triton_tem_fused__grouped_mm__to_copy_floor_divide_index_transpose_5
+       2.88 us       triton_poi_fused__grouped_mm__to_copy_mul_silu_slice_transpose_6
+     100.19 us  GEMM triton_tem_fused__grouped_mm__to_copy_mul_silu_slice_transpose_7
+       7.94 us       triton_per_fused__to_copy_add_gather_index_mul_select_squeeze_sub_sum_unsqueeze_view_8
+fusion log: cannot fuse op10 with op11: template has no allowed prologue inputs
+fusion log: cannot fuse op11 with op12: template epilogue not satisfied
+fusion log: cannot fuse op11 with op12_op13: template epilogue not satisfied
+fusion log: cannot fuse op5_op7_op10 with op11: prologue fusion only supported for pointwise nodes
+fusion log: cannot fuse op5_op7_op10 with op8: prologue fusion only supported for pointwise nodes
+fusion log: cannot fuse op6 with op8: template has no allowed prologue inputs
+fusion log: cannot fuse op7 with op8: template has no allowed prologue inputs
+fusion log: cannot fuse op8 with op9: memory deps did not match
+fusion log: cannot fuse op9 with op11: template has no allowed prologue inputs
