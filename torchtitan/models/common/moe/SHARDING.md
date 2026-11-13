@@ -17,22 +17,25 @@ the two supported expert-parallel configurations (SP on/off). For MoE models,
 
 ## Configurations
 
-"MoE input src → dst" shows the input redistribution at the MoE boundary.
-"Routed input src → dst" shows the redistribution before routed-expert
-dispatch and computation.
+"MoE input" is the TP layout at the MoE boundary. "Routed input" is the
+layout change `MoE.forward` makes explicitly before routed-expert dispatch and
+computation. "MoE output" is the combined output layout and the explicit
+collective that produces the boundary layout.
 "Routed expert weights" describes the routed expert weight placement.
 
-| Config | Routed expert mesh | Routed expert weights | MoE input src → dst | Routed input src → dst | MoE output |
-|--------|-------------------|----------------------|---------------------|------------------------|------------|
-| EP on, SP on | sparse (`ep`/`edp_shard`) | `Shard(0)` on EP | `Shard(0)` -> `Shard(0)` | `Shard(0)` -> `Shard(0)` | `Partial` -> `Shard(0)` |
-| EP on, SP off | sparse (`ep`/`edp_shard`) | `Shard(0)` on EP | `Replicate` -> `Replicate` | `Replicate` -> `Shard(0)` | `Partial` -> `Replicate` |
+| Config | Routed expert mesh | Routed expert weights | MoE input | Routed input | MoE output |
+|--------|-------------------|----------------------|-----------|--------------|------------|
+| EP on, SP on | sparse (`ep`/`edp_shard`) | `Shard(0)` on EP | `Shard(0)` | `Shard(0)` (no-op) | `Shard(0)` |
+| EP on, SP off | sparse (`ep`/`edp_shard`) | `Shard(0)` on EP | `Invariant` | `Invariant` -> `Shard(0)` | `Partial` -> `Invariant` (all-reduce) |
 
 ## Submodule sharding
 
-- **MoE wrapper**: input/output redistribution between `sp_layout` and
-  `desired_input_layouts`. With EP, output is sequence-sharded or `Partial`
-  and redistributed to `sp_layout` at the boundary. Without EP, TP/SP are
-  disabled and routed-expert activations remain replicated.
+- **MoE wrapper**: `ShardingConfig` only asserts the residual layout of the
+  input and output; it inserts no collectives. With EP and SP off,
+  `MoE.forward` explicitly shards the tokens across TP before routing,
+  zero-fills the routed output to `Partial`, and all-reduces the combined
+  output once. Without EP, TP/SP are disabled and routed-expert activations
+  remain replicated.
 - **Router gate**: weights `Replicate`, output stays DTensor.
 - **Shared experts** (w13/w2): dense-family TP plan. `ColumnParallelLinear`
   gathers the w13 input. The local w2 projection produces `Partial`. With EP

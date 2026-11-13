@@ -7,7 +7,7 @@
 """Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels,
+# B = batch, T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # S = state slots, W = convolution kernel width, G = key-head groups.
 
@@ -134,9 +134,8 @@ def _batch_invariant_recurrent_gdn_fwd(
         scale=q_BTHK.shape[-1] ** -0.5,
         state_indices=state_indices,
         has_initial_state=has_initial_state,
-        autotune=False,
         # The scan otherwise picks its arithmetic from the batch shape.
-        kernel_options={"batch_invariant": True},
+        kernel_options={"batch_invariant": True, "autotune": False},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
@@ -167,11 +166,11 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             inputs[2],
             inputs[3],
             inputs[4],
@@ -180,7 +179,7 @@ def _chunk_gdn_gradients(
             impl="fused",
         )
         grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
-            output, inputs, grad_output
+            output_BTHV, inputs, grad_output
         )
         return grad_q, grad_k, grad_v, grad_g, grad_beta
 
@@ -338,11 +337,11 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        normalized_q = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             xv_BTHV,
             g_BTH,
             beta_BTH,
@@ -351,7 +350,7 @@ class GDNKernel(Module):
             impl="fused",
             kernel_options=chunk_kernel_options(xq_BTHK),
         )
-        return output.squeeze(0)
+        return output_BTHV.squeeze(0)
 
 
 class InnerGDN(InnerAttention):

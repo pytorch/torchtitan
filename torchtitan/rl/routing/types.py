@@ -34,9 +34,6 @@ class RoutingCandidate(ABC):
 class RoutingContext:
     """Routing metadata for one generation request."""
 
-    estimated_cost: int = 1
-    """Estimated request cost used by load-aware routing strategies."""
-
     session_id: str | None = None
     """Stable session key consumed only by sticky routing strategies; other
     strategies ignore it. ``None`` means the request is unpinned and uses fallback

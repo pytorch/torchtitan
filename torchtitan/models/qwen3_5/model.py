@@ -15,13 +15,12 @@ import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
     spmd_local_context,
 )
 from torchtitan.models.base.module import Module
@@ -31,12 +30,11 @@ from torchtitan.models.common.attention import (
     AttentionMetadata,
     AttentionMetadataMap,
     FlexAttentionMetadata,
-    LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -50,6 +48,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicate_to_residual,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
@@ -282,9 +281,20 @@ class Qwen35TransformerBlock(TransformerBlock):
         )(x_TD, h_TD)
 
 
-class Qwen35Model(MultimodalModel):
+class Qwen35Model(Decoder):
+    """Qwen3.5 language model with hybrid attention.
+
+    Key architectural features:
+    - Hybrid attention: 75% GatedDeltaNet (linear) + 25% full attention
+    - Output gating on full attention: ``attn_out * sigmoid(gate)``
+    - Partial RoPE: only first ``rotary_dim`` elements get positional encoding
+    - OffsetRMSNorm: ``(1 + weight) * norm(x)`` with zero-init weight
+    - MoE variant: routed experts + shared expert with sigmoid gate
+
+    ``Qwen35MultimodalModel`` adds the vision encoder.
+    """
+
     state_dict_adapter_cls = Qwen35StateDictAdapter
-    multimodal_encoder_fqns = ("vision_encoder",)
 
     @classmethod
     def _register_optimizer_hooks(
@@ -296,55 +306,10 @@ class Qwen35Model(MultimodalModel):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
         register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
-    pipeline_first_stage_module_fqns = ("vision_encoder",)
-
-    """Qwen3.5: Multimodal model with hybrid attention.
-
-    Combines a hybrid decoder (GatedDeltaNet linear attention + full
-    attention with output gating and partial RoPE) with a Vision
-    Transformer encoder for multimodal understanding.
-
-    Key architectural features:
-    - Hybrid attention: 75% GatedDeltaNet (linear) + 25% full attention
-    - Output gating on full attention: ``attn_out * sigmoid(gate)``
-    - Partial RoPE: only first ``rotary_dim`` elements get positional encoding
-    - OffsetRMSNorm: ``(1 + weight) * norm(x)`` with zero-init weight
-    - MRoPE: 3D (temporal/height/width) position IDs for multimodal batches;
-      text batches use the plain 1D positions
-    - MoE variant: routed experts + shared expert with sigmoid gate
-
-    MRoPE positions (shape ``(num_tokens, 3)``) are built by the dataloader as
-    ``mrope_positions``. After building the attention masks from the 2D
-    ``positions``, ``preprocess_inputs`` picks which one the RoPE layers see:
-    ``mrope_positions`` when present (multimodal), else the 2D ``positions`` --
-    the chosen tensor overwrites the single ``positions`` input. This keeps RoPE
-    consistent across every pipeline stage even though the raw vision inputs
-    (``pixel_values``/``grid_thw``) only reach the first stage. The per-layer
-    MRoPE dispatches on the position rank.
-
-    Forward pass flow::
-
-        forward(tokens, pixel_values, grid_thw, positions, ...)
-          │
-          ├─ _prepare_multimodal_embeds
-          │    ├─ tok_embeddings(tokens)              → text embeddings
-          │    ├─ _get_vision_embeds(pixel_values)     → vision embeddings
-          │    │    └─ vision_encoder(pixel_values)     → merge patches
-          │    ├─ get_vision_positions              → locate vision regions
-          │    └─ _scatter_vision_embeds                → scatter into text sequence
-          │
-          └─ transformer layers (hybrid), each given ``positions`` (3D or 2D)
-               └─ for each layer:
-                    ├─ full attention (every Nth):  QK-norm → partial RoPE → SDPA → gate
-                    │    (the layer's MRoPE builds the cos/sin cache from positions)
-                    └─ GatedDeltaNet (others):      Conv1d → gated delta rule → gated norm
-    """
-
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config):
+    class Config(Decoder.Config):
         # pyrefly: ignore [bad-override]
         layers: list[Qwen35TransformerBlock.Config]
-        vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=[
@@ -384,33 +349,50 @@ class Qwen35Model(MultimodalModel):
                     )
         super().__init__(config)
 
-        self.vision_encoder = (
-            config.vision_encoder.build() if config.vision_encoder is not None else None
-        )
-        self.spatial_merge_size = (
-            config.vision_encoder.spatial_merge_size
-            if config.vision_encoder is not None
-            else None
-        )
 
-    def parallelize(
-        self,
-        *,
-        parallelism_context: ParallelismContext,
-        precision: PrecisionConfig,
-        parallelism: ParallelismConfig,
-        local_compile: LocalCompileConfig,
-        activation_remat: ActivationRematConfig | None,
-        dump_folder: str,
-    ) -> Qwen35Model:
-        return super().parallelize(
-            parallelism_context=parallelism_context,
-            precision=precision,
-            parallelism=parallelism,
-            local_compile=local_compile,
-            activation_remat=activation_remat,
-            dump_folder=dump_folder,
-        )
+class Qwen35MultimodalModel(Qwen35Model, MultimodalModel):
+    """Qwen3.5 with its vision encoder.
+
+    MRoPE: 3D (temporal/height/width) position IDs for multimodal batches;
+    text batches use the plain 1D positions.
+
+    MRoPE positions (shape ``(num_tokens, 3)``) are built by the dataloader as
+    ``mrope_positions``. After building the attention masks from the 2D
+    ``positions``, ``preprocess_inputs`` picks which one the RoPE layers see:
+    ``mrope_positions`` when present (multimodal), else the 2D ``positions`` --
+    the chosen tensor overwrites the single ``positions`` input. This keeps RoPE
+    consistent across every pipeline stage even though the raw vision inputs
+    (``pixel_values``/``grid_thw``) only reach the first stage. The per-layer
+    MRoPE dispatches on the position rank.
+
+    Forward pass flow::
+
+        forward(tokens, pixel_values, grid_thw, positions, ...)
+          |
+          +- _prepare_multimodal_embeds
+          |    +- tok_embeddings(tokens)            -> text embeddings
+          |    +- get_vision_embeds(pixel_values)   -> vision embeddings
+          |    |    +- vision_encoder(pixel_values) -> merge patches
+          |    +- get_vision_positions              -> locate vision regions
+          |    +- scatter_vision_embeds             -> scatter into text sequence
+          |
+          +- transformer layers (hybrid), each given ``positions`` (3D or 2D)
+               +- for each layer:
+                    +- full attention (every Nth):  QK-norm -> partial RoPE -> SDPA -> gate
+                    |    (the layer's MRoPE builds the cos/sin cache from positions)
+                    +- GatedDeltaNet (others):      Conv1d -> gated delta rule -> gated norm
+    """
+
+    multimodal_encoder_fqns = ("vision_encoder",)
+    pipeline_first_stage_module_fqns = ("vision_encoder",)
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Qwen35Model.Config, MultimodalModel.Config):
+        vision_encoder: Qwen35VisionEncoder.Config
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.vision_encoder = config.vision_encoder.build()
 
     def preprocess_inputs(
         self,
@@ -439,7 +421,14 @@ class Qwen35Model(MultimodalModel):
         if parallelism_context.cp_enabled and self.tok_embeddings is not None:
             special_tokens = input_dict.get("special_tokens")
             pixel_values = input_dict.get("pixel_values")
-            if pixel_values is not None:
+            # Under CP, give each token its row in the image embeddings by counting the
+            # placeholder tokens (a block of rows per placeholder run, in order), unless the
+            # batch provides the rows: the RL batcher encodes each distinct image once and
+            # points every run that shows it at the same rows, which counting would not.
+            if (
+                pixel_values is not None
+                and "image_vision_bank_indices_T" not in input_dict
+            ):
                 if special_tokens is None or "image_id" not in special_tokens:
                     raise ValueError(
                         "pixel_values require special_tokens with an 'image_id' entry."
@@ -507,13 +496,6 @@ class Qwen35Model(MultimodalModel):
         input_dict = annotate_input_spmd_types(
             parallelism_context, input_dict, input_shardings
         )
-        # Plain-tensor inputs are typed above; nested GDN metadata is annotated
-        # separately.
-        attention_metadata = input_dict.get("attention_metadata")
-        if attention_metadata is not None:
-            for metadata in attention_metadata.values():
-                if isinstance(metadata, LinearAttentionMetadata):
-                    metadata.annotate_spmd_types()
 
         loss_kwargs = {name: input_dict.pop(name) for name in loss_kwargs}
         inputs = input_dict.pop("input")
@@ -524,7 +506,7 @@ class Qwen35Model(MultimodalModel):
             input_dict["aux_loss_denominators"] = global_routing_token_counts
         return inputs, labels, input_dict, loss_kwargs
 
-    def _get_vision_embeds(
+    def get_vision_embeds(
         self,
         pixel_values: torch.Tensor,
         *,
@@ -540,8 +522,6 @@ class Qwen35Model(MultimodalModel):
             vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
             num_tokens_per_item: (num_items,) actual token count per item
         """
-        if self.vision_encoder is None:
-            raise ValueError("Vision inputs were provided without a vision encoder.")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 
@@ -571,17 +551,18 @@ class Qwen35Model(MultimodalModel):
             grid_thw: Grid dimensions for images or None
             grid_thw_videos: Grid dimensions for videos or None
             special_tokens: Special token definitions
-            image_vision_bank_indices_T: Image-bank rows for local CP tokens
-            video_vision_bank_indices_T: Video-bank rows for local CP tokens
+            image_vision_bank_indices_T: Each local token's row in the image embeddings,
+                -1 for text; built from placeholders under CP, or provided by the batch
+                (several placeholder runs may share rows). None: placed by special_tokens.
+            video_vision_bank_indices_T: Same for videos.
 
         Returns:
             ``(num_tokens, dim)`` embeddings with vision tokens scattered in.
         """
-        inputs_embeds = (
-            self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
-        )
-        if self.vision_encoder is None:
-            return inputs_embeds
+        inputs_embeds = self.tok_embeddings(tokens)
+        # The vision scatter writes arbitrary positions, so every TP rank needs
+        # the full sequence.
+        inputs_embeds = maybe_gather_tp_input(self.tok_embeddings, inputs_embeds)
 
         # TODO: Configure the job-wide modality set from the dataset so
         # single-modality jobs can avoid the second encoder call.
@@ -593,14 +574,17 @@ class Qwen35Model(MultimodalModel):
                 grid_thw=(1, grid_size, grid_size),
                 device=inputs_embeds.device,
             )
-        vision_embeds, num_tokens = self._get_vision_embeds(
+        vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values, grid_thw=grid_thw
         )
+        # The encoder output is TP- and CP-invariant; the decoder consumes it in
+        # TP-sharded computation on CP-sharded tokens, so its gradient is summed
+        # across both. Converting TP first reduces CP first in backward.
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if image_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
-            if special_tokens is None:
-                raise ValueError("special_tokens is required for image inputs")
             if image_vision_bank_indices_T is not None:
                 inputs_embeds = gather_vision_embeds(
                     inputs_embeds,
@@ -608,6 +592,8 @@ class Qwen35Model(MultimodalModel):
                     vision_bank_indices_T=image_vision_bank_indices_T,
                 )
             else:
+                if special_tokens is None:
+                    raise ValueError("special_tokens is required for image inputs")
                 image_positions = get_vision_positions(
                     tokens, num_tokens, special_tokens["image_id"]
                 )
@@ -626,14 +612,14 @@ class Qwen35Model(MultimodalModel):
                 grid_thw=(1, grid_size, grid_size),
                 device=inputs_embeds.device,
             )
-        vision_embeds, num_tokens = self._get_vision_embeds(
+        vision_embeds, num_tokens = self.get_vision_embeds(
             pixel_values_videos, grid_thw=grid_thw_videos
         )
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.TP)
+        vision_embeds = invariant_to_replicate(vision_embeds, MeshAxisName.CP)
         if video_is_dummy:
             inputs_embeds = add_zero_vision_dependency(inputs_embeds, vision_embeds)
         else:
-            if special_tokens is None:
-                raise ValueError("special_tokens is required for video inputs")
             if video_vision_bank_indices_T is not None:
                 inputs_embeds = gather_vision_embeds(
                     inputs_embeds,
@@ -641,6 +627,8 @@ class Qwen35Model(MultimodalModel):
                     vision_bank_indices_T=video_vision_bank_indices_T,
                 )
             else:
+                if special_tokens is None:
+                    raise ValueError("special_tokens is required for video inputs")
                 video_positions = get_vision_positions(
                     tokens, num_tokens, special_tokens["video_id"]
                 )
@@ -690,28 +678,16 @@ class Qwen35Model(MultimodalModel):
                 {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
                 spmd.PartitionSpec(("dp", "cp"), None),
             )
+        if self.tok_embeddings is not None:
+            x = replicate_to_residual(x)
 
         # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
         # forward. The per-layer MRoPE dispatches on rank.
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            x = layer(
-                x,
-                (
-                    attention_metadata.get(type(layer.attention.inner_attention))
-                    if attention_metadata is not None
-                    else None
-                ),
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        x = self.norm(x) if self.norm is not None else x
-        if self._skip_lm_head:
-            return x
-        return self.lm_head(x) if self.lm_head is not None else x
+        return self.forward_embeddings(
+            x,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
