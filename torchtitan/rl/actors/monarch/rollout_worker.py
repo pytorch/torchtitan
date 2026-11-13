@@ -29,6 +29,7 @@ class RolloutWorkerActor(Actor):
         self,
         *,
         worker_config: BaseRolloutWorker.Config,
+        worker_kwargs: dict[str, Any],
         num_threads: int,
         structured_logger_init_fn: functools.partial[None] | None,
     ) -> None:
@@ -39,7 +40,7 @@ class RolloutWorkerActor(Actor):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
-        self._worker = worker_config.build()
+        self._worker = worker_config.build(**worker_kwargs)
 
     @concurrent_endpoint
     async def setup_async(
