@@ -209,8 +209,10 @@ class TestEmbedding(DTensorTestBase):
                 )
                 expected = reference(tokens)
                 expected.sum().backward()
+                # The masked vocab-shard lookup, before the reduction that
+                # HFVocabParallelEmbedding.forward adds.
                 with set_current_spmd_mesh(mesh):
-                    partial_output = embedding(tokens)
+                    partial_output = embedding._lookup_vocab_shard(tokens)
                 partial_output.sum().backward()
                 output = partial_output.detach().clone()
                 dist.all_reduce(output, group=mesh.get_group("tp"))
