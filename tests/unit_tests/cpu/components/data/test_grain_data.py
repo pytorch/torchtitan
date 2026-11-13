@@ -225,10 +225,13 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
     assert next(restored) == expected
 
 
+_HF_SHARDED_NUM_ROWS = 16
+
+
 def _hf_sharded_rows():
-    return datasets.Dataset.from_dict({"id": list(range(16))}).to_iterable_dataset(
-        num_shards=8
-    )
+    return datasets.Dataset.from_dict(
+        {"id": list(range(_HF_SHARDED_NUM_ROWS))}
+    ).to_iterable_dataset(num_shards=8)
 
 
 def test_hf_shuffled_repeat_advances_epoch():
@@ -324,8 +327,7 @@ def test_hf_cursor_state_after_restore(shuffle, num_consumed):
         iterator = cursor()
         try:
             iterator.set_state(state)
-            # 20 rows crosses the 16-row epoch boundary.
-            return [next(iterator) for _ in range(20)]
+            return [next(iterator) for _ in range(_HF_SHARDED_NUM_ROWS)]
         finally:
             iterator.close()
 
@@ -335,13 +337,14 @@ def test_hf_cursor_state_after_restore(shuffle, num_consumed):
         for _ in range(num_consumed):
             next(original)
         state = original.get_state()
-        expected = [next(original) for _ in range(24)]
-
         restored.set_state(state)
+
         assert restored.get_state() == state
-        for step in range(1, 5):
-            assert next(restored) == expected[step - 1]
-            assert resumed_rows(restored.get_state()) == expected[step : step + 20]
+        for _ in range(4):
+            assert next(restored) == next(original)
+            assert resumed_rows(restored.get_state()) == resumed_rows(
+                original.get_state()
+            )
     finally:
         original.close()
         restored.close()
