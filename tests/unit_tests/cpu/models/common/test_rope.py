@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
@@ -20,6 +21,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
+    _RotatePairs,
     _yarn_inv_freq,
     ComplexRoPE,
     CosSinRoPE,
@@ -298,6 +300,27 @@ class TestYaRNScaling(unittest.TestCase):
         )
         expected_softmax_scale = attention.qk_head_dim**-0.5 * expected_mscale**2
         self.assertAlmostEqual(attention.softmax_scale, expected_softmax_scale)
+
+
+class TestRotatePairsOffCuda(unittest.TestCase):
+    def test_bf16_off_cuda_reads_halves_and_matches_complex(self):
+        # The int32 pair views are CUDA-only; a CPU bf16 input must not take them.
+        torch.manual_seed(0)
+        x = torch.randn(4, 2, 8, dtype=torch.bfloat16)
+        angle = torch.randn(4, 1, 4)
+        cos, sin = angle.cos(), angle.sin()
+
+        graph = make_fx(_RotatePairs.rotate)(x, cos, sin).graph
+        dtypes = {n.meta["val"].dtype for n in graph.nodes if "val" in n.meta}
+        self.assertNotIn(torch.int32, dtypes)
+
+        out = _RotatePairs.rotate(x, cos, sin)
+        x_complex = torch.view_as_complex(x.float().unflatten(-1, (-1, 2)))
+        expected = torch.view_as_real(
+            x_complex * torch.polar(torch.ones_like(angle), angle)
+        )
+        self.assertEqual(out.dtype, torch.bfloat16)
+        torch.testing.assert_close(out, expected.flatten(-2).bfloat16())
 
 
 class TestPerLayerRoPECache(unittest.TestCase):
