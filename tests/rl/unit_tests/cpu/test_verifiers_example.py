@@ -59,7 +59,7 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
     config = VerifiersTaskDataset.Config(
         verifiers_taskset=data.VerifiersMathTasksetConfig(
-            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            id="torchtitan_verifiers_dapo_math",
             dataset="dapo_math",
         ),
         seed=7,
@@ -83,7 +83,7 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
     monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
     dataset = VerifiersTaskDataset.Config(
         verifiers_taskset=data.VerifiersMathTasksetConfig(
-            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            id="torchtitan_verifiers_dapo_math",
             dataset="dapo_math",
         ),
         num_tasks=2,
@@ -92,6 +92,20 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
 
     task_indices = [next(dataset).verifiers_task_data["idx"] for _ in range(4)]
     assert task_indices == [0, 1, 0, 1]
+
+
+def test_verifiers_task_dataset_rejects_a_config_its_id_does_not_load() -> None:
+    """A config subclass that kept its parent's id would run the parent's Taskset."""
+
+    class SubclassMathTasksetConfig(data.VerifiersMathTasksetConfig):
+        pass
+
+    with pytest.raises(ValueError, match="SubclassMathTasksetConfig"):
+        VerifiersTaskDataset.Config(
+            verifiers_taskset=SubclassMathTasksetConfig(
+                id="torchtitan_verifiers_dapo_math", dataset="dapo_math"
+            )
+        )
 
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
@@ -107,7 +121,6 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
         config.environment.taskset
         == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
-    assert config.local_taskset_module == data.__name__
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:

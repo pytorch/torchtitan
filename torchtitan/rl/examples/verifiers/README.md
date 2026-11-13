@@ -1,19 +1,25 @@
 # Verifiers integration
 
-This directory contains the optional bridge between TitanRL and
-[Verifiers](https://github.com/PrimeIntellect-ai/verifiers). Other TitanRL
-recipes do not import or require Verifiers.
+The optional bridge between TitanRL and [Verifiers](https://github.com/PrimeIntellect-ai/verifiers),
+pinned to Verifiers 0.4.0 (`verifiers.v1` API). Other TitanRL recipes don't import Verifiers.
 
-The ownership boundary is:
+- TitanRL picks the tasks, serves the model calls and trains on the scored groups.
+- Verifiers runs the env, the agent and its tools, the runtime and the task reward.
+- The code here converts tasks and traces between the two.
 
-- TitanRL loads samples, schedules rollout groups, routes generation, tracks
-  policy versions, computes advantages, and trains the policy.
-- Verifiers runs the environment, agent or tool loop, runtime, and task reward.
-- The adapter converts samples and traces between the two systems.
+Words used below:
 
-Reusable bridge code lives alongside this README. Each experiment has its own
-package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
-[`terminal_bench/`](./terminal_bench) (multi-turn terminal agent on Harbor tasks).
+```text
+taskset   the list of tasks, e.g. Terminal-Bench's
+harness   the program that runs the agent, e.g. Terminus
+env       a taskset plus the agents that solve it
+runtime   where an agent runs, e.g. a Docker container or a local process
+trace     Verifiers' record of one agent's run: each message and model call
+group     the rollouts of one task, scored together
+```
+
+Examples, each with its own README and dependencies. Start with [`dapo_math/`](./dapo_math):
+single-turn math, no sandbox. [`terminal_bench/`](./terminal_bench) is a multi-turn terminal agent.
 
 ## Integration flow
 
@@ -24,8 +30,6 @@ A diagram of one group: the `VerifiersRollouter` docstring in [`rollouter.py`](.
 2. [`env_server.py`](./env_server.py) runs the Verifiers env server as a local process on the
    controller host. The server runs the agents in the configured runtime, e.g. `SubprocessConfig`
    or `DockerConfig`. With a pool, its pool workers run them. The Terminal-Bench recipe runs 16.
-   The server and each of its pool workers first run [`worker_setup.py`](./worker_setup.py). Every
-   worker imports that module, so it must not import torch.
 3. [`rollouter.py`](./rollouter.py) runs each group in a rollout worker process
    (`VerifiersRolloutWorker`), like TitanRL's own rollout groups. The worker sends the task to the
    env server (a plain dict, msgpack over ZMQ) and turns the trainable agent's trace of each
@@ -35,51 +39,66 @@ A diagram of one group: the `VerifiersRollouter` docstring in [`rollouter.py`](.
    `generate` on it. Each rollout worker runs its own, on localhost. The server also records what
    Verifiers' traces leave out: the policy versions and the generation metrics.
 
-The training dataset is the single source of the environment taskset config.
-`VerifiersRollouter.Config` copies it into the environment-server config, so an
-experiment must not configure the same taskset a second time.
-
 For CPU-heavy envs, raise the env server's pool (`verifiers_env_server.serve.pool`, e.g.
 `vf.StaticPoolConfig(num_workers=16)`). At high rollout rates, also raise the
 rollouter's `worker_pool_size`: each rollout worker decodes one trace at a time.
 
-## Add an experiment
+## Taskset ids
 
-Create one package per task, with its own dependency list:
+Verifiers loads each taskset, harness or env by id: the name of a Python package. It imports the
+package and takes the one class of that kind in its `__all__`:
 
 ```text
-verifiers/
-  data.py
-  env_server.py
-  generation_server.py
-  rollouter.py
-  worker_setup.py
-  my_task/
-    __init__.py
-    recipe module
-    data.py
-    requirements.txt
-    rollouter.py
+id "torchtitan_verifiers_terminal_bench"
+  import torchtitan_verifiers_terminal_bench
+  __all__ = ["HarborEnv", "TerminalBenchTerminusHarness", "TerminalTaskset"]
+  taskset -> TerminalTaskset, harness -> TerminalBenchTerminusHarness,
+  env -> HarborEnv (re-exported from Verifiers)
 ```
 
-1. In `my_task/data.py`, define the Verifiers `Taskset` and `TasksetConfig`.
-2. In `my_task/rollouter.py`, put that config in
-   `VerifiersTaskDataset.Config.verifiers_taskset`. Configure the agent,
-   harness, runtime, and worker pool, but leave
-   `verifiers_env_server.environment.taskset` unset; `VerifiersRollouter`
-   derives it from the training dataset.
-3. In `recipe module`, select the rollouter from `Controller.Config`.
-4. Place the module under `torchtitan/rl/examples` or pass its fully qualified
-   module path to `--module`.
+Leave the harness or the env unset, and Verifiers takes the one in the taskset's package. If there
+is none, it uses its defaults: the `bash` harness and `SingleAgentEnv`.
 
-Run the recipe with:
+Outside this repo, any top-level package name works as the id. Don't reuse a built-in Verifiers
+plugin's name (e.g. `harbor`, `bash`, `codex`): Verifiers looks for its own first.
+
+Configs carry ids, not classes, so each of these processes imports the package:
+the controller, the env server and its pool workers.
+
+`pyproject.toml` ships every `torchtitan_verifiers_*` package. An editable install
+(`pip install -e . --no-deps`) sees only the packages that existed when it ran: rerun it after you
+add or pull a new one.
+
+## Add an experiment
+
+For a task `my_task`:
+
+```text
+torchtitan/rl/examples/verifiers/my_task/
+  __init__.py
+  data.py                                  # your Taskset and its TasksetConfig
+  requirements.txt                         # its own dependencies
+torchtitan_verifiers_my_task/__init__.py   # __all__ re-exports your Taskset
+torchtitan_recipes/rl/verifiers_my_task.py # recipe functions that return a Controller.Config
+```
+
+Keep the `torchtitan_verifiers_` prefix: `pyproject.toml`, the PR labeler and the reviewer routing
+match it.
+
+Start the recipe from a copy of
+[`verifiers_dapo_math.py`](../../../../torchtitan_recipes/rl/verifiers_dapo_math.py). Change three
+things:
+
+1. In both `VerifiersTaskDataset.Config`s (training and validation), set your `TasksetConfig`, with
+   `id="torchtitan_verifiers_my_task"`.
+2. Set your agent, harness and runtime in `verifiers_env_server.environment`. Leave its
+   `taskset` unset: `VerifiersRollouter` copies it from the training dataset.
+3. Set `ValidationConfig.steps` for your validation set: the recipe validates on 30 tasks.
+
+Then run:
 
 ```bash
 python -m torchtitan.rl.train \
-  --module verifiers.my_task \
-  --config <config-name>
+  --module torchtitan_recipes.rl.verifiers_my_task \
+  --config <recipe function name>
 ```
-
-See [DAPO Math](./dapo_math) for a complete single-turn example and
-[Terminal-Bench](./terminal_bench) for a multi-turn agent example. This
-integration pins Verifiers 0.4.0 and uses its `verifiers.v1` API.
