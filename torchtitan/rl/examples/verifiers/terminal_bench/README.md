@@ -91,11 +91,27 @@ There is no CLI flag for the path.
 | Config | Model | GPUs |
 | --- | --- | --- |
 | `rl_grpo_qwen35_9b_terminal_bench` | Qwen3.5-9B | 8 trainer, 8 generators x 1 |
-| `rl_grpo_qwen35_35b_a3b_terminal_bench` | Qwen3.5-35B-A3B | 8 trainer, 2 generators x 4 |
+| `rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe` | Qwen3.5-35B-A3B | 4 trainer, 4 generators x 4 (DP 4 x EP 4, Dist-MoE) |
 
-`torchtitan.rl.train` places every process on the local host, so either recipe needs a
-16-GPU host as written; there is no multi-host launcher example yet. The 35B-A3B recipe
-has not been run end to end.
+`torchtitan.rl.train` places every process on the local host, so the 9B recipe needs a
+16-GPU host as written. The 35B-A3B recipe uses Dist-MoE, which needs SM100+ GPUs. It needs
+20 GPUs on several hosts, and its 4-GPU trainer holds 140 GB of model state per GPU, so it
+needs 288 GB GPUs (GB300, B300). On B200 (180 GB), set the trainer's
+`data_parallel_shard_degree=4` (8 GPUs). Wrap it in
+`MonarchControllerWithLauncher.Config.from_controller_config` with a launcher, as
+`rl_grpo_qwen3_0_6b_flex_slurm` in `torchtitan_recipes/rl/alphabet_sort.py` does. It has not
+been run end to end.
+
+With the Slurm launcher, host 0 runs the 4-GPU trainer and every CPU process. On 4-GPU hosts
+(GB300), each 4-GPU generator gets its own host: 5 hosts. On 8-GPU hosts, generator_0 shares host 0
+and the other three take two more hosts: 3 hosts, 4 GPUs idle.
+
+With the default local Docker runtime, every rollout in flight is a container on the
+controller host, and a task asks for at least 1 CPU and 2 GB (21 of the 89 Terminal-Bench
+2.1 tasks ask for 4-8 GB). The 9B recipe keeps up to 1,536 training rollouts in flight, plus 89
+while a validation runs: at least 1,625 CPUs and 3,250 GB of RAM on one host. The 35B-A3B recipe
+keeps up to 1,280, plus the same 89: 1,369 CPUs and 2,738 GB. For runs this size, set a remote
+sandbox as the `runtime` (below).
 
 ## Datasets
 

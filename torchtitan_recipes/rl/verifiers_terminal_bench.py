@@ -28,8 +28,11 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms
+from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -69,7 +72,7 @@ from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.losses import DAPOLoss, GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 
@@ -276,31 +279,34 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     )
 
 
-def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
+def rl_dapo_qwen35_35b_a3b_terminal_bench_dist_moe() -> Controller.Config:
     """Qwen3.5-35B-A3B: train on TMax (``local/tmax@v1``), validate on Terminal-Bench 2.1.
 
-    16 GPUs: 8 trainer (FSDP=4, TP=2, EP=8) and 2 generators of 4 GPUs
-    (DP=2, TP=2, EP=4).
+    Dist-MoE routed experts in both roles, so it needs SM100+ GPUs. The 4-GPU trainer
+    needs 288 GB GPUs (GB300, B300). A B200 (180 GB) would keep only about 40 GB per GPU
+    for activations. There, set the trainer's ``data_parallel_shard_degree=4`` (8 GPUs, EP 4
+    and the scratch factor unchanged).
 
-    The layout is constrained from both sides. The model has 2 KV heads, so TP
-    is at most 2 in either role. Trainer EP must be at least TP, divide the 256
-    experts and divide ``dp_shard * tp``; EP=8 spans the whole sparse region, so
-    each rank holds 32 experts. The generator's DP axis only supplies ranks for
-    expert parallelism, so its EP equals DP x TP; 256 experts over 4 ranks is 64
-    each.
+    20 GPUs on GB300 (4 GPUs per host): 5 hosts. SlurmLauncher runs the controller on the
+    trainer's host.
+        trainer:     4 GPUs, FSDP 2 x TP 2 x EP 4. Model state is 35.1B x 16 B (fp32
+                     weights, gradients, AdamW m and v) / 4 = 140 GB per GPU.
+        generators:  4 engines, one 4-GPU host each, DP 4 x EP 4. Each GPU holds 64 of
+                     the 256 experts: (2.9B non-routed + 32.2B routed / 4) x 2 B (bf16)
+                     = 22 GB of weights per GPU. The rest holds the KV cache.
 
-    The trainer keeps fp32 master weights, the default. That is about 70 GB of
-    model states per GPU across 8 GPUs before activations, so it needs GPUs with
-    well over 80 GB of memory.
+    Terminal-Bench is generation-bound: a rollout makes up to 120 model calls in a row,
+    with a sandbox command between each, while the trainer processes all of a rollout's
+    tokens in parallel. The trainer state fits one 4-GPU host, so the other 16 GPUs
+    generate.
 
-    Generator CUDA graphs are off because of the standard all-to-all MoE token
-    dispatcher, not DistMoE. That dispatcher copies the split sizes to the host,
-    which CUDA graph capture does not allow
-    ("Cannot copy between CPU and CUDA tensors during CUDA graph capture"). Turn
-    capture back on together with a dispatcher that avoids the host read, such as
-    HybridEP with ``non_blocking_capacity_factor``.
+    With EP 4 a decode step reads at most 64 experts' weights per GPU and MoE layer,
+    not up to 256. The cost: an expert all-to-all in every MoE layer, and the 4 DP
+    ranks step together, each padded to the largest rank's tokens. Dist-MoE's
+    all-to-all keeps split sizes on the GPU, so the engines still run FULL CUDA graphs.
 
-    TODO: migrate to DistMoE and capture generator CUDA graphs in ``FULL`` mode.
+    The model has 2 KV heads, so TP is at most 2. Trainer EP must be at least TP and
+    divide both the 256 experts and FSDP x TP.
     """
     max_context_length = 65536
     max_output_tokens = 16384
@@ -311,16 +317,15 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         target_offpolicy_steps=4,
         validation=ValidationConfig(steps=-1),
     )
-    # TODO: update to distMoE model config
     trainer_parallelism = ParallelismConfig(
         data_parallel_replicate_degree=1,
-        data_parallel_shard_degree=4,
+        data_parallel_shard_degree=2,
         tensor_parallel_degree=2,
-        expert_parallel_degree=8,
+        expert_parallel_degree=4,
     )
     generator_parallelism = InferenceParallelismConfig(
-        data_parallel_degree=2,
-        tensor_parallel_degree=2,
+        data_parallel_degree=4,
+        tensor_parallel_degree=1,
         expert_parallel_degree=4,
     )
     trainer_model, generator_model = build_rl_model_configs(
@@ -331,7 +336,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    return Controller.Config(
+    config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
@@ -350,7 +355,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 thinking_retention="all",
             )
         ),
-        num_generators=2,
+        num_generators=4,
         generator_router=InterGeneratorRouter.Config(
             strategy=StickySessionRoutingStrategy.Config(
                 fallback_strategy=LeastLoadedRoutingStrategy.Config()
@@ -387,6 +392,10 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=max_context_length,
             ),
             parallelism=trainer_parallelism,
+            # 4.0 = EP x min(top-k, local experts) / top-k = 4 x 8 / 8: the most one rank
+            # can receive, as a multiple of balanced routing. A rank that receives more
+            # rows than planned raises an error.
+            dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             activation_remat=FullActivationRematConfig(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
@@ -396,15 +405,24 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             ),
             loss=ChunkedLossWrapper.Config(
                 num_chunks=32,
-                loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(trainer_model)
+                loss_fn=DAPOLoss.Config(
+                    ratio_clip_low=0.2,
+                    ratio_clip_high=0.28,
+                    global_vocab_size=decoder_vocab_size(trainer_model),
                 ),
             ),
         ),
         generator=Generator.Config(
             model=generator_model,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             parallelism=generator_parallelism,
+            # 4.0 = EP x min(top-k, local experts) / top-k = 4 x 8 / 8: the most one rank
+            # can receive, as a multiple of balanced routing. A rank that receives more
+            # rows than planned raises an error, and vLLM's profiling dummy batch can
+            # route every token to one expert.
+            dist_moe_runtime=DistMoeRuntime.Config(
+                scratch_capacity_factor=4.0, inference=True
+            ),
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -413,6 +431,10 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             ),
         ),
     )
+    # Dist-MoE routed experts in both roles.
+    config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
+    config.generator = apply_transforms(config.generator, [DistMoeTransform()])
+    return config
 
 
 def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
