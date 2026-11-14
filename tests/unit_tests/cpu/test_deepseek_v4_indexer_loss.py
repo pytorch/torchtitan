@@ -110,9 +110,52 @@ class TestSparseIndexerLoss(unittest.TestCase):
                 torch.testing.assert_close(out, expected_out)
                 torch.testing.assert_close(lse, expected_lse)
                 teacher = self.loss()._teacher(
-                    self.q, self.compressed, indices, lse, cu
+                    self.q, self.compressed[:, None], indices, lse, cu
                 )
                 torch.testing.assert_close(teacher, expected_teacher)
+
+    def test_block_teacher_max_pools_grouped_head_probabilities(self):
+        num_heads, num_kv_heads, block, scale = 4, 2, 4, 8**-0.5
+        q, keys = torch.randn(13, num_heads, 8), torch.randn(13, num_kv_heads, 8)
+        for cu in (None, torch.tensor([0, 5, 5, 13], dtype=torch.int32)):
+            with self.subTest(packed=cu is not None):
+                offsets = [0, 13] if cu is None else cu.tolist()
+                indices = torch.full((13, 2), -1, dtype=torch.int32)
+                rows, lse = [], torch.empty(13, num_heads)
+                for token in range(13):
+                    start = offsets[bisect.bisect_right(offsets, token) - 1]
+                    complete = (token - start + 1) // block
+                    chosen = list(range(complete))[::-1][:2]
+                    indices[token, : len(chosen)] = torch.tensor(chosen)
+                    rows.append(
+                        [[start + b * block + j for j in range(block)] for b in chosen]
+                    )
+                    tail = list(range(start + complete * block, token + 1))
+                    attended = [r for blk in rows[-1] for r in blk] + tail
+                    for head in range(num_heads):
+                        logits = keys[attended, head // 2] @ q[token, head] * scale
+                        lse[token, head] = logits.logsumexp(0)
+                expected = torch.zeros(13, 2)
+                for token in range(13):
+                    for slot, block_rows in enumerate(rows[token]):
+                        mass = torch.zeros(block)
+                        for head in range(num_heads):
+                            logits = keys[block_rows, head // 2] @ q[token, head]
+                            mass += (logits * scale - lse[token, head]).exp()
+                        expected[token, slot] = mass.max() / num_heads
+                teacher = (
+                    SparseIndexerLoss.Config(
+                        coeff=0.01,
+                        softmax_scale=scale,
+                        num_heads=num_heads,
+                        compress_ratio=1,
+                        block_size=block,
+                        chunk_size=5,
+                    )
+                    .build()
+                    ._teacher(q, keys, indices, lse, cu)
+                )
+                torch.testing.assert_close(teacher, expected)
 
     def test_padding_gradient_and_metric_match_independent_kl(self):
         indices, cu = self.case(True)
@@ -135,7 +178,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
                 carrier = torch.randn_like(self.q, requires_grad=True)
                 out = loss(
                     self.q,
-                    self.compressed,
+                    self.compressed[:, None],
                     indices,
                     scores.masked_fill(indices < 0, -torch.inf),
                     lse,
@@ -168,9 +211,9 @@ class TestSparseIndexerLoss(unittest.TestCase):
         indices, cu = self.case(True)
         _, lse = self.kernel(indices, cu)
         loss = self.loss()
-        small = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        small = loss._teacher(self.q, self.compressed[:, None], indices, lse, cu)
         loss.chunk_size = 128
-        large = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        large = loss._teacher(self.q, self.compressed[:, None], indices, lse, cu)
         torch.testing.assert_close(small, large)
 
     def test_bfloat16_teacher_dot_products_accumulate_in_float32(self):
@@ -188,7 +231,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
             cu,
         )
         with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-            actual = self.loss()._teacher(q, compressed, indices, lse, cu)
+            actual = self.loss()._teacher(q, compressed[:, None], indices, lse, cu)
         torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
 
     def test_configuration_defaults_to_unweighted_kl(self):
