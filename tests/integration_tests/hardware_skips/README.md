@@ -1,15 +1,14 @@
 # Hardware-specific integration test skips
 
 This directory contains one TOML file per hardware backend (`cuda.toml`,
-`rocm.toml`, `xpu.toml`). Each file lists integration tests that must not run on
-that backend; a backend with no skips keeps an empty list.
-`tests/integration_tests/run_tests.py` reads the files from `_filter_tests`: a
+`rocm.toml`, `xpu.toml`), listing the integration tests that must not run on
+that backend. `tests/integration_tests/run_tests.py` reads these files: a
 matching test is dropped before anything is launched, and the skip is logged.
 
 ## File format
 
-The file name is for readability; the top-level key inside is the backend the
-skips apply to:
+The file name is for readability; the top-level key inside is what takes
+effect:
 
 ```toml
 # rocm.toml
@@ -21,47 +20,54 @@ rocm = [
 ]
 ```
 
-- A key aligns with `utils.device_type` (for example `xpu`). `cuda` and `rocm`
-  are special cases: because ROCm also reports `device_type == "cuda"`, they are
-  distinguished with `torch.version.hip`.
-- The value lists `test_name`s of `IntegrationTestDefinition` entries.
-- Reasons are trailing comments on the entry; an entry without a comment is
-  fine.
-- Skips match by test name, the same way `disabled` does.
-- Every `*.toml` file in this directory is loaded; additional backends can also
-  register a file through the entry point below.
+- A key aligns with `utils.device_type` (for example `xpu`).
+- `cuda` and `rocm` are special cases: ROCm also reports
+  `device_type == "cuda"`, so the two are distinguished with
+  `torch.version.hip`.
+- The value is the list of `test_name`s of `IntegrationTestDefinition` entries.
+- Every `*.toml` file in this directory is loaded; out-of-tree hardware
+  registers its own file as described below.
 
-## Registering skips from an out-of-tree device repo
+## How an out-of-tree device repo registers skips
 
-A device repo ships its own file(s) with the same schema and registers them.
-`register_hardware_skips` accepts either a single file or a directory; a
-directory loads every `*.toml` in it. Two ways, in order of preference:
+Out-of-tree hardware registers its skips through `register_hardware_skips`. A
+device repo is another repository that provides an additional device backend to
+torchtitan. `register_hardware_skips` accepts a single file or a directory
+(a directory loads every `*.toml` in it). There are two ways, in order of
+preference:
 
-### 1. Entry point (automatic)
+### 1. Entry point (automatic registration)
+
+A device repo adds the following to its `pyproject.toml`:
 
 ```toml
-# pyproject.toml of the device repo
 [project.entry-points."torchtitan.hardware_skips"]
-my_device = "my_device.tests:register_skips"
+example_hardware = "example_hardware.tests:register_skips"
 ```
 
-```python
-# my_device/tests.py
-from pathlib import Path
+It also needs to add a Python file that calls the registration function with the TOML
+file or directory it maintains:
 
+```python
+# example_hardware/tests.py
 from tests.integration_tests.hardware_skips import register_hardware_skips
 
 
 def register_skips() -> None:
-    register_hardware_skips(Path(__file__).parent / "hardware_skips")
+    register_hardware_skips(toml_file_path_or_dir)
 ```
 
 ### 2. Explicit call
 
-Call `register_hardware_skips(path_or_dir)` from the device repo before its
-runner calls `run_tests()`, i.e. before the test list is filtered.
+Call `register_hardware_skips` explicitly with the TOML file or directory you
+maintain. An in-repo example is
+`torchtitan/experiments/graph_trainer/tests/integration_tests.py`:
 
-Both ways use the same parser and the same schema; no runner change is needed.
+```python
+# torchtitan/experiments/graph_trainer/tests/integration_tests.py
+register_hardware_skips(Path(__file__).parent / "hardware_skips")
+run_tests(args, test_list)
+```
 
 ## Where a skip belongs
 
@@ -70,3 +76,8 @@ Both ways use the same parser and the same schema; no runner change is needed.
 | `hardware_skips/<backend>.toml` | permanent, backend-wide skips | this directory |
 | `disabled=True` | skips not caused by hardware coupling, and temporary one-off skips | the definition |
 | `--exclude a,b,c` | skipping a few cases for one invocation | the command line |
+
+`--exclude` is already used in-repo when one CI job drops a few cases:
+[scripts/ci/pytorch_ci_test_runner.sh:37](../../../scripts/ci/pytorch_ci_test_runner.sh#L37),
+[.github/scripts/validate_release_gpu.sh:382](../../../.github/scripts/validate_release_gpu.sh#L382),
+[.github/scripts/run_8xgpu_integration_tests.sh:81](../../../.github/scripts/run_8xgpu_integration_tests.sh#L81).
