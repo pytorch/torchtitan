@@ -21,6 +21,20 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 | CPU | - | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
 | NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
 
+The H100 and B200 workflows separate unit/numerics checks from full GRPO runs:
+
+| Coverage | PR trigger | Scheduled runs on `main` |
+| --- | --- | --- |
+| H100 unit/numerics (`unit_test_gpu_rl_h100.yaml`) | `ciflow/rl` | Every 12 hours; also runs on pushes to `main` |
+| B200 unit/numerics (`unit_test_gpu_rl_b200.yaml`) | `ciflow/b200` | Daily |
+| H100/B200 GRPO integration (`integration_test_rl_h100.yaml`, `integration_test_rl_b200.yaml`) | Manual only | Daily |
+
+For example, a PR labeled `ciflow/rl` runs H100 Kimi K3 parity and generator
+CUDA-graph checks alongside the CPU/A10G RL suites. To validate the full GRPO
+loop before merging, select the PR branch with **Run workflow** in the relevant
+H100 or B200 integration workflow. The standalone checks still use H100/B200
+runners because their kernels require that hardware.
+
 ## Model support
 
 Supported entries completed a two-step end-to-end RL run with a representative

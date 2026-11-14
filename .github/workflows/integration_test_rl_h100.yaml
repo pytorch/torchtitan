@@ -1,16 +1,12 @@
 name: RL H100 Integration Tests
 
 on:
-  push:
-    branches: [ main ]
-    tags:
-      - ciflow/rl/*
   schedule:
-    # Runs every 12 hours
-    - cron: '0 */12 * * *'
+    - cron: '0 0 * * *'
+  workflow_dispatch:
 
 concurrency:
-  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  group: integration-test-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -30,7 +26,7 @@ jobs:
       gpu-arch: cuda
       is-experimental: true
 
-  rl-kimi-k3:
+  rl-h100:
     needs: set-matrix
     if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
@@ -78,17 +74,6 @@ jobs:
         sudo chown -R "$(id -u):$(id -g)" "$RUNNER_ARTIFACT_DIR"
         OUTPUT_DIR="$RUNNER_ARTIFACT_DIR/rl"
         mkdir -p "$OUTPUT_DIR"
-
-        RL_TEST_DUMP_FOLDER="$OUTPUT_DIR" torchrun --nproc-per-node=1 -m pytest \
-          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
-        # TODO: the test_generator_dp_cudagraph.py tests below are unit tests, not
-        # integration tests. They run here because FULL CUDA graphs of the MoE debug
-        # models need SM90, and the GPU unit-test job (unit_test_gpu_rl.yaml) runs on
-        # A10G. Move them to an SM90 unit-test job.
-        torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/unit_tests/gpu/test_generator_dp_cudagraph.py::test_vllm_dp_decode_graphs_with_prefilling_peer -v
-        torchrun --nproc-per-node=2 -m pytest \
-          tests/rl/unit_tests/gpu/test_generator_dp_cudagraph.py::test_vllm_dp_linear_attention_full_graphs -v
 
         python -m tests.integration_tests.run_tests "$OUTPUT_DIR/integration" \
           --ngpu 8 --test_suite rl_h100

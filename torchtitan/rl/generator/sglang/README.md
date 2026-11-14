@@ -2,7 +2,7 @@
 
 **Status:** an alternative to the vLLM engine. Verified only at SGLang
 `851642ade`, which `scripts/install_rl_env.sh --sglang` installs; CI runs
-`test_sglang_bitwise_parity.py` on B200 (`integration_test_rl_b200.yaml`). It
+`test_sglang_bitwise_parity.py` on B200 (`unit_test_gpu_rl_b200.yaml`). It
 relies on private SGLang APIs (see the TODOs linking sgl-project/sglang issues),
 so other SGLang versions may break it.
 

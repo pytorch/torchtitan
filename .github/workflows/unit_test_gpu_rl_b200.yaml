@@ -1,0 +1,129 @@
+name: RL B200 Unit Tests
+
+on:
+  push:
+    tags:
+      - ciflow/b200/*
+  schedule:
+    - cron: '0 0 * * *'
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash -l -eo pipefail {0}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  rl-b200:
+    if: github.repository_owner == 'pytorch'
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 90
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      options: --gpus all --shm-size=16g
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Set up environment
+        id: setup
+        run: |
+          set -eux
+
+          bash .ci/docker/common/install_base.sh
+
+          uv venv --python 3.12
+          source .venv/bin/activate
+
+          DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1 || true)
+          echo "CUDA driver version: ${DRIVER_VERSION}"
+
+          uv pip install pytest
+          bash scripts/install_rl_env.sh --flash-attn 4
+
+          # Dist-MoE is optional; the B200 suite's Dist-MoE test needs it.
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@main"
+
+          python - <<'PY'
+          import torch
+
+          capability = torch.cuda.get_device_capability()
+          if capability not in ((10, 0), (10, 3)):
+              raise RuntimeError(
+                  f"B200 RL unit tests require SM100 or SM103, got SM{capability[0]}{capability[1]}"
+              )
+          PY
+
+          mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded/rl"
+
+      # The RL Dist-MoE recipe test needs dist_moe, which the CPU unit-test
+      # workflows do not install, so it runs here. The Dist-MoE unit tests run in
+      # the B200 Integration workflow, which also installs torchao.
+      - name: Unit tests
+        run: |
+          set -eux
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+          RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded/rl" \
+            torchrun --nproc-per-node=1 -m pytest \
+            tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
+            tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py \
+            tests/rl/unit_tests/gpu/test_vllm_mla_backends.py \
+            tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py \
+            -v
+
+      # SGLang is installed on top of the RL environment, so its tests run after
+      # the others. The engine has been verified only on Blackwell GPUs.
+      - name: SGLang generator tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -eux
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+          bash scripts/install_rl_env.sh --skip-base --flash-attn none --sglang
+          MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
+
+          # Each class runs in its own torchrun launch, one process per TP rank.
+          # Only TestSGLangBitwiseParityVarlen loads HF weights; the debug-model
+          # classes read the repo's test tokenizer. Every class runs even if one
+          # fails, so one failure does not hide the others.
+          failed_classes=()
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+            tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v \
+            || failed_classes+=(Varlen)
+          for test_class in MoEEP GDN SlidingWindow MLA DistMoE; do
+            torchrun --nproc-per-node=2 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
+              || failed_classes+=("$test_class")
+          done
+          for test_class in KDA; do
+            torchrun --nproc-per-node=1 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
+              || failed_classes+=("$test_class")
+          done
+          if (( ${#failed_classes[@]} )); then
+            echo "Failed SGLang test classes: ${failed_classes[*]}"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b200-rl-unit-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded
