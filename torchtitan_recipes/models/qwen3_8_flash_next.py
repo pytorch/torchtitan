@@ -91,6 +91,12 @@ def make_dist_muon_optimizer(
         raise ValueError(
             "The Flash-Next DistMuon policy does not support tensor parallelism yet"
         )
+    if parallelism.pipeline_parallel_degree > 1:
+        # OptimizersContainer requires every pattern to match on every model
+        # part, but only one PP stage owns the PLE table.
+        raise ValueError(
+            "The Flash-Next DistMuon policy does not support pipeline parallelism"
+        )
     owned = ComputeLayout(
         shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Owned()},
         compute_dtype=torch.bfloat16,
