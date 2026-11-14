@@ -24,7 +24,10 @@ class RLDataset(Configurable, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        repeat: bool = True
+        """True: start over after the last sample. False: end after one pass. `Rollouter` builds
+        every validation dataset with False. A dataset that generates samples forever needs a
+        size for that, or raises on False."""
 
 
 class RolloutDataLoader(Stateful, ABC, Configurable):

@@ -108,7 +108,8 @@ things:
    `id="torchtitan_verifiers_my_task"`.
 2. Set your agent, harness and runtime in `VerifiersRolloutWorker.Config.environment`. Leave its
    `taskset` unset: `VerifiersRollouter` copies it from the training dataset.
-3. Set `ValidationConfig.steps` for your validation set: the recipe validates on 30 tasks.
+3. Set `ValidationConfig.steps` for your validation set: the recipe validates on 30 tasks and
+   raises if there are fewer. -1 reads all of them.
 
 Then run:
 

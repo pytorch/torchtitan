@@ -140,6 +140,15 @@ class Rollouter(Configurable):
                     "num_threads_per_worker must be at least 1, got "
                     f"{self.num_threads_per_worker}"
                 )
+            if not self.training_dataloader.dataset.repeat:
+                raise ValueError(
+                    "training_dataloader.dataset.repeat=False: training reads its dataset "
+                    "without end, so it must repeat. Only validation builds a dataset with "
+                    "repeat=False."
+                )
+            # Every validation builds its dataset with repeat=False; a dataset with no end and no
+            # size raises here.
+            replace(self.validation_dataset, repeat=False)
 
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -163,15 +172,30 @@ class Rollouter(Configurable):
         self._training_dataloader.commit(sample_ids)
 
     def get_validation_samples(self, steps: int) -> list[object]:
-        """Materialize one fresh validation pass, optionally bounded by steps."""
-        validation_data = self._config.validation_dataset.build()
+        """Read one fresh validation pass: the first `steps` prompts, or all of them for -1.
+
+        Validation never repeats a prompt. Example, a dataset of 3 prompts:
+            steps=-1  reads the 3
+            steps=2   reads the first 2
+            steps=5   raises: the dataset has only 3
+        """
+        # Built fresh on each call, so every validation starts at the first prompt.
+        validation_dataset = replace(self._config.validation_dataset, repeat=False)
+        validation_data = validation_dataset.build()
         try:
             iterator = iter(validation_data)
         except TypeError as error:
             raise ValueError("validation_dataset must build an iterable") from error
         if steps == -1:
             return list(iterator)
-        return list(itertools.islice(iterator, steps))
+        samples = list(itertools.islice(iterator, steps))
+        if len(samples) < steps:
+            raise ValueError(
+                f"validation_dataset has {len(samples)} prompts, fewer than "
+                f"ValidationConfig.steps={steps}, and validation doesn't repeat prompts. "
+                f"Set steps=-1 to read all {len(samples)}."
+            )
+        return samples
 
     async def setup_async(
         self,
