@@ -131,3 +131,19 @@ traces. The agent itself runs in its runtime.
   parallel, up to `num_threads_per_worker` at once.
 - Each worker is its own Verifiers run, so run-wide limits apply per worker. Example: 16 workers
   with `PrimeConfig.creates_per_min=10` start up to 160 sandboxes a minute.
+
+## Which failed rollouts train
+
+A failed rollout either trains (usually at reward 0) or is ERROR_INFRA. ERROR_INFRA means the
+failure isn't the policy's fault. That rollout gets no reward and isn't trained. The rest of its
+group still trains.
+
+- ERROR_INFRA: a grading deadline passed, a model call failed (other than a prompt past the
+  context), the rollout ended before the policy's first turn, or the sandbox, a tool or the task's
+  code failed.
+- Trains: the last prompt grew past the context, another deadline passed (e.g. the agent's), or
+  the agent exited (e.g. the model ran `pkill` on it).
+- A first prompt past the context has no tokens to train, so its whole group is dropped.
+
+The exact rules, in order: `VerifiersRolloutWorker.rollout_status`. The metric
+`rollout/status_rate/error_infra` tracks the share of ERROR_INFRA rollouts.

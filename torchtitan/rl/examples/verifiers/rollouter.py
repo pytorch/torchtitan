@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
+from verifiers.v1 import errors as verifiers_errors
 from verifiers.v1.clients import ModelContext as VerifiersModelContext
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.env import EnvConfig as VerifiersEnvConfig
@@ -42,7 +43,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
 )
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, Rollouter
-from torchtitan.rl.rollout.rubric import RewardFn
+from torchtitan.rl.rollout.rubric import RewardFn, RubricOutput
 from torchtitan.rl.rollout.types import (
     GenerateFn,
     Prompt,
@@ -66,6 +67,19 @@ VERIFIERS_REWARD_KEY = "verifiers_reward"
 # The container watchdog sweeps once when its worker exits and, if the worker died, again
 # this long after.
 _SECOND_SWEEP_DELAY_SEC = 30
+
+# A generator call that failed, or the connection to it (`verifiers/v1/errors.py`): almost always
+# the generator's side. A ProviderError 400 is read before these, as a prompt past the context.
+# TODO: a policy that breaks its container's network also ends as InterceptionError (the harness
+# can't reach the interception server, exit 97); split that case out if run logs show it.
+_GENERATOR_ERROR_TYPES = frozenset(
+    error_type.__name__
+    for error_type in (
+        verifiers_errors.ProviderError,
+        verifiers_errors.InterceptionError,
+        verifiers_errors.TunnelError,
+    )
+)
 
 
 class RewardFromVerifiers(RewardFn):
@@ -329,6 +343,17 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         )
         return await self.make_scored_group(results, sample, group_id=group_id)
 
+    async def score_group(
+        self, rollouts: list[Rollout], env_input: object
+    ) -> list[RubricOutput]:
+        """Score with the rubric; a trace that Verifiers dropped (e.g. a judge gave a drop
+        verdict) gets reward None, so it isn't trained."""
+        outputs = await super().score_group(rollouts, env_input)
+        return [
+            RubricOutput(reward=None) if rollout.logs["dropped"] is not None else output
+            for rollout, output in zip(rollouts, outputs, strict=True)
+        ]
+
     async def _run_single_rollout(
         self,
         *,
@@ -381,7 +406,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         if len(traces) != 1:
             raise ValueError(
                 "Verifiers expects one trainable trace per rollout; got "
-                f"{len(traces)}"
+                f"{len(traces)} (episode error: {verifiers_episode.last_error})"
             )
 
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
@@ -394,31 +419,24 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             rollout_id=rollout_id,
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
-        if not turns:
-            # Verifiers records an overlong first prompt as a failed model call; vLLM, the
-            # renderer and the generation server all word it "maximum context length".
-            first_prompt_too_long = any(
-                call.error is not None
-                and "maximum context length" in call.error.message
-                for call in trace.calls
+        if status is RolloutStatus.TRUNCATED_PROMPT_TOO_LONG and not turns:
+            # The harness builds the first prompt during the episode, so the dataset can't
+            # be filtered for it; flag it here as a data problem, not a policy one.
+            # Not every task has a name; every task has an index.
+            task = slot.task.data.name or slot.task.data.idx
+            logger.warning(
+                "rollout group=%d/rollout=%d: the first prompt of task %s does not fit "
+                "the context; marking TRUNCATED_PROMPT_TOO_LONG",
+                group_id,
+                rollout_id,
+                task,
             )
-            if first_prompt_too_long:
-                # The harness builds the first prompt during the episode, so the dataset can't
-                # be filtered for it; flag it here as a data problem, not a policy one.
-                # Not every task has a name; every task has an index.
-                task = slot.task.data.name or slot.task.data.idx
-                logger.warning(
-                    "rollout group=%d/rollout=%d: the first prompt of task %s does not fit "
-                    "the context; marking ERROR",
-                    group_id,
-                    rollout_id,
-                    task,
-                )
-            status = RolloutStatus.ERROR
         logs = verifiers_rollout_logs(verifiers_episode, trace)
         if status.is_error():
             log_failed_rollout(logs, group_id=group_id, rollout_id=rollout_id)
-        else:
+        if turns:
+            # Also for a failed rollout, as in `MessageEnvRolloutWorker`: the rubric applies `error_reward`
+            # if set, else it reads this grade.
             turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
         return Rollout(
             group_id=group_id,
@@ -430,12 +448,67 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
 
     @staticmethod
     def rollout_status(*, verifiers_episode: Any, trace: Any) -> RolloutStatus:
+        """Return the status of a finished Verifiers rollout: the first row that matches.
+
+            how the rollout ended                                          status
+            a grading deadline passed: the trace stopped as                ERROR_INFRA
+              "finalize_timeout" or "scoring_timeout"
+            its last model call was refused as too long (ProviderError     TRUNCATED_PROMPT_TOO_LONG
+              400, from the renderer or the generation server); graded
+              only if the harness then ends cleanly
+            failed on a generator call (`_GENERATOR_ERROR_TYPES`)          ERROR_INFRA
+            with no turn: the policy never sampled                         ERROR_INFRA
+            another deadline passed (`is_timeout` on the trace or the      ERROR_TIMEOUT
+              episode), e.g. the agent's
+            the harness run failed after the first turn: the trace's last  ERROR
+              error is exactly `HarnessError` (the agent exited, or the
+              harness's own code raised)
+            failed otherwise: the sandbox, a tool, the task's or env's     ERROR_INFRA
+              code, an unknown or no error
+            truncated at `max_turns`                                       TRUNCATED_MAX_TURNS
+            truncated                                                      TRUNCATED_LENGTH
+            completed                                                      COMPLETED
+
+        A failed harness run is mostly the agent exiting (e.g. its own `pkill`). Any other error
+        type names the part that broke, not who broke it, so it is infra, as any env exception is
+        in `MessageEnvRolloutWorker`. It has two costs. A policy that breaks its sandbox before
+        grading, or hangs the task's tests, isn't penalized. An agent the host kills (e.g. out of
+        memory) trains as ERROR.
+        """
+        # A grading deadline is the grader's, not the policy's.
+        # TODO: an env-level finalize deadline (`Env.finalize`, e.g. best_of_n_judge's judge) flags
+        # only the episode, so it still reads as ERROR_TIMEOUT below.
+        if trace.stop_condition in ("finalize_timeout", "scoring_timeout"):
+            return RolloutStatus.ERROR_INFRA
+        last_call_error = trace.calls[-1].error if trace.calls else None
+        # TODO: a harness that dies on the 400 isn't graded (Verifiers skips scoring a failed
+        # run), so the rollout gets 0.0, not credit for its partial work. The in-repo Terminus
+        # harness could end cleanly on a 400.
+        if (
+            last_call_error is not None
+            and last_call_error.type == verifiers_errors.ProviderError.__name__
+            and last_call_error.status_code == 400
+        ):
+            return RolloutStatus.TRUNCATED_PROMPT_TOO_LONG
+        # The failed trace's last error is its final attempt's: a retry puts earlier ones first.
+        error = None if trace.ok else trace.last_error
+        # Before the timeout check: a generator failure that also set a timeout flag is the
+        # generator's.
+        if error is not None and error.type in _GENERATOR_ERROR_TYPES:
+            return RolloutStatus.ERROR_INFRA
+        if trace.num_turns == 0:
+            return RolloutStatus.ERROR_INFRA
         # Verifiers flags an expired deadline with is_timeout: a stage's on its trace (which can keep
         # ok=True), the whole episode's on the episode.
         if trace.is_timeout or verifiers_episode.is_timeout:
             return RolloutStatus.ERROR_TIMEOUT
         if not verifiers_episode.ok or not trace.ok:
-            return RolloutStatus.ERROR
+            if (
+                error is not None
+                and error.type == verifiers_errors.HarnessError.__name__
+            ):
+                return RolloutStatus.ERROR
+            return RolloutStatus.ERROR_INFRA
         if not trace.is_truncated:
             return RolloutStatus.COMPLETED
         if trace.stop_condition == "max_turns":
@@ -602,6 +675,8 @@ def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]
         "verifiers_trace_id": trace.id,
         "task": trace.task.key,
         "stop_condition": trace.stop_condition,
+        # Why Verifiers dropped the trace (e.g. a judge gave a drop verdict), or None.
+        "dropped": trace.dropped,
         "errors": [
             error.model_dump(mode="json")
             for error in (*verifiers_episode.errors, *trace.errors)
