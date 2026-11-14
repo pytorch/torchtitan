@@ -252,7 +252,7 @@ def _shared_experts_config(
     )
 
 
-def _qwen35_vision_encoder_config(
+def make_qwen35_vision_encoder_config(
     *,
     dim: int,
     ffn_dim: int,
@@ -400,7 +400,7 @@ def _qwen35_attention_config(
     )
 
 
-def _qwen35_deltanet_config(
+def make_qwen35_deltanet_config(
     *,
     dim: int,
     n_key_heads: int,
@@ -524,7 +524,7 @@ def _build_qwen35_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else _qwen35_deltanet_config(
+            else make_qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -598,7 +598,7 @@ def _build_qwen35_moe_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else _qwen35_deltanet_config(
+            else make_qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -724,7 +724,7 @@ def _debugmodel(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=256,
                 ffn_dim=512,
                 num_layers=4,
@@ -804,7 +804,7 @@ def _debugmodel_moe(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=256,
                 ffn_dim=512,
                 num_layers=2,
@@ -885,7 +885,7 @@ def _0_8b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=768,
                 ffn_dim=3072,
                 num_layers=12,
@@ -966,7 +966,7 @@ def _2b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1024,
                 ffn_dim=4096,
                 num_layers=24,
@@ -1047,7 +1047,7 @@ def _4b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1024,
                 ffn_dim=4096,
                 num_layers=24,
@@ -1123,7 +1123,7 @@ def _9b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1199,7 +1199,7 @@ def _27b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1279,7 +1279,7 @@ def _35b_a3b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1359,7 +1359,7 @@ def _122b_a10b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1439,7 +1439,7 @@ def _397b_a17b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
