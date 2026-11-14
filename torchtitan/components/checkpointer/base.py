@@ -81,6 +81,15 @@ def purge_thread(
         logger.info("Destroying the purge thread.")
 
 
+def _incomplete_checkpoint_error(checkpoint_id: str) -> str:
+    return (
+        f"Checkpoint {checkpoint_id} is not a complete checkpoint: it has no "
+        "completed checkpoint metadata, so its save never finished, or it is a "
+        "Hugging Face checkpoint. Load a full checkpoint instead, or set "
+        "checkpointer.initial_load_in_hf to load Hugging Face weights."
+    )
+
+
 def _shares_storage(a: torch.Tensor, b: torch.Tensor) -> bool:
     """Whether ``a`` and ``b`` are backed by the same storage.
 
@@ -117,6 +126,11 @@ class ModelWrapper(Stateful):
            are refreshed in place to keep their storage stable while their values
            track the current parameters.
 
+    With ``trainable_only``, ``state_dict()`` leaves out frozen params
+    (``requires_grad=False``), so saves and staging skip them. The frozen set is
+    fixed at construction: a parameter must not change ``requires_grad`` after
+    the checkpointer is built, or its trained values are not saved.
+
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
         refreshes the cached state_dict.
@@ -125,13 +139,28 @@ class ModelWrapper(Stateful):
         cache will become stale.
     """
 
-    def __init__(self, model: nn.Module | list[nn.Module]) -> None:
+    def __init__(
+        self, model: nn.Module | list[nn.Module], *, trainable_only: bool = False
+    ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
+        self.frozen_keys = frozenset(
+            key
+            for model in self.model
+            for key, value in model.state_dict(keep_vars=True).items()
+            if isinstance(value, nn.Parameter) and not value.requires_grad
+        )
+        self.trainable_only = trainable_only
         self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
         # TorchTitan already makes model state_dict keys canonical.
-        return {k: v for model in self.model for k, v in model.state_dict().items()}
+        excluded = self.frozen_keys if self.trainable_only else frozenset()
+        return {
+            k: v
+            for model in self.model
+            for k, v in model.state_dict().items()
+            if k not in excluded
+        }
 
     def state_dict(self) -> dict[str, Any]:
         # Recompute the state dict so hook-produced tensors reflect the current
@@ -284,12 +313,13 @@ class BaseCheckpointManager(Configurable, ABC):
 
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
-        """Restore state from ``step``, or the latest checkpoint when ``-1``."""
-        with sl.log_trace_span("checkpoint_load"):
-            model_only = False
-            from_hf = False
-            from_quantized = False
+        """Restore state from ``step``, or the latest checkpoint when ``-1``.
 
+        Checkpoints after step 0 leave out frozen params. Loading a folder
+        checkpoint, a step-0 seed included, for a model with frozen params loads
+        them from the base first, then the checkpoint's trainable state.
+        """
+        with sl.log_trace_span("checkpoint_load"):
             has_checkpoint_folder = self._storage.isdir(self.folder)
             load_step = -1
             if has_checkpoint_folder:
@@ -301,63 +331,78 @@ class BaseCheckpointManager(Configurable, ABC):
                     f"checkpointer.folder {self.folder} does not exist"
                 )
 
+            has_frozen = bool(self.states[MODEL].frozen_keys)
+            no_base_error = (
+                "A model with frozen parameters needs checkpointer.initial_load_path "
+                "or initial_load_in_hf: checkpoints leave out frozen parameters."
+            )
+            # Each entry: (checkpoint_id, from_hf, states to restore).
+            loads: list[tuple[str, bool, dict[str, Any]]] = []
             if load_step == -1:
-                model_only = self.initial_load_model_only
-                from_hf = self.initial_load_in_hf
-                from_quantized = self.initial_load_in_hf_quantized
-
-                if from_hf:
-                    assert model_only, (
-                        "Only model can be loaded when loading from "
-                        "HF's safetensors checkpointer."
-                    )
-                if from_quantized:
-                    assert (
-                        from_hf
-                    ), "Quantized checkpoint can only be loaded from HF format"
-
-                if self.initial_load_path:
-                    checkpoint_id = self.initial_load_path
-                    if not self._storage.isdir(checkpoint_id):
-                        raise ValueError(
-                            f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
-                        )
-                    if from_hf:
-                        logger.info(
-                            "Loading from HF safetensors from "
-                            f"checkpointer.initial_load_path: {checkpoint_id}"
-                        )
-                elif from_hf:
-                    assert (
-                        self.sd_adapter and self.sd_adapter.hf_assets_path
-                    ), "from_hf=True requires sd_adapter and hf_assets_path."
-                    checkpoint_id = self.sd_adapter.hf_assets_path
-                    if not self._storage.isdir(checkpoint_id):
-                        raise ValueError(
-                            "model.hf_assets_path is being used to load HF weights "
-                            "but the path is not valid. Either make sure hf_assets_path "
-                            "is correct or provide a valid checkpointer.initial_load_path"
-                        )
-                    logger.info(
-                        "Loading HF safetensors from "
-                        f"hf_assets_path: {checkpoint_id}"
-                    )
-                else:
+                base = self._resolve_base()
+                if base is None:
+                    if has_frozen:
+                        raise ValueError(no_base_error)
                     logger.info("No checkpoint was provided, this is a fresh start.")
                     return False
+                base_id, base_from_hf = base
+                states = self._states_to_load(
+                    self.initial_load_model_only, full_model=True
+                )
+                loads.append((base_id, base_from_hf, states))
             else:
-                step = load_step
-                # Step 0 is a seed checkpoint, which holds model state only.
-                model_only = step == 0
-                checkpoint_id = self._create_checkpoint_id(step)
+                checkpoint_id = self._create_checkpoint_id(load_step)
                 if not self._storage.isdir(checkpoint_id):
                     raise FileNotFoundError(
-                        f"checkpointer.load_step={step} not found at {checkpoint_id}"
+                        f"checkpointer.load_step={load_step} not found at "
+                        f"{checkpoint_id}"
                     )
+                # Checked before any collective, so all ranks raise together.
+                if not self._is_resumable_checkpoint(checkpoint_id):
+                    raise ValueError(_incomplete_checkpoint_error(checkpoint_id))
+                # All ranks load the base, or none does: a rank whose model parts
+                # have no frozen params still joins the base load.
+                any_rank_has_frozen = has_frozen
+                if dist.is_initialized():
+                    flags: list[Any] = [None] * dist.get_world_size()
+                    dist.all_gather_object(flags, has_frozen)
+                    any_rank_has_frozen = any(flags)
+                if any_rank_has_frozen and load_step != 0:
+                    # Rank 0 reads the stored keys; each rank checks its own
+                    # frozen keys, then all ranks agree so they raise together.
+                    stored: list[Any] = [None]
+                    if not dist.is_initialized() or dist.get_rank() == 0:
+                        stored[0] = self._stored_model_keys(checkpoint_id)
+                    if dist.is_initialized():
+                        dist.broadcast_object_list(stored, src=0)
+                    frozen_keys = self.states[MODEL].frozen_keys
+                    stored_frozen = sorted(frozen_keys & stored[0])[:5]
+                    if dist.is_initialized():
+                        all_stored_frozen: list[Any] = [None] * dist.get_world_size()
+                        dist.all_gather_object(all_stored_frozen, stored_frozen)
+                        stored_frozen = sorted(set().union(*all_stored_frozen))[:5]
+                    if stored_frozen:
+                        raise ValueError(
+                            f"Checkpoint {checkpoint_id} stores parameters "
+                            f"{stored_frozen} that are frozen now. Loading it would "
+                            "replace them with the base values."
+                        )
+                if any_rank_has_frozen:
+                    base = self._resolve_base()
+                    if base is None:
+                        raise ValueError(no_base_error)
+                    base_id, base_from_hf = base
+                    states = self._states_to_load(True, full_model=True)
+                    loads.append((base_id, base_from_hf, states))
+                # Step 0 is a seed checkpoint, which holds model state only. Its
+                # frozen params are not loaded, so they match every later resume.
+                states = self._states_to_load(load_step == 0, full_model=False)
+                loads.append((checkpoint_id, False, states))
                 # Fault-tolerance restart: an existing folder checkpoint wins
                 # over initial_* so the same job args can be reused. This is
                 # the normal restart path, so it is logged, not warned about.
-                if (
+                # A resume with frozen params still loads them from the base.
+                if len(loads) == 1 and (
                     self.initial_load_path
                     or self.initial_load_in_hf
                     or self.initial_load_in_hf_quantized
@@ -368,39 +413,70 @@ class BaseCheckpointManager(Configurable, ABC):
                         "initial_load_path / initial_load_in_hf / "
                         "initial_load_in_hf_quantized.",
                         self.folder,
-                        step,
+                        load_step,
                     )
 
-            # Explicit load_step and initial_load_path are only checked to be
-            # directories above; automatic selection already filtered on this.
-            if not from_hf and not self._is_resumable_checkpoint(checkpoint_id):
-                raise ValueError(
-                    f"Checkpoint {checkpoint_id} is not a complete checkpoint: it "
-                    "has no completed checkpoint metadata, so its save never "
-                    "finished, or it is a Hugging Face checkpoint. Load a full "
-                    "checkpoint instead, or set checkpointer.initial_load_in_hf "
-                    "to load Hugging Face weights."
+            for checkpoint_id, from_hf, states in loads:
+                # The base is only checked to be a directory above.
+                if not from_hf and not self._is_resumable_checkpoint(checkpoint_id):
+                    raise ValueError(_incomplete_checkpoint_error(checkpoint_id))
+                logger.info("Loading the checkpoint from %s.", checkpoint_id)
+                begin = time.monotonic()
+                self._load_checkpoint(
+                    states,
+                    checkpoint_id,
+                    from_hf=from_hf,
+                    from_quantized=from_hf and self.initial_load_in_hf_quantized,
                 )
-
-            logger.info("Loading the checkpoint from %s.", checkpoint_id)
-            begin = time.monotonic()
-            states = self._states_to_load(model_only)
-            self._load_checkpoint(
-                states,
-                checkpoint_id,
-                from_hf=from_hf,
-                from_quantized=from_quantized,
-            )
+                GarbageCollector.collect("GC collection for checkpoint loading.")
+                logger.info(
+                    "Finished loading the checkpoint in %.2f seconds.",
+                    time.monotonic() - begin,
+                )
             # Reseed EMA from the just-loaded weights if it wasn't itself
             # restored (excluded, or a model_only load).
-            if EMA in self.states and EMA not in states:
+            if EMA in self.states and EMA not in loads[-1][2]:
                 self.states[EMA].load_state_dict({})
-            GarbageCollector.collect("GC collection for checkpoint loading.")
-            logger.info(
-                "Finished loading the checkpoint in %.2f seconds.",
-                time.monotonic() - begin,
-            )
             return True
+
+    def _resolve_base(self) -> tuple[str, bool] | None:
+        """The ``(checkpoint_id, from_hf)`` a fresh start loads, or None.
+
+        Resuming a model with frozen params loads them from the same base.
+        """
+        from_hf = self.initial_load_in_hf
+        if from_hf:
+            assert self.initial_load_model_only, (
+                "Only model can be loaded when loading from "
+                "HF's safetensors checkpointer."
+            )
+        if self.initial_load_in_hf_quantized:
+            assert from_hf, "Quantized checkpoint can only be loaded from HF format"
+
+        if self.initial_load_path:
+            checkpoint_id = self.initial_load_path
+            if not self._storage.isdir(checkpoint_id):
+                raise ValueError(
+                    f"Checkpoint.initial_load_path is invalid: {checkpoint_id}"
+                )
+            return checkpoint_id, from_hf
+        if from_hf:
+            assert (
+                self.sd_adapter and self.sd_adapter.hf_assets_path
+            ), "from_hf=True requires sd_adapter and hf_assets_path."
+            checkpoint_id = self.sd_adapter.hf_assets_path
+            if not self._storage.isdir(checkpoint_id):
+                raise ValueError(
+                    "model.hf_assets_path is being used to load HF weights "
+                    "but the path is not valid. Either make sure hf_assets_path "
+                    "is correct or provide a valid checkpointer.initial_load_path"
+                )
+            return checkpoint_id, True
+        return None
+
+    def _full_model(self) -> ModelWrapper:
+        """The model state with frozen params, for base loads and full saves."""
+        return ModelWrapper(self.states[MODEL].model)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> bool:
@@ -476,19 +552,26 @@ class BaseCheckpointManager(Configurable, ABC):
     ) -> None:
         """Restore ``states`` from a resolved checkpoint source."""
 
-    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
-        """Select the live state objects that must be restored."""
+    def _states_to_load(self, model_only: bool, *, full_model: bool) -> dict[str, Any]:
+        """Select the live state objects that must be restored.
+
+        ``full_model`` restores frozen params too, which checkpoints after step 0
+        leave out.
+        """
+        model = self._full_model() if full_model else self.states[MODEL]
         if model_only:
-            return {MODEL: self.states[MODEL]}
+            return {MODEL: model}
 
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")
-        return {
+        states = {
             key: value
             for key, value in self.states.items()
             if key not in self.exclude_from_loading
         }
+        states[MODEL] = model
+        return states
 
     @abstractmethod
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
@@ -534,6 +617,11 @@ class BaseCheckpointManager(Configurable, ABC):
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
         """Whether ``checkpoint_dir`` is a completed checkpoint in this manager's
         native format, which every non-Hugging Face load requires."""
+
+    @abstractmethod
+    def _stored_model_keys(self, checkpoint_id: str) -> set[str]:
+        """The model state keys stored in ``checkpoint_id``, named as in
+        ``ModelWrapper.frozen_keys``. May include non-model keys."""
 
     def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.
@@ -633,7 +721,10 @@ class BaseCheckpointManager(Configurable, ABC):
         """Checkpointing interval in steps."""
 
         initial_load_path: str | None = None
-        """Optional checkpoint path used when the output checkpoint folder is empty."""
+        """Optional checkpoint path used when the output checkpoint folder is empty.
+
+        A model with frozen params also loads them from it on every resume.
+        """
 
         initial_load_model_only: bool = True
         """Whether an initial checkpoint restores only model state."""

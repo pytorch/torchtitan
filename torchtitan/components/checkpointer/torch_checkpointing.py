@@ -38,7 +38,9 @@ from torch_checkpointing.hf.metadata import (
 )
 from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.metadata_serialization import (
+    load_distributed_metadata,
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
+    TorchDistributedMetadataFormat,
 )
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
@@ -265,7 +267,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.states = dict(extra_states)
         self.states.update(
             {
-                MODEL: ModelWrapper(model_parts),
+                MODEL: ModelWrapper(model_parts, trainable_only=True),
                 OPTIMIZER: optimizers,
                 LR_SCHEDULER: lr_schedulers,
             }
@@ -301,7 +303,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         storage_config = (
             self._manager_config.storage_config or LocalFileSystemStorageConfig()
         )
-        self._storage = _BackendCheckpointStorage(storage_config.create_storage())
+        self._backend_storage = storage_config.create_storage()
+        self._storage = _BackendCheckpointStorage(self._backend_storage)
         self._prewarmed = False
 
         self.sd_adapter = sd_adapter
@@ -465,6 +468,17 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
 
+    def _stored_model_keys(self, checkpoint_id: str) -> set[str]:
+        metadata = load_distributed_metadata(
+            checkpoint_id,
+            self._backend_storage,
+            formats=[TorchDistributedMetadataFormat],
+        )
+        assert metadata is not None
+        # Each path holds the nested keys of one entry, e.g. ``("layers.0.w",)``.
+        paths = metadata.metadata[MODEL].nested_path_to_metadata
+        return {".".join(map(str, path)) for path in paths}
+
     def _is_hf_checkpoint(self, checkpoint_dir: str, item_key: str) -> bool:
         return any(
             self._storage.isfile(
@@ -528,7 +542,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     def _save_last_step(self, curr_step: int) -> None:
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
+            model = self._full_model()
             model_state = export_state_dict(
                 model.state_dict(), dtype=self.export_dtype, model_parts=model.model
             )
@@ -539,6 +553,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             )
         else:
             states = self.states
+            if curr_step == 0:
+                # A seed checkpoint can initialize a model, so it keeps frozen params.
+                states = {**self.states, MODEL: self._full_model()}
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
         # The final save must land before the process exits, so retire the async

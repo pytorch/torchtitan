@@ -82,6 +82,22 @@ checkpointer=CheckpointManager.Config(
 
 A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). DCP-specific `async_mode` is on `CheckpointManager.Config` in `torchtitan/components/checkpointer/dcp.py`.
 
+## Models with frozen parameters
+Checkpoints after step 0 leave out frozen parameters (`requires_grad=False`), e.g. the base weights of a LoRA model. They hold the trainable parameters, all buffers, and the optimizer and other training state. Seed checkpoints and model-only exports keep every parameter.
+
+The frozen parameters come from the base: what a fresh start loads, i.e. `initial_load_path`, or `hf_assets_path` with `initial_load_in_hf=True`. Loading any folder checkpoint, a `step-0` seed included, loads the base first, then the checkpoint's trainable state on top:
+```
+fresh start:  base (all params)        -> train -> step-500/ (trainable only)
+from a seed:  base, then step-0/       -> train -> step-500/
+resume:       base, then step-500/     -> train -> step-1000/
+```
+- The base must be a full model: an HF checkpoint, or a full native checkpoint such as a `step-0` seed or a model-only export. A training checkpoint of another run with frozen parameters cannot be a base, because it lacks them.
+- The base must stay present and unchanged. Nothing checks it.
+- A model with frozen parameters and no base raises.
+- Resuming from a checkpoint after step 0 raises if it holds a parameter that is frozen now, since its trained value would be lost.
+- Frozen parameters are not saved, so state that changes without gradients must be a buffer.
+- `last_save_in_hf=True` raises for a model with frozen parameters, since state dict adapters drop LoRA adapters.
+
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.
@@ -96,7 +112,7 @@ parallelism degree set to 1. Then run that configuration on one device.
 ### HuggingFace
 `torchtitan` offers two ways to work with Hugging Face models: either by directly saving and loading a Hugging Face checkpoint during training, or by using an example conversion script to directly reformat the model weights on cpu.
 
-1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. The final save is written to `<checkpointer.folder>/exports/step-<N>`. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
+1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the recipe. The final save is written to `<checkpointer.folder>/exports/step-<N>`. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart), except that a model with frozen parameters still loads them from that base. The first run (empty folder) uses the initial load.
 
 2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt. `convert_ema_to_hf` exports the EMA weights instead of the trained ones, from the same checkpoint; it takes the same arguments plus `--ema_key` to pick one EMA copy (e.g. `--ema_key half_life_0p05`; optional when the checkpoint holds a single copy), and errors out if the checkpoint holds no EMA state. Note that `last_save_model_only` (the default) writes only model weights at the last step, so export the EMA from an interval checkpoint, or set it to `False`.
 

@@ -171,7 +171,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.states = dict(extra_states)
         self.states.update(
             {
-                MODEL: ModelWrapper(model_parts),
+                MODEL: ModelWrapper(model_parts, trainable_only=True),
                 OPTIMIZER: optimizers,
                 LR_SCHEDULER: lr_schedulers,
             }
@@ -584,6 +584,15 @@ class CheckpointManager(BaseCheckpointManager):
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
         return self._storage.isfile(filesystem.join(checkpoint_dir, ".metadata"))
 
+    def _stored_model_keys(self, checkpoint_id: str) -> set[str]:
+        # Model keys sit at the top level of the flattened DCP state dict.
+        reader = (
+            dcp.FsspecReader(checkpoint_id)
+            if filesystem.is_remote(checkpoint_id)
+            else dcp.FileSystemReader(checkpoint_id)
+        )
+        return set(reader.read_metadata().state_dict_metadata)
+
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         return self._is_resumable_checkpoint(checkpoint_dir) or (
             self._storage.isfile(
@@ -638,7 +647,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         checkpoint_id = self._create_last_step_id(curr_step)
         if self.last_save_model_only:
-            model = self.states[MODEL]
+            model = self._full_model()
             states = export_state_dict(
                 model.state_dict(), dtype=self.export_dtype, model_parts=model.model
             )
@@ -648,7 +657,10 @@ class CheckpointManager(BaseCheckpointManager):
             )
         else:
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
-            states = self._flattened_model_states_sd()
+            # A seed checkpoint can initialize a model, so it keeps frozen params.
+            states = self._flattened_model_states_sd(
+                {**self.states, MODEL: self._full_model()} if curr_step == 0 else None
+            )
 
         self.dcp_save(
             states,

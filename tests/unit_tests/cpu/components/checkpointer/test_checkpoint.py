@@ -1515,7 +1515,7 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.initial_load_path = None
         manager.initial_load_in_hf = False
         manager.initial_load_in_hf_quantized = False
-        manager.states = {}
+        manager.states = {MODEL: SimpleNamespace(frozen_keys=frozenset())}
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
         manager._create_checkpoint_id.return_value = "/checkpoint/step-10"
@@ -1879,17 +1879,8 @@ class TestModelWrapper(unittest.TestCase):
         self.assertTrue(torch.all(model.w._tensor == 3.0))
 
 
-class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
-    """Exercises the real EMA + CheckpointManager save/load path (no dcp
-    mocking) across combinations of ``ema`` being ``None`` vs. configured,
-    differing between the save-time and resume-time run.
-
-    Resuming with ``ema`` configured against a checkpoint that has no EMA
-    state requires the caller to explicitly pass
-    ``checkpoint.exclude_from_loading=["ema"]`` (matching how any other
-    optional state is excluded) -- otherwise DCP raises its normal
-    missing-key error. See test_missing_ema_without_exclude_raises below.
-    """
+class _RealCheckpointManagerTestCase(unittest.TestCase):
+    """Builds a real CheckpointManager (no dcp mocking) on a world-size-1 group."""
 
     @classmethod
     def setUpClass(cls):
@@ -1948,6 +1939,19 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
             base_folder="",
         )
         return manager, ema
+
+
+class TestCheckpointManagerEMAResumeFlexibility(_RealCheckpointManagerTestCase):
+    """Exercises the real EMA + CheckpointManager save/load path (no dcp
+    mocking) across combinations of ``ema`` being ``None`` vs. configured,
+    differing between the save-time and resume-time run.
+
+    Resuming with ``ema`` configured against a checkpoint that has no EMA
+    state requires the caller to explicitly pass
+    ``checkpoint.exclude_from_loading=["ema"]`` (matching how any other
+    optional state is excluded) -- otherwise DCP raises its normal
+    missing-key error. See test_missing_ema_without_exclude_raises below.
+    """
 
     def test_resume_with_ema_enabled_after_saving_with_ema_disabled(self):
         folder = os.path.join(self.base_temp_dir, "ckpt")
@@ -2135,6 +2139,125 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         ]
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
+
+
+def _frozen_weight_linear(value: float) -> nn.Linear:
+    model = nn.Linear(2, 2)
+    model.weight.requires_grad_(False)
+    with torch.no_grad():
+        model.weight.fill_(value)
+        model.bias.fill_(value)
+    return model
+
+
+class TestCheckpointManagerFrozenParams(_RealCheckpointManagerTestCase):
+    """Checkpoints after step 0 leave out frozen params; resume loads the base."""
+
+    def test_resume_loads_frozen_params_from_base(self):
+        # The seed keeps the frozen weight, so it can serve as the base.
+        seed_model = _frozen_weight_linear(1.0)
+        manager, _ = self._build_manager(
+            os.path.join(self.base_temp_dir, "seed"), seed_model, with_ema=False
+        )
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_temp_dir, "seed", "step-0")
+
+        folder = os.path.join(self.base_temp_dir, "run")
+        model = _frozen_weight_linear(2.0)
+        manager, _ = self._build_manager(
+            folder, model, with_ema=False, initial_load_path=base
+        )
+        manager.load()
+        self.assertTrue(torch.equal(model.weight, seed_model.weight))
+        with torch.no_grad():
+            model.bias.fill_(3.0)
+        manager.save(curr_step=1)
+        manager.close()
+
+        resumed = _frozen_weight_linear(4.0)
+        manager, _ = self._build_manager(
+            folder, resumed, with_ema=False, initial_load_path=base
+        )
+        manager.load()
+        self.assertTrue(torch.equal(resumed.weight, seed_model.weight))
+        self.assertTrue(torch.equal(resumed.bias, model.bias))
+        # A load must not bring frozen params back into the save payload.
+        self.assertNotIn("weight", manager._flattened_model_states_sd())
+        manager.close()
+
+    def test_seed_in_folder_takes_frozen_params_from_base(self):
+        base_model = _frozen_weight_linear(1.0)
+        manager, _ = self._build_manager(
+            os.path.join(self.base_temp_dir, "base"), base_model, with_ema=False
+        )
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_temp_dir, "base", "step-0")
+
+        # The run folder holds its own seed, with a different frozen weight.
+        folder = os.path.join(self.base_temp_dir, "run")
+        seed_model = _frozen_weight_linear(5.0)
+        manager, _ = self._build_manager(folder, seed_model, with_ema=False)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+
+        model = _frozen_weight_linear(2.0)
+        manager, _ = self._build_manager(
+            folder, model, with_ema=False, initial_load_path=base
+        )
+        manager.load()
+        self.assertTrue(torch.equal(model.weight, base_model.weight))
+        self.assertTrue(torch.equal(model.bias, seed_model.bias))
+        manager.save(curr_step=1)
+        manager.close()
+
+        # A resume keeps the same frozen values as the run that started from the seed.
+        resumed = _frozen_weight_linear(4.0)
+        manager, _ = self._build_manager(
+            folder, resumed, with_ema=False, initial_load_path=base
+        )
+        manager.load()
+        self.assertTrue(torch.equal(resumed.weight, base_model.weight))
+        self.assertTrue(torch.equal(resumed.bias, seed_model.bias))
+        manager.close()
+
+    def test_resume_raises_when_trained_param_is_frozen(self):
+        model = nn.Sequential(nn.Linear(2, 2))
+        manager, _ = self._build_manager(
+            os.path.join(self.base_temp_dir, "seed"), model, with_ema=False
+        )
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_temp_dir, "seed", "step-0")
+
+        folder = os.path.join(self.base_temp_dir, "run")
+        manager, _ = self._build_manager(folder, model, with_ema=False)
+        manager.save(curr_step=1)
+        manager.close()
+
+        model[0].weight.requires_grad_(False)
+        manager, _ = self._build_manager(
+            folder, model, with_ema=False, initial_load_path=base
+        )
+        with self.assertRaisesRegex(
+            ValueError, r"stores parameters \['0.weight'\] that are frozen"
+        ):
+            manager.load()
+        # An incomplete step raises before rank 0 reads its metadata.
+        os.makedirs(os.path.join(folder, "step-2"))
+        with self.assertRaisesRegex(ValueError, "step-2 is not a complete checkpoint"):
+            manager.load(step=2)
+        manager.close()
+
+    def test_fresh_start_with_frozen_params_needs_base(self):
+        folder = os.path.join(self.base_temp_dir, "run")
+        manager, _ = self._build_manager(
+            folder, _frozen_weight_linear(0.0), with_ema=False
+        )
+        with self.assertRaisesRegex(ValueError, "needs checkpointer.initial_load_path"):
+            manager.load()
+        manager.close()
 
 
 if __name__ == "__main__":
