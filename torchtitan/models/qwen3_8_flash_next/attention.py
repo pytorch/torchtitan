@@ -27,6 +27,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attn_gym import gather_attn, lightning_indexer
 from torchtitan.models.common.aux_loss import AuxLoss
 
+from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm, Qwen35Attention
 from torchtitan.models.qwen3_5.rope import MRoPE as Qwen35MRoPE
@@ -36,6 +37,7 @@ from torchtitan.tools.utils import has_cuda_capability
 from .embedding import document_starts
 
 # T = packed tokens, U = valid tokens, G = complete blocks, R = block size,
+# N = document offset slots (document capacity + 1),
 # B = selected blocks, J = selected tokens including the incomplete tail,
 # H = query or KV heads, K = head dimension, V = value dimension,
 # D = model dimension, Q = query chunk, C = projection channels.
@@ -137,21 +139,38 @@ def _selected_block_scores(query_QHK, key_GK, blocks_QB, *, scale):
 class QSAIndexMetadata(NamedTuple):
     """Document-local complete blocks and tails shared by all QSA layers.
 
-    Built once per microbatch, so the data-dependent shapes below cost one set
-    of host syncs instead of one per QSA layer and pass.
+    Shapes depend only on the token count and the document capacity, so the
+    metadata can be refreshed in place for accelerator-graph replay. Complete
+    blocks fill the first rows of ``block_indices_GR`` (G = T // R); the
+    remaining rows are inactive capacity that point at a valid token and lie
+    outside every document's candidate range, so they are never selected.
+    Valid tokens are compacted in ``valid_indices_T``: its first U entries are
+    their token indices and the rest are zero. Offsets have one slot per
+    document of capacity; unused slots repeat the valid-token count.
     """
 
-    valid_indices_U: torch.Tensor  # noqa: N815
-    document_U: torch.Tensor  # noqa: N815
-    cu_seqlens: torch.Tensor
-    cu_seqlens_k: torch.Tensor
+    valid_T: torch.Tensor  # noqa: N815
+    document_T: torch.Tensor  # noqa: N815
+    compact_T: torch.Tensor  # noqa: N815
+    valid_indices_T: torch.Tensor  # noqa: N815
+    cu_seqlens_N: torch.Tensor  # noqa: N815
+    cu_seqlens_k_N: torch.Tensor  # noqa: N815
     block_indices_GR: torch.Tensor  # noqa: N815
     tail_indices_TR: torch.Tensor  # noqa: N815
 
     @classmethod
-    def from_inputs(cls, document_positions_T, *, padding_mask_T, compress_ratio):
+    def from_inputs(
+        cls,
+        document_positions_T,
+        *,
+        padding_mask_T,
+        compress_ratio,
+        max_num_documents=None,
+    ):
+        """Build the metadata; ``max_num_documents=None`` reserves T documents."""
         num_tokens = document_positions_T.numel()
-        indices_T = torch.arange(num_tokens, device=document_positions_T.device)
+        device = document_positions_T.device
+        indices_T = torch.arange(num_tokens, device=device)
         starts_T = document_starts(document_positions_T)
         valid_T = (
             torch.ones_like(indices_T, dtype=torch.bool)
@@ -161,59 +180,84 @@ class QSAIndexMetadata(NamedTuple):
         counts_T = valid_T.long().cumsum(0)
         start_counts_T = F.pad(counts_T[:-1], (1, 0))[starts_T]
         local_counts_T = counts_T - start_counts_T
-        valid_indices_U = valid_T.nonzero().flatten()
-        block_ends_G = (
-            (valid_T & (local_counts_T.remainder(compress_ratio) == 0))
-            .nonzero()
-            .flatten()
+        compact_T = (counts_T - 1).clamp_min(0)
+        # Scatter targets past the kept range absorb rows that write nothing.
+        valid_indices_T = torch.zeros(num_tokens + 1, dtype=torch.long, device=device)
+        valid_indices_T.scatter_(
+            0, torch.where(valid_T, compact_T, num_tokens), indices_T
         )
-        block_indices_GR = valid_indices_U[
-            counts_T[block_ends_G, None]
-            - compress_ratio
-            + torch.arange(compress_ratio, device=document_positions_T.device)
+        valid_indices_T = valid_indices_T[:num_tokens]
+
+        num_block_slots = num_tokens // compress_ratio
+        block_end_T = valid_T & (local_counts_T.remainder(compress_ratio) == 0)
+        block_end_counts_G = torch.zeros(
+            num_block_slots + 1, dtype=torch.long, device=device
+        )
+        block_end_counts_G.scatter_(
+            0,
+            torch.where(block_end_T, block_end_T.long().cumsum(0) - 1, num_block_slots),
+            counts_T,
+        )
+        block_indices_GR = valid_indices_T[
+            (
+                block_end_counts_G[:num_block_slots, None]
+                - compress_ratio
+                + torch.arange(compress_ratio, device=device)
+            ).clamp_min(0)
         ]
+
+        num_documents = num_tokens if max_num_documents is None else max_num_documents
+        document_first_T = valid_T & (local_counts_T == 1)
+        document_slot_T = document_first_T.long().cumsum(0) - 1
+        if max_num_documents is not None:
+            torch._assert_async(document_first_T.sum() <= max_num_documents)
+        cu_seqlens_N = counts_T[-1:].repeat(num_documents + 2)
+        cu_seqlens_N.scatter_(
+            0,
+            torch.where(document_first_T, document_slot_T, num_documents + 1),
+            compact_T,
+        )
+        cu_seqlens_N = cu_seqlens_N[: num_documents + 1]
+        cu_seqlens_k_N = F.pad(
+            (cu_seqlens_N.diff() // compress_ratio).cumsum(0), (1, 0)
+        ).int()
+        document_T = document_slot_T.clamp(0, max(num_documents - 1, 0))
+
         tail_count_T = local_counts_T.remainder(compress_ratio)
-        tail_offsets_TR = torch.arange(
-            compress_ratio - 1, device=document_positions_T.device
-        ).expand(num_tokens, -1)
+        tail_offsets_TR = torch.arange(compress_ratio - 1, device=device).expand(
+            num_tokens, -1
+        )
         tail_slots_TR = counts_T[:, None] - tail_count_T[:, None] + tail_offsets_TR
-        # The extra entry makes all-padding documents a well-defined empty selection.
-        tail_indices_TR = F.pad(valid_indices_U, (0, 1))[
-            tail_slots_TR.clamp_max(valid_indices_U.numel())
-        ]
+        tail_indices_TR = valid_indices_T[tail_slots_TR.clamp_max(num_tokens - 1)]
         tail_indices_TR = tail_indices_TR.masked_fill(
             ~(valid_T[:, None] & (tail_offsets_TR < tail_count_T[:, None])), -1
         )
-        # lightning_indexer's varlen layout over valid tokens.
-        starts_U = starts_T[valid_indices_U]
-        new_document_U = F.pad(starts_U[1:] != starts_U[:-1], (1, 0), value=True)
-        document_U = new_document_U.cumsum(0) - 1
-        tokens_N = torch.bincount(document_U)
-        cu_seqlens = F.pad(tokens_N.cumsum(0), (1, 0)).int()
-        cu_seqlens_k = F.pad((tokens_N // compress_ratio).cumsum(0), (1, 0)).int()
         return cls(
-            valid_indices_U,
-            document_U,
-            cu_seqlens,
-            cu_seqlens_k,
+            valid_T,
+            document_T,
+            compact_T,
+            valid_indices_T,
+            cu_seqlens_N.int(),
+            cu_seqlens_k_N,
             block_indices_GR,
             tail_indices_TR,
         )
 
     def annotate_spmd_types(self) -> None:
-        # Valid tokens and documents are rank-local and data-dependent.
-        types_local = {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R}
+        types_T = token_id_placement()
         types_TR = spmd.SpmdType(
             {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R},
             spmd.PartitionSpec(("dp", "cp"), None),
         )
         for tensor in (
-            self.valid_indices_U,
-            self.document_U,
-            self.cu_seqlens,
-            self.cu_seqlens_k,
+            self.valid_T,
+            self.document_T,
+            self.compact_T,
+            self.valid_indices_T,
         ):
-            spmd.assert_type(tensor, types_local)
+            spmd.assert_type(tensor, types_T)
+        for tensor in (self.cu_seqlens_N, self.cu_seqlens_k_N):
+            spmd.assert_type(tensor, {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R})
         spmd.assert_type(self.block_indices_GR, types_TR)
         spmd.assert_type(self.tail_indices_TR, types_TR)
 
@@ -306,15 +350,15 @@ class QSAIndexer(Module):
             self.k_layernorm(pooled_GK).unsqueeze(1), positions[block_indices_GR[:, 0]]
         ).squeeze(1)
         num_selected = min(self.block_topk, num_blocks)
-        blocks_TB = torch.full(
-            (num_tokens, num_selected), -1, dtype=torch.long, device=x_TD.device
-        )
         if num_selected:
             with torch.no_grad():
-                blocks_UB = self._select_blocks(
+                blocks_TB = self._select_blocks(
                     query_THK, key_GK, metadata, num_selected=num_selected
                 )
-            blocks_TB[metadata.valid_indices_U] = blocks_UB
+        else:
+            blocks_TB = torch.full(
+                (num_tokens, 0), -1, dtype=torch.long, device=x_TD.device
+            )
         tokens_TBR = block_indices_GR[blocks_TB.clamp_min(0)].masked_fill(
             (blocks_TB < 0).unsqueeze(-1), -1
         )
@@ -343,47 +387,49 @@ class QSAIndexer(Module):
         """Top-k complete blocks per valid query with Attention Gym's lightning_indexer.
 
         lightning_indexer groups each document's tokens into compress_ratio-token
-        candidates. Run it over valid tokens only, so padding never forms or splits
-        a block and the candidates are exactly ``QSAIndexMetadata``'s blocks.
-        Scores rank as sum_h relu(q_h . k); the positive scale is irrelevant.
-        ReLU makes exact ties common. Under deterministic algorithms the CuTe
-        backend resolves them toward earlier blocks, independent of later
-        candidates; otherwise the choice among cutoff ties is backend-defined.
+        candidates. Run it over the compacted valid tokens, so padding never forms
+        or splits a block and the candidates are exactly ``QSAIndexMetadata``'s
+        blocks; rows past the valid count return only -1. Scores rank as
+        sum_h relu(q_h . k); the positive scale is irrelevant. ReLU makes exact
+        ties common. Under deterministic algorithms the CuTe backend resolves
+        them toward earlier blocks, independent of later candidates; otherwise
+        the choice among cutoff ties is backend-defined.
 
         Returns:
-            ``blocks_UB``: each valid token's selected global block ids in
-            ascending order, -1 after the valid ones.
+            Selected global block ids per token in ascending order, -1 after
+            the valid ones and for padding tokens.
         """
-        query_UHK = query_THK[metadata.valid_indices_U]
+        compact_query_THK = query_THK[metadata.valid_indices_T]
         # The fused kernels need fp16/bf16 on SM90 or newer, as in DeepSeek-V4.
         fused = (
-            query_UHK.is_cuda
-            and query_UHK.dtype in (torch.float16, torch.bfloat16)
+            compact_query_THK.is_cuda
+            and compact_query_THK.dtype in (torch.float16, torch.bfloat16)
             and has_cuda_capability(9, 0)
         )
-        local_UB = lightning_indexer(
-            query_UHK.unsqueeze(0),
+        compact_local_TB = lightning_indexer(
+            compact_query_THK.unsqueeze(0),
             key_GK.unsqueeze(0),
-            query_UHK.new_ones(1, *query_UHK.shape[:2]),
+            compact_query_THK.new_ones(1, *compact_query_THK.shape[:2]),
             num_selected,
             causal=True,
             compress_ratio=self.compress_ratio,
-            cu_seqlens=metadata.cu_seqlens,
-            cu_seqlens_k=metadata.cu_seqlens_k,
+            cu_seqlens=metadata.cu_seqlens_N,
+            cu_seqlens_k=metadata.cu_seqlens_k_N,
             impl="fused" if fused else "reference",
         ).squeeze(0)
         num_blocks = key_GK.shape[0]
+        local_TB = compact_local_TB[metadata.compact_T]
         # Document-local -> global block ids; sort for a backend-independent order.
-        blocks_UB = (
+        blocks_TB = (
             torch.where(
-                local_UB >= 0,
-                local_UB + metadata.cu_seqlens_k[metadata.document_U, None],
+                metadata.valid_T[:, None] & (local_TB >= 0),
+                local_TB + metadata.cu_seqlens_k_N[metadata.document_T, None],
                 num_blocks,
             )
             .sort(-1)
             .values
         )
-        return blocks_UB.masked_fill(blocks_UB == num_blocks, -1).long()
+        return blocks_TB.masked_fill(blocks_TB == num_blocks, -1).long()
 
 
 class QSAIndexerLoss(AuxLoss):
@@ -424,7 +470,7 @@ class QSAInnerAttention(InnerAttention):
             return True
 
         def build_attention_metadata(
-            self, positions, *, padding_mask=None, **kwargs
+            self, positions, *, padding_mask=None, max_num_documents=None, **kwargs
         ) -> AttentionMetadata:
             # Decoder dispatches this metadata only to QSA by inner-attention type.
             return cast(
@@ -433,6 +479,7 @@ class QSAInnerAttention(InnerAttention):
                     positions,
                     padding_mask_T=padding_mask,
                     compress_ratio=self.compress_ratio,
+                    max_num_documents=max_num_documents,
                 ),
             )
 
