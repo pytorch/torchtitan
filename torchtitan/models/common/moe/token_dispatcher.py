@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import spmd_types as spmd
@@ -181,6 +182,18 @@ class LocalTokenDispatcher(Module):
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
+
+    def dispatch_with_overlap(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        compute_while_dispatching: Callable[[], None],
+    ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
+        result = self.dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK, routing_map_TE)
+        compute_while_dispatching()
+        return result
 
     def combine(
         self,
@@ -867,9 +880,9 @@ class DeepEPDispatchMetadata(EPDispatchMetadata):
 
 
 class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
-    """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
+    """Token dispatcher using DeepEP v2's unified ``EPBuffer`` dispatch/combine.
 
-    DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
+    DeepEP v2 collapses the v1 high-throughput (HT) and low-latency (LL)
     paths into a single ``buffer.dispatch``/``combine``. Compact dispatch is gathered
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
@@ -949,6 +962,34 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         topk_expert_ids_TK: torch.Tensor,
         routing_map_TE: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        return self._dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK, routing_map_TE)
+
+    # pyrefly: ignore [bad-override]
+    def dispatch_with_overlap(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        compute_while_dispatching: Callable[[], None],
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
+        return self._dispatch(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            routing_map_TE,
+            compute_while_dispatching=compute_while_dispatching,
+        )
+
+    def _dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        *,
+        compute_while_dispatching: Callable[[], None] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, DeepEPDispatchMetadata]:
         """Dispatch through the preallocated ElasticBuffer."""
         # Ignore input routing_map_TE. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
@@ -977,6 +1018,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             remat_region_name=self.remat_region_name("ep_communication.dispatch"),
             recompute=self._replays_communication(),
             cuda_graph_compatible=self.cuda_graph_compatible,
+            compute_while_dispatching=compute_while_dispatching,
         )
 
         metadata = DeepEPDispatchMetadata(state=state, scores_R=scores_R)
