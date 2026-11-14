@@ -31,6 +31,14 @@ class Qwen38FlashNextStateDictAdapter(Qwen35StateDictAdapter):
         self, model_config: Qwen38FlashNextModel.Config, hf_assets_path: str | None
     ):
         super().__init__(model_config, hf_assets_path)
+        if model_config.vision_encoder is None:
+            # The only released checkpoint is multimodal: text-only configs read
+            # its model.language_model.* decoder keys and skip model.visual.*.
+            self.hf_language_model_prefix = "model.language_model"
+            self.from_hf_map = {
+                re.sub(r"^model\.", "model.language_model.", hf_key): tt_key
+                for hf_key, tt_key in self.from_hf_map.items()
+            }
         self.flash_config = model_config
         self._ngram_weight_layouts: dict[int, DTensor] = {}
         self._split_projection_layouts: dict[str, tuple[int, int, int]] = {}
