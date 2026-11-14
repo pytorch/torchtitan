@@ -205,8 +205,7 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
         )
         rank_rows.append([row["id"] for row in dataset])
 
-    assert set(rank_rows[0]).isdisjoint(rank_rows[1])
-    assert set(rank_rows[0]) | set(rank_rows[1]) == set(range(10))
+    assert rank_rows == [[0, 2, 4, 6, 8], [1, 3, 5, 7, 9]]
 
     iterator = iter(
         config.build().build_iter_dataset(
@@ -226,10 +225,13 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
     assert next(restored) == expected
 
 
+_HF_SHARDED_NUM_ROWS = 16
+
+
 def _hf_sharded_rows():
-    return datasets.Dataset.from_dict({"id": list(range(16))}).to_iterable_dataset(
-        num_shards=8
-    )
+    return datasets.Dataset.from_dict(
+        {"id": list(range(_HF_SHARDED_NUM_ROWS))}
+    ).to_iterable_dataset(num_shards=8)
 
 
 def test_hf_shuffled_repeat_advances_epoch():
@@ -308,12 +310,29 @@ def test_hf_resume_mid_second_epoch():
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_consumed", [4, 16, 20])
 def test_hf_cursor_state_after_restore(shuffle, num_consumed):
-    original = _HuggingFaceCursorIterator(
-        _hf_sharded_rows(), repeat=True, shuffle=shuffle
-    )
-    restored = _HuggingFaceCursorIterator(
-        _hf_sharded_rows(), repeat=True, shuffle=shuffle
-    )
+    """States saved after a restore resume to the same rows as the original's.
+
+    Once read, Hugging Face streaming state can carry different nested
+    bookkeeping after ``load_state_dict`` than an uninterrupted iterator's
+    for the same position, so states after advancing are compared by the rows
+    they resume to.
+    """
+
+    def cursor():
+        return _HuggingFaceCursorIterator(
+            _hf_sharded_rows(), repeat=True, shuffle=shuffle
+        )
+
+    def resumed_rows(state):
+        iterator = cursor()
+        try:
+            iterator.set_state(state)
+            return [next(iterator) for _ in range(_HF_SHARDED_NUM_ROWS)]
+        finally:
+            iterator.close()
+
+    original = cursor()
+    restored = cursor()
     try:
         for _ in range(num_consumed):
             next(original)
@@ -323,7 +342,9 @@ def test_hf_cursor_state_after_restore(shuffle, num_consumed):
         assert restored.get_state() == state
         for _ in range(4):
             assert next(restored) == next(original)
-            assert restored.get_state() == original.get_state()
+            assert resumed_rows(restored.get_state()) == resumed_rows(
+                original.get_state()
+            )
     finally:
         original.close()
         restored.close()
