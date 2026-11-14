@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.config import Function
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
@@ -837,8 +839,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
         head gradients are already accumulated. The returned loss is a leaf
         whose backward accumulates only its own gradient.
         """
-        from torchtitan.distributed.fsdp_lifecycle import fsdp_partial_backwards
-
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
@@ -922,15 +922,15 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 )
             chunk_metrics_list: list[dict[str, torch.Tensor]] = []
 
-            with fsdp_partial_backwards(
-                lm_head,
-                run_backward=run_backward,
-                outer_backward_follows=decoder_requires_grad,
-            ) as fsdp:
+            # FSDP all-gathers lm_head once for the chunks and reduces its
+            # accumulated gradients once, leaving the decoder's FSDP state for
+            # the backward through the decoder.
+            with (
+                lm_head.partial_backward(outer_backward_follows=decoder_requires_grad)
+                if isinstance(lm_head, FSDPModule)
+                else contextlib.nullcontext()
+            ):
                 for chunk_index in range(num_chunks):
-                    if chunk_index == num_chunks - 1:
-                        fsdp.before_last_forward()
-
                     h_chunks = tuple(
                         chunks[chunk_index] for chunks in hidden_state_chunks_per_output
                     )
@@ -949,7 +949,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
                     # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
                     # fails at lm_head's hooks, which can't be traced.
                     logits: LossInput = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                    logits = fsdp.after_forward(logits)
                     if not is_multi_output:
                         logits = logits[0]
                         label_chunks = label_chunks[0]

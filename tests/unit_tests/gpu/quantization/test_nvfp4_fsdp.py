@@ -19,7 +19,11 @@ pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.nvfp4_training")
 
 import torchtitan.quantization.nvfp4.tensor as nvfp4_tensor  # noqa: E402
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization._fsdp_tensor import (  # noqa: E402
+    _ShardedFSDPTensor,
+    _unsharded_inner_tensors,
+    _UnshardedFSDPTensor,
+)
 from torchtitan.quantization.nvfp4 import NVFP4Linear  # noqa: E402
 from torchtitan.quantization.nvfp4.tensor import (  # noqa: E402
     _LinearShardedTensorWithNVFP4Compute,
@@ -36,15 +40,30 @@ pytestmark = [
 ]
 
 
-def _get_weight_param(linear):
-    state = fully_shard.state(linear)
-    param_group = state._fsdp_param_group
-    assert param_group is not None
-    return next(
-        param
-        for param in param_group.fsdp_params
-        if param._module_info.param_name == "weight"
-    )
+class _FSDPWeightBuffers:
+    """Records the tensors that FSDP owns for the weight's all-gather extension
+    and frees on reshard: the all-gather outputs passed to
+    ``fsdp_post_all_gather`` and the unsharded inner tensors of the weight it
+    returns or refills."""
+
+    def __init__(self) -> None:
+        self.all_gather_outputs: tuple[torch.Tensor, ...] = ()
+        self.unsharded_inner_tensors: tuple[torch.Tensor, ...] = ()
+        self._fsdp_post_all_gather = _ShardedFSDPTensor.fsdp_post_all_gather
+
+        def fsdp_post_all_gather(tensor, all_gather_outputs, *args, **kwargs):
+            result = self._fsdp_post_all_gather(
+                tensor, all_gather_outputs, *args, **kwargs
+            )
+            unsharded = kwargs["out"] if result is None else result[0]
+            self.all_gather_outputs = tuple(all_gather_outputs)
+            self.unsharded_inner_tensors = _unsharded_inner_tensors(unsharded.operands)
+            return result
+
+        _ShardedFSDPTensor.fsdp_post_all_gather = fsdp_post_all_gather
+
+    def remove(self) -> None:
+        _ShardedFSDPTensor.fsdp_post_all_gather = self._fsdp_post_all_gather
 
 
 def _run_nvfp4_fsdp_lifecycle(
@@ -66,6 +85,7 @@ def _run_nvfp4_fsdp_lifecycle(
         return original_quantize_weight(*args, **kwargs)
 
     nvfp4_tensor._quantize_nvfp4_weight = counted_quantize_weight
+    fsdp_buffers = _FSDPWeightBuffers()
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
         linear = (
@@ -94,33 +114,30 @@ def _run_nvfp4_fsdp_lifecycle(
 
         if reshard_after_forward:
             output_MN = linear(input_MK)
-            weight_param = _get_weight_param(linear)
-            inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+            inner_tensor_ids = tuple(map(id, fsdp_buffers.unsharded_inner_tensors))
             assert num_quantize_calls == 1
             assert isinstance(
                 linear.weight.to_local(), _LinearShardedTensorWithNVFP4Compute
             )
             assert all(
                 tensor.untyped_storage().size() == 0
-                for tensor in weight_param._unsharded_inner_tensors
+                for tensor in fsdp_buffers.unsharded_inner_tensors
             )
             output_MN.sum().backward()
             assert num_quantize_calls == 2
             assert (
-                tuple(map(id, weight_param._unsharded_inner_tensors))
-                == inner_tensor_ids
+                tuple(map(id, fsdp_buffers.unsharded_inner_tensors)) == inner_tensor_ids
             )
         else:
             linear.set_is_last_backward(False)
             linear.set_reshard_after_backward(False)
             linear.set_requires_gradient_sync(False)
             outputs = [linear(input_MK), linear(input_MK)]
-            weight_param = _get_weight_param(linear)
             assert num_quantize_calls == 1
             assert isinstance(linear.weight, _UnshardedFSDPTensor)
             assert all(
                 tensor.untyped_storage().size() > 0
-                for tensor in weight_param._unsharded_inner_tensors
+                for tensor in fsdp_buffers.unsharded_inner_tensors
             )
             outputs[0].sum().backward(retain_graph=True)
             assert num_quantize_calls == 1
@@ -133,6 +150,7 @@ def _run_nvfp4_fsdp_lifecycle(
                 linear.weight.to_local(), _LinearShardedTensorWithNVFP4Compute
             )
     finally:
+        fsdp_buffers.remove()
         nvfp4_tensor._quantize_nvfp4_weight = original_quantize_weight
         dist.destroy_process_group()
 
