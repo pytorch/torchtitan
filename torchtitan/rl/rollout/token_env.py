@@ -17,6 +17,7 @@ from renderers import (
     PlaceholderRange,
     RenderedTokens,
     Renderer,
+    ToolCall,
     ToolSpec,
 )
 
@@ -233,6 +234,10 @@ class TokenEnv(Configurable):
                 self._renderer.parse_response,
                 token_ids=completion.token_ids,
                 tools=self._tools,
+                # The sampling prompt can open a reasoning block (GPT-OSS's analysis channel,
+                # Qwen3.5's `<think>`). Without the prompt, the parser reads that reasoning as
+                # content.
+                prompt_ids=self._last_prompt.token_ids,
             )
         except Exception:
             logger.exception(
@@ -252,8 +257,27 @@ class TokenEnv(Configurable):
         }
         if parsed.reasoning_content:
             completion_message["reasoning_content"] = parsed.reasoning_content
-        if parsed.tool_calls:
-            completion_message["tool_calls"] = parsed.tool_calls
+        # Envs and full re-renders read `ToolCall` dicts. A `ToolCall` needs a string name: a call
+        # without one is dropped, and its tokens stay in the completion. `arguments` stays as parsed
+        # (a JSON value, or the raw string when the JSON didn't parse); null becomes {}.
+        tool_calls: list[ToolCall] = []
+        for call in parsed.tool_calls:
+            # TODO: drop the isinstance check once renderers' `parse_qwen3` marks a name that is not
+            # a string (e.g. `{"name": 5}`) as missing; today it keeps it.
+            # TODO: record dropped and broken calls (raw text, parse status) next to the message.
+            # A JSONL reader, a rubric or a loss mask may need them; no in-repo code does today.
+            if not isinstance(call.name, str) or not call.name:
+                continue
+            arguments = {} if call.arguments is None else call.arguments
+            tool_call: ToolCall = {
+                "type": "function",
+                "function": {"name": call.name, "arguments": arguments},
+            }
+            if call.id is not None:
+                tool_call["id"] = call.id
+            tool_calls.append(tool_call)
+        if tool_calls:
+            completion_message["tool_calls"] = tool_calls
 
         # Truncated / aborted: the response is final and partial. Keep it for
         # partial-reward grading and debugging; don't step the env on it.

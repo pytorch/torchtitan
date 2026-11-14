@@ -272,32 +272,6 @@ def _strip_reasoning_history(messages):
     return out
 
 
-def _normalize_tool_calls(messages):
-    """Our ParsedToolCall is flat (.name/.arguments); rendering expects OpenAI-nested."""
-    out = []
-    for m in messages:
-        tcs = m.get("tool_calls") if isinstance(m, dict) else None
-        if not tcs:
-            out.append(m)
-            continue
-        norm = []
-        for tc in tcs:
-            if isinstance(tc, dict) and "function" in tc:
-                norm.append(tc)
-                continue
-            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
-            args = (
-                tc.get("arguments")
-                if isinstance(tc, dict)
-                else getattr(tc, "arguments", None)
-            )
-            norm.append(
-                {"type": "function", "function": {"name": name, "arguments": args}}
-            )
-        out.append({**m, "tool_calls": norm})
-    return out
-
-
 def _parse_channels(text: str) -> list[tuple[str, str]]:
     """Split a Muse Glimmer assistant completion into (recipient, body) harmony channels."""
     return [
@@ -376,10 +350,10 @@ class MuseGlimmerRenderer:
     # ---------------------------------------------------------------- rendering
 
     def _prepare(self, messages):
-        """Apply the history policy, then the tool-call shape rendering expects."""
+        """Apply the reasoning history policy."""
         if not self._config.retain_reasoning_in_history:
             messages = _strip_reasoning_history(messages)
-        return _normalize_tool_calls(messages)
+        return messages
 
     def _reasoning_line(self) -> str:
         strength = self._config.reasoning_strength or _DEFAULT_REASONING_STRENGTH
