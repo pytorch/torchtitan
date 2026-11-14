@@ -32,12 +32,30 @@ from .decoder import Decoder
 
 
 class MultimodalModel(Decoder):
-    """Language model with modality-specific encoders."""
+    """Language model with modality-specific encoders.
+
+    A config always sets at least one of ``multimodal_encoder_fqns``; a model
+    family's text-only variant is its ``Decoder`` subclass. Pipeline stages
+    other than the first drop the encoders, so modules may still be None.
+    """
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
+        def __post_init__(self) -> None:
+            super(MultimodalModel.Config, self).__post_init__()
+            owner = cast(type[MultimodalModel], type(self)._owner)
+            if all(
+                getattr(self, encoder_fqn) is None
+                for encoder_fqn in owner.multimodal_encoder_fqns
+            ):
+                raise ValueError(
+                    f"{owner.__qualname__} needs at least one of "
+                    f"{owner.multimodal_encoder_fqns}; use the model family's "
+                    "text-only Decoder for a model without encoders."
+                )
+
         def build_flops_estimator(
             self,
             model: Module,

@@ -52,7 +52,7 @@ The pipeline has three layers.
 
 **2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [controller/WINDOWED_FIFO.md](controller/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
-**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
+**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore (or `ModelStateDictTransport`, see [MODEL_STATE_DICT_TRANSPORT.md](MODEL_STATE_DICT_TRANSPORT.md)) publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
 `torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
@@ -120,7 +120,7 @@ Most experiments configure four pieces:
 rollouter = Rollouter.Config(
     training_dataloader=IterableRolloutDataLoader.Config(dataset=MyDataset.Config()),
     validation_dataset=MyValidationDataset.Config(),
-    worker=RolloutWorker.Config(
+    worker=MessageEnvRolloutWorker.Config(
         message_env=MyEnv.Config(),
         rubric=Rubric.Config(
             reward_fns=[RewardCorrect.Config(weight=1.0)]
@@ -129,7 +129,7 @@ rollouter = Rollouter.Config(
 )
 ```
 
-Subclass `RolloutWorker` or `Rollouter` only when an experiment changes their
+Subclass `MessageEnvRolloutWorker` or `Rollouter` only when an experiment changes their
 behavior. For example, the Verifiers integration keeps a custom
 `VerifiersRollouter` because it owns an external environment server and a
 different rollout protocol.
@@ -216,12 +216,12 @@ scripts/install_rl_env.sh
 The script installs the core and RL requirements (Monarch, OpenTelemetry, ...),
 matching PyTorch, torchvision and vLLM CUDA nightlies, TorchStore and
 batch-invariant ops (git main, without dependencies so they cannot replace the
-nightly torch), and the Flash Attention build for the local GPU: FA4 on
-Blackwell (SM100+), FA3 on Hopper (SM90). TorchTitan uses the FA2
-implementation bundled with PyTorch on older GPUs such as A100. Flags
-documented in the script header select another CUDA tag (`--cuda`), force
-Flash Attention versions (`--flash-attn`), or install `nvcc` for FlashInfer's
-JIT when no CUDA toolkit is present (`--nvcc`).
+nightly torch), Mooncake and NIXL for `ModelStateDictTransport`, and the Flash
+Attention build for the local GPU: FA4 on Blackwell (SM100+), FA3 on Hopper
+(SM90). TorchTitan uses the FA2 implementation bundled with PyTorch on older
+GPUs such as A100. Flags documented in the script header select another CUDA
+tag (`--cuda`), force Flash Attention versions (`--flash-attn`), or install
+`nvcc` for FlashInfer's JIT when no CUDA toolkit is present (`--nvcc`).
 
 Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
 (SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the

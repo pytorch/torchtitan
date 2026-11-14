@@ -22,7 +22,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import torch_utils as _torch_utils
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -300,9 +299,6 @@ class VLLMModelWrapper(Module):
             parallelism=parallelism,
             precision=precision,
             device=device,
-            # Text-only generators need a config without a vision encoder;
-            # VLLMMultimodalModelWrapper keeps it.
-            keep_vision_encoder=supports_multimodal(self),
         )
         # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
         # routed tokens.

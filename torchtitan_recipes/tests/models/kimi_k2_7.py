@@ -53,7 +53,7 @@ from torchtitan.models.kimi_k2_7 import (
     build_model_config,
     KIMI_K2_5_SPECIAL_TOKENS,
     KIMI_K2_5_VISION_PROCESSOR_KWARGS,
-    KimiK25Model,
+    KimiK2Model,
 )
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -119,7 +119,7 @@ def kimi_k2_5_debugmodel(
 
 
 def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
-    """Moonlight 16B-A3B: the text-only DeepSeekV3 sibling (no vision tower)."""
+    """Moonlight 16B-A3B: the text-only Kimi K2 sibling (no vision tower)."""
     parallelism = ParallelismConfig(
         expert_parallel_degree=8,
     )
@@ -293,7 +293,7 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
 
 
 def _dist_muon_optimizer(
-    model_config: KimiK25Model.Config,
+    model_config: KimiK2Model.Config,
     *,
     muon_lr: float,
     adamw_lr: float,

@@ -18,7 +18,8 @@ if TYPE_CHECKING:
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.rl.generator.generator import Generator
     from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-    from torchtitan.rl.rollout.rollouter import RolloutWorker
+    from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
+    from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from torchtitan.rl.trainer.batcher import Batcher
     from torchtitan.rl.trainer.trainer import Trainer
@@ -48,7 +49,7 @@ class ActorSystem(Configurable, abc.ABC):
     """Places the RL services on processes and returns handles to them.
 
     The services (``Trainer``, ``Generator``, ``InterGeneratorRouter``,
-    ``Batcher``, ``RolloutWorker``) are framework-free classes; an actor system
+    ``Batcher``, ``BaseRolloutWorker``) are framework-free classes; an actor system
     runs each in its framework's actors. The controller builds it from
     ``Controller.Config.actor_system`` (or takes one its launcher built) and
     drives it: ``provision`` once, then a ``spawn_*`` call per service, and
@@ -116,7 +117,7 @@ class ActorSystem(Configurable, abc.ABC):
 
     @abc.abstractmethod
     async def spawn_rollout_workers(
-        self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
+        self, config: BaseRolloutWorker.Config, *, num_workers: int, num_threads: int
     ) -> Any:
         """Spawn a pool of ``num_workers`` rollout worker processes on the
         controller host, each running ``num_threads`` rollout threads."""
@@ -130,8 +131,16 @@ class ActorSystem(Configurable, abc.ABC):
         """Initialize TorchStore, with its storage colocated with the trainer, and the
         TorchStore client of every trainer and generator actor.
 
-        TODO: move to a model state dict transport, which owns its placement.
+        TODO: delete once ``ModelStateDictTransport`` replaces TorchStore.
         """
+
+    @abc.abstractmethod
+    async def initialize_model_state_dict_transport(
+        self, config: ModelStateDictTransport.Config
+    ) -> None:
+        """Connect every generator rank to every trainer rank's
+        ``ModelStateDictTransport`` staging buffer, laid out for the generators'
+        shards."""
 
     @abc.abstractmethod
     async def stop(self) -> None:

@@ -34,7 +34,7 @@ from torchtitan.models.kimi_k2_7.vision_encoder import (
     _compute_learned_pos_embeds as _compute_kimi_learned_pos_embeds,
     _tpool_patch_merger,
 )
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
 from torchtitan.models.qwen3_5.vision_encoder import (
     _compute_2d_rope_cache,
     _compute_learned_pos_embeds,
@@ -121,7 +121,7 @@ class TestPackedVision(unittest.TestCase):
                 self.num_calls += 1
                 return self.patch_embed(pixel_values)
 
-        for model_type in (KimiK25Model, KimiK3Model):
+        for model_type in (KimiK25Model, KimiK3MultimodalModel):
             with self.subTest(model_type=model_type.__name__):
                 model = model_type.__new__(model_type)
                 nn.Module.__init__(model)
