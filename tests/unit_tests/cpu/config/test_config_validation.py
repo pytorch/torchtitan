@@ -8,11 +8,13 @@ import contextlib
 from unittest import mock
 
 import pytest
+import torch.distributed as dist
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
-from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config import CommConfig, DebugConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.process_group_options import NCCLProcessGroupOptions
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -77,6 +79,25 @@ def test_per_group_accelerator_graph_config_restrictions() -> None:
         training=TrainingConfig(accelerator_graph_per_microbatch_group=True),
         parallelism=ParallelismConfig(pipeline_parallel_degree=2),
     )
+
+
+def test_comm_config_restrictions() -> None:
+    dp_shard_ctas = {
+        "dp_shard": NCCLProcessGroupOptions.Config(min_ctas=16, max_ctas=16)
+    }
+    with pytest.raises(ValueError, match="comm.backend='default'"):
+        CommConfig(process_group_options=dp_shard_ctas, backend="fake")
+    with mock.patch("torch.version.cuda", None):
+        with pytest.raises(ValueError, match="requires a CUDA build"):
+            CommConfig(sm_carveout=16)
+
+
+@pytest.mark.skipif(not dist.is_nccl_available(), reason="PyTorch built without NCCL")
+def test_nccl_process_group_options_build() -> None:
+    config = NCCLProcessGroupOptions.Config(min_ctas=16, max_ctas=32)
+    backend, options = config.build().backend_override
+    assert backend == "nccl"
+    assert (options.config.min_ctas, options.config.max_ctas) == (16, 32)
 
 
 def test_lazy_preprocessing_config_restrictions() -> None:

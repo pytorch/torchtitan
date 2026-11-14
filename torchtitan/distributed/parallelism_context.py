@@ -29,6 +29,9 @@ from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
+    # The type DeviceMesh uses for a backend override's options.
+    from torch._C._distributed_c10d import Backend as C10dBackend
+
     from torchtitan.config.parallelism import ParallelismConfig
 
 logger = logging.getLogger(__name__)
@@ -108,6 +111,11 @@ class ParallelismContext:
     ep: int
     world_size: int
     enable_sequence_parallel: bool
+    axis_backend_overrides: dict[str, str | tuple[str, C10dBackend.Options]] = field(
+        default_factory=dict
+    )
+    """Backend, or ``(backend, options)``, for the process group of a mesh axis.
+    Inactive and size-1 axes stay on the fake backend regardless."""
     _real_pp_group_for_fake_spmd: dist.ProcessGroup | None = None
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
@@ -129,6 +137,7 @@ class ParallelismContext:
         topology: DistributedTopology,
         *,
         dump_folder: str,
+        axis_backend_overrides: dict[str, str | tuple[str, C10dBackend.Options]],
     ) -> ParallelismContext:
         """Construct the parallelism context from config and topology."""
         parallelism_context = cls(
@@ -140,6 +149,7 @@ class ParallelismContext:
             ep=parallelism_config.expert_parallel_degree,
             world_size=topology.world_size,
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
+            axis_backend_overrides=axis_backend_overrides,
             _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
         if parallelism_config.save_parallelism_folder is not None:
@@ -290,6 +300,8 @@ class ParallelismContext:
             for axis, degree in zip(axis_names, axis_degrees, strict=True):
                 if degree == 1 or not self._axis_is_active(axis, degree):
                     backend_override[axis] = "fake"
+                elif axis in self.axis_backend_overrides:
+                    backend_override[axis] = self.axis_backend_overrides[axis]
 
             return world_mesh._unflatten(
                 0,
