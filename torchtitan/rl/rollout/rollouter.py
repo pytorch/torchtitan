@@ -111,7 +111,16 @@ class Rollouter(Configurable):
         `BaseRolloutWorker` subclass by config type; one worker is built per pool process."""
 
         worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        """CPU rollout worker processes, on the controller's host unless
+        `workers_on_controller_host` is False."""
+
+        # TODO: default to False once a matched multi-node run (workers home vs spread) passes.
+        workers_on_controller_host: bool = True
+        """True: every rollout worker runs on the controller's host. False: the actor system
+        spreads them over the job's other hosts (a one-node run keeps them on this host). Keep
+        True when an env needs something only that host has, e.g. a retriever on its 127.0.0.1,
+        its Docker daemon, or image files on its disk (`TokenEnv` reads each image by path in the
+        worker)."""
 
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
@@ -182,6 +191,7 @@ class Rollouter(Configurable):
             self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
+            on_controller_host=self._config.workers_on_controller_host,
         )
         await asyncio.gather(
             *(
@@ -259,6 +269,8 @@ class Rollouter(Configurable):
 
         # Random, so a worker whose groups fail immediately gets 1/N of the groups. Picking the
         # least busy worker would send it every slot that frees up.
+        # TODO: before groups of tens of GB (1M-token rollouts, 128 per group), reserve each group's
+        #   bytes per worker host at admission, or pick by bytes with a fail-fast guard.
         worker = random.choice(self._workers)
         call = asyncio.ensure_future(
             worker.run_group.call_one(

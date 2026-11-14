@@ -67,10 +67,12 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
             structured_logger_init_fn=functools.partial(
                 lambda **kwargs: init_calls.append(kwargs), source="rl", rank=0
             ),
+            first_worker_index=4,
         )
 
         assert actor._worker is worker
-        assert init_calls == [{"source": "rl_rollout_worker", "rank": 2}]
+        # Rank 2 in the proc mesh of a host whose first worker is the pool's worker 4.
+        assert init_calls == [{"source": "rl_rollout_worker", "rank": 6}]
 
     asyncio.run(run())
 
@@ -93,6 +95,7 @@ class _Worker:
         self.setup_async = _CallOneEndpoint()
         self.run_group = _RunGroupEndpoint()
         self.sync_log_step = _CallOneEndpoint()
+        self.hostname = _CallOneEndpoint()
 
 
 class _ActorSystem:
@@ -157,6 +160,7 @@ def _rollouter_without_datasets() -> Rollouter:
         worker="worker_config",
         worker_pool_size=3,
         num_threads_per_worker=2,
+        workers_on_controller_host=False,
     )
     rollouter._workers = []
     rollouter._actor_system = None
@@ -203,11 +207,11 @@ def test_monarch_spawns_rollout_workers_on_controller_host(monkeypatch) -> None:
         actor_system = MonarchActorSystem(MonarchActorSystem.Config())
 
         handles = await actor_system.spawn_rollout_workers(
-            "worker_config", num_workers=3, num_threads=2
+            "worker_config", num_workers=3, num_threads=2, on_controller_host=True
         )
 
         assert handles == workers
-        assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
+        assert host.spawn_kwargs["per_host"] == {"cpus": 3}
         args, kwargs = worker_mesh.spawn_args
         assert args[0] == "rollout_worker"
         assert args[1] is RolloutWorkerActor
@@ -215,6 +219,7 @@ def test_monarch_spawns_rollout_workers_on_controller_host(monkeypatch) -> None:
             "worker_config": "worker_config",
             "num_threads": 2,
             "structured_logger_init_fn": structured_logger_init_fn,
+            "first_worker_index": 0,
         }
         await actor_system.stop_rollout_workers()
         assert worker_mesh.actor_mesh.stopped
@@ -232,6 +237,7 @@ def test_setup_spawns_and_sets_up_every_worker_and_close_stops_them() -> None:
             "config": "worker_config",
             "num_workers": 3,
             "num_threads": 2,
+            "on_controller_host": False,
         }
         for worker in actor_system.workers:
             assert worker.setup_async.calls == [
