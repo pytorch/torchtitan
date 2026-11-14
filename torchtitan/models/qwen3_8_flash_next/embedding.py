@@ -19,7 +19,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Conv1d, Linear
 
@@ -85,16 +86,25 @@ class NGramTable(nn.Embedding, Module):
     def __init__(self, config: Config):
         super().__init__(config.num_embeddings, config.embedding_dim)
         self.row_mesh = None
+        self._owner_rank = 0
 
     def _parallelize(self, parallelism_context: ParallelismContext) -> None:
         global_shape = torch.Size((self.num_embeddings, self.embedding_dim))
         global_stride = self.weight.stride()
         self.row_mesh = parallelism_context.get_optional_mesh("dp")
+        tp_mesh = parallelism_context.get_optional_mesh("tp")
+        if self.row_mesh is None and tp_mesh is not None:
+            self.row_mesh = parallelism_context.get_mesh("dp_shard")
         if self.row_mesh is not None and self.num_embeddings % self.row_mesh.size():
             # SPMD meta allocation pads uneven shards; owners store only valid rows.
             raise ValueError("PLE requires num_embeddings divisible by the DP degree")
         super()._parallelize(parallelism_context)
         if self.row_mesh is not None:
+            num_feature_owners = 1 if tp_mesh is None else tp_mesh.size()
+            feature_owner = 0 if tp_mesh is None else tp_mesh.get_local_rank()
+            self._owner_rank = (
+                self.row_mesh.get_local_rank() * num_feature_owners + feature_owner
+            )
             # Use the backbone storage mesh to preserve its norm reduction order.
             storage_mesh, _ = resolve_fsdp_mesh(parallelism_context)
             assert storage_mesh.mesh_dim_names is not None
@@ -131,7 +141,7 @@ class NGramTable(nn.Embedding, Module):
         with torch.random.fork_rng(
             devices=devices, device_type=self.weight.device.type
         ):
-            torch.manual_seed(torch.initial_seed() + self.row_mesh.get_local_rank())
+            torch.manual_seed(torch.initial_seed() + self._owner_rank)
             self._init_param(
                 "weight",
                 torch.nn.Parameter(
@@ -295,7 +305,18 @@ class NGramEmbedding(Module):
             if routing is None
             else routing.input_ids
         )
-        return self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype).flatten(-2)
+        embedding_TNE = self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype)
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # The table shards features over TP; gather the looked-up vectors.
+            embedding_TNE = spmd.redistribute(
+                embedding_TNE,
+                tp_group,
+                src=spmd.S(2),
+                dst=spmd.R,
+                backward_options={"op_dtype": embedding_TNE.dtype},
+            )
+        return embedding_TNE.flatten(-2)
 
 
 class PLELayer(Module):
