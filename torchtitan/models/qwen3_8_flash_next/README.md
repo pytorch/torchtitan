@@ -60,8 +60,11 @@ depthwise convolution, and are added to the residual streams.
 
 The weight is a `Shard(0)` DTensor on the FSDP storage mesh, excluded from FSDP
 all-gathers. Each DP owner keeps contiguous rows. Preprocessing deduplicates
-hash IDs and prepares the all-to-all request plan; forward exchanges only
-selected vectors, and backward returns their gradients to the owners.
+hash IDs into fixed per-owner request slots; forward exchanges the requested
+vectors, and backward returns their gradients to the owners. Each of the 16
+hash heads owns a contiguous row range, so an owner receives at most one ID
+per token from each head meeting its rows: two heads at DP16 and DP64, which
+bounds the slots at `2T` per owner without depending on the data.
 
 PLE needs fixed row ownership and individual vector lookups. All-to-all routing
 and local `F.embedding` meet these needs while reusing TorchTitan's DTensor,

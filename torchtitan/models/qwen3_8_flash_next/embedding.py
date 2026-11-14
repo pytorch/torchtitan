@@ -218,6 +218,27 @@ class NGramEmbedding(Module):
                 self.ngram_heads_vocab_sizes.cumsum(0) - self.ngram_heads_vocab_sizes
             )
 
+    def max_ids_per_owner(self, num_tokens: int, *, num_owners: int) -> int:
+        """Bound the distinct table IDs one requester sends to one row owner.
+
+        Hash head h reads only rows ``[offset_h, offset_h + size_h)``, once per
+        token, so an owner receives at most ``num_tokens`` IDs from each head
+        whose range meets its contiguous rows. For the released table, at most
+        two of the 16 heads meet any owner at DP16 or DP64.
+        """
+        rows_per_owner = self.ngram_embedding.num_embeddings // num_owners
+        offsets = [0]
+        for size in self.config.head_vocab_sizes:
+            offsets.append(offsets[-1] + size)
+        heads_per_owner = max(
+            sum(
+                begin < (owner + 1) * rows_per_owner and end > owner * rows_per_owner
+                for begin, end in zip(offsets[:-1], offsets[1:])
+            )
+            for owner in range(num_owners)
+        )
+        return num_tokens * heads_per_owner
+
     def hash_ids(
         self, input_ids_T: torch.Tensor, *, document_positions_T: torch.Tensor
     ) -> torch.Tensor:
