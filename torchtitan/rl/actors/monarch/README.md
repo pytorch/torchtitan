@@ -17,7 +17,7 @@ dependency of its own: it declares the service's methods as
 
 | Module | Purpose |
 | --- | --- |
-| `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client, and stops the meshes. |
+| `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client (or the `ModelStateDictTransport`), and stops the meshes. |
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
