@@ -7,6 +7,7 @@
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
 import asyncio
+import itertools
 import sys
 from pathlib import PurePosixPath
 from types import SimpleNamespace
@@ -31,7 +32,10 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
     _terminal_bench_rollouter_config,
 )
+from verifiers.v1.agent import resolve_rollout_timeouts
 from verifiers.v1.runtimes import ProgramResult, Runtime
+from verifiers.v1.tasksets.harbor import taskset as harbor_taskset
+from verifiers.v1.utils.compile import resolve_runtime_config
 from verifiers.v1.utils.loaders import (
     load_environment,
     load_harness,
@@ -235,6 +239,75 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert isinstance(
         load_harness(env.config.agent.harness), TerminalBenchTerminusHarness
     )
+
+
+def _write_harbor_task(task_dir, *, task_toml: str, dockerfile: str | None) -> None:
+    (task_dir / "tests").mkdir(parents=True)
+    (task_dir / "tests" / "test.sh").write_text("exit 0\n")
+    (task_dir / "instruction.md").write_text("Fix the parser.\n")
+    (task_dir / "task.toml").write_text(task_toml)
+    if dockerfile is not None:
+        (task_dir / "environment").mkdir()
+        (task_dir / "environment" / "Dockerfile").write_text(dockerfile)
+
+
+def test_tasks_run_in_the_image_workdir_and_grade_with_task_timeouts(
+    tmp_path, monkeypatch
+) -> None:
+    """Each task gets the start folder and grading timeout that `harbor run` gives it.
+
+    A Terminal-Bench 2.1 task names its folder only in its Dockerfile and declares a
+    verifier timeout. A TMax task from prepare_tmax.py names its folder in task.toml
+    and declares no verifier timeout, so it gets Harbor's 600 s. A WORKDIR that Docker
+    would expand ($HOME) is left to the runtime's default folder.
+    """
+    monkeypatch.setattr(harbor_taskset, "CACHE", tmp_path)
+    for dataset_dir in ("local_train_v1", "local_validation_v1"):
+        _write_harbor_task(
+            tmp_path / dataset_dir / "terminal-bench",
+            task_toml='[task]\nname = "test/terminal-bench"\n'
+            '[environment]\ndocker_image = "example/dclm:1"\n'
+            "[verifier]\ntimeout_sec = 900.0\n",
+            dockerfile="FROM python:3.13\nWORKDIR /app\nRUN true\nWORKDIR /app/dclm\n",
+        )
+        _write_harbor_task(
+            tmp_path / dataset_dir / "tmax",
+            task_toml='[task]\nname = "test/tmax"\n'
+            '[environment]\ndocker_image = "example/tmax:1"\nworkdir = "/home/user"\n',
+            dockerfile=None,
+        )
+        _write_harbor_task(
+            tmp_path / dataset_dir / "env-var",
+            task_toml='[task]\nname = "test/env-var"\n'
+            '[environment]\ndocker_image = "example/env:1"\n',
+            dockerfile="FROM python:3.13\nWORKDIR $HOME/work\n",
+        )
+    config = _rollouter_config("local/train@v1", "local/validation@v1")
+    agent = config.worker.environment.agent
+    task_type = taskset.TerminalTaskset.task_type()
+
+    for dataset in (config.training_dataloader.dataset, config.validation_dataset):
+        runs = {}
+        # A rollout worker rebuilds each task from the data the controller sends.
+        for sample in itertools.islice(dataset.build(), 3):
+            task = task_type(
+                task_type.data_type().model_validate(sample.verifiers_task_data)
+            )
+            runs[task.data.name] = (
+                resolve_runtime_config(agent.runtime, task).workdir,
+                resolve_rollout_timeouts(agent.timeout, task).scoring,
+            )
+        assert runs == {
+            "test/terminal-bench": ("/app/dclm", 900.0),
+            "test/tmax": ("/home/user", 600.0),
+            "test/env-var": (None, 600.0),
+        }
+    # With Verifiers' default ignore_timeouts=True, no task gets a grading timeout.
+    ignoring = config.validation_dataset.verifiers_taskset.model_copy(
+        update={"ignore_timeouts": True}
+    )
+    scorings = [task.data.timeout.scoring for task in taskset.TerminalTaskset(ignoring)]
+    assert scorings == [None, None, None]
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:

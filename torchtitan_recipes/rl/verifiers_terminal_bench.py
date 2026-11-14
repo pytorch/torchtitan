@@ -101,7 +101,9 @@ def _terminal_bench_rollouter_config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
                 verifiers_taskset=TerminalTasksetConfig(
-                    id=_TERMINAL_BENCH_PACKAGE_ID, dataset=train_dataset
+                    id=_TERMINAL_BENCH_PACKAGE_ID,
+                    dataset=train_dataset,
+                    ignore_timeouts=False,
                 ),
                 seed=42,
                 shuffle=True,
@@ -109,7 +111,9 @@ def _terminal_bench_rollouter_config(
         ),
         validation_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=TerminalTasksetConfig(
-                id=_TERMINAL_BENCH_PACKAGE_ID, dataset=validation_dataset
+                id=_TERMINAL_BENCH_PACKAGE_ID,
+                dataset=validation_dataset,
+                ignore_timeouts=False,
             ),
             seed=99,
             shuffle=False,
@@ -122,11 +126,9 @@ def _terminal_bench_rollouter_config(
                     ),
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
-                    timeout=AgentTimeoutConfig(
-                        setup=600,
-                        rollout=7200,
-                        scoring=12000,
-                    ),
+                    # Setup and agent timeouts apply to every task. Grading uses the task's
+                    # verifier timeout from task.toml (ignore_timeouts=False), else Harbor's 600 s.
+                    timeout=AgentTimeoutConfig(setup=600, rollout=7200),
                 ),
             ),
             rubric=Rubric.Config(

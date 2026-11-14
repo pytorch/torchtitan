@@ -66,7 +66,7 @@ starts with training and runs beside it (`ValidationConfig`).
 | --- | --- |
 | Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
-| Verifiers' Harbor taskset for Terminal-Bench and TMax; Verifiers imports it through `torchtitan_verifiers_terminal_bench/` | [`taskset.py`](./taskset.py) |
+| Harbor taskset with each task's WORKDIR and verifier timeout; Verifiers imports it through `torchtitan_verifiers_terminal_bench/` | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
 | Bridge: task dataset, rollout worker, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |
@@ -119,7 +119,13 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - Each task must declare a pullable `[environment].docker_image`. Verifiers does not
   build Dockerfiles, and a single Dockerfile-only task makes the dataset fail to load.
   `prepare_tmax.py` writes each TMax task's published image.
-- The tasks' own timeouts are ignored; the timeouts in the recipe file apply.
+- Grading uses each task's verifier timeout from task.toml, or Harbor's 600 s when it
+  declares none. The setup and agent timeouts in the recipe file apply to every task.
+  Under training load each model call waits behind other rollouts, so the task's own
+  agent timeout (600-12,000 s in Terminal-Bench 2.1) would end rollouts early. Because
+  of this, validation scores are not directly comparable to `harbor run` results.
+- A task without a `workdir` in task.toml starts in the `WORKDIR` of its
+  `environment/Dockerfile`'s final build stage, as under `harbor run`.
 - The validation id has no `@ref`, so it uses whichever revision is in the cache. Pin a
   ref for numbers you want to compare; Terminal-Bench 2.0 and 2.1 are not
   interchangeable.
