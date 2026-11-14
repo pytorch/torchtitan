@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -138,8 +139,8 @@ class Rollouter(Configurable):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
         self._training_dataloader = iter(training_dataloader)
 
-        # The worker pool's actor handle and the actor system that spawned it.
-        self._worker_actors: Any | None = None
+        # One single-actor handle per worker process, and the actor system that spawned them.
+        self._workers: list[Any] = []
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
         self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
@@ -173,20 +174,25 @@ class Rollouter(Configurable):
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
-        if self._worker_actors is not None:
+        if self._workers:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
-        self._worker_actors = await actor_system.spawn_rollout_workers(
+        self._workers = await actor_system.spawn_rollout_workers(
             self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
         )
-        await self._worker_actors.setup_async.call(
-            tokenizer_config=tokenizer_config,
-            renderer_config=renderer_config,
-            hf_assets_path=hf_assets_path,
-            vision_processor_config=vision_processor_config,
+        await asyncio.gather(
+            *(
+                worker.setup_async.call_one(
+                    tokenizer_config=tokenizer_config,
+                    renderer_config=renderer_config,
+                    hf_assets_path=hf_assets_path,
+                    vision_processor_config=vision_processor_config,
+                )
+                for worker in self._workers
+            )
         )
 
     async def close(self) -> None:
@@ -201,7 +207,7 @@ class Rollouter(Configurable):
         Monarch fails that actor and the finished job exits 130.
         """
         actor_system = self._actor_system
-        self._worker_actors = None
+        self._workers = []
         self._actor_system = None
         calls = tuple(self._inflight_run_group_calls)
         if calls:
@@ -220,8 +226,9 @@ class Rollouter(Configurable):
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
-        if self._worker_actors is not None:
-            await self._worker_actors.sync_log_step.call(step)
+        await asyncio.gather(
+            *(worker.sync_log_step.call_one(step) for worker in self._workers)
+        )
 
     async def run_group_rollouts(
         self,
@@ -247,13 +254,14 @@ class Rollouter(Configurable):
         Returns:
             One scored `RolloutGroup`.
         """
-        if self._worker_actors is None:
+        if not self._workers:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
-        # endpoint of one worker in the pool.
+        # Random, so a worker whose groups fail immediately gets 1/N of the groups. Picking the
+        # least busy worker would send it every slot that frees up.
+        worker = random.choice(self._workers)
         call = asyncio.ensure_future(
-            self._worker_actors.run_group.choose(
+            worker.run_group.call_one(
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 sample=sample,
