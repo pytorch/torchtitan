@@ -59,7 +59,7 @@ starts with training and runs beside it (`ValidationConfig`).
 | --- | --- |
 | Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
-| Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
+| Verifiers' Harbor taskset for Terminal-Bench and TMax; Verifiers imports it through `torchtitan_verifiers_terminal_bench/` | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
 | Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |

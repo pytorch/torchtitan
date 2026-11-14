@@ -37,9 +37,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = [""]
-# torchtitan_recipes is a second top-level package, listed so that
-# tightening the first pattern to "torchtitan.*" cannot silently drop it.
-include = ["torchtitan*", "torchtitan_recipes*"]
+# The other top-level packages are listed so that tightening the first pattern to
+# "torchtitan.*" cannot silently drop them. torchtitan_verifiers_* are the Verifiers
+# plugin packages of the RL examples (torchtitan/rl/examples/verifiers/README.md).
+include = ["torchtitan*", "torchtitan_recipes*", "torchtitan_verifiers_*"]
 
 [tool.pytest.ini_options]
 addopts = ["--showlocals"]  # show local variables in tracebacks

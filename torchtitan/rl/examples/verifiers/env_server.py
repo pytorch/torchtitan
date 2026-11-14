@@ -24,18 +24,14 @@ from verifiers.v1.configs.serve import (
 )
 from verifiers.v1.serve import env_config_data, serve_env
 from verifiers.v1.utils.loaders import resolve_env_config
+from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
-from torchtitan.rl.examples.verifiers.worker_setup import (
-    register_local_taskset_alias,
-    setup_env_server_worker,
-)
 
 
 def _run_env_server_process(
     environment: dict[str, Any],
     serve: VerifiersServeConfig,
-    local_taskset_module: str | None,
     address_queue: Any,
     death_pipe: Any,
 ) -> None:
@@ -46,11 +42,6 @@ def _run_env_server_process(
     os.environ["no_proxy"] = no_proxy
     os.environ["NO_PROXY"] = no_proxy
 
-    # Registered here too: resolve_env_config imports the taskset before serve_env runs log_setup.
-    if local_taskset_module is not None:
-        environment["taskset"]["id"] = register_local_taskset_alias(
-            local_taskset_module
-        )
     env_config = resolve_env_config(environment)
     # Each spawned pool worker re-runs this process's __main__: the controller's
     # script, with its trainer imports. An empty __main__ skips that.
@@ -61,11 +52,7 @@ def _run_env_server_process(
         address_queue=address_queue,
         death_pipe=death_pipe,
         # Workers unpickle this by importing its module, so that module must not import torch.
-        log_setup=functools.partial(
-            setup_env_server_worker,
-            level="INFO",
-            local_taskset_module=local_taskset_module,
-        ),
+        log_setup=functools.partial(setup_logging, "INFO"),
         config_data=env_config_data(env_config),
         max_concurrent=serve.max_concurrent,
     )
@@ -84,11 +71,6 @@ class VerifiersEnvServer(Configurable):
         )
         """Typed Verifiers worker-pool and bind-address configuration."""
 
-        # TODO: pass the taskset to build() and derive its module there, removing
-        # this field from the user-facing configuration entirely.
-        local_taskset_module: str | None = None
-        """Local taskset module derived from the rollouter's dataset config."""
-
         startup_timeout_sec: float = 120.0
         """Maximum time to wait for the server process to publish its address."""
 
@@ -100,7 +82,6 @@ class VerifiersEnvServer(Configurable):
             return {
                 "environment": self.environment.model_dump(mode="json"),
                 "serve": self.serve.model_dump(mode="json"),
-                "local_taskset_module": self.local_taskset_module,
                 "startup_timeout_sec": self.startup_timeout_sec,
             }
 
@@ -124,7 +105,6 @@ class VerifiersEnvServer(Configurable):
             args=(
                 env_config_data(self.config.environment),
                 self.config.serve,
-                self.config.local_taskset_module,
                 address_queue,
                 child_conn,
             ),
