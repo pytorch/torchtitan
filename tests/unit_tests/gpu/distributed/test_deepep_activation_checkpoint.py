@@ -42,6 +42,10 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 deep_ep = pytest.importorskip("deep_ep")
+# DeepEP < 2.5 named the unified buffer ``ElasticBuffer``.
+_EP_BUFFER = getattr(deep_ep, "EPBuffer", None) or getattr(
+    deep_ep, "ElasticBuffer", None
+)
 
 pytestmark = pytest.mark.multi_gpu
 
@@ -372,7 +376,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
 
 
 @unittest.skipUnless(
-    torch.cuda.device_count() >= 2 and hasattr(deep_ep, "ElasticBuffer"),
+    torch.cuda.device_count() >= 2 and _EP_BUFFER is not None,
     "requires two CUDA devices and DeepEP v2",
 )
 class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
@@ -401,7 +405,7 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
                     RMSNorm.Config(normalized_shape=_MODEL_DIM),
                 ),
             ),
-            buffer_type=deep_ep.ElasticBuffer,
+            buffer_type=_EP_BUFFER,
             dispatch_method="dispatch",
             combine_method="combine",
             exact=bool(num_replays),
