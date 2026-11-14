@@ -178,6 +178,18 @@ def kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
     )
 
 
+def kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2_pp2() -> Trainer.Config:
+    """Exercise Dist-MoE activation slots through Kimi's interleaved PP stages."""
+    config = kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2()
+    # Type checking stays off under pipeline parallelism, as the other pipeline
+    # recipes have it.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 4
+    return config
+
+
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
@@ -239,6 +251,13 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Kimi K3 BF16 and MXFP8 Dist-MoE with FSDP and EP",
             test_name="kimi_k3_dist_moe_fsdp_ep",
             ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[kimi_k3_debugmodel_dist_moe_bf16_fsdp2_ep2_pp2],
+            test_descr="Kimi K3 BF16 Dist-MoE with FSDP, EP, and interleaved PP",
+            test_name="kimi_k3_dist_moe_fsdp_ep_pp",
+            ngpu=4,
             use_real_pg=True,
         ),
     ]

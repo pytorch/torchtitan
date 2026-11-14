@@ -248,6 +248,11 @@ non-strict FX tracing. In-place accumulation passes its destination explicitly
 to the registered backward operation, so eager and graph execution retain the
 same standard `parameter.grad` ownership contract.
 
+Dynamic pipeline metadata inference may execute with uninitialized inputs.
+Eager PP bypasses native expert routing during this setup pass, including
+backward metadata recomputation. Its cleanup clears metadata mode and resets
+the context before real execution.
+
 ## VMM Overflow Scratch
 
 VMM keeps the fast scratch prefix in HBM and maps additional pinned host pages
