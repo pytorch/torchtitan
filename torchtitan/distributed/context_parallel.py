@@ -79,6 +79,12 @@ class ContextParallelLoadBalancer(Configurable, ABC):
         """Generate the global token permutation for this batch."""
         raise NotImplementedError
 
+    @property
+    @abstractmethod
+    def max_num_fragments(self) -> int:
+        """Upper bound on contiguous token ranges per rank, for any batch."""
+        raise NotImplementedError
+
 
 class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
     """Balance CP tokens using PyTorch's head-tail strategy."""
@@ -116,6 +122,11 @@ class HeadTailCPLoadBalancer(ContextParallelLoadBalancer):
             self.seq_len, self.cp_size, self.device
         )._generate_indices()
         return permutation
+
+    @property
+    def max_num_fragments(self) -> int:
+        """Each rank receives a head chunk and a tail chunk."""
+        return 2
 
 
 class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
@@ -160,6 +171,11 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
             self.block_mask, self.cp_size
         )._generate_indices()
         return permutation
+
+    @property
+    def max_num_fragments(self) -> int:
+        """Query blocks per rank; adjacent blocks can merge but never split."""
+        return self.block_mask.kv_num_blocks.shape[-1] // self.cp_size
 
 
 def supports_cp_inner_attention(

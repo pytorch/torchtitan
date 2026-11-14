@@ -62,6 +62,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
         return AllGatherKVVarlen.prepare_cp_metadata(
             global_metadata,
             permutation=permutation,
+            max_num_fragments=1,
         )
 
     def test_matches_global_varlen_attention(self) -> None:

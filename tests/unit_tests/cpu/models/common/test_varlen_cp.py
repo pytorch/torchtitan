@@ -48,7 +48,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
             8, 2, torch.device("cpu")
         )._generate_indices()
         metadata = AllGatherKVVarlen.prepare_cp_metadata(
-            _metadata([0, 3, 7, 8]), permutation=permutation
+            _metadata([0, 3, 7, 8]), permutation=permutation, max_num_fragments=2
         )
         reordered = torch.arange(8).index_select(0, permutation[0])
         self.assertEqual(
@@ -57,7 +57,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
 
     def test_builds_chunk_metadata(self) -> None:
         metadata = AllGatherKVVarlen.prepare_cp_metadata(
-            _metadata([0, 3, 7, 8]), permutation=None
+            _metadata([0, 3, 7, 8]), permutation=None, max_num_fragments=1
         )
         self.assertIsNone(metadata.inverse_permutation)
         for kv_start, expected_k in ((0, [0, 3, 6, 6]), (2, [0, 1, 4, 4])):
@@ -80,7 +80,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
         mesh = init_device_mesh("cpu", (2, 2, 2), mesh_dim_names=("dp", "cp", "tp"))
         global_metadata = _metadata([0, 3, 7, 8])
         metadata = AllGatherKVVarlen.prepare_cp_metadata(
-            global_metadata, permutation=None
+            global_metadata, permutation=None, max_num_fragments=1
         )
         with set_current_spmd_mesh(mesh), typecheck():
             chunk = AllGatherKVVarlen._chunk_metadata(
@@ -102,7 +102,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
             with self.subTest(shape=permutation.shape):
                 with self.assertRaisesRegex(ValueError, "requires a permutation"):
                     AllGatherKVVarlen.prepare_cp_metadata(
-                        _metadata([0, 8]), permutation=permutation
+                        _metadata([0, 8]), permutation=permutation, max_num_fragments=1
                     )
 
     def test_rejects_cross_attention(self) -> None:
@@ -113,14 +113,18 @@ class TestAllGatherKVVarlenPreparation(TestCase):
             max_k=5,
         )
         with self.assertRaisesRegex(ValueError, "self-attention"):
-            AllGatherKVVarlen.prepare_cp_metadata(metadata, permutation=None)
+            AllGatherKVVarlen.prepare_cp_metadata(
+                metadata, permutation=None, max_num_fragments=1
+            )
 
     def test_rejects_noncausal_windows(self) -> None:
         for window_size in ((-1, -1), (2, 1), (-2, 0)):
             with self.subTest(window_size=window_size):
                 metadata = replace(_metadata([0, 8]), window_size=window_size)
                 with self.assertRaisesRegex(ValueError, "requires a causal window"):
-                    AllGatherKVVarlen.prepare_cp_metadata(metadata, permutation=None)
+                    AllGatherKVVarlen.prepare_cp_metadata(
+                        metadata, permutation=None, max_num_fragments=1
+                    )
 
 
 class TestVarlenMetadataCudaGraphInputs(TestCase):
@@ -136,10 +140,10 @@ class TestVarlenMetadataCudaGraphInputs(TestCase):
                         else None
                     )
                     captured_metadata = AllGatherKVVarlen.prepare_cp_metadata(
-                        captured_metadata, permutation=permutation
+                        captured_metadata, permutation=permutation, max_num_fragments=1
                     )
                     rebuilt_metadata = AllGatherKVVarlen.prepare_cp_metadata(
-                        rebuilt_metadata, permutation=permutation
+                        rebuilt_metadata, permutation=permutation, max_num_fragments=1
                     )
                 spec = AcceleratorGraphInputSpec({"metadata": captured_metadata})
                 captured = spec.flatten({"metadata": captured_metadata})
@@ -195,6 +199,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
                     metadata = AllGatherKVVarlen.prepare_cp_metadata(
                         replace(_metadata([0, 3, 7, 8]), window_size=case.window),
                         permutation=permutation,
+                        max_num_fragments=1,
                     )
                     q_THK = torch.randn(seq_len // 2, 1, 4)
                     k_THK = torch.arange(seq_len * 4).view(seq_len, 1, 4).float()
