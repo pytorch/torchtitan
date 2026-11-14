@@ -69,9 +69,6 @@ class GenerationServer(Configurable):
         host: str = "127.0.0.1"
         """Interface on which the local HTTP server listens."""
 
-        port: int = 0
-        """Listening port; zero requests an ephemeral port."""
-
         max_rollout_tokens: int
         """Context length; set it to the generator's ``max_model_len``.
         Prompts of this many tokens or more get a 400.
@@ -82,8 +79,6 @@ class GenerationServer(Configurable):
         """
 
         def __post_init__(self) -> None:
-            if not 0 <= self.port <= 65535:
-                raise ValueError("port must be between 0 and 65535")
             if self.max_rollout_tokens <= 0:
                 raise ValueError("max_rollout_tokens must be positive")
 
@@ -91,7 +86,6 @@ class GenerationServer(Configurable):
 
     def __init__(self, config: Config) -> None:
         self.host = config.host
-        self.requested_port = config.port
         self.max_rollout_tokens = config.max_rollout_tokens
         self.generate_fn: GenerateFn | None = None
         self.runner: web.AppRunner | None = None
@@ -122,7 +116,9 @@ class GenerationServer(Configurable):
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
         runner = web.AppRunner(app, access_log_class=_DebugAccessLogger)
         await runner.setup()
-        site = web.TCPSite(runner, self.host, self.requested_port)
+        # Port 0: the OS picks a free port. Each rollout worker runs its own server,
+        # so a fixed port would collide.
+        site = web.TCPSite(runner, self.host, 0)
         await site.start()
         sockets = getattr(site._server, "sockets", None)
         if not sockets:
@@ -210,6 +206,10 @@ class GenerationServer(Configurable):
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
         request_id = f"{session_id}/request={request_index}"
+        # TODO(monarch): when Verifiers gives up on a call (e.g. its rollout timeout), `run_group`
+        # returns and `Rollouter.close` doesn't wait for this handler. Cancelling the handler wouldn't
+        # help: the generator still answers, and an answer that reaches a worker that already stopped
+        # fails the generator, so the job exits 130 (https://github.com/meta-pytorch/monarch/issues/5301).
         try:
             completion = await self.generate_fn(
                 Prompt(token_ids=prompt_token_ids),
