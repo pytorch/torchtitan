@@ -1,7 +1,7 @@
 # Verifiers integration
 
 The optional bridge between TitanRL and [Verifiers](https://github.com/PrimeIntellect-ai/verifiers),
-pinned to Verifiers 0.4.0 (`verifiers.v1` API). Other TitanRL recipes don't import Verifiers.
+pinned to Verifiers 0.4.1 (`verifiers.v1` API). Other TitanRL recipes don't import Verifiers.
 
 - TitanRL picks the tasks, serves the model calls and trains on the scored groups.
 - Verifiers runs the env, the agent and its tools, the runtime and the task reward.
@@ -23,25 +23,41 @@ single-turn math, no sandbox. [`terminal_bench/`](./terminal_bench) is a multi-t
 
 ## Integration flow
 
-A diagram of one group: the `VerifiersRollouter` docstring in [`rollouter.py`](./rollouter.py).
+One group, top to bottom. Each column is one process, or the agent in its runtime. Where each
+column runs: the `VerifiersRollouter` docstring in [`rollouter.py`](./rollouter.py).
 
-1. [`data.py`](./data.py) loads the taskset in the controller, which sends each group's task to a
-   rollout worker.
-2. [`env_server.py`](./env_server.py) runs the Verifiers env server as a local process on the
-   controller host. The server runs the agents in the configured runtime, e.g. `SubprocessConfig`
-   or `DockerConfig`. With a pool, its pool workers run them. The Terminal-Bench recipe runs 16.
-3. [`rollouter.py`](./rollouter.py) runs each group in a rollout worker process
-   (`VerifiersRolloutWorker`), like TitanRL's own rollout groups. The worker sends the task to the
-   env server (a plain dict, msgpack over ZMQ) and turns the trainable agent's trace of each
-   rollout into TitanRL `RolloutTurn`s. The controller receives finished groups only.
-4. [`generation_server.py`](./generation_server.py) serves Verifiers' model calls (token ids over
-   HTTP, from the env server). For each call it gets a generator from `router.reserve`, then calls
-   `generate` on it. Each rollout worker runs its own, on localhost. The server also records what
-   Verifiers' traces leave out: the policy versions and the generation metrics.
+```text
+    VerifiersRollouter  rollout worker      agent       router     generator
+       (controller)                      its runtime               (rank 0)
+             |                 |              |            |           |
+ 1           |--run_group----->|              |            |           |  Monarch, random worker
+ 2           |                 |--start------>|            |           |  one per rollout
+ 3           |                 |<-chat--------|            |           |  HTTP, each turn
+ 4           |                 |              |            |           |  render, POST to this
+             |                 |              |            |           |  process's GenerationServer
+ 5           |                 |--reserve----------------->|           |  returns a generator
+ 6           |                 |--generate---------------------------->|  Monarch call
+ 7           |                 |<-Completion---------------------------|
+ 8           |                 |--release_reservation----->|           |  no reply
+ 9           |                 |--reply------>|            |           |  3-9 per turn
+10           |                 * grade        |            |           |  by the worker, e.g. by
+             |                 |              |            |           |  running the task's tests
+11           |                 |--release_session--------->|           |  one per trace, after
+             |                 |              |            |           |  run_slot returns
+12           |<-RolloutGroup---|              |            |           |  scored
+13           |--release_groups---------------------------->|           |  drops its cache salts
+```
 
-For CPU-heavy envs, raise the env server's pool (`verifiers_env_server.serve.pool`, e.g.
-`vf.StaticPoolConfig(num_workers=16)`). At high rollout rates, also raise the
-rollouter's `worker_pool_size`: each rollout worker decodes one trace at a time.
+1. [`data.py`](./data.py) loads the taskset in the controller. The controller sends each task to a
+   rollout worker as a plain dict (row 1). Workers never load the dataset.
+2. The worker loads the Verifiers env once. For each rollout, it starts an agent in the configured
+   runtime, e.g. `DockerConfig`, `SubprocessConfig` or `PrimeConfig` (row 2).
+3. Rows 3-9 repeat for each agent turn. The `GenerationServer`
+   ([`generation_server.py`](./generation_server.py)) also records what Verifiers' traces leave out:
+   the policy versions and the generation metrics.
+4. The worker grades each rollout and turns the trainable agent's trace into TitanRL
+   `RolloutTurn`s (rows 10-12). The controller then releases the group at the router (row 13),
+   and TitanRL trains on it as usual.
 
 ## Taskset ids
 
@@ -51,9 +67,8 @@ package and takes the one class of that kind in its `__all__`:
 ```text
 id "torchtitan_verifiers_terminal_bench"
   import torchtitan_verifiers_terminal_bench
-  __all__ = ["HarborEnv", "TerminalBenchTerminusHarness", "TerminalTaskset"]
-  taskset -> TerminalTaskset, harness -> TerminalBenchTerminusHarness,
-  env -> HarborEnv (re-exported from Verifiers)
+  __all__ = ["TerminalBenchTerminusHarness", "TerminalTaskset"]
+  taskset -> TerminalTaskset, harness -> TerminalBenchTerminusHarness
 ```
 
 Leave the harness or the env unset, and Verifiers takes the one in the taskset's package. If there
@@ -63,7 +78,7 @@ Outside this repo, any top-level package name works as the id. Don't reuse a bui
 plugin's name (e.g. `harbor`, `bash`, `codex`): Verifiers looks for its own first.
 
 Configs carry ids, not classes, so each of these processes imports the package:
-the controller, the env server and its pool workers.
+the controller and each rollout worker.
 
 `pyproject.toml` ships every `torchtitan_verifiers_*` package. An editable install
 (`pip install -e . --no-deps`) sees only the packages that existed when it ran: rerun it after you
@@ -91,7 +106,7 @@ things:
 
 1. In both `VerifiersTaskDataset.Config`s (training and validation), set your `TasksetConfig`, with
    `id="torchtitan_verifiers_my_task"`.
-2. Set your agent, harness and runtime in `verifiers_env_server.environment`. Leave its
+2. Set your agent, harness and runtime in `VerifiersRolloutWorker.Config.environment`. Leave its
    `taskset` unset: `VerifiersRollouter` copies it from the training dataset.
 3. Set `ValidationConfig.steps` for your validation set: the recipe validates on 30 tasks.
 
@@ -102,3 +117,16 @@ python -m torchtitan.rl.train \
   --module torchtitan_recipes.rl.verifiers_my_task \
   --config <recipe function name>
 ```
+
+## Scaling
+
+The rollout workers do the env's CPU work: rendering (turning messages into tokens) and decoding
+traces. The agent itself runs in its runtime.
+
+- Workers busy on CPU: raise the rollouter's `worker_pool_size` (default 4; the Terminal-Bench
+  recipe uses 16).
+- Renders waiting: lower the worker's `renderer_multiplex` (rollouts per renderer, default 256). A
+  renderer renders one prompt at a time, behind a lock. More renderers (~75-95 MB each) render in
+  parallel, up to `num_threads_per_worker` at once.
+- Each worker is its own Verifiers run, so run-wide limits apply per worker. Example: 16 workers
+  with `PrimeConfig.creates_per_min=10` start up to 160 sandboxes a minute.

@@ -134,9 +134,9 @@ rollouter = Rollouter.Config(
 Subclass `MessageEnvRolloutWorker` or `Rollouter` only when an experiment changes their
 behavior; a worker whose env isn't a `MessageEnv` subclasses `BaseRolloutWorker`.
 For example, the Verifiers integration keeps a custom
-`VerifiersRollouter` because it owns an external environment server, and a
 `VerifiersRolloutWorker` (no `MessageEnv` or `TokenEnv`)
-because Verifiers runs a different rollout protocol.
+because Verifiers runs the env and its agent loop, and a
+`VerifiersRollouter` that copies the training taskset into the worker's env config.
 
 The default path handles rollout, scoring, batching, training, and model state dict transfer.
 

@@ -13,8 +13,6 @@ Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 The Muse Glimmer example is capped at its model's 16K context length.
 """
 
-import math
-
 import verifiers.v1 as vf
 
 from renderers import CustomRendererConfig, Qwen35RendererConfig
@@ -42,7 +40,6 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
@@ -75,11 +72,9 @@ from torchtitan.rl.routing.strategies import (
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
-from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
-_ENV_SERVER_WORKERS = 16
 # Verifiers id of the example's taskset and harness: the repo-root package that exports both.
 _TERMINAL_BENCH_PACKAGE_ID = "torchtitan_verifiers_terminal_bench"
 
@@ -90,15 +85,12 @@ def _terminal_bench_rollouter_config(
     *,
     max_context_length: int,
     max_turns: int,
-    max_concurrent_rollouts: int,
 ) -> VerifiersRollouter.Config:
     """Select Harbor datasets by id.
 
     ``max_context_length`` is the generator's sequence length; the generation
     server caps each rollout at it. ``max_turns`` is the agent turn limit,
-    which Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server;
-    set it to the number of rollouts the controller keeps in flight, or the
-    excess queues in the env server and the generators idle.
+    which Verifiers enforces.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
@@ -122,8 +114,8 @@ def _terminal_bench_rollouter_config(
             seed=99,
             shuffle=False,
         ),
-        verifiers_env_server=VerifiersEnvServer.Config(
-            environment=HarborEnvConfig(
+        worker=VerifiersRolloutWorker.Config(
+            environment=vf.SingleAgentEnvConfig(
                 agent=vf.AgentConfig(
                     harness=TerminalBenchTerminusHarnessConfig(
                         id=_TERMINAL_BENCH_PACKAGE_ID, version="0.22.0"
@@ -137,13 +129,6 @@ def _terminal_bench_rollouter_config(
                     ),
                 ),
             ),
-            serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
-                max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
-                address="tcp://127.0.0.1:0",
-            ),
-        ),
-        worker=VerifiersRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
@@ -151,8 +136,17 @@ def _terminal_bench_rollouter_config(
             generation_server=GenerationServer.Config(
                 max_rollout_tokens=max_context_length
             ),
-            connection_timeout_sec=1800.0,
         ),
+        # TODO: 16 is untuned. Set it from a Terminal-Bench run with Docker: rollouts in flight
+        # per worker, render wait and host RAM. The `VerifiersRollouter` docstring and the
+        # Verifiers README's "Scaling" section copy 16: update them with it.
+        worker_pool_size=16,
+        # 32 threads (Python's default on a host with 28+ CPUs) for the worker's `asyncio.to_thread`
+        # calls. A render waiting for its renderer's lock holds a thread, and Verifiers' runtimes
+        # clean up on these threads (e.g. `docker rm --force`). With the default 4, waiting renders
+        # would hold every thread and block cleanup. More threads don't speed up renders: one
+        # renderer serves up to `renderer_multiplex` rollouts, one render at a time.
+        num_threads_per_worker=32,
     )
 
 
@@ -201,8 +195,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -344,8 +336,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -464,8 +454,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=8,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             CustomRendererConfig(

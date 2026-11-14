@@ -7,43 +7,45 @@ TitanRL's generators, and the task's own tests grade the result. Verifiers runs 
 agent and the grading through the [Verifiers bridge](../README.md).
 
 > **Toy sandbox.** Local Docker keeps this example self-contained; it is not a sandbox
-> for real training. Containers run untrusted task code on the controller host and, by
-> default, share its network. For real training, plug in a mature sandbox as the
-> Verifiers runtime. Do not use `SubprocessConfig`: it runs the agent on the host.
+> for real training. Containers run untrusted task code on the controller host. They sit
+> on Docker's shared bridge network and reach the internet through the host. For real
+> training, plug in a mature sandbox as the Verifiers runtime. Do not use
+> `SubprocessConfig`: it runs the agent on the host.
 
 ## How it works
 
-One group, top to bottom. Each rollout sends its own task (row 1), runs rows 2-5 and returns
-its own trace (row 6). Rows 3-4 repeat for each agent turn. Each column is one kind of process,
-or the containers. The rollouter runs N = `worker_pool_size` rollout workers. Row numbers match
-the steps below.
+One group, top to bottom: rows 2-5 run for each rollout, rows 3-4 for each agent turn.
+Each column is one kind of process, or the containers. The rollouter runs N =
+`worker_pool_size` rollout workers. Row numbers match the steps below.
 
 ```text
-   controller       rollout worker     env server        container       generators      trainer
-     (CPU)             (CPU, xN)       (Verifiers)     (per rollout)        (GPU)         (GPU)
-        |                  |                |                |                |             |
- 1      |--group---------->|--task--------->|                |                |             |
- 2      |                  |                |--start-------->|                |             |
- 3      |                  |                |<-chat request--|                |             |
- 4      |                  |<-token ids-----|                |                |             |
-        |                  |--generate--------------------------------------->|             |
- 5      |                  |                |--run test.sh-->|                |             |
- 6      |<-scored group----|<-trace, reward-|                |                |             |
- 7      |--batch, packed by the batcher process-------------------------------------------->|
-        |                  |                |                |                |<-new weights|
+   controller          rollout worker           container          generators        trainer
+     (CPU)        (CPU, xN): Verifiers env    (per rollout)           (GPU)           (GPU)
+        |                     |                     |                   |               |
+ 1      |--group------------->|                     |                   |               |
+ 2      |                     |--start------------->|                   |               |
+ 3      |                     |<-chat request-------|                   |               |
+ 4      |                     |--generate------------------------------>|               |
+ 5      |                     |--run test.sh------->|                   |               |
+ 6      |<-scored group-------|                     |                   |               |
+ 7      |--batch, packed by the batcher process---------------------------------------->|
+        |                     |                     |                   |<-new weights--|
 ```
 
+With the command in "Run", every column above runs on one host. With a launcher, the generators, and
+any trainer ranks past host 0, can move to other hosts. The `VerifiersRollouter` docstring draws an
+example.
+
 1. **Task.** The controller sends each group to a rollout worker process
-   (`VerifiersRolloutWorker`), which sends the sampled task to the env server (ZMQ) once
-   per rollout in the group.
-2. **Agent.** One of the env server's pool workers (`verifiers_env_server.serve.pool`)
-   starts a container from the task's `docker_image` and runs Terminus-2 in it
-   ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and reads
-   the screen back.
-3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
-   which records the turn in the rollout's trace.
-4. **Generation.** The request reaches the rollout worker's `GenerationServer` as token
-   ids (HTTP). The server sends them to the vLLM generator that the router picks.
+   (`VerifiersRolloutWorker`), which runs one Verifiers episode per rollout in the group.
+2. **Agent.** The worker starts a container from the task's `docker_image` and runs
+   Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a
+   tmux shell and reads the screen back.
+3. **Model call.** Each agent turn is a chat request to the worker's Verifiers
+   interception server, which records the turn in the rollout's trace.
+4. **Generation.** The interception server renders the chat to token ids and sends them
+   to the worker's `GenerationServer`, which asks the router for a generator, then calls
+   that generator itself.
 5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
    container and reads the reward file it writes.
 6. **Trace.** The rollout worker turns the trace into rollout turns, with the exact
@@ -61,7 +63,7 @@ starts with training and runs beside it (`ValidationConfig`).
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
 | Verifiers' Harbor taskset for Terminal-Bench and TMax; Verifiers imports it through `torchtitan_verifiers_terminal_bench/` | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
-| Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
+| Bridge: task dataset, rollout worker, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |
 
 ## Run
@@ -125,9 +127,8 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - **A grader that never ran scores 0.** Verifiers ignores `tests/test.sh`'s exit status
   and scores a missing or unreadable reward file as 0, the same as a failed task.
   Terminal-Bench 2.1 test scripts install their test tools (`apt-get`, `uv`, pytest)
-  when they run, so the container needs outbound network while grading. With its
-  default network policy, Verifiers' Docker runtime uses host networking, so the
-  controller host needs that access.
+  when they run, so the container needs outbound network while grading. Its traffic
+  leaves through the controller host, so that host needs the access.
 - **The run fails after 10 untrainable batches.** A group whose samples all get the
   same reward is dropped (`TrainingSampleBuilder.drop_zero_std_reward_groups`). The
   batcher warns after each batch's worth of such groups in a row and raises

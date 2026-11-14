@@ -114,7 +114,10 @@ class Rollouter(Configurable):
 
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
-        behind every `asyncio.to_thread` call in that process."""
+        behind every `asyncio.to_thread` call in that process. Rendering runs on it (e.g.
+        `TokenEnv`'s), and so does a blocking client that an env calls through
+        `asyncio.to_thread` (e.g. a sandbox SDK). With fewer threads than such calls in flight,
+        rollouts wait for a free thread."""
 
         def __post_init__(self) -> None:
             if self.worker_pool_size < 1:
@@ -168,10 +171,6 @@ class Rollouter(Configurable):
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
-        # Constructor args of each rollout worker known only at setup, e.g. a server address.
-        # TODO: VerifiersRollouter is the only user. Once its env runs in the rollout worker, remove
-        # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
-        worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
         if self._worker_actors is not None:
@@ -182,7 +181,6 @@ class Rollouter(Configurable):
             self._config.worker,
             num_workers=self._config.worker_pool_size,
             num_threads=self._config.num_threads_per_worker,
-            **(worker_kwargs or {}),
         )
         await self._worker_actors.setup_async.call(
             tokenizer_config=tokenizer_config,
@@ -312,6 +310,9 @@ class BaseRolloutWorker(Configurable, ABC):
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         """Called once in the worker process after it is spawned."""
+
+    async def close(self) -> None:
+        """Release what `setup_async` opened. The worker actor calls it on a graceful stop."""
 
     async def score_group(
         self,
