@@ -162,13 +162,21 @@ class TestOptimizerConfig(unittest.TestCase):
         self.assertIsInstance(container.optimizers[0], ExternalSGD)
         self.assertEqual(container.optimizers[0].param_groups[0]["lr"], 0.25)
 
-    def test_bfloat16_moments_require_fused_adam(self):
-        with self.assertRaisesRegex(ValueError, "require fused=True"):
-            AdamW.Config(
-                pattern=r".*",
-                fused=False,
-                moment_dtype="bfloat16",
-            )
+    def test_moment_options_checked_at_config_time(self):
+        """Catches bf16 or pinned_host moments silently using a non-fused kernel,
+        which lacks mixed-precision support and passes over the moments several
+        times, and pinned_host moments on ROCm, where they are not verified."""
+        for moment_kwargs in (
+            {"moment_dtype": "bfloat16"},
+            {"moment_location": "pinned_host"},
+        ):
+            with self.subTest(**moment_kwargs):
+                with self.assertRaisesRegex(ValueError, "require fused=True"):
+                    AdamW.Config(pattern=r".*", fused=False, **moment_kwargs)
+        with self.subTest("rocm"), patch.object(torch.version, "hip", "6.0"):
+            with self.assertRaisesRegex(ValueError, "not verified on ROCm"):
+                AdamW.Config(pattern=r".*", fused=True, moment_location="pinned_host")
+            AdamW.Config(pattern=r".*", fused=True, moment_location="device")
 
     def test_catch_all_optimizer(self):
         """A catch-all optimizer selects every trainable parameter."""

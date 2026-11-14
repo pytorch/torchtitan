@@ -395,6 +395,8 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
+    # Resume device moments into pinned host moments.
+    config.optim.optimizer.optimizers[0].moment_location = "pinned_host"
     return config
 
 
@@ -973,6 +975,8 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="pp_dp_tp",
             ngpu=8,
             use_real_pg=True,
+            # pinned_host Adam moments are not verified on ROCm.
+            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[
