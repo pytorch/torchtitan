@@ -87,6 +87,19 @@ provide the first TorchTitan integration. Their shared optimizer configuration:
 The same construction can be used by Kimi-family, Kimi-VL, and Moonlight
 recipes.
 
+## Local optimizer compilation
+
+Enable compilation of local momentum preparation, Newton-Schulz and direction
+writeback, and parameter updates in the TorchTitan optimizer config:
+
+```python
+DistMuon.Config(..., compile=True)
+```
+
+The standalone FlexShard `DistMuon` constructor also accepts `compile=True`.
+The default is eager updates. Compilation requires accelerator-resident parameters,
+is lazy, and is independent of model compilation. Redistribution stays eager.
+
 ## Package boundary
 
 FlexShard currently lives in TorchTitan while its API matures. We intend to

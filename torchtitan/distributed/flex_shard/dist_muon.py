@@ -86,7 +86,8 @@ def _ns_coefficients_by_step(
 ) -> tuple[_NSCoefficients, ...]:
     if _is_ns_coefficient_triple(coefficients):
         return (cast(_NSCoefficients, coefficients),) * ns_steps
-    return cast(tuple[_NSCoefficients, ...], coefficients)
+    # Avoid evaluating the generic alias while Dynamo traces the NS loop.
+    return cast("tuple[_NSCoefficients, ...]", coefficients)
 
 
 def _normalize_param_groups(
@@ -230,8 +231,13 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
+        compile: bool = False,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
+        self._prepare_input = _prepare_muon_input
+        self._compute_direction = _compute_muon_direction
+        self._apply_parameter_update = _apply_muon_update
+        self._compiled_lr: Tensor | None = None
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -252,6 +258,38 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
+        if compile:
+            if any(
+                parameter.device.type == "cpu"
+                for group in self.param_groups
+                for parameter in group["params"]
+            ):
+                raise ValueError(
+                    "Compiled DistMuon updates require accelerator storage"
+                )
+            if any(
+                parameter.dtype not in (torch.float32, torch.bfloat16)
+                for group in self.param_groups
+                for parameter in group["params"]
+            ):
+                raise ValueError(
+                    "Compiled DistMuon updates require FP32 or BF16 storage"
+                )
+            compile_fn: Callable[
+                [Callable[..., Tensor]], Callable[..., Tensor]
+            ] = partial(
+                torch.compile,
+                fullgraph=True,
+                dynamic=False,
+                # Leave room for shape/stride variants across model parameters.
+                recompile_limit=256,
+                options={"emulate_precision_casts": True},
+            )
+            self._prepare_input = compile_fn(self._prepare_input)
+            self._compute_direction = compile_fn(self._compute_direction)
+            self._apply_parameter_update = compile_fn(self._apply_parameter_update)
+            # Preserve Python-float precision without specializing on LR values.
+            self._compiled_lr = torch.tensor(lr, dtype=torch.float64, device="cpu")
 
     @staticmethod
     def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
@@ -283,6 +321,8 @@ class DistMuon(Optimizer):
                 loss = closure()
 
         self._preflight_step()
+        if self._compiled_lr is not None:
+            self._compiled_lr.fill_(self.param_groups[0]["lr"])
         self._redistribution_runtime.run(
             self._bucket_plans,
             local_tensor_spec=self._local_tensor_spec,
@@ -612,7 +652,7 @@ class DistMuon(Optimizer):
         grad, momentum, momentum_state, group = self._local_gradient_and_momentum(
             compute_layout
         )
-        _prepare_muon_input(
+        self._prepare_input(
             grad,
             momentum,
             momentum=group["momentum"],
@@ -634,7 +674,7 @@ class DistMuon(Optimizer):
             if self._ns_device is None or compute.device == self._ns_device
             else compute.to(self._ns_device, non_blocking=False)
         )
-        _compute_muon_direction(
+        self._compute_direction(
             staged,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
             lr_reference_shape=(
@@ -660,10 +700,10 @@ class DistMuon(Optimizer):
         row_scale = self._direction_row_scale_by_fqn.get(compute_layout.fqn)
         if row_scale is not None:
             direction.mul_(row_scale)
-        _apply_muon_update(
+        self._apply_parameter_update(
             local_param,
             direction,
-            lr=group["lr"],
+            lr=group["lr"] if self._compiled_lr is None else self._compiled_lr,
             weight_decay=group["weight_decay"],
             adjust_lr_fn=group["adjust_lr_fn"],
             compute_matrix_shape=compute_layout.lr_reference_shape,
@@ -1825,6 +1865,21 @@ def _prepare_muon_input(
     out: Tensor,
 ) -> Tensor:
     """Update momentum and prepare the Tensor passed to Muon computation."""
+    if torch.compiler.is_compiling():
+        # TODO: Remove when Inductor scalar lerp matches eager CUDA rounding.
+        # Related upstream work: https://github.com/pytorch/pytorch/pull/176797
+        # Eager CUDA rounds the scalar weight to FP32 before lerp arithmetic;
+        # Inductor can fold Python scalars before that rounding. Tensor weights
+        # preserve it, and the buffer copy preserves BF16 rounding before Nesterov.
+        gradient = gradient.float()
+        weight = gradient.new_tensor(1 - momentum)
+        momentum_buffer.copy_(torch.lerp(momentum_buffer.float(), gradient, weight))
+        if nesterov:
+            weight = gradient.new_tensor(momentum)
+            out.copy_(torch.lerp(gradient, momentum_buffer.float(), weight))
+        else:
+            out.copy_(momentum_buffer)
+        return out
     momentum_buffer.lerp_(gradient, 1 - momentum)
     if nesterov:
         torch.lerp(
@@ -1934,19 +1989,28 @@ def _apply_muon_update(
     parameter: Tensor,
     direction: Tensor,
     *,
-    lr: float,
+    lr: float | Tensor,
     weight_decay: float,
     adjust_lr_fn: str | None,
     compute_matrix_shape: torch.Size | tuple[int, ...],
 ) -> Tensor:
     """Apply decoupled weight decay and a computed Muon direction."""
-    adjusted_lr = _adjust_muon_learning_rate(
-        lr,
+    shape_scale = _adjust_muon_learning_rate(
+        1.0,
         adjust_lr_fn,
         compute_matrix_shape,
     )
+    if isinstance(lr, Tensor):
+        # Match scalar opmath and round the decayed parameter before adding.
+        parameter.copy_(parameter.float() * (1 - lr * weight_decay).float())
+        parameter.copy_(
+            torch.addcmul(
+                parameter.float(), direction.float(), -(lr * shape_scale).float()
+            )
+        )
+        return parameter
     parameter.mul_(1 - lr * weight_decay)
-    parameter.add_(direction, alpha=-adjusted_lr)
+    parameter.add_(direction, alpha=-(lr * shape_scale))
     return parameter
 
 

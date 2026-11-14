@@ -114,9 +114,10 @@ class TestDistMuon(DTensorTestBase):
         torch.testing.assert_close(output_tensor, expected)
 
     @parametrize("block_sizes", [(4,), (4, 2)])
+    @parametrize("compile", [False, True])
     @with_comms(eager_init=True)
     def test_matches_plain_muon_across_flat_checkpoint(
-        self, block_sizes: tuple[int, ...]
+        self, block_sizes: tuple[int, ...], compile: bool
     ):
         lr = 0.03
         num_repeats = 3
@@ -183,6 +184,7 @@ class TestDistMuon(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=ns_steps,
+                compile=compile,
             )
 
         redistributed_value = (
@@ -322,6 +324,9 @@ class TestDistMuon(DTensorTestBase):
         )
         init_optim_state(resumed_optimizer)
         load_flat_optim_state_dict(resumed_optimizer, flat_state_dict)
+        lr *= 0.5
+        resumed_optimizer.param_groups[0]["lr"] = lr
+        reference_optimizer.param_groups[0]["lr"] = lr
 
         second_redistributed_grad = first_redistributed_grad.flip(0).contiguous()
         second_local_blocks_grad = first_local_blocks_grad.flip(0).contiguous()
