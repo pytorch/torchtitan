@@ -236,10 +236,27 @@ arrives from the next stage, leaving no time to reload. `skip_last_layers`
 avoids the problem by keeping each stage's last block on GPU, at the cost of
 one block of activations per microbatch in flight on every stage.
 
-Offloading those blocks too needs the pipeline schedule to take over the
-stage boundary, the way it drives FSDP's UNSHARD/RESHARD actions: free each
-microbatch's last group one action after its forward, and reload it ahead of
-its backward. That is a follow-up.
+To offload those blocks too, the schedule can take over the stage boundary,
+the way it drives FSDP's UNSHARD/RESHARD actions today. It names each
+microbatch by the index its actions already carry
+(`_Action(stage_index, computation_type, microbatch_index)`), so the
+offloader assumes no particular schedule or backward order:
+
+- `defer_to_schedule()`: the schedule, not the model part's hooks, decides
+  when each microbatch's last group is freed and reloaded;
+- `set_microbatch(i)`: called before the stage's forward of microbatch `i`;
+  a forward the schedule does not tag (e.g. metadata inference) is handled as
+  without a schedule;
+- `wait_offload(i)`: called after an action following that forward; it frees
+  microbatch `i`'s last group, whose copies had the action's compute to
+  finish;
+- `reload_backward(i, num_groups=1)`: called ahead of microbatch `i`'s
+  backward; it queues the reload of its last `num_groups` groups.
+  `num_groups` equal to the number of blocks reloads the whole stage, which
+  pays off only for stages of one or two blocks.
+
+Inside the stage, gradient hooks still prefetch one block ahead, and the
+model part's output keeps its reload trigger as a fallback.
 
 ## Pinned host memory and CUDA graphs
 

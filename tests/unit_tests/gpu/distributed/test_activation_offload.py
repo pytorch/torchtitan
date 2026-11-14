@@ -21,6 +21,7 @@ from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
 from torchtitan.distributed.activation_offload import (
+    _State,
     ActivationOffloadConfig,
     ActivationOffloader,
 )
@@ -513,6 +514,115 @@ class TestActivationOffload(unittest.TestCase):
             ]
             + ["hook 0"],
         )
+
+    def _run_schedule(
+        self, model: _Model, actions: list[str], inputs: list[torch.Tensor], **reload
+    ) -> list[torch.Tensor]:
+        """Play one pipeline stage's actions ("F<mb>" / "B<mb>") the way a
+        schedule drives a deferred offloader: set_microbatch before each
+        forward, wait_offload one action after it, reload_backward before each
+        backward."""
+        offloader = _offloader(model)
+        model.zero_grad(set_to_none=True)
+        losses: dict[int, torch.Tensor] = {}
+        awaiting_wait: int | None = None
+        for action in actions:
+            kind, mb = action[0], int(action[1:])
+            if kind == "F":
+                offloader.set_microbatch(mb)
+                losses[mb] = (
+                    model(inputs[mb].clone().requires_grad_(True)).square().mean()
+                )
+            else:
+                offloader.reload_backward(mb, **reload)
+                losses.pop(mb).backward()
+            if awaiting_wait is not None:
+                offloader.wait_offload(awaiting_wait)
+            awaiting_wait = mb if kind == "F" else None
+        return [p.grad.detach().clone() for p in model.parameters()]
+
+    def _schedule_driven_model(self) -> _Model:
+        model = _build(
+            FullActivationRematConfig(),
+            self.reference,
+            ActivationOffloadConfig(skip_last_layers=0),
+        )
+        _offloader(model).defer_to_schedule()
+        # Like a pipeline stage's metadata inference: a forward and backward
+        # the schedule does not tag, which the offloader does not track.
+        model(self.inputs[0].clone().requires_grad_(True)).square().mean().backward()
+        return model
+
+    def _assert_schedule_matches(self, actions: list[str], **reload) -> None:
+        num_microbatches = len(actions) // 2
+        inputs = [
+            torch.randn(_NUM_TOKENS, _DIM, device="cuda")
+            for _ in range(num_microbatches)
+        ]
+        # Same action order without offload: grads accumulate in backward order.
+        baseline = _build(FullActivationRematConfig(), self.reference)
+        losses: dict[int, torch.Tensor] = {}
+        for action in actions:
+            mb = int(action[1:])
+            if action[0] == "F":
+                x_TD = inputs[mb].clone().requires_grad_(True)
+                losses[mb] = baseline(x_TD).square().mean()
+            else:
+                losses.pop(mb).backward()
+        expected = [p.grad.detach().clone() for p in baseline.parameters()]
+        model = self._schedule_driven_model()
+        offloader = _offloader(model)
+        actual = self._run_schedule(model, actions, inputs, **reload)
+        for e, a in zip(expected, actual, strict=True):
+            torch.testing.assert_close(a, e, rtol=0, atol=0)
+        # Blocks 1..5: nothing is skipped, and every reload was prefetched.
+        input_bytes = _NUM_TOKENS * _DIM * 4
+        self.assertEqual(
+            offloader.forward_stats.offloaded_bytes, (_NUM_LAYERS - 1) * input_bytes
+        )
+        self.assertEqual(offloader.num_on_demand_reloads, 0)
+        self.assertEqual(offloader._pp_schedule.groups_by_microbatch, {})
+
+    def test_schedule_driven_offloads_every_block(self):
+        self._assert_schedule_matches(["F0", "F1", "B0", "F2", "B1", "F3", "B2", "B3"])
+
+    def test_schedule_driven_backwards_out_of_order(self):
+        """Backwards in a different order than forwards still reload the
+        right microbatch, since the schedule names it."""
+        self._assert_schedule_matches(["F0", "F1", "F2", "B2", "B0", "B1"])
+
+    def test_schedule_driven_reloads_whole_stage(self):
+        self._assert_schedule_matches(["F0", "F1", "B0", "B1"], num_groups=_NUM_LAYERS)
+
+    def test_schedule_driven_wait_offload_frees_last_group(self):
+        """wait_offload frees only the named microbatch's last group."""
+        model = self._schedule_driven_model()
+        offloader = _offloader(model)
+        offloader.set_microbatch(0)
+        loss0 = model(self.inputs[1].clone().requires_grad_(True)).square().mean()
+        offloader.set_microbatch(1)
+        loss1 = model(self.inputs[0].clone().requires_grad_(True)).square().mean()
+        pp_schedule = offloader._pp_schedule
+        (mb0_last,) = pp_schedule.groups_by_microbatch[0][-1].storages.values()
+        (mb1_last,) = pp_schedule.groups_by_microbatch[1][-1].storages.values()
+        gc.collect()
+        torch.cuda.synchronize()
+        before_wait = torch.cuda.memory_allocated()
+        offloader.wait_offload(0)
+        self.assertEqual(
+            before_wait - torch.cuda.memory_allocated(), _NUM_TOKENS * _DIM * 4
+        )
+        self.assertIs(mb0_last.state, _State.OFFLOADED)
+        self.assertIs(mb1_last.state, _State.OFFLOADING)
+        offloader.reload_backward(0)
+        # Queued by the schedule call, before backward reaches the trigger.
+        self.assertIs(mb0_last.state, _State.RELOADING)
+        loss0.backward()
+        offloader.wait_offload(1)
+        self.assertIs(mb1_last.state, _State.OFFLOADED)
+        offloader.reload_backward(1)
+        loss1.backward()
+        self.assertEqual(offloader.num_on_demand_reloads, 0)
 
     def test_backward_triggers_prefetch_every_group(self):
         offload = ActivationOffloadConfig()
