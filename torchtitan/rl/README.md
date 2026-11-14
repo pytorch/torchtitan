@@ -122,6 +122,8 @@ rollouter = Rollouter.Config(
     validation_dataset=MyValidationDataset.Config(),
     worker=MessageEnvRolloutWorker.Config(
         message_env=MyEnv.Config(),
+        # Max prompt tokens, usually the generator's context length.
+        token_env=TokenEnv.Config(max_rollout_tokens=32768),
         rubric=Rubric.Config(
             reward_fns=[RewardCorrect.Config(weight=1.0)]
         ),

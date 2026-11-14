@@ -97,6 +97,13 @@ class MessageEnv(Configurable, abc.ABC):
         finish_reason / length / parse / timeout failures before calling this,
         so the env only sees a well-formed completion message.
 
+        Answer the model's bad output with a reply or `done=True`; a penalty goes through
+        `env_rewards` or the rubric. Don't raise for it: a raise means the env's own code failed,
+        so the rollout ends `ERROR_INFRA` and isn't trained. Examples:
+
+            a tool call with wrong arguments        reply with the error
+            a tool command past its own timeout     reply "command timed out after 600 s"
+
         Args:
             completion_message: the completion decoded into a message.
 

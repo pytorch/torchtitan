@@ -91,7 +91,7 @@ class VerifiersRollouter(Rollouter):
             |      |
             |      +--> generate_fn: router.reserve, then generator.generate (GPU)
             |
-            |  8 traces --> RolloutTurns --> scores and advantages
+            |  8 traces --> RolloutTurns --> make_scored_group
             v
         controller: one scored RolloutGroup
     """
@@ -285,23 +285,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             ),
             return_exceptions=True,
         )
-        # Raise only after every sibling finished: the caller releases the group next, and a
-        # sibling still generating would pin the group again, with nothing left to release it.
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-        rollouts = results
-
-        outputs = await self.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
-            rollout.reward = output.reward
-            rollout.reward_breakdown = output.reward_breakdown
-
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self.advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
-            rollout.advantage = advantage
-        return group
+        return await self.make_scored_group(results, sample, group_id=group_id)
 
     async def _run_single_rollout(
         self,
