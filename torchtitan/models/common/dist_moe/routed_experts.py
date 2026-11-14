@@ -35,7 +35,8 @@ class DistMoeRoutedExperts(Module):
     W13 and W2 remain ordinary TorchTitan modules so parameter, FSDP,
     optimizer, and checkpoint ownership does not change. Their module
     ``forward`` methods are not called: Dist-MoE consumes the weights directly
-    and owns dispatch, SwiGLU, expert GEMMs, and combine.
+    and owns dispatch, the configured gated activation, expert GEMMs, and
+    combine.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -55,6 +56,8 @@ class DistMoeRoutedExperts(Module):
                 BF16 FPROP/DGRAD grouped-GEMM schedule. ``None`` selects the
                 shape-aware production defaults.
             activation: Expert activation implemented by the Dist-MoE kernels.
+            situ_glu_gate_beta: Tanh bound for the SiTU-GLU gate input.
+            situ_glu_up_beta: Tanh bound for the SiTU-GLU up input.
             swiglu_alpha: Sigmoid multiplier when ``activation`` is clamped
                 SwiGLU; otherwise ``None``.
             swiglu_limit: Gate and up-projection bound when ``activation`` is
@@ -65,9 +68,11 @@ class DistMoeRoutedExperts(Module):
         w2: GroupedLinear.Config
         top_k: int
         output_postprocess: Module.Config | None = None
+        activation: Literal["swiglu", "swiglu_clamped", "situ_glu"] = "swiglu"
+        situ_glu_gate_beta: float | None = None
+        situ_glu_up_beta: float | None = None
         inplace_wgrad_accum: bool = True
         bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
-        activation: Literal["swiglu", "swiglu_clamped"] = "swiglu"
         swiglu_alpha: float | None = None
         swiglu_limit: float | None = None
 
@@ -86,13 +91,39 @@ class DistMoeRoutedExperts(Module):
             if self.top_k <= 0:
                 raise ValueError("top_k must be positive")
             if self.activation == "swiglu":
-                if self.swiglu_alpha is not None or self.swiglu_limit is not None:
-                    raise ValueError("plain SwiGLU must not define clamp parameters")
+                if any(
+                    value is not None
+                    for value in (
+                        self.swiglu_alpha,
+                        self.swiglu_limit,
+                        self.situ_glu_gate_beta,
+                        self.situ_glu_up_beta,
+                    )
+                ):
+                    raise ValueError(
+                        "plain SwiGLU must not define activation parameters"
+                    )
             elif self.activation == "swiglu_clamped":
                 if self.swiglu_alpha is None or self.swiglu_limit is None:
                     raise ValueError("clamped SwiGLU requires alpha and limit")
+                if (
+                    self.situ_glu_gate_beta is not None
+                    or self.situ_glu_up_beta is not None
+                ):
+                    raise ValueError(
+                        "SiTU-GLU parameters require activation='situ_glu'"
+                    )
+            elif self.activation == "situ_glu":
+                if self.swiglu_alpha is not None or self.swiglu_limit is not None:
+                    raise ValueError(
+                        "clamped SwiGLU parameters require activation='swiglu_clamped'"
+                    )
+                if self.situ_glu_gate_beta is None or self.situ_glu_up_beta is None:
+                    raise ValueError(
+                        "SiTU-GLU requires situ_glu_gate_beta and situ_glu_up_beta"
+                    )
             else:
-                raise ValueError(f"unsupported activation {self.activation!r}")
+                raise ValueError(f"unsupported Dist-MoE activation {self.activation!r}")
             postprocess_config = self.output_postprocess
             owner = None if postprocess_config is None else postprocess_config._owner
             if postprocess_config is not None and not callable(
@@ -116,10 +147,12 @@ class DistMoeRoutedExperts(Module):
         self.intermediate_dim = config.w2.in_features
         self.num_experts = config.w13.group_size
         self.top_k = config.top_k
+        self.activation = config.activation
+        self.situ_glu_gate_beta = config.situ_glu_gate_beta
+        self.situ_glu_up_beta = config.situ_glu_up_beta
         self.inplace_wgrad_accum = config.inplace_wgrad_accum
         self.bf16_grouped_gemm_preset = config.bf16_grouped_gemm_preset
         self.block_scaled_config: dist_moe.BlockScaledConfig | None = None
-        self.activation = config.activation
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_limit = config.swiglu_limit
         self._runtime: DistMoeRuntime | None = None

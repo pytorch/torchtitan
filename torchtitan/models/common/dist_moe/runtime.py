@@ -446,6 +446,13 @@ class DistMoeRuntime(Configurable):
                 "swiglu_alpha": module.swiglu_alpha,
                 "swiglu_limit": module.swiglu_limit,
             }
+        elif module.activation == "situ_glu":
+            assert module.situ_glu_gate_beta is not None
+            assert module.situ_glu_up_beta is not None
+            activation_options = {
+                "situ_glu_gate_beta": module.situ_glu_gate_beta,
+                "situ_glu_up_beta": module.situ_glu_up_beta,
+            }
         return dist_moe.Config(
             max_num_local_input_tokens=max_num_local_input_tokens,
             hidden_dim=module.hidden_dim,
