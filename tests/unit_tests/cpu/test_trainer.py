@@ -462,6 +462,7 @@ def test_forward_backward_runs_whole_accumulation(
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._accelerator_graph_per_microbatch_group_enabled = per_group_graph
+    engine._dist_moe_runtime = None
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
     engine._run_forward_backward = partial(
@@ -926,6 +927,9 @@ def test_optim_step_waits_for_checkpoint() -> None:
             checkpointer=SimpleNamespace(
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
+            _dist_moe_runtime=SimpleNamespace(
+                finish_overflow_check=lambda: events.append("overflow_check")
+            ),
             optim=optim,
         ),
     )
@@ -933,7 +937,7 @@ def test_optim_step_waits_for_checkpoint() -> None:
     grad_norm = TrainingEngine.optim_step(engine)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["checkpoint", "optimization_3"]
+    assert events == ["checkpoint", "overflow_check", "optimization_3"]
     assert engine.num_completed_steps == 3
 
 
@@ -1004,6 +1008,29 @@ def fake_dp_mesh():
     dist.destroy_process_group()
 
 
+def test_dist_moe_overflow_stops_optimizer_commit() -> None:
+    """A planner-capacity failure leaves parameters and step state untouched."""
+    runtime = SimpleNamespace(
+        finish_overflow_check=MagicMock(side_effect=ValueError("overflow"))
+    )
+    optim = SimpleNamespace(step=MagicMock())
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            num_completed_steps=4,
+            loss=torch.tensor(1.0),
+            _dist_moe_runtime=runtime,
+            optim=optim,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="overflow"):
+        TrainingEngine.optim_step(engine)
+
+    optim.step.assert_not_called()
+    assert engine.num_completed_steps == 4
+
+
 @pytest.mark.parametrize("fake_dp", [False, True])
 @pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
@@ -1069,6 +1096,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
             device=torch.device("cpu"),
             forward_backward=forward_backward,
             loss=graph_loss,
+            _dist_moe_runtime=None,
             sdc_replayer=None,
             model_parts=[],
             model_config=SimpleNamespace(mtp_layers=None),
@@ -1210,6 +1238,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine._accelerator_graph_per_microbatch_group_enabled = False
+    engine._dist_moe_runtime = None
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine.flops_estimator = MagicMock(return_value=100)

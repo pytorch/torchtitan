@@ -44,6 +44,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.config.training.disable_accelerator_graphs = True
         trainer.sdc_replayer = None
         trainer._accelerator_graph_per_microbatch_group_enabled = False
+        trainer._dist_moe_runtime = None
         trainer.config.training.preprocess_microbatch_groups_lazily = False
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1

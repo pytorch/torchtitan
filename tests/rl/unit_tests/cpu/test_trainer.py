@@ -199,6 +199,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         ),
         _run_forward_backward=MagicMock(return_value=(torch.tensor(1.0), [])),
         _accelerator_graph_per_microbatch_group_enabled=False,
+        _dist_moe_runtime=None,
         sdc_replayer=None,
         flops_estimator=lambda inputs: inputs["input"].numel(),
     )
