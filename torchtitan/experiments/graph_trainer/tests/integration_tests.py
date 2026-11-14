@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tests.integration_tests import IntegrationTestDefinition
 from tests.integration_tests.run_tests import run_tests
-from tests.integration_tests.skips import register_skip_cases
+from tests.integration_tests.hardware_skips import register_hardware_skips
 from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
 
 from torchtitan_recipes.tests.graph_trainer import (
@@ -334,7 +334,7 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
         ),
         # === GraphRuntime tests ===
         # Note: aot_fx_trace applies CUDA graphs, which ROCm does not support;
-        # the ROCm skip lives in skips/skip_cases.toml.
+        # the ROCm skip lives in hardware_skips/rocm.toml.
         #
         # Disable cuda_graph: replaying coalesced FSDP collectives with CP fails
         # with "CUDA error: invalid argument".
@@ -343,7 +343,7 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             test_descr="aot_fx_trace llama3 FSDP+TP+CP",
             test_name="aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
-            # Also skipped on ROCm; see skips/skip_cases.toml.
+            # Also skipped on ROCm; see hardware_skips/rocm.toml.
             disabled=_FLEX_CP_INDUCTOR_DISABLED,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
@@ -381,7 +381,7 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             ngpu=8,
             # GraphRuntime must preserve offload/reload pairs when it
             # extracts scheduled graph callables.
-            # Also skipped on ROCm; see skips/skip_cases.toml.
+            # Also skipped on ROCm; see hardware_skips/rocm.toml.
             disabled=True,
         ),
         IntegrationTestDefinition(
@@ -630,7 +630,7 @@ def _build_async_tp_tests() -> list[IntegrationTestDefinition]:
             # ("expected size 2==2, stride 2048==1048576 at dim=0"), i.e. a bad
             # meta/fake kernel for the async-TP fused op. Likely an upstream
             # inductor / async-TP regression. Re-enable once fixed upstream.
-            # Also skipped on ROCm; see skips/skip_cases.toml.
+            # Also skipped on ROCm; see hardware_skips/rocm.toml.
             disabled=True,
         ),
     ]
@@ -753,10 +753,7 @@ def main():
         raise RuntimeError("Please provide an empty output directory.")
 
     test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
-    register_skip_cases(
-        Path(__file__).parent / "skips" / "skip_cases.toml",
-        suites=set(_TEST_SUITES_FUNCTION),
-    )
+    register_hardware_skips(Path(__file__).parent / "hardware_skips")
     run_tests(args, test_list)
 
 

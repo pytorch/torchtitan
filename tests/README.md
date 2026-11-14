@@ -26,8 +26,8 @@ This directory contains tests for the torchtitan project, including unit tests a
   - `b200.py`: Test cases that require SM100 or SM103 GPUs
   - `rl.py`: RL end-to-end suites (`rl`, `rl_h100`, `rl_b200`)
   - `run_tests.py`: The runner for every suite
-  - `skips/`: Per-backend skip lists for the suites; see
-    [README](integration_tests/skips/README.md)
+  - `hardware_skips/`: Hardware-specific skip lists; see
+    [README](integration_tests/hardware_skips/README.md)
 - `assets/`: Contains test assets and fixtures used by the tests
   - `losses/`: Golden loss and gradient norm curves for the numerics guards
   - `tokenizer/`: Tokenizer configuration and vocabulary files for testing

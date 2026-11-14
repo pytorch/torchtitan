@@ -43,8 +43,8 @@ maintained; it has to earn its cost.
 - Verify that the intended test actually ran (not skipped, right config).
 
 ## Skip Integration Tests on Specific Backend
-- An integration test that a backend cannot run goes in that backend section of
-  `tests/integration_tests/skips/skip_cases.toml`, not in a per-backend flag.
-  Out-of-tree device repos register their own file through the
-  `torchtitan.skip_cases` interface.
-  See `tests/integration_tests/skips/README.md`.
+- An integration test that a backend cannot run goes in that backend's file
+  under `tests/integration_tests/hardware_skips/` (for example `rocm.toml`), not
+  in a per-backend flag. Out-of-tree device repos register their own file through
+  the `torchtitan.hardware_skips` interface.
+  See `tests/integration_tests/hardware_skips/README.md`.
