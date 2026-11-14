@@ -62,9 +62,11 @@ class TestDSVPackedDocuments(unittest.TestCase):
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
     def test_get_attention_metadata_builds_document_offsets(self):
-        # Documents start where positions reset; the padding tail is its own segment.
-        positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
-        padding_mask = torch.tensor([False] * 8 + [True] * 2)
+        # Documents start where positions reset and are aligned to the
+        # compression ratio; the padding tail is its own segment.
+        positions = torch.arange(128).repeat(4)
+        padding_mask = torch.zeros(512, dtype=torch.bool)
+        padding_mask[384:] = True
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             model = config.model.build()
@@ -72,16 +74,16 @@ class TestDSVPackedDocuments(unittest.TestCase):
         self.assertTrue(metadata)
         for value in metadata.values():
             self.assertIsInstance(value, VarlenAttentionMetadata)
-            self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 128, 256, 384, 512])
 
     def test_preprocess_inputs_passes_document_offsets(self):
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             model = config.model.build()
         input_dict = {
-            "input": torch.zeros(128, dtype=torch.long),
-            "labels": torch.zeros(128, dtype=torch.long),
-            "positions": torch.arange(64).repeat(2),
+            "input": torch.zeros(256, dtype=torch.long),
+            "labels": torch.zeros(256, dtype=torch.long),
+            "positions": torch.arange(128).repeat(2),
         }
         # SPMD annotation needs a device mesh; this checks only the plumbing.
         with patch(
@@ -98,7 +100,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
         metadata = kwargs["attention_metadata"]
         self.assertTrue(metadata)
         for value in metadata.values():
-            self.assertEqual(value.cu_seq_q.tolist(), [0, 64, 128])
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 128, 256])
 
     def test_packed_attention_matches_each_document_alone(self):
         """Packed documents must not see each other through the sliding window,
@@ -115,11 +117,11 @@ class TestDSVPackedDocuments(unittest.TestCase):
         # breaks ties by layout; let CSA select every causal candidate instead
         # (the longest document below has 384 // 4 compressed entries).
         attention_configs[4].inner_attention.index_topk = 96
-        # Group-aligned lengths also compare against the unpacked path; the
-        # others cover partial groups and documents shorter than a group.
+        # Documents are packed aligned to the largest compression ratio, so
+        # every segment ends on a group boundary.
         for lengths, reference in (
             ([256, 128, 384], "unpacked"),
-            ([300, 37, 150, 5], "packed alone"),
+            ([384, 128, 256], "packed alone"),
         ):
             positions = torch.cat([torch.arange(n) for n in lengths])
             for attention_config in attention_configs.values():
@@ -160,6 +162,47 @@ class TestDSVPackedDocuments(unittest.TestCase):
                             )
                         )
                     torch.testing.assert_close(packed, torch.cat(docs))
+
+    def test_in_segment_padding_is_invisible_to_real_tokens(self):
+        """Padded document tails must not change a real token's output."""
+        torch.manual_seed(0)
+        model_config = config_registry.deepseek_v4_debugmodel(seq_len=512).model
+        alignment = model_config.per_sample_pad_multiple
+        lengths = [133, 7, 116]
+        padded_lengths = [n + (-n) % alignment for n in lengths]
+        positions = torch.cat([torch.arange(n) for n in padded_lengths])
+        valid = torch.cat(
+            [
+                torch.arange(padded) < real
+                for padded, real in zip(padded_lengths, lengths)
+            ]
+        )
+        for ratio in (4, 128):
+            attention_config = next(
+                layer.attention
+                for layer in model_config.layers
+                if layer.attention.compress_ratio == ratio
+            )
+            with torch.device("meta"):
+                attention = attention_config.build().double()
+            attention.to_empty(device="cpu")
+            attention.init_states(buffer_device=torch.device("cpu"))
+            attention.eval()
+            for param in attention.parameters():
+                torch.nn.init.normal_(param, std=0.1)
+            metadata = attention_config.inner_attention.build_attention_metadata(
+                positions, padding_mask=~valid
+            )
+            x = torch.randn(len(positions), model_config.dim, dtype=torch.float64)
+            outputs = attention(x, attention_metadata=metadata, positions=positions)
+            perturbed = x.clone()
+            perturbed[~valid] = torch.randn(
+                int((~valid).sum()), model_config.dim, dtype=torch.float64
+            )
+            perturbed_outputs = attention(
+                perturbed, attention_metadata=metadata, positions=positions
+            )
+            torch.testing.assert_close(outputs[valid], perturbed_outputs[valid])
 
 
 if __name__ == "__main__":

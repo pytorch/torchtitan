@@ -40,3 +40,23 @@ def test_default_positions_match_explicit_positions(ratio):
     implicit = compressor(x, positions=None)
     explicit = compressor(x, positions=torch.arange(seqlen))
     torch.testing.assert_close(implicit, explicit)
+
+
+@pytest.mark.parametrize("ratio", [4, 128])
+def test_aligned_documents_match_per_document_compression(ratio):
+    """Aligned packing lets the compressor regroup the whole stream.
+
+    Regression: regrouping must be equivalent to compressing each document on
+    its own, including the overlap candidate at a document start.
+    """
+    compressor = _compressor(ratio)
+    lengths = (2 * ratio, 3 * ratio)
+    x = torch.randn(sum(lengths), compressor.wkv.in_features, dtype=torch.float64)
+    packed = compressor(x, positions=torch.cat([torch.arange(n) for n in lengths]))
+    per_document = torch.cat(
+        [
+            compressor(x_doc, positions=torch.arange(n))
+            for x_doc, n in zip(x.split(lengths), lengths)
+        ]
+    )
+    torch.testing.assert_close(packed, per_document)
