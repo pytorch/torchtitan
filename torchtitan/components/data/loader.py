@@ -72,6 +72,8 @@ class GrainDataLoader(BaseDataLoader):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
         dataset: DatasetConfig
+        document_alignment: int | None = None
+        """Pad document segments to this multiple; requires document-aware packing."""
         collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
         shuffle: bool = True
@@ -120,6 +122,7 @@ class GrainDataLoader(BaseDataLoader):
             read_options=read_options,
             max_num_documents=config.max_num_documents,
             num_mtp_layers=config.num_mtp_layers,
+            document_alignment=config.document_alignment,
             vision_processor=vision_processor,
         )
         dataset_iteration_policy = DatasetIterationPolicy(

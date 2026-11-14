@@ -15,6 +15,7 @@ from spmd_types import SpmdType
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
+    attention_activation_placement,
     dense_activation_placement,
     dense_param_placement,
     residual_activation_placement,
@@ -75,7 +76,7 @@ def _hc_state_shardings() -> dict[str, SpmdType]:
 
 def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfig:
     """Local-SPMD sparse attention kernel with queries sharded on heads."""
-    query_states = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
+    query_states = attention_activation_placement()
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     input_shardings = {
         "q": query_states,
@@ -85,9 +86,8 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
         input_shardings.update(
             {
                 "cmp_k": replicated_activation,
-                "idx_q": replicated_activation,
-                "idx_k": replicated_activation,
-                "idx_w": replicated_activation,
+                "topk_indices": replicated_activation,
+                "topk_scores": replicated_activation,
                 "attn_sink": _attn_sink_placement,
                 "padding_mask_T": token_id_placement(),
             }
@@ -220,4 +220,19 @@ def mtp_block_sharding_config() -> ShardingConfig:
             "mtp_input_valid_mask": token_id_placement(),
         },
         output_shardings=replicated_activation,
+    )
+
+
+def inner_indexer_sharding_config() -> ShardingConfig:
+    replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    query = SpmdType(
+        replicated.local_type,
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+    inputs = {"idx_q": query, "idx_k": replicated, "idx_w": replicated}
+    return ShardingConfig(
+        in_src_shardings=inputs,
+        in_dst_shardings=dict(inputs),
+        out_src_shardings=(replicated, replicated),
+        local_spmd=True,
     )

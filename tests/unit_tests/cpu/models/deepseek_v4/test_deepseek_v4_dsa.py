@@ -12,14 +12,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
+from torchtitan.models.deepseek_v4.metadata import SparseAttentionMetadata
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
-class TestIndexerSelect(unittest.TestCase):
+class TestInnerIndexerSelect(unittest.TestCase):
     def test_indexer_select_matches_old_topk(self):
         torch.manual_seed(0)
         device = torch.device("cpu")
@@ -30,7 +30,7 @@ class TestIndexerSelect(unittest.TestCase):
         idx_k = torch.randn(n_cmp, 32, generator=g, device=device)
         idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
-        selected, selected_scores = Indexer.select(
+        selected, selected_scores = InnerIndexer.select(
             idx_q, idx_k, idx_w, max_seqlen=seqlen, ratio=ratio, topk=topk
         )
 
@@ -71,7 +71,9 @@ class TestDSVPackedDocuments(unittest.TestCase):
         metadata = model._get_attention_metadata(positions, padding_mask=padding_mask)
         self.assertTrue(metadata)
         for value in metadata.values():
-            self.assertIsInstance(value, VarlenAttentionMetadata)
+            self.assertIsInstance(
+                value, (VarlenAttentionMetadata, SparseAttentionMetadata)
+            )
             self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
 
     def test_preprocess_inputs_passes_document_offsets(self):
@@ -84,14 +86,19 @@ class TestDSVPackedDocuments(unittest.TestCase):
             "positions": torch.arange(64).repeat(2),
         }
         # SPMD annotation needs a device mesh; this checks only the plumbing.
-        with patch(
-            "torchtitan.models.common.decoder.annotate_input_spmd_types",
-            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+        with (
+            patch(
+                "torchtitan.models.common.decoder.annotate_input_spmd_types",
+                side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+            ),
+            patch("spmd_types.assert_type"),
         ):
             _, _, kwargs, _ = model.preprocess_inputs(
                 input_dict,
                 parallelism_context=SimpleNamespace(
-                    cp_enabled=False, activate_spmd=contextlib.nullcontext
+                    cp_enabled=False,
+                    activate_spmd=contextlib.nullcontext,
+                    spmd_dense_mesh=lambda: {},
                 ),
                 parallelism=SimpleNamespace(),
             )
