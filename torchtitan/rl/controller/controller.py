@@ -951,6 +951,9 @@ class Controller(Configurable):
                 rollout for group in rollout_groups for rollout in group.rollouts
             ],
         )
+        metrics.extend(
+            m.fold(metric for group in rollout_groups for metric in group.metrics)
+        )
         # Training logs the same turn metrics, so prefix validation's to keep them apart in W&B:
         #   generator/queue_time_ms -> validation_generator/queue_time_ms
         #   math_verify/timeouts    -> validation_math_verify/timeouts
@@ -1249,8 +1252,8 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
-                    prefix="rollout", rollouts=group.rollouts
+                group.metrics.extend(
+                    compute_rollout_metrics(prefix="rollout", rollouts=group.rollouts)
                 )
 
                 # save rollout for inspection
