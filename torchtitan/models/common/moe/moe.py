@@ -191,6 +191,8 @@ class RoutedExperts(Module):
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
                 # Non-blocking HybridEP leaves rows past offsets_E[-1] unwritten.
+                # DeepEP needs no mask: training uses its compact layout, which
+                # has no such rows, and its expand layout runs only without grad.
                 if (
                     isinstance(self.token_dispatcher, HybridEPTokenDispatcher)
                     and self.token_dispatcher.non_blocking_capacity_factor is not None

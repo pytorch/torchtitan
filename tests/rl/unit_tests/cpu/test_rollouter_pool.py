@@ -20,7 +20,7 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 
 
 class _ChooseRunGroupEndpoint:
@@ -120,7 +120,7 @@ class _ControllerHost:
 
 def _rollouter_without_datasets() -> Rollouter:
     class WorkerConfig:
-        _owner = RolloutWorker
+        _owner = MessageEnvRolloutWorker
 
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)

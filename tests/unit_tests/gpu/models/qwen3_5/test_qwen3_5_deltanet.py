@@ -296,7 +296,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+            build_config, max_context_length = MODEL_FLAVORS["debugmodel_mm"]
             model = build_config(
                 "flex",
                 seq_len=max_context_length,
@@ -324,7 +324,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+            build_config, max_context_length = MODEL_FLAVORS["debugmodel_mm"]
             model = build_config(
                 "flex",
                 seq_len=max_context_length,
@@ -593,7 +593,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         flex_model = build_model_config(
-            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+            "debugmodel_mm", attn_backend="flex", parallelism=ParallelismConfig()
         ).build()
         masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
@@ -625,7 +625,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             )
 
         varlen_model = build_model_config(
-            "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+            "debugmodel_mm", attn_backend="varlen", parallelism=ParallelismConfig()
         ).build()
         varlen_masks = varlen_model._get_attention_metadata(positions)
         varlen_backend = next(
@@ -646,7 +646,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         deltanet_only_config = build_model_config(
-            "debugmodel", parallelism=ParallelismConfig()
+            "debugmodel_mm", parallelism=ParallelismConfig()
         )
         deltanet_only_config.layers = [
             layer

@@ -142,10 +142,8 @@ def test_vllm_replacement_preserves_attention_sharding(build_config) -> None:
         vllm_sharding = vllm_layer.attention.inner_attention.sharding_config
         assert model_sharding is not None
         assert vllm_sharding is not None
-        assert vllm_sharding.in_src_shardings is model_sharding.in_src_shardings
-        assert vllm_sharding.in_dst_shardings is model_sharding.in_dst_shardings
-        assert vllm_sharding.out_src_shardings is model_sharding.out_src_shardings
-        assert vllm_sharding.out_dst_shardings is model_sharding.out_dst_shardings
+        assert vllm_sharding.input_shardings is model_sharding.input_shardings
+        assert vllm_sharding.output_shardings is model_sharding.output_shardings
         assert vllm_sharding.local_spmd is model_sharding.local_spmd
         for name, layout in model_sharding.state_shardings.items():
             assert vllm_sharding.state_shardings[name] is layout

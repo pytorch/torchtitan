@@ -37,18 +37,16 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
-    dense_sequence_parallel_placement,
     gqa_attention_sharding_config,
     head_norm_sharding_config,
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     rope_cache_sharding_config,
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -95,6 +93,7 @@ from .model import (
     MuseSparkEmbeddingWithNorm,
     MuseSparkLMHead,
     MuseSparkModel,
+    MuseSparkMultimodalModel,
     MuseSparkNormPreservingResidualConnection,
     MuseSparkQKVLinear,
     MuseSparkRMSNorm,
@@ -109,7 +108,6 @@ from .sharding import (
     audio_wrapper_sharding_config,
     compressed_moe_linear_sharding_config,
     muse_spark_activation_placement,
-    perception_norm_sharding_config,
     post_expert_norm_sharding_config,
     residual_gate_sharding_config,
     transformer_block_sharding_config,
@@ -522,7 +520,6 @@ def _moe_config(
 ) -> MuseSparkMoE.Config:
     grouped_linear_init = _grouped_linear_init(layer_id)
     experts_sharding = routed_experts_sharding_config()
-    experts_sharding.out_dst_shardings = dense_sequence_parallel_placement()
     return MuseSparkMoE.Config(
         num_experts=num_experts,
         router=TokenChoiceTopKRouter.Config(
@@ -647,7 +644,7 @@ def _muse_spark_navit_mlp_config(
     mlp_hidden_dim: int,
 ) -> VisionMLP.Config:
     return VisionMLP.Config(
-        fc1=Linear.Config(
+        fc1=ColumnParallelLinear.Config(
             in_features=latent_dim,
             out_features=mlp_hidden_dim,
             bias=True,
@@ -814,10 +811,11 @@ def _muse_spark_config(
     attn_backend: str,
     parallelism: ParallelismConfig,
     dataset_modalities: tuple[Literal["vision", "audio"], ...],
-    audio_encoder: MuseSparkAudioEncoder.Config,
-    vision_encoder: NaViTEncoder.Config,
-    vision_adapter: MuseSparkNaViTAdapter.Config,
+    audio_encoder: MuseSparkAudioEncoder.Config | None,
+    vision_encoder: NaViTEncoder.Config | None,
+    vision_adapter: MuseSparkNaViTAdapter.Config | None,
 ) -> MuseSparkModel.Config:
+    """Build the multimodal config when encoders are given, else the text one."""
     enable_sp = parallelism.enable_sequence_parallel
     enable_ep = parallelism.expert_parallel_degree > 1
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
@@ -825,26 +823,6 @@ def _muse_spark_config(
         raise ValueError("Muse Spark supports only attn_backend='flex' or 'varlen'")
 
     assert len(post_norm_gain_centers) == num_layers
-
-    if audio_encoder.output_size != dim:
-        raise ValueError(
-            "audio_encoder.output_size must match Muse Spark model dim "
-            f"{dim}; got {audio_encoder.output_size}"
-        )
-    vision_projection = Linear.Config(
-        in_features=vision_adapter.c_proj.out_features,
-        out_features=dim,
-        bias=False,
-        param_init=_LINEAR_INIT,
-        sharding_config=cp_replicated_vision_sharding_config(
-            vision_invariant_linear_sharding_config()
-        ),
-    )
-    perception_emb_norm = _gain_norm(
-        dim,
-        elementwise_affine=False,
-        sharding_config=perception_norm_sharding_config(enable_sp=enable_sp),
-    )
 
     layers = []
     for layer_id, post_norm_gain_center in enumerate(post_norm_gain_centers):
@@ -923,12 +901,12 @@ def _muse_spark_config(
             )
         )
 
-    return MuseSparkModel.Config(
+    fields = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=MuseSparkEmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
@@ -954,7 +932,7 @@ def _muse_spark_config(
                 if final_norm_gain_center == 0.0
                 else _GAIN_NORM_INIT
             ),
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=MuseSparkLMHead.Config(
             in_features=dim,
@@ -967,12 +945,41 @@ def _muse_spark_config(
         ),
         residual_dtype=torch.float32,
         final_norm_input_dtype=final_norm_input_dtype,
+    )
+    if audio_encoder is None and vision_encoder is None:
+        assert vision_adapter is None and not dataset_modalities
+        return MuseSparkModel.Config(**fields)
+
+    if audio_encoder is not None and audio_encoder.output_size != dim:
+        raise ValueError(
+            "audio_encoder.output_size must match Muse Spark model dim "
+            f"{dim}; got {audio_encoder.output_size}"
+        )
+    vision_projection = None
+    if vision_adapter is not None:
+        vision_projection = Linear.Config(
+            in_features=vision_adapter.c_proj.out_features,
+            out_features=dim,
+            bias=False,
+            param_init=_LINEAR_INIT,
+            sharding_config=cp_replicated_vision_sharding_config(
+                vision_invariant_linear_sharding_config()
+            ),
+        )
+    return MuseSparkMultimodalModel.Config(
+        **fields,
         dataset_modalities=dataset_modalities,
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
         vision_projection=vision_projection,
-        perception_emb_norm=perception_emb_norm,
+        perception_emb_norm=_gain_norm(
+            dim,
+            elementwise_affine=False,
+            sharding_config=cp_replicated_vision_sharding_config(
+                invariant_norm_sharding_config()
+            ),
+        ),
     )
 
 
@@ -981,32 +988,35 @@ def _debugmodel(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
-    dataset_modalities: tuple[Literal["vision", "audio"], ...],
+    has_encoders: bool,
 ) -> MuseSparkModel.Config:
-    audio_encoder = muse_spark_audio_encoder_config(
-        output_size=_DEBUG_MODEL_DIM,
-        patch_size=4,
-        kernel_size=7,
-        input_channels=1,
-        patchify_sizes=(2, 2),
-        hidden_sizes=(16, 32),
-    )
-    vision_encoder = muse_spark_navit_encoder_config(
-        latent_dim=64,
-        num_layers=3,
-        num_heads=4,
-        mlp_hidden_dim=128,
-        patch_size=14,
-        patch_temporal=2,
-        downsample_factor=2,
-        sparse_attention_factor=2,
-        pos_emb_grid_h=2,
-        pos_emb_grid_w=2,
-    )
-    vision_adapter = muse_spark_navit_adapter_config(
-        input_dim=vision_encoder.output_dim,
-        output_dim=128,
-    )
+    """Debug config for Muse Spark, with vision and audio encoders if ``has_encoders``."""
+    audio_encoder = vision_encoder = vision_adapter = None
+    if has_encoders:
+        audio_encoder = muse_spark_audio_encoder_config(
+            output_size=_DEBUG_MODEL_DIM,
+            patch_size=4,
+            kernel_size=7,
+            input_channels=1,
+            patchify_sizes=(2, 2),
+            hidden_sizes=(16, 32),
+        )
+        vision_encoder = muse_spark_navit_encoder_config(
+            latent_dim=64,
+            num_layers=3,
+            num_heads=4,
+            mlp_hidden_dim=128,
+            patch_size=14,
+            patch_temporal=2,
+            downsample_factor=2,
+            sparse_attention_factor=2,
+            pos_emb_grid_h=2,
+            pos_emb_grid_w=2,
+        )
+        vision_adapter = muse_spark_navit_adapter_config(
+            input_dim=vision_encoder.output_dim,
+            output_dim=128,
+        )
     num_layers = 8
     return _muse_spark_config(
         dim=_DEBUG_MODEL_DIM,
@@ -1040,7 +1050,7 @@ def _debugmodel(
         load_balance_coeff=None,
         expert_bias_init=0.125,
         attn_backend=attn_backend,
-        dataset_modalities=dataset_modalities,
+        dataset_modalities=("vision", "audio") if has_encoders else (),
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
@@ -1053,14 +1063,17 @@ def _muse_spark_816b_a42b(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
-    dataset_modalities: tuple[Literal["vision", "audio"], ...],
+    has_encoders: bool,
 ) -> MuseSparkModel.Config:
-    vision_encoder, vision_adapter = muse_spark_navit_configs(
-        _MUSE_SPARK_816B_VISION_ADAPTER_DIM,
-    )
-    audio_encoder = muse_spark_audio_encoder_config(
-        output_size=_MUSE_SPARK_816B_DIM,
-    )
+    """Muse Spark 816B-A42B, with vision and audio encoders if ``has_encoders``."""
+    audio_encoder = vision_encoder = vision_adapter = None
+    if has_encoders:
+        vision_encoder, vision_adapter = muse_spark_navit_configs(
+            _MUSE_SPARK_816B_VISION_ADAPTER_DIM,
+        )
+        audio_encoder = muse_spark_audio_encoder_config(
+            output_size=_MUSE_SPARK_816B_DIM,
+        )
     num_layers = 62
     return _muse_spark_config(
         dim=_MUSE_SPARK_816B_DIM,
@@ -1092,7 +1105,7 @@ def _muse_spark_816b_a42b(
         load_balance_coeff=1e-3,
         expert_bias_init=0.0,
         attn_backend=attn_backend,
-        dataset_modalities=dataset_modalities,
+        dataset_modalities=("vision", "audio") if has_encoders else (),
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
@@ -1103,19 +1116,19 @@ def _muse_spark_816b_a42b(
 # Each tuple contains the model factory and its default training context length.
 MODEL_FLAVORS: dict[str, tuple[Callable[..., MuseSparkModel.Config], int]] = {
     "816B-A42B": (
-        partial(_muse_spark_816b_a42b, dataset_modalities=()),
+        partial(_muse_spark_816b_a42b, has_encoders=False),
         32768,
     ),
     "816B-A42B_mm": (
-        partial(_muse_spark_816b_a42b, dataset_modalities=("vision", "audio")),
+        partial(_muse_spark_816b_a42b, has_encoders=True),
         32768,
     ),
     "debugmodel": (
-        partial(_debugmodel, dataset_modalities=()),
+        partial(_debugmodel, has_encoders=False),
         512,
     ),
     "debugmodel_mm": (
-        partial(_debugmodel, dataset_modalities=("vision", "audio")),
+        partial(_debugmodel, has_encoders=True),
         512,
     ),
 }

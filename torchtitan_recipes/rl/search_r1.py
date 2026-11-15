@@ -57,7 +57,7 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.losses import DAPOLoss
@@ -80,7 +80,7 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
             data_source="nq",
             shuffle=False,
         ),
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardExactMatch.Config(weight=1.0)],
                 truncation_reward=0.0,

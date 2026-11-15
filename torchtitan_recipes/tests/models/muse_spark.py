@@ -44,7 +44,7 @@ from torchtitan.models.muse_spark import (
     MUSE_SPARK_VISION_PROCESSOR_KWARGS,
 )
 from torchtitan.models.muse_spark.flavors import _MUSE_SPARK_816B_VOCAB_SIZE
-from torchtitan.models.muse_spark.model import MuseSparkModel
+from torchtitan.models.muse_spark.model import MuseSparkModel, MuseSparkMultimodalModel
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -236,6 +236,7 @@ def muse_spark_debugmodel_mm(
         parallelism=config.parallelism,
         attn_backend="flex",
     )
+    assert isinstance(model_config, MuseSparkMultimodalModel.Config)
     config.model = model_config
     config.tokenizer = MuseSparkTokenizer.Config(**MUSE_SPARK_DEBUG_SPECIAL_TOKENS)
     config.vision_processor = VisionProcessor.Config(

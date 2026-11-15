@@ -934,6 +934,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         generator = object.__new__(Generator)
         generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
         generator._prefetched_model_state_dict = {}
+        generator._model_state_dict_transport = None
         generator._engine_loop = engine_thread(
             engine,
             fetch_model_state_dict=generator._copy_prefetched_model_state_dict,

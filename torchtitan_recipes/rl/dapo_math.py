@@ -69,7 +69,7 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.batcher import Batcher
@@ -93,7 +93,7 @@ def _dapo_math_rollouter_config(
             dataset=DapoMathDataset.Config()
         ),
         validation_dataset=validation_dataset,
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardMathVerify.Config(weight=1.0)],
                 error_reward=0.0,

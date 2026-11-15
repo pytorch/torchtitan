@@ -18,7 +18,7 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
 
@@ -28,7 +28,7 @@ class RolloutWorkerActor(Actor):
     def __init__(
         self,
         *,
-        worker_config: RolloutWorker.Config,
+        worker_config: BaseRolloutWorker.Config,
         num_threads: int,
         structured_logger_init_fn: functools.partial[None] | None,
     ) -> None:

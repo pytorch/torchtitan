@@ -41,7 +41,10 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
-from torchtitan.rl.generator.vllm.multimodal_wrapper import image_prompt_to_engine_input
+from torchtitan.rl.generator.vllm.multimodal_wrapper import (
+    image_prompt_to_engine_input,
+    keep_prefix_cached_image_data,
+)
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -221,6 +224,8 @@ class VLLMEngine(GenerationEngine):
                     output_dir=output_dir,
                 )
             )
+        if vision_processor is not None:
+            keep_prefix_cached_image_data()
         logger.info("Initializing LLMEngine from EngineArgs...")
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers

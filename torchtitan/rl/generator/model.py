@@ -67,7 +67,6 @@ def build_inference_model(
     parallelism: InferenceParallelismConfig,
     precision: PrecisionConfig,
     device: torch.device,
-    keep_vision_encoder: bool = False,
 ) -> tuple[Decoder, ParallelismContext, frozenset[str]]:
     """Build, parallelize and materialize the generator's model, without its weights.
 
@@ -81,8 +80,6 @@ def build_inference_model(
         parallelism: The generator's parallelism.
         precision: The trainer's dtypes, which the model mirrors.
         device: The device to materialize the model on.
-        keep_vision_encoder: Keep the model's vision encoder, for an engine that serves
-            image prompts; otherwise it is dropped.
 
     Returns:
         ``(model, parallelism_context, frozen_param_keys)``: the model, its buffers
@@ -131,8 +128,6 @@ def build_inference_model(
     # sends weights in `precision.param_dtype`, so the FSDP below casts none of them.
     maybe_store_frozen_params_in_param_dtype_(model, precision)
     model._skip_lm_head = True
-    if not keep_vision_encoder and getattr(model, "vision_encoder", None) is not None:
-        model.vision_encoder = None
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
