@@ -117,6 +117,17 @@ def test_dataset_rejects_invalid_max_turns() -> None:
         AlphabetSortDataset.Config(max_turns=0)
     with pytest.raises(ValueError, match="max_names_per_turn must be >= 1"):
         AlphabetSortDataset.Config(max_names_per_turn=0)
+    # Samples are generated forever: a validation dataset (repeat=False) needs a size.
+    with pytest.raises(ValueError, match="needs num_samples"):
+        AlphabetSortDataset.Config(repeat=False)
+
+
+def test_validation_dataset_ends_after_num_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_names(monkeypatch)
+    config = AlphabetSortDataset.Config(seed=7, repeat=False, num_samples=2)
+    assert len(list(AlphabetSortDataset(config))) == 2
 
 
 def test_dataset_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:

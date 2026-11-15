@@ -45,7 +45,8 @@ class Geometry3kSample:
 
 
 class Geometry3kDataset(RLDataset):
-    """Geometry3K (Hugging Face ``hiyouga/geometry3k``), streamed in reshuffled epochs.
+    """Geometry3K (Hugging Face ``hiyouga/geometry3k``), streamed in reshuffled epochs, or one
+    pass if not `repeat`.
 
     The release stores each problem's images inside its parquet files. Rendering reads
     image files (the renderer computes each image's grid from the file header), so the
@@ -105,6 +106,7 @@ class Geometry3kDataset(RLDataset):
             raise ValueError(f"No Geometry3K samples in {config.path} ({config.split})")
         self._samples = tuple(samples)
         self._rng = random.Random(config.seed)
+        self._repeat = config.repeat
         self._order: list[int] = []
         self._cursor = 0
 
@@ -116,6 +118,9 @@ class Geometry3kDataset(RLDataset):
 
     def __next__(self) -> Geometry3kSample:
         if self._cursor == len(self._order):
+            # The first call starts the first epoch; later ones start another only if `repeat`.
+            if self._order and not self._repeat:
+                raise StopIteration
             self._order = list(range(len(self._samples)))
             self._rng.shuffle(self._order)
             self._cursor = 0

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import itertools
 import json
 
 import numpy as np
@@ -70,6 +71,13 @@ def test_dataset_state_dict_resumes_the_stream(data_dir) -> None:
     resumed = SlakeDataset(config)
     resumed.load_state_dict(state)
     assert [next(resumed).qid for _ in range(5)] == expected
+
+
+def test_dataset_without_repeat_ends_after_one_pass(data_dir) -> None:
+    config = SlakeDataset.Config(data_dir=str(data_dir), repeat=False)
+
+    samples = itertools.islice(SlakeDataset(config), 5)
+    assert sorted(sample.qid for sample in samples) == [0, 1, 2]
 
 
 def test_env_asks_one_question() -> None:

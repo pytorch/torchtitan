@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 
 import numpy as np
@@ -88,9 +89,12 @@ def test_aime_dataset_restarts_after_configured_num_samples(monkeypatch) -> None
         return Dataset.from_list([{"question": f"{subset} question", "answer": "42"}])
 
     monkeypatch.setattr(math_data, "load_dataset", load_dataset)
-    dataset = AIME2025Dataset.Config(num_samples=1).build()
+    dataset = AIME2025Dataset.Config(num_samples=1, repeat=True).build()
     first = next(dataset)
     assert next(dataset) == first
+    # The default: one pass ends.
+    one_pass = AIME2025Dataset.Config(num_samples=1).build()
+    assert list(itertools.islice(one_pass, 3)) == [first]
 
 
 def test_env_is_single_turn() -> None:

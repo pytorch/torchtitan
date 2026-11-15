@@ -7,6 +7,7 @@
 import asyncio
 import dataclasses
 import io
+import itertools
 import os
 
 import datasets
@@ -70,6 +71,24 @@ def test_dataset_writes_each_image_once_and_yields_its_path(tmp_path) -> None:
     modified = os.path.getmtime(image_path)
     Geometry3kDataset(config)
     assert os.path.getmtime(image_path) == modified
+
+
+def test_dataset_without_repeat_ends_after_one_pass(tmp_path) -> None:
+    rows = [
+        {
+            "images": [{"bytes": _png((8, 8)), "path": None}],
+            "problem": f"<image>q{n}",
+            "answer": "1",
+        }
+        for n in range(2)
+    ]
+    release = _write_release(tmp_path / "release", rows)
+    config = Geometry3kDataset.Config(
+        path=release, image_dir=str(tmp_path / "images"), repeat=False
+    )
+
+    samples = itertools.islice(Geometry3kDataset(config), 5)
+    assert sorted(sample.problem for sample in samples) == ["<image>q0", "<image>q1"]
 
 
 def test_dataset_rejects_a_marker_count_mismatch(tmp_path) -> None:

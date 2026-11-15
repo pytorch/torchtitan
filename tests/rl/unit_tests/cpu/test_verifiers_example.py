@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 from types import SimpleNamespace
 
 import pytest
@@ -92,6 +93,24 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
 
     task_indices = [next(dataset).verifiers_task_data["idx"] for _ in range(4)]
     assert task_indices == [0, 1, 0, 1]
+
+
+def test_verifiers_task_dataset_without_repeat_ends_after_one_pass(monkeypatch) -> None:
+    samples = [
+        DapoMathSample(prompt=f"problem {i}", ground_truth="1") for i in range(2)
+    ]
+    monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 2))
+    dataset = VerifiersTaskDataset.Config(
+        verifiers_taskset=data.VerifiersMathTasksetConfig(
+            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            dataset="dapo_math",
+        ),
+        shuffle=False,
+        repeat=False,
+    ).build()
+
+    read_back = itertools.islice(dataset, 3)
+    assert [sample.verifiers_task_data["idx"] for sample in read_back] == [0, 1]
 
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
