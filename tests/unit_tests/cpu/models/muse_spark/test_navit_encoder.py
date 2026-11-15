@@ -43,8 +43,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
     config.pos_emb_grid_order = grid_order
     encoder = config.build()
     encoder.init_states()
-    attention = encoder.layers["0"].attn
-    rope = attention.rope
+    rope = encoder.layers["0"].attn.rope
     device = torch.device("cpu")
     expected = encoder._get_pos_emb(4, 6, device)
     expected.square().sum().backward()
@@ -68,11 +67,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
         permutation, _ = encoder._get_sparse_perm_and_slens(4, 6, device)
         spmd.assert_type(positions, activation)
         spmd.assert_type(rope_positions[permutation], activation)
-        _, kwargs = attention._redistribute_inputs(
-            (positions.clone(),),
-            {"positions": rope_positions[permutation]},
-        )
-        rope._reshape_cache(positions, kwargs["positions"])
+        rope._reshape_cache(positions, rope_positions[permutation])
         restored = positions[permutation][torch.argsort(permutation)]
         spmd.assert_type(restored, activation)
         # Explicit local gradients avoid implying a distributed scalar reduction.
