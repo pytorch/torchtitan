@@ -6,7 +6,9 @@ name = "torchtitan-verifiers-terminal-bench"
 version = "0.1.0"
 description = "TitanRL's Terminal-Bench example as a Verifiers taskset and harness"
 requires-python = ">=3.11"
-dependencies = ["verifiers==0.4.1", "harbor==0.24.0"]
+# dockerfile-parse: Harbor's Dockerfile WORKDIR parser needs it; Harbor lists it only in its
+# cloud extras.
+dependencies = ["verifiers==0.4.1", "harbor==0.24.0", "dockerfile-parse==2.0.1"]
 
 [build-system]
 requires = ["setuptools>=64"]
