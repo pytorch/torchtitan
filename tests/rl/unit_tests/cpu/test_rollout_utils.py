@@ -414,7 +414,7 @@ def test_empty_completion_on_a_later_turn_raises() -> None:
 
 
 def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> None:
-    # e.g. turn 1 aborted before its first token: drop that rollout and count it, keep the others
+    # e.g. turn 1's generate fn returned no tokens: drop that rollout and count it, keep the others
     empty_later = _scored_rollout(
         [
             _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
@@ -445,6 +445,60 @@ def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> No
         if metric.key == "training_sample_builder/num_rollouts_dropped_empty_completion"
     ]
     assert dropped.value.value == 1.0
+
+
+def test_build_from_group_skips_an_unscored_rollout_but_trains_its_siblings() -> None:
+    # Its code raised after a turn, so the rubric didn't score it: the partial turn isn't trained.
+    # Its siblings still train.
+    failed = Rollout(
+        group_id=_GROUP_ID,
+        rollout_id=0,
+        status=RolloutStatus.ERROR_INFRA,
+        turns=[_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+    )
+    siblings = []
+    for rollout_id, reward in [(1, 0.0), (2, 1.0)]:
+        sibling = _scored_rollout(
+            [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+            reward=reward,
+            advantage=reward - 0.5,
+        )
+        sibling.rollout_id = rollout_id
+        siblings.append(sibling)
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[failed, *siblings])
+        )
+    )
+
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1, 2]
+
+
+def test_build_from_group_drops_a_group_left_with_one_rollout() -> None:
+    # 1 of 2 siblings raised: the one left has advantage 0, so the group teaches nothing.
+    failed = Rollout(group_id=_GROUP_ID, rollout_id=0, status=RolloutStatus.ERROR_INFRA)
+    left = _scored_rollout(
+        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+        reward=1.0,
+        advantage=0.0,
+    )
+    left.rollout_id = 1
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[failed, left])
+        )
+    )
+
+    assert group.training_samples == []
+    assert "training_sample_builder/num_groups_dropped_zero_std" in [
+        metric.key for metric in group.metrics
+    ]
 
 
 def test_empty_completion_on_first_turn_is_skipped() -> None:

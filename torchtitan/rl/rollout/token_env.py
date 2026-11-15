@@ -33,6 +33,10 @@ from torchtitan.rl.rollout.types import (
 
 logger = logging.getLogger(__name__)
 
+# Finish reasons of a response the generator cut short: an "abort", or vLLM's "error" (e.g. a
+# failed KV load).
+_CUT_SHORT_FINISH_REASONS = frozenset({"abort", "error"})
+
 
 def _read_image_file(path: str, image_hash: str) -> bytes:
     """Return the bytes of the image file at ``path``, which must hash to ``image_hash``.
@@ -140,7 +144,9 @@ class TokenEnv(Configurable):
 
     Example:
 
-        env = TokenEnv.Config().build(message_env=MyMessageEnv(...), renderer=renderer)
+        env = TokenEnv.Config(max_rollout_tokens=32768).build(
+            message_env=MyMessageEnv(...), renderer=renderer
+        )
         env_output = await env.init()
         while not env_output.status.is_terminal():
             completion = await generate_fn(env_output.next_prompt, ...)
@@ -151,9 +157,9 @@ class TokenEnv(Configurable):
     class Config(Configurable.Config):
         """Limits enforced by the wrapper"""
 
-        max_rollout_tokens: int | None = None
-        """Max prompt tokens before the next turn; multi-turn envs use it to stop before the
-        prompt outgrows context (`None` disables)."""
+        max_rollout_tokens: int
+        """A prompt of this many tokens or more, before the next turn, ends the rollout as
+        `TRUNCATED_PROMPT_TOO_LONG`. Usually the generator's context length."""
 
         # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
         step_timeout_s: float | None = 1800.0
@@ -227,7 +233,15 @@ class TokenEnv(Configurable):
         """
         self._num_turns += 1
 
-        # Parse first, so a truncated / aborted response still carries its message
+        if completion.finish_reason in _CUT_SHORT_FINISH_REASONS:
+            # The generator cut the response short: it isn't the policy's output, so don't parse it.
+            return TokenEnvOutput(
+                next_prompt=None,
+                next_prompt_messages=None,
+                status=RolloutStatus.ERROR_INFRA,
+            )
+
+        # Parse first, so a truncated response still carries its message
         try:
             parsed = await asyncio.to_thread(
                 self._renderer.parse_response,
@@ -255,7 +269,7 @@ class TokenEnv(Configurable):
         if parsed.tool_calls:
             completion_message["tool_calls"] = parsed.tool_calls
 
-        # Truncated / aborted: the response is final and partial. Keep it for
+        # Truncated: the response is final and partial. Keep it for
         # partial-reward grading and debugging; don't step the env on it.
         # TODO: check if we should step the env on an incomplete message
         if completion.finish_reason == "length":
@@ -265,24 +279,18 @@ class TokenEnv(Configurable):
                 status=RolloutStatus.TRUNCATED_LENGTH,
                 completion_message=completion_message,
             )
-        if completion.finish_reason == "abort":
-            return TokenEnvOutput(
-                next_prompt=None,
-                next_prompt_messages=None,
-                status=RolloutStatus.ERROR_ABORT,
-                completion_message=completion_message,
-            )
 
-        # Apply the user's env step under a timeout
+        # Apply the user's env step under a timeout; `asyncio.timeout(None)` never expires.
         timeout = self._config.step_timeout_s
+        deadline = asyncio.timeout(timeout)
         try:
-            if timeout is None:
+            async with deadline:
                 step_output = await self._message_env.step(completion_message)
-            else:
-                step_output = await asyncio.wait_for(
-                    self._message_env.step(completion_message), timeout=timeout
-                )
         except TimeoutError:
+            if not deadline.expired():
+                # Raised by the env's own code (e.g. its HTTP client): an env failure, so
+                # `MessageEnvRolloutWorker` ends the rollout as ERROR_INFRA, like any env exception.
+                raise
             logger.warning("step timed out after %ss; -> ERROR_TIMEOUT", timeout)
             return TokenEnvOutput(
                 next_prompt=None,
@@ -384,8 +392,7 @@ class TokenEnv(Configurable):
         await self._message_env.close()
 
     def _is_prompt_too_long(self, *, prompt_len: int) -> bool:
-        cap = self._config.max_rollout_tokens
-        return cap is not None and prompt_len >= cap
+        return prompt_len >= self._config.max_rollout_tokens
 
     def _to_prompt(self, rendered: RenderedTokens) -> Prompt:
         """The generator's input for the rendered conversation: its tokens and images.
