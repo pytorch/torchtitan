@@ -55,13 +55,17 @@ class VerifiersGenerationMetadata:
 
 
 class GenerationServer(Configurable):
-    """Expose a TorchTitan ``GenerateFn`` through Verifiers' model API.
+    """Serves TitanRL's `generate_fn` as the vLLM endpoint that Verifiers' train client calls.
 
-    A Verifiers environment calls a named HTTP model endpoint, while TitanRL
-    supplies an in-process ``GenerateFn`` backed by its generator router. This
-    server exposes Verifiers' token-generation endpoint, forwards each request
-    to that function, and retains TorchTitan policy-version and metric metadata
-    that the resulting Verifiers trace does not carry.
+    Each rollout worker runs one, on the controller host:
+
+        Verifiers' train client --POST /inference/v1/generate--> GenerationServer
+                                  (X-Session-ID: the trace id)        |
+                                                                      generate_fn --> generator
+                                <---- token ids + logprobs ----------  <-- Completion --
+
+    Verifiers keeps each completion's tokens and logprobs in its trace. This server keeps what a
+    trace has no field for: each session's policy versions and generator metrics.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -165,6 +169,26 @@ class GenerationServer(Configurable):
         return web.json_response({"object": "list", "data": [model]})
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:
+        """Run one model call through `generate_fn`. Its error answers:
+
+            503  `generate_fn` is not set yet
+            400  no X-Session-ID header, a malformed body, or a prompt with no room for an output token
+            500  `generate_fn` raised, or the completion's token ids and logprobs differ in length
+            502  no completion, or a finish reason other than "stop" or "length"
+
+        Example request and reply (one completion of 2 tokens):
+
+            headers  {"X-Session-ID": "9f3c..."}
+            body     {"token_ids": [151644, 872, ...],
+                      "sampling_params": {"temperature": 1.0, "top_p": 1.0, "max_tokens": 512,
+                                          "stop_token_ids": [151645], "torchtitan_group_id": 7,
+                                          "logprobs": 1, ...}}
+            reply    {"request_id": "9f3c.../request=0",
+                      "choices": [{"token_ids": [9707, 151645], "finish_reason": "stop",
+                                   "logprobs": {"content": [{"token": "token_id:9707",
+                                                             "logprob": -0.01}, ...]}}]}
+        """
+        # ======== Check the request ========
         if self.generate_fn is None:
             return web.json_response(
                 {"error": "TorchTitan GenerateFn is not ready"}, status=503
@@ -203,6 +227,7 @@ class GenerationServer(Configurable):
         except (TypeError, ValueError) as error:
             return web.json_response({"error": str(error)}, status=400)
 
+        # ======== Generate ========
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
         request_id = f"{session_id}/request={request_index}"
@@ -224,6 +249,7 @@ class GenerationServer(Configurable):
             logger.exception("TorchTitan generation failed for %s", request_id)
             return web.json_response({"error": str(error)}, status=500)
 
+        # ======== Check the completion, and keep its versions and metrics ========
         if completion is None:
             return web.json_response(
                 {"error": f"generation returned no completion for {request_id}"},
@@ -263,6 +289,8 @@ class GenerationServer(Configurable):
                 else [*previous.metrics, *completion.metrics]
             ),
         )
+
+        # ======== Reply ========
         # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
         # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
         logprobs_content = ",".join(

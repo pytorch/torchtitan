@@ -75,25 +75,15 @@ class RewardFromVerifiers(RewardFn):
 
 
 class VerifiersRollouter(Rollouter):
-    """Runs Verifiers envs as TitanRL rollout groups. Verifiers runs each episode (the agent, its
-    tools, the grader), so TitanRL's `MessageEnv` and `TokenEnv` aren't used. TitanRL picks the
-    tasks, serves the model calls and trains on the scored groups. `setup_async` starts the env
-    server, then the rollout workers. One group of 8 rollouts:
+    """Runs Verifiers envs as TitanRL rollout groups.
 
-        controller (CPU, controller host): run_group_rollouts sends one task to a rollout worker
-            |
-            v
-        rollout worker k (CPU process, controller host): VerifiersRolloutWorker.run_group
-            |  env client: 8 x run(task), ZMQ --> Verifiers env server (controller host:
-            |                                       1 process, plus a worker pool if any: 16 for TB)
-            |                                       |  runs the 8 episodes
-            |  GenerationServer <-- HTTP ----------+  each model call, on 127.0.0.1
-            |      |
-            |      +--> generate_fn: router.reserve, then generator.generate (GPU)
-            |
-            |  8 traces --> RolloutTurns --> scores and advantages
-            v
-        controller: one scored RolloutGroup
+    TitanRL provides: the tasks (`VerifiersTaskDataset`), the model (`generate_fn`, which each
+    worker's `GenerationServer` serves to Verifiers) and the training (rewards, advantages).
+    Verifiers provides: the env, the agent loop, the sandbox and the grade.
+
+    This rollouter starts the Verifiers env server, then the rollout workers
+    (`VerifiersRolloutWorker`) that send it each group's task. The diagram: "Integration flow" in
+    this folder's README.md.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -113,6 +103,7 @@ class VerifiersRollouter(Rollouter):
 
         def __post_init__(self) -> None:
             Rollouter.Config.__post_init__(self)
+            # The user sets the taskset once, in the training dataset; the env server's comes from it.
             configured_taskset = self.verifiers_env_server.environment.taskset
             if configured_taskset not in (
                 VerifiersTasksetConfig(),
@@ -181,7 +172,8 @@ class VerifiersRollouter(Rollouter):
 
 
 class VerifiersRolloutWorker(BaseRolloutWorker):
-    """Runs one Verifiers group in a rollout worker process. The flow: `VerifiersRollouter`."""
+    """Runs Verifiers groups in a rollout worker process: the env server runs each rollout, and
+    this worker serves its model calls and turns its trace into a TitanRL rollout."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseRolloutWorker.Config):
@@ -268,6 +260,8 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         # Each group replaces this one slot. That is safe because every group's generate_fn routes the
         # same way; keep per-group state out of it.
         self._generation_server.set_generate_fn(generate_fn)
+
+        # Run the group's rollouts in the env server, all at once.
         results = await asyncio.gather(
             *(
                 self._run_single_rollout(

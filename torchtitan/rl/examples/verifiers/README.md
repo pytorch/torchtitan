@@ -17,67 +17,90 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
 
 ## Integration flow
 
-A diagram of one group: the `VerifiersRollouter` docstring in [`rollouter.py`](./rollouter.py).
+One group, top to bottom. Each column is a process, or the agent in its runtime.
 
-1. [`data.py`](./data.py) loads the taskset in the controller, which sends each group's task to a
-   rollout worker.
-2. [`env_server.py`](./env_server.py) runs the Verifiers env server as a local process on the
-   controller host. The server runs the agents in the configured runtime, e.g. `SubprocessConfig`
-   or `DockerConfig`. With a pool, its pool workers run them. The Terminal-Bench recipe runs 16.
-   The server and each of its pool workers first run [`worker_setup.py`](./worker_setup.py). Every
-   worker imports that module, so it must not import torch.
-3. [`rollouter.py`](./rollouter.py) runs each group in a rollout worker process
-   (`VerifiersRolloutWorker`), like TitanRL's own rollout groups. The worker sends the task to the
-   env server (a plain dict, msgpack over ZMQ) and turns the trainable agent's trace of each
-   rollout into TitanRL `RolloutTurn`s. The controller receives finished groups only.
-4. [`generation_server.py`](./generation_server.py) serves Verifiers' model calls (token ids over
-   HTTP, from the env server). For each call it gets a generator from `router.reserve`, then calls
-   `generate` on it. Each rollout worker runs its own, on localhost. The server also records what
-   Verifiers' traces leave out: the policy versions and the generation metrics.
+```text
+     controller      rollout worker            env server     agent        router     generator
+     (Rollouter)     (VerifiersRolloutWorker   (Verifiers)    (runtime)
+                     and its GenerationServer)
+          |                  |                      |              |            |           |
+ 1        |--run_group------>|                      |              |            |           |
+          |                  |                      |              |            |           |
+ 2        |                  |--task, per rollout-->|              |            |           |
+          |                  |                      |              |            |           |
+ 3        |                  |                      |--start------>|            |           |
+          |                  |                      |              |            |           |
+ 4        |                  |                      |<--chat-------|            |           |
+          |                  |                      |              |            |           |
+ 5        |                  |<--token ids----------|              |            |           |
+          |                  |                      |              |            |           |
+ 6        |                  |--reserve---------------------------------------->|           |
+          |                  |--generate---------------------------------------------------->|
+          |                  |                      |              |            |           |
+ 7        |                  |--tokens, logprobs--->|--reply------>|            |           |
+          |                  |                      |              |            |           |
+ 8        |                  |                      |--grade------>|            |           |
+          |                  |                      |              |            |           |
+ 9        |                  |<--trace, reward------|              |            |           |
+          |                  |--release_session------------------------------->|           |
+          |                  |                      |              |            |           |
+10        |<--scored group---|                      |              |            |           |
+```
 
-The training dataset is the single source of the environment taskset config.
-`VerifiersRollouter.Config` copies it into the environment-server config, so an
-experiment must not configure the same taskset a second time.
+1. The controller sends one task to a rollout worker. The task is plain data from
+   [`data.py`](./data.py).
+2. The worker sends the task to the env server once per rollout of the group: a plain dict,
+   msgpack over ZMQ ([`env_server.py`](./env_server.py)).
+3. The env server starts the agent in the env's runtime, e.g. a local process or a Docker
+   container. With a pool, one of its pool workers runs the rollout.
+4. Each agent turn, the agent sends a chat request to Verifiers' interception server, in the env
+   server. Verifiers' train client renders the messages to token ids.
+5. The token ids reach the rollout worker's [`GenerationServer`](./generation_server.py), over
+   HTTP on the controller host.
+6. The GenerationServer calls TitanRL's `generate_fn`, which reserves a generator at the router
+   and then calls that generator.
+7. The GenerationServer answers with the tokens and logprobs, and keeps the call's policy version
+   and generator metrics: the trace has no field for them. The agent gets its reply. Steps 4 to
+   7 repeat every turn.
+8. When the agent stops, Verifiers grades the rollout, e.g. by running the task's tests.
+9. The env server returns the rollout's traces. The worker releases each trace's routing session
+   at the router.
+10. The worker turns the rollout's trainable trace into TitanRL rollout turns
+    ([`rollouter.py`](./rollouter.py)), scores the group, computes its advantages, and returns it.
 
-For CPU-heavy envs, raise the env server's pool (`verifiers_env_server.serve.pool`, e.g.
-`vf.StaticPoolConfig(num_workers=16)`). At high rollout rates, also raise the
-rollouter's `worker_pool_size`: each rollout worker decodes one trace at a time.
+How many processes: the controller, the rollouter's `worker_pool_size` rollout workers, and one env
+server that all workers share. With a pool (`verifiers_env_server.serve.pool`), the env server runs
+its rollouts in its pool workers. So 4 rollout workers and a pool of 8 add 4 + 1 + 8 processes to
+the controller, not 4 x 8. The env server and each pool worker first run
+[`worker_setup.py`](./worker_setup.py), so that module must not import torch: importing torch costs
+each process about 0.5 GB of memory (peak RSS after `import torch`).
+
+The taskset is set once, in the training dataset (`VerifiersTaskDataset.Config.verifiers_taskset`).
+`VerifiersRollouter.Config` fills the env server's taskset from it, so leave
+`verifiers_env_server.environment.taskset` unset.
 
 ## Add an experiment
 
-Create one package per task, with its own dependency list:
+For a task `my_task`:
 
 ```text
-verifiers/
-  data.py
-  env_server.py
-  generation_server.py
-  rollouter.py
-  worker_setup.py
-  my_task/
-    __init__.py
-    recipe module
-    data.py
-    requirements.txt
-    rollouter.py
+torchtitan/rl/examples/verifiers/my_task/
+  __init__.py
+  data.py                                  # your Taskset and its TasksetConfig
+  requirements.txt                         # its dependencies
+torchtitan_recipes/rl/verifiers_my_task.py # recipe functions that return a Controller.Config
 ```
 
-1. In `my_task/data.py`, define the Verifiers `Taskset` and `TasksetConfig`.
-2. In `my_task/rollouter.py`, put that config in
-   `VerifiersTaskDataset.Config.verifiers_taskset`. Configure the agent,
-   harness, runtime, and worker pool, but leave
-   `verifiers_env_server.environment.taskset` unset; `VerifiersRollouter`
-   derives it from the training dataset.
-3. In `recipe module`, select the rollouter from `Controller.Config`.
-4. Place the module under `torchtitan/rl/examples` or pass its fully qualified
-   module path to `--module`.
-
-Run the recipe with:
+Install its dependencies with `pip install -r torchtitan/rl/examples/verifiers/my_task/requirements.txt`.
+Start the recipe from a copy of
+[`verifiers_dapo_math.py`](../../../../torchtitan_recipes/rl/verifiers_dapo_math.py), and change its
+`VerifiersRollouter.Config`: your `TasksetConfig` in its training and validation datasets, and
+your agent, harness and runtime in `verifiers_env_server.environment`. Then run:
 
 ```bash
 python -m torchtitan.rl.train \
-  --module verifiers.my_task \
-  --config <config-name>
+  --module torchtitan_recipes.rl.verifiers_my_task \
+  --config <recipe function name>
 ```
 
 See [DAPO Math](./dapo_math) for a complete single-turn example and

@@ -13,44 +13,14 @@ agent and the grading through the [Verifiers bridge](../README.md).
 
 ## How it works
 
-One group, top to bottom. Each rollout sends its own task (row 1), runs rows 2-5 and returns
-its own trace (row 6). Rows 3-4 repeat for each agent turn. Each column is one kind of process,
-or the containers. The rollouter runs N = `worker_pool_size` rollout workers. Row numbers match
-the steps below.
+Each rollout takes the path in the Verifiers README's
+[integration flow](../README.md#integration-flow). Here:
 
-```text
-   controller       rollout worker     env server        container       generators      trainer
-     (CPU)             (CPU, xN)       (Verifiers)     (per rollout)        (GPU)         (GPU)
-        |                  |                |                |                |             |
- 1      |--group---------->|--task--------->|                |                |             |
- 2      |                  |                |--start-------->|                |             |
- 3      |                  |                |<-chat request--|                |             |
- 4      |                  |<-token ids-----|                |                |             |
-        |                  |--generate--------------------------------------->|             |
- 5      |                  |                |--run test.sh-->|                |             |
- 6      |<-scored group----|<-trace, reward-|                |                |             |
- 7      |--batch, packed by the batcher process-------------------------------------------->|
-        |                  |                |                |                |<-new weights|
-```
-
-1. **Task.** The controller sends each group to a rollout worker process
-   (`VerifiersRolloutWorker`), which sends the sampled task to the env server (ZMQ) once
-   per rollout in the group.
-2. **Agent.** One of the env server's pool workers (`verifiers_env_server.serve.pool`)
-   starts a container from the task's `docker_image` and runs Terminus-2 in it
-   ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and reads
-   the screen back.
-3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
-   which records the turn in the rollout's trace.
-4. **Generation.** The request reaches the rollout worker's `GenerationServer` as token
-   ids (HTTP). The server sends them to the vLLM generator that the router picks.
-5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
-   container and reads the reward file it writes.
-6. **Trace.** The rollout worker turns the trace into rollout turns, with the exact
-   tokens the generators sampled, computes group advantages and returns the finished
-   group to the controller.
-7. **Training.** The batcher feeds the trainer, and the generators load the new weights
-   after each step.
+- **Agent.** The env server starts a Docker container from the task's `docker_image` and runs
+  Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and
+  reads the screen back. Each agent turn is one model call.
+- **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the container
+  and reads the reward file it writes.
 
 Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task. A validation
 starts with training and runs beside it (`ValidationConfig`).

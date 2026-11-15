@@ -22,6 +22,10 @@ from torchtitan.rl.rollout.data import RLDataset
 class VerifiersTaskSample:
     """Serialized task data dispatched to a stateless Verifiers EnvServer."""
 
+    # TODO: send the task's fields as one lazily deserialized object, e.g. JSON bytes, decoded
+    # only where the task runs. The hops before it (the controller, a checkpoint of pending
+    # samples) would copy bytes, not a nested dict. Not done: no one has measured that cost,
+    # and it changes how every sample crosses to the worker.
     verifiers_task_data: dict[str, Any]
 
 
