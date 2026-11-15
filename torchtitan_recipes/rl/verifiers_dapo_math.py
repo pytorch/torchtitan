@@ -36,10 +36,7 @@ from torchtitan.rl.controller.controller import (
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.rollouter import (
-    RewardFromVerifiers,
-    VerifiersRolloutWorker,
-)
+from torchtitan.rl.examples.verifiers.rollouter import VerifiersRolloutWorker
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -48,7 +45,6 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
@@ -86,13 +82,7 @@ def _verifiers_math_rollouter_config(*, max_rollout_tokens: int) -> Rollouter.Co
         validation_dataset=VerifiersTaskDataset.Config(
             env=_math_env_config("aime2025")
         ),
-        worker=VerifiersRolloutWorker.Config(
-            rubric=Rubric.Config(
-                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
-                error_reward=0.0,
-            ),
-            max_rollout_tokens=max_rollout_tokens,
-        ),
+        worker=VerifiersRolloutWorker.Config(max_rollout_tokens=max_rollout_tokens),
         # Python's default thread pool, as `verifiers_terminal_bench.py` explains.
         num_threads_per_worker=None,
     )

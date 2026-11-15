@@ -106,6 +106,59 @@ each reply, back to the agent                            the new completion only
   either on also sets `async_loop.batcher.rdma_min_tensor_bytes`, so those tensors go by RDMA:
   Monarch caps a message at 10 GiB and fails the whole actor mesh above it.
 
+## Failed rollouts
+
+Only a rollout that Verifiers finished cleanly trains, with Verifiers' grade as its reward. Every
+other rollout gets reward None and doesn't train; the rest of its group does. Its status says what
+went wrong:
+
+```text
+how the rollout ended                                 status                     trains
+Verifiers dropped its trace                           error_infra                no
+a deadline passed, and Verifiers recorded no error    error_timeout              no; validation keeps its grade
+the prompt left no room for one output token          truncated_prompt_too_long  no
+the harness failed after the policy's first token     error                      no
+another error, e.g. a sandbox that never started, a   error_infra                no
+  harness that failed to launch, a model call, or a
+  deadline that came with an error
+the policy never sampled a token                      error_infra                no
+stopped at the turn limit                             truncated_max_turns        yes
+stopped by another limit, e.g. a reply out of tokens  truncated_length           yes
+completed                                             completed                  yes
+```
+
+`rollout_status` in [`rollouter.py`](./rollouter.py) picks the row.
+`VerifiersRolloutWorker.score_group` sends only the "yes" rows to the rubric (the default rubric
+is `RewardFromVerifiers`), so every Verifiers job follows this table. Validation also grades
+`error_timeout`, so a timeout counts as a failure in the validation reward. The other rows are
+left out of it.
+
+The metrics:
+
+- `rollout/status_rate/<status>`: the share of each status, e.g. `error_timeout` mostly for the
+  agent's deadline (the log line's `stop` names the stage), `error_infra` for a sandbox, a harness
+  launch or a generator that broke.
+- `rollout/unscored_rate`: the share that doesn't train.
+- `validation_reward` averages the graded rollouts; `validation_reward_all` averages all of them,
+  an ungraded one as 0.
+
+Each failed rollout logs one line. It is this WARNING, with its task, status, stop condition, last
+error and phase times, or an ERROR with the traceback if its episode raised:
+
+```text
+Verifiers rollout failed: group=12 rollout=3 task=tmax/fix-git status=error_infra stop=sandbox_error
+turns=7 dropped=None error=SandboxError: lease expired | boot=41s setup=12s agent=388s scoring=0s
+```
+
+`Rollout.logs["errors"]` keeps every error with its traceback. To write each failed rollout, with
+these logs, to `rollout_samples.jsonl`, set this in the `Controller.Config`:
+
+```python
+rollout_recorder=RolloutSampleRecorder.Config(
+    filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+),
+```
+
 ## Taskset ids
 
 Verifiers loads a taskset, harness or env by id: the name of an installed package. It imports
