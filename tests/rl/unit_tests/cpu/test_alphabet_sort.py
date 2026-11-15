@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -420,6 +421,8 @@ def test_rollouter_builds_one_env_per_group_member(
     worker = config.worker.build()
     asyncio.run(
         worker.setup_async(
+            generate_fn=AsyncMock(),
+            release_session_fn=AsyncMock(),
             tokenizer_config=HuggingFaceTokenizer.Config(),
             renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",

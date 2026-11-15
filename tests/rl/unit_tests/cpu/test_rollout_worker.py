@@ -143,13 +143,13 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             released.append(kwargs)
 
         await worker.setup_async(
+            generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             tokenizer_config=HuggingFaceTokenizer.Config(),
             renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
         )
         group = await worker.run_group(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
             sample="sample",
             group_id=7,
             group_size=2,
@@ -319,13 +319,13 @@ def test_a_failed_rollout_is_kept_but_left_out_of_the_advantage(
         )
         worker.fails_in = fails_in
         await worker.setup_async(
+            generate_fn=_GenerateFnFailingRolloutZero(),
+            release_session_fn=release_session_fn,
             tokenizer_config=HuggingFaceTokenizer.Config(),
             renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
         )
         return await worker.run_group(
-            generate_fn=_GenerateFnFailingRolloutZero(),
-            release_session_fn=release_session_fn,
             sample="sample",
             group_id=7,
             group_size=3,
@@ -376,9 +376,9 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                 message_env=_CountingMessageEnv(num_turns=rng.randint(1, 6)),
                 renderer=renderer,
             )
+            worker._generate_fn = generate_fn
+            worker._release_session_fn = release_session_fn
             rollout = await worker._run_single_rollout(
-                generate_fn=generate_fn,
-                release_session_fn=release_session_fn,
                 env=env,
                 sampling=SamplingConfig(),
                 group_id=0,
@@ -436,10 +436,10 @@ def test_rollout_sends_and_records_prompt_images() -> None:
     async def release_session_fn(**kwargs) -> None:
         pass
 
+    worker._generate_fn = generate_fn
+    worker._release_session_fn = release_session_fn
     rollout = asyncio.run(
         worker._run_single_rollout(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
             env=_ImageTokenEnv(),
             sampling=SamplingConfig(),
             group_id=0,

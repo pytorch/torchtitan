@@ -6,6 +6,7 @@
 
 import asyncio
 import os
+import pathlib
 import sys
 from types import SimpleNamespace
 
@@ -490,32 +491,49 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
 
 
+class _Worker:
+    """Its `close` leaves a file: the test can't read a worker process's memory."""
+
+    def __init__(self, marker_dir):
+        self.marker_dir = marker_dir
+
+    async def close(self):
+        pathlib.Path(self.marker_dir, f"closed-{os.getpid()}").touch()
+
+
 class _WorkerConfig:
+    def __init__(self, marker_dir):
+        self.marker_dir = marker_dir
+
     def build(self):
-        return object()
+        return _Worker(self.marker_dir)
 
 
-def test_spawn_rollout_workers_returns_one_handle_per_worker():
+def test_spawn_rollout_workers_returns_one_handle_per_worker(tmp_path):
     """5 workers on this host come back as 5 single-actor handles (`call_one` raises on a
-    handle to several actors)."""
+    handle to several actors). The `close` endpoint closes a worker; stopping the workers
+    closes the rest (`__cleanup__`)."""
 
     async def run():
         system = MonarchActorSystem(MonarchActorSystem.Config())
-        # The worker processes can't import this test module, so ship the fake by value.
+        # The worker processes can't import this test module, so ship the fakes by value.
         cloudpickle.register_pickle_by_value(sys.modules[__name__])
         try:
             workers = await system.spawn_rollout_workers(
-                _WorkerConfig(), num_workers=5, num_threads=1
+                _WorkerConfig(str(tmp_path)), num_workers=5, num_threads=1
             )
             assert len(workers) == 5
             await asyncio.gather(
                 *(worker.sync_log_step.call_one(1) for worker in workers)
             )
+            await asyncio.gather(*(worker.close.call_one() for worker in workers[:2]))
+            assert len(list(tmp_path.glob("closed-*"))) == 2
             await system.stop_rollout_workers()
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
 
     asyncio.run(run())
+    assert len(list(tmp_path.glob("closed-*"))) == 5
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):

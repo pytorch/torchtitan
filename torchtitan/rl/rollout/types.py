@@ -195,8 +195,8 @@ class GenerateFn(Protocol):
 class ReleaseSessionFn(Protocol):
     """Tell the generator side that a routing session makes no more calls.
 
-    The Rollouter calls this once per rollout, after its last turn, so a router can drop the
-    session's affinity.
+    A rollout worker calls this once per routing session, after its last turn, so a router can drop
+    the session's affinity. It never raises: a release that fails is logged.
     """
 
     async def __call__(self, *, routing_session_id: str) -> None:
