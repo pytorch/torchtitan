@@ -5,8 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import os
+import sys
 from types import SimpleNamespace
 
+import cloudpickle
 import pytest
 
 from torchtitan.config import OverrideConfig
@@ -116,7 +119,7 @@ def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
         AsyncLoopConfig(window_fraction=0.3)  # type: ignore[call-arg]
 
 
-def _make_stub_rl_trainer(tmp_path):
+def _make_stub_rl_trainer(tmp_path, num_workers: int = 1):
     """Create an Controller with a minimal stub config (no Generator validation)."""
     from torchtitan.rl.observability import metrics as m
 
@@ -147,7 +150,10 @@ def _make_stub_rl_trainer(tmp_path):
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
         override = OverrideConfig()
-        rollouter = SimpleNamespace(build=lambda: _StubRollouter())
+        rollouter = SimpleNamespace(
+            build=lambda: _StubRollouter(), rollouts_per_worker=64
+        )
+        num_rollout_workers = num_workers
 
         def to_dict(self):
             return {}
@@ -159,6 +165,16 @@ def _make_stub_rl_trainer(tmp_path):
             pass
 
     return train.Controller(_StubConfig())
+
+
+def test_more_rollout_workers_than_host_cpus_raise_when_the_controller_is_built(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: range(8))
+    with pytest.raises(
+        ValueError, match="need 24 rollout workers, over this host's 8 CPUs"
+    ):
+        _make_stub_rl_trainer(tmp_path, num_workers=24)
 
 
 def test_main_shuts_down_after_success(monkeypatch):
@@ -472,6 +488,34 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
         )
 
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
+
+
+class _WorkerConfig:
+    def build(self):
+        return object()
+
+
+def test_spawn_rollout_workers_returns_one_handle_per_worker():
+    """5 workers on this host come back as 5 single-actor handles (`call_one` raises on a
+    handle to several actors)."""
+
+    async def run():
+        system = MonarchActorSystem(MonarchActorSystem.Config())
+        # The worker processes can't import this test module, so ship the fake by value.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        try:
+            workers = await system.spawn_rollout_workers(
+                _WorkerConfig(), num_workers=5, num_threads=1
+            )
+            assert len(workers) == 5
+            await asyncio.gather(
+                *(worker.sync_log_step.call_one(1) for worker in workers)
+            )
+            await system.stop_rollout_workers()
+        finally:
+            cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+    asyncio.run(run())
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):

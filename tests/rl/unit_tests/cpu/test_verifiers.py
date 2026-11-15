@@ -260,16 +260,16 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
 
     events = []
 
-    class _WorkerActors:
+    class _WorkerActor:
         def __init__(self) -> None:
-            self.setup_async = SimpleNamespace(call=AsyncMock())
+            self.setup_async = SimpleNamespace(call_one=AsyncMock())
 
     class _ActorSystem:
         async def spawn_rollout_workers(
             self, config, *, num_workers, num_threads, **kwargs
         ):
-            events.append(("spawn", kwargs["env_server_address"]))
-            return _WorkerActors()
+            events.append(("spawn", num_workers, kwargs["env_server_address"]))
+            return [_WorkerActor() for _ in range(num_workers)]
 
         async def stop_rollout_workers(self) -> None:
             events.append(("stop_workers",))
@@ -286,19 +286,18 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
         generation_server=GenerationServer.Config(max_rollout_tokens=64),
     )
     rollouter = object.__new__(VerifiersRollouter)
-    rollouter._config = SimpleNamespace(
-        worker=worker, worker_pool_size=2, num_threads_per_worker=3
-    )
+    rollouter._config = SimpleNamespace(worker=worker, num_threads_per_worker=3)
     rollouter._verifiers_env_server = SimpleNamespace(
         start=start, close=close_env_server
     )
-    rollouter._worker_actors = None
+    rollouter._workers = []
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
 
     async def run() -> None:
         await rollouter.setup_async(
             actor_system=cast(ActorSystem, _ActorSystem()),
+            num_workers=2,
             tokenizer_config="tokenizer_config",
             renderer_config=from_renderers(Qwen3RendererConfig()),
             hf_assets_path="hf_assets_path",
@@ -308,7 +307,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     asyncio.run(run())
     assert events == [
         ("start_env_server",),
-        ("spawn", "tcp://127.0.0.1:5555"),
+        ("spawn", 2, "tcp://127.0.0.1:5555"),
         ("stop_workers",),
         ("close_env_server",),
     ]
