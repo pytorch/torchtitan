@@ -10,10 +10,10 @@ configuration for untrusted code execution.
 
 ## Setup
 
-Follow the [TitanRL setup](../../../README.md), then install this example's dependencies:
+Follow the [TitanRL setup](../../../README.md), then install this example and its dependencies:
 
 ```bash
-pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
+pip install -e torchtitan/rl/examples/verifiers/dapo_math
 
 python scripts/download_hf_assets.py \
   --repo_id Qwen/Qwen3-4B-Base \

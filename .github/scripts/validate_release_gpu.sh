@@ -517,7 +517,8 @@ PY
   uv pip install --constraint "${PIP_CONSTRAINT}" \
     --extra-index-url "${PYTORCH_INDEX_URL}" \
     --index-strategy unsafe-best-match \
-    -r "${REPO_ROOT}/torchtitan/rl/examples/verifiers/dapo_math/requirements.txt"
+    -e "${REPO_ROOT}/torchtitan/rl/examples/verifiers/dapo_math" \
+    -e "${REPO_ROOT}/torchtitan/rl/examples/verifiers/terminal_bench"
   CUDA_VISIBLE_DEVICES='' python -m pytest \
     tests/rl/unit_tests/cpu/test_verifiers.py \
     tests/rl/unit_tests/cpu/test_verifiers_example.py \

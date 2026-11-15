@@ -24,7 +24,6 @@ Verifiers' ``Terminus2HarnessConfig`` in the recipe.
 
 import asyncio
 import json
-import sys
 from pathlib import Path
 
 from pydantic import Field
@@ -136,20 +135,3 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
             ),
             timeout=30,
         )
-
-
-def register_harness_alias() -> str:
-    """Make the local harness importable in spawned Verifiers worker processes."""
-    module = sys.modules[__name__]
-    alias = __name__.replace(".", "_").lower()
-    existing = sys.modules.get(alias)
-    if existing is not None and existing is not module:
-        raise ValueError(f"harness alias {alias!r} is already registered")
-    sys.modules[alias] = module
-    return alias
-
-
-__all__ = [
-    "TerminalBenchTerminusHarness",
-    "TerminalBenchTerminusHarnessConfig",
-]
