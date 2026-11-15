@@ -18,6 +18,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, MLAAttention
@@ -25,6 +26,7 @@ from torchtitan.models.common.attention.cp_mla import (
     AllGatherKVMLAFlexAttention,
     UlyssesMLAAttention,
 )
+from torchtitan.models.common.attention.mla import materialize_mla_kv
 from torchtitan.models.common.decoder_sharding import (
     mla_attention_local_spmd_sharding_config,
     mla_kv_projection_sharding_config,
@@ -184,3 +186,60 @@ class TestMLAAttentionSharding(DTensorTestBase):
                                     executions[f"attention.inner_attention.{name}"],
                                     kernel_calls,
                                 )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class TestMLAKVLocalCompile(unittest.TestCase):
+    def tearDown(self):
+        LocalCompileConfig().apply()
+        torch._dynamo.reset()
+
+    def test_compiled_matches_eager_bitwise(self):
+        torch.manual_seed(42)
+        num_tokens, num_heads = 64, 4
+        nope_head_dim, rope_head_dim, value_head_dim = 16, 8, 16
+        q_THK = torch.empty(
+            num_tokens,
+            num_heads,
+            nope_head_dim + rope_head_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        kv_THP = torch.randn(
+            num_tokens,
+            num_heads,
+            nope_head_dim + value_head_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        k_shared_TR = torch.randn(
+            num_tokens, rope_head_dim, device="cuda", dtype=torch.bfloat16
+        )
+
+        def run():
+            inputs = [
+                kv_THP.clone().requires_grad_(),
+                k_shared_TR.clone().requires_grad_(),
+            ]
+            k_THK, v_THV = materialize_mla_kv(q_THK, *inputs)
+            generator = torch.Generator(device="cuda").manual_seed(42)
+            grad_k_THK = torch.randn(
+                k_THK.shape, dtype=k_THK.dtype, device="cuda", generator=generator
+            )
+            grad_v_THV = torch.randn(
+                v_THV.shape, dtype=v_THV.dtype, device="cuda", generator=generator
+            )
+            grads = torch.autograd.grad(
+                (k_THK, v_THV), inputs, (grad_k_THK, grad_v_THV)
+            )
+            return (k_THK, v_THV, *grads)
+
+        with DeterministicGuard(True):
+            LocalCompileConfig().apply()
+            eager = run()
+            LocalCompileConfig(regions=["mla_kv"]).apply()
+            compiled = run()
+
+        # This region only moves data and sums the repeated rope gradients.
+        for actual, expected in zip(compiled, eager, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)

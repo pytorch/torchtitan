@@ -130,6 +130,7 @@ class MultimodalModel(Decoder):
                     pp_enabled=parallelism_context.pp_enabled,
                     cpu_offload=parallelism.fsdp_enable_cpu_offloading,
                     dp_mesh_dims=dp_mesh_dims,
+                    unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
                 )
         super()._apply_fsdp(
             parallelism_context=parallelism_context,

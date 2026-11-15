@@ -16,6 +16,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
+    HybridEPTokenDispatcher,
     LocalTokenDispatcher,
 )
 
@@ -65,10 +66,11 @@ class MuseSparkMoE(MoE):
             elif dispatcher._owner not in (
                 LocalTokenDispatcher,
                 AllToAllTokenDispatcher,
+                HybridEPTokenDispatcher,
             ):
                 raise ValueError(
-                    "Muse Spark MoE requires LocalTokenDispatcher or "
-                    "AllToAllTokenDispatcher, "
+                    "Muse Spark MoE requires LocalTokenDispatcher, "
+                    "AllToAllTokenDispatcher, or HybridEPTokenDispatcher, "
                     f"got {type(dispatcher).__qualname__}"
                 )
 

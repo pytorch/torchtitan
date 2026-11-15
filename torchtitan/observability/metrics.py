@@ -17,12 +17,15 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 import torch
+from tensorboard.compat.proto.summary_pb2 import (  # generated protobuf class
+    Summary,  # pyrefly: ignore [missing-module-attribute]
+)
 from torch.distributed.pipelining.schedules import (
     get_schedule_class,
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
-from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import FileWriter
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config import Configurable
@@ -120,7 +123,7 @@ def compute_training_performance_metrics(
     elapsed_time: float,
     non_data_parallel_size: int,
     num_flops: float,
-    gpu_peak_flops: float,
+    gpu_peak_flops: float | None,
     has_quantization: bool,
 ) -> dict[str, float]:
     """Compute per-device throughput, TFLOPS, and optional MFU."""
@@ -131,7 +134,7 @@ def compute_training_performance_metrics(
         "tokens_per_second": tokens_per_second,
         "tflops": tflops,
     }
-    if not has_quantization:
+    if not has_quantization and gpu_peak_flops is not None:
         metrics["mfu_percent"] = 100 * device_flops_per_second / gpu_peak_flops
     return metrics
 
@@ -167,20 +170,45 @@ class TensorBoardLogger(BaseLogger):
         tag: str | None = None,
     ):
         self.tag = tag
-        self.writer = SummaryWriter(log_dir, max_queue=1000)
+        self.writer = FileWriter(log_dir, max_queue=1000)
+        # Without TensorFlow, TensorBoard opens and closes the events file per event: slow on
+        # FUSE/NFS. Keep one unbuffered file open; safe because EventFileWriter.__init__ has
+        # already flushed its file_version event. TODO: drop this private-field swap (tensorboard
+        # is unpinned) when its file layer keeps files open: https://github.com/tensorflow/tensorboard/issues/5286
+        event_writer = self.writer.event_writer
+        record_writer = event_writer._async_writer._writer
+        # If TensorBoard renames RecordWriter._writer, the assignment would silently do nothing.
+        if not hasattr(record_writer, "_writer"):
+            raise RuntimeError(
+                f"TensorBoard's {type(record_writer)} has no _writer field"
+            )
+        record_writer._writer = open(event_writer._file_name, "ab", buffering=0)
         logger.info(f"TensorBoard logging enabled. Logs will be saved at {log_dir}")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
-        for k, v in metrics.items():
-            tag = k if self.tag is None else f"{self.tag}/{k}"
-            self.writer.add_scalar(tag, v, step)
+        # One event per step, so each slot of the writer queue (max_queue) holds a whole step.
+        summary = Summary(
+            value=[
+                Summary.Value(
+                    tag=k if self.tag is None else f"{self.tag}/{k}",
+                    simple_value=float(v),
+                )
+                for k, v in metrics.items()
+            ]
+        )
+        self.writer.add_summary(summary, step)
 
     def close(self) -> None:
         self.writer.close()
 
 
 class WandBLogger(BaseLogger):
-    """Logger implementation for Weights & Biases."""
+    """Logger implementation for Weights & Biases: each `log` call is one row, with `trainer/step`.
+
+    Example:
+        log({"loss": 2.1}, step=10)                       -> row _step=0, trainer/step=10
+        log({"validation_metrics/loss": 2.3}, step=10)    -> row _step=1, trainer/step=10
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLogger.Config):
@@ -222,6 +250,9 @@ class WandBLogger(BaseLogger):
             dir=log_dir,
             config=config_dict,
         )
+        # Generated charts plot `trainer/step` on the x-axis.
+        self.wandb.define_metric("trainer/step")
+        self.wandb.define_metric("*", step_metric="trainer/step")
         logger.info("WandB logging enabled")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
@@ -229,7 +260,9 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        self.wandb.log(wandb_metrics, step=step, commit=True)
+        # Note: we use `trainer/step` key instead of `step` arg so multiple
+        # log calls can be made to the same step (e.g. trainer and validation)
+        self.wandb.log({**wandb_metrics, "trainer/step": step})
 
     def close(self) -> None:
         if self.wandb.run is not None:
@@ -417,7 +450,7 @@ class MetricsProcessor(Configurable):
     device_memory_monitor: DeviceMemoryMonitor
     color: NoColor | Color
 
-    gpu_peak_flops: float
+    gpu_peak_flops: float | None
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float

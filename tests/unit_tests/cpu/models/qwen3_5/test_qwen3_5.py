@@ -83,8 +83,7 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     import spmd_types as spmd
     from spmd_types import SpmdType
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+    from torchtitan.models.common.linear import Linear, RowParallelLinear
 
     config = cast(
         Qwen35Model.Config,
@@ -94,10 +93,10 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     assert vision_encoder is not None
 
     assert type(vision_encoder.block.mlp.fc1) is Linear.Config
-    assert type(vision_encoder.block.mlp.fc2) is InvariantRowParallelLinear.Config
-    assert type(vision_encoder.block.attn.proj) is InvariantRowParallelLinear.Config
+    assert type(vision_encoder.block.mlp.fc2) is RowParallelLinear.Config
+    assert type(vision_encoder.block.attn.proj) is RowParallelLinear.Config
     assert type(vision_encoder.merger.fc1) is Linear.Config
-    assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
+    assert type(vision_encoder.merger.fc2) is RowParallelLinear.Config
 
     for projection in (
         vision_encoder.block.mlp.fc2,

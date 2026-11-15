@@ -25,3 +25,12 @@ def graph_trainer_muse_glimmer_debugmodel() -> GraphTrainer.Config:
     )
     config.compile = GraphTrainerCompileConfig()
     return config
+
+
+def graph_trainer_muse_glimmer_debugmodel_flex() -> GraphTrainer.Config:
+    config = to_graph_trainer_config(
+        muse_glimmer_debugmodel(attn_backend="flex"),
+        GraphTrainerMuseGlimmerModel.Config,
+    )
+    config.compile = GraphTrainerCompileConfig()
+    return config

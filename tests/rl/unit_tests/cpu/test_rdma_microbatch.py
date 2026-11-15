@@ -20,6 +20,8 @@ import torch
 from monarch.actor import Actor, current_rank, endpoint, this_host
 from torch.utils import _pytree as pytree
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
 from torchtitan.rl.actors.monarch import rdma_microbatch
 from torchtitan.rl.actors.monarch.rdma_microbatch import (
     _TensorRef,
@@ -83,6 +85,7 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
             ),
             "topk_logprobs": torch.zeros(0, 4),
         },
+        vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
     )
 
 
@@ -110,6 +113,9 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     for leaf, rdma_leaf, read_leaf in zip(
         leaves, rdma_leaves, read_leaves, strict=True
     ):
+        if not isinstance(leaf, torch.Tensor):  # e.g. vision_processor, by value
+            assert rdma_leaf == leaf == read_leaf
+            continue
         assert isinstance(rdma_leaf, _TensorRef) == (leaf.nbytes >= min_bytes)
         assert torch.equal(leaf, read_leaf) and leaf.dtype == read_leaf.dtype
 
@@ -221,12 +227,19 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     ]
 
 
+class _ReadMicrobatch(int):
+    """Stands in for a read `TrainingMicrobatch` without images: an index."""
+
+    def preprocess_images(self) -> "_ReadMicrobatch":
+        return self
+
+
 def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
     """Stands in for a `MonarchRDMAMicrobatch`: `read()` records its index."""
 
-    async def read() -> int:
+    async def read() -> _ReadMicrobatch:
         started.append(index)
-        return index
+        return _ReadMicrobatch(index)
 
     return SimpleNamespace(read=read)
 
@@ -253,23 +266,40 @@ def test_prefetcher_read_thread_sees_caller_context() -> None:
     step = contextvars.ContextVar("step")
     step.set(7)
 
-    async def read() -> int:
-        return step.get()
+    async def read() -> _ReadMicrobatch:
+        return _ReadMicrobatch(step.get())
 
     prefetcher = RDMAMicrobatchPrefetcher([SimpleNamespace(read=read)])
 
     assert list(prefetcher) == [[7]]
 
 
+def test_prefetcher_preprocesses_images_on_the_read_thread() -> None:
+    preprocessed = SimpleNamespace()
+
+    class _ImageMicrobatch:
+        def preprocess_images(self) -> SimpleNamespace:
+            preprocessed.thread = threading.current_thread()
+            return preprocessed
+
+    async def read() -> _ImageMicrobatch:
+        return _ImageMicrobatch()
+
+    prefetcher = RDMAMicrobatchPrefetcher([SimpleNamespace(read=read)])
+
+    assert list(prefetcher) == [[preprocessed]]
+    assert preprocessed.thread is not threading.main_thread()
+
+
 def test_prefetcher_skips_queued_reads_when_training_stops() -> None:
     started: list[int] = []
     read_1_started, read_1_done = threading.Event(), threading.Event()
 
-    async def read_1() -> int:
+    async def read_1() -> _ReadMicrobatch:
         read_1_started.set()
         await asyncio.sleep(0.2)
         read_1_done.set()
-        return 1
+        return _ReadMicrobatch(1)
 
     prefetcher = RDMAMicrobatchPrefetcher(
         [

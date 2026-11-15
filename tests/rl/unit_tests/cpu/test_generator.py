@@ -24,6 +24,7 @@ import torch
 
 import torchtitan.rl.generator.generator as generator_module
 import torchtitan.rl.generator.vllm.engine as vllm_engine_module
+from renderers import PlaceholderRange
 from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import DebugConfig, PrecisionConfig
@@ -48,15 +49,26 @@ from torchtitan.rl.generator.vllm.engine import (
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
+    TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.types import Prompt, PromptImage
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
+from vllm.config import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    DeviceConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.utils.cache import LRUCache
 
 
 class _FakeRenderer:
@@ -81,6 +93,7 @@ class _FakeLLMEngine:
     def __init__(self):
         self.add_requests = []
         self.reset_prefix_cache_calls = []
+        self.reset_encoder_cache_calls = 0
         self.renderer = _FakeRenderer()
 
     def add_request(self, *args, **kwargs):
@@ -91,6 +104,9 @@ class _FakeLLMEngine:
 
     def reset_prefix_cache(self, *args, **kwargs):
         self.reset_prefix_cache_calls.append((args, kwargs))
+
+    def reset_encoder_cache(self):
+        self.reset_encoder_cache_calls += 1
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
@@ -133,7 +149,29 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
     )
     engine._get_model = lambda: model
     engine._session_kv_holder = None
+    engine._vision_processor = None
+    engine._pixel_values_lru_cache = LRUCache(
+        1 << 20, getsizeof=lambda pixel_values: pixel_values.nbytes
+    )
     return engine
+
+
+class _FakeVisionProcessor:
+    """Stands in for `VisionProcessor`: every image file becomes ``pixel_values``; counts
+    the files it preprocesses."""
+
+    def __init__(self, pixel_values: torch.Tensor | None = None):
+        self.pixel_values = (
+            pixel_values if pixel_values is not None else torch.zeros(16, 8)
+        )
+        self.num_preprocessed_files = 0
+
+    def resize_and_normalize(self, data: bytes):
+        self.num_preprocessed_files += 1
+        return torch.zeros(1, 32, 32, 3), torch.tensor([1, 2, 2])
+
+    def patchify(self, pixels: torch.Tensor):
+        return self.pixel_values, torch.tensor([1, 2, 2])
 
 
 def test_initialize_torchstore_client_uses_requester_index():
@@ -204,7 +242,7 @@ def test_process_finished_requests_resolves_reply_with_completion():
         reply = concurrent.futures.Future()
         reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
         # Admitted (sampled) under v7 (the min); a model state dict load then advanced the live version to 8 (the max).
-        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation = OutstandingGeneration(reply=reply)
         generation.min_policy_version = 7
         dispatcher._rank0_outstanding_generations = {"r0": generation}
 
@@ -255,7 +293,7 @@ def test_process_finished_requests_releases_dp_router_load():
         assert dispatcher._rank0_dp_router is not None
         reply = concurrent.futures.Future()
         reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
-        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation = OutstandingGeneration(reply=reply)
         generation.min_policy_version = 7
         dispatcher._rank0_outstanding_generations = {"r0": generation}
         dispatcher._rank0_dp_router.reserve("r0", routing_session_id=None)
@@ -310,7 +348,7 @@ def test_build_sampling_params_seed_defaults_to_none():
 def _engine_request(request_id: str, *, min_policy_version: int, group_id: int = 3):
     request = EngineRequest(
         request_id=request_id,
-        prompt_token_ids=[1, 2],
+        prompt=Prompt(token_ids=[1, 2]),
         sampling=SamplingConfig(),
         group_id=group_id,
         routing_session_id="group=3/rollout=0",
@@ -318,6 +356,18 @@ def _engine_request(request_id: str, *, min_policy_version: int, group_id: int =
     )
     request.min_policy_version = min_policy_version
     return request
+
+
+def _image_prompt() -> Prompt:
+    """Text, a (1, 4, 4)-patch image as 4 placeholders, text."""
+    image = PromptImage(
+        hash_value="k", source_path="k.png", grid_thw=(1, 4, 4), data=b"k"
+    )
+    return Prompt(
+        token_ids=[1, 7, 7, 7, 7, 2],
+        images=(image,),
+        image_placeholders=(PlaceholderRange(offset=1, length=4),),
+    )
 
 
 def test_admission_passes_group_id_as_priority_and_arrival_time():
@@ -368,11 +418,93 @@ def test_admission_salts_prompt_with_min_policy_version():
 
 def test_admission_with_kv_reset_does_not_salt_prompt():
     engine = _vllm_engine(reset_kv_cache_on_model_state_dict_load=True)
+    engine._vision_processor = _FakeVisionProcessor()
+    image_request = _engine_request("r1", min_policy_version=6)
+    image_request.prompt = _image_prompt()
 
-    engine.add_requests([_engine_request("r0", min_policy_version=6)])
+    engine.add_requests([_engine_request("r0", min_policy_version=6), image_request])
 
-    _, kwargs = cast(_FakeLLMEngine, engine._engine).add_requests[0]
-    assert kwargs["prompt"]["cache_salt"] is None
+    [(_, text_kwargs), (_, image_kwargs)] = cast(
+        _FakeLLMEngine, engine._engine
+    ).add_requests
+    assert text_kwargs["prompt"]["cache_salt"] is None
+    assert image_kwargs["prompt"].get("cache_salt") is None
+    # The engine resets its encoder cache on every load instead.
+    assert image_kwargs["prompt"]["mm_hashes"] == {"image": ["k"]}
+
+
+def test_admission_submits_image_prompts_as_multimodal_inputs():
+    engine = _vllm_engine()
+    pixel_values = torch.zeros(16, 8)
+    engine._vision_processor = _FakeVisionProcessor(pixel_values)
+    request = _engine_request("r0", min_policy_version=6)
+    request.prompt = _image_prompt()
+
+    assert (
+        engine.add_requests([request, _engine_request("r1", min_policy_version=6)])
+        == []
+    )
+
+    [(_, image_kwargs), (_, text_kwargs)] = cast(
+        _FakeLLMEngine, engine._engine
+    ).add_requests
+    prompt = image_kwargs["prompt"]
+    assert prompt["type"] == "multimodal"
+    assert prompt["prompt_token_ids"] == [1, 7, 7, 7, 7, 2]
+    assert prompt["cache_salt"] == "6"
+    # The image hash carries the pinned version: encoder outputs follow the vision weights.
+    assert prompt["mm_hashes"] == {"image": ["k@6"]}
+    assert prompt["mm_kwargs"]["image"][0]["pixel_values"].data is pixel_values
+    assert text_kwargs["prompt"]["type"] == "token"
+
+
+def test_admission_preprocesses_each_image_file_once_while_cached():
+    # The samples of a group, and later turns, carry the same image file.
+    engine = _vllm_engine()
+    vision_processor = _FakeVisionProcessor()
+    engine._vision_processor = vision_processor
+    requests = [
+        _engine_request(f"r{index}", min_policy_version=6) for index in range(3)
+    ]
+    for request in requests:
+        request.prompt = _image_prompt()
+
+    assert engine.add_requests(requests) == []
+
+    assert vision_processor.num_preprocessed_files == 1
+
+
+def test_admission_rejects_image_prompts_without_an_image_source():
+    engine = _vllm_engine()
+    request = _engine_request("r0", min_policy_version=6)
+    request.prompt = _image_prompt()
+
+    [(request_id, error)] = engine.add_requests([request])
+
+    assert request_id == "r0" and "Controller.Config.vision_processor" in str(error)
+    assert cast(_FakeLLMEngine, engine._engine).add_requests == []
+
+
+def test_admission_rejects_only_the_request_whose_image_does_not_decode():
+    # A truncated dataset file fails its rollout, not the generator.
+    engine = _vllm_engine()
+
+    class _TruncatedFileVisionProcessor(_FakeVisionProcessor):
+        def resize_and_normalize(self, data: bytes):
+            raise RuntimeError("decode_png: truncated file")  # what torchvision raises
+
+    engine._vision_processor = _TruncatedFileVisionProcessor()
+    corrupt = _engine_request("corrupt", min_policy_version=6)
+    corrupt.prompt = _image_prompt()
+
+    [(request_id, error)] = engine.add_requests(
+        [corrupt, _engine_request("text", min_policy_version=6)]
+    )
+
+    assert request_id == "corrupt" and isinstance(error, ValueError)
+    assert "k.png" in str(error) and "truncated" in str(error)
+    llm_engine = cast(_FakeLLMEngine, engine._engine)
+    assert [kwargs["request_id"] for _, kwargs in llm_engine.add_requests] == ["text"]
 
 
 def test_admission_rejects_only_the_invalid_request():
@@ -398,9 +530,7 @@ def test_process_rejected_requests_fails_only_their_replies():
         for request_id in ("r0", "r1"):
             replies[request_id] = concurrent.futures.Future()
             replies[request_id].set_running_or_notify_cancel()
-            dispatcher.rank0_register_generation(
-                request_id, "generator", replies[request_id]
-            )
+            dispatcher.rank0_register_generation(request_id, replies[request_id])
             dispatcher._rank0_dp_router.reserve(request_id, routing_session_id=None)
         error = ValueError("prompt too long")
 
@@ -492,19 +622,27 @@ def test_shutdown_closes_the_renderer():
     engine._engine.renderer.shutdown.assert_called_once_with()
 
 
+@pytest.mark.parametrize("serves_images", [False, True])
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
 def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
-    reset_kv_cache: bool,
+    reset_kv_cache: bool, serves_images: bool
 ):
-    model = SimpleNamespace(load_model_state_dict=lambda fetch: None)
+    model = SimpleNamespace(
+        model_state_dict_loader=SimpleNamespace(load=lambda fetch: None)
+    )
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model
     )
+    if serves_images:
+        engine._vision_processor = _FakeVisionProcessor()
 
     engine.load_model_state_dict(lambda state_dict: state_dict.keys())
 
+    fake = cast(_FakeLLMEngine, engine._engine)
     expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
-    assert cast(_FakeLLMEngine, engine._engine).reset_prefix_cache_calls == expected
+    assert fake.reset_prefix_cache_calls == expected
+    # Unsalted image hashes would let new requests reuse old encoder outputs.
+    assert fake.reset_encoder_cache_calls == int(reset_kv_cache and serves_images)
 
 
 def test_sampling_config_rejects_top_p_below_one():
@@ -515,27 +653,23 @@ def test_sampling_config_rejects_top_p_below_one():
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
 
 
-def test_metric_timing_math_and_prefix_override():
+def test_metric_timing_math():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output(num_preemptions=2)),
-        prefix="validation_generator",
+        _extract_request_metrics_inputs(_request_output(num_preemptions=2))
     )
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
-    assert all(key.startswith("validation_generator/") for key in aggregate)
-    assert aggregate["validation_generator/num_preemptions/mean"] == 2
-    assert aggregate["validation_generator/queue_time_ms/mean"] == pytest.approx(5)
-    assert aggregate["validation_generator/time_to_first_token_ms/mean"] == 12
-    assert aggregate["validation_generator/prefill_time_ms/mean"] == pytest.approx(12)
-    assert aggregate["validation_generator/decode_time_ms/mean"] == pytest.approx(30)
-    assert aggregate[
-        "validation_generator/inter_token_latency_ms/mean"
-    ] == pytest.approx(10)
+    assert all(key.startswith("generator/") for key in aggregate)
+    assert aggregate["generator/num_preemptions/mean"] == 2
+    assert aggregate["generator/queue_time_ms/mean"] == pytest.approx(5)
+    assert aggregate["generator/time_to_first_token_ms/mean"] == 12
+    assert aggregate["generator/prefill_time_ms/mean"] == pytest.approx(12)
+    assert aggregate["generator/decode_time_ms/mean"] == pytest.approx(30)
+    assert aggregate["generator/inter_token_latency_ms/mean"] == pytest.approx(10)
 
 
 def test_decode_metrics_absent_for_single_generated_token():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output(num_generation_tokens=1)),
-        prefix="generator",
+        _extract_request_metrics_inputs(_request_output(num_generation_tokens=1))
     )
     keys = {metric.key for metric in metrics}
     assert "generator/prefill_time_ms" in keys
@@ -603,6 +737,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             debug=DebugConfig(),
             reset_kv_cache_on_model_state_dict_load=True,
             model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -651,6 +786,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         debug=config.debug,
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
+        vision_processor=None,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),
@@ -658,16 +794,20 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
     return engine_args.call_args.kwargs
 
 
-def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
+def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
         tmp_path,
         Generator.Config(
             model=_MODEL_CONFIG,
-            engine=VLLMEngine.Config(extra_engine_args={"watermark": 0.03}),
+            engine=VLLMEngine.Config(
+                watermark=0.03,
+                extra_engine_args={"long_prefill_token_threshold": 4096},
+            ),
         ),
     )
     assert engine_kwargs["watermark"] == 0.03
+    assert engine_kwargs["long_prefill_token_threshold"] == 4096
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
@@ -682,6 +822,7 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
             r"use Generator\.Config\.max_num_batched_tokens",
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
+        ("watermark", r"use VLLMEngine\.Config\.watermark"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
@@ -697,6 +838,7 @@ def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
 def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
     compilation_config = VLLMCudaGraphConfig(mode="NONE").get_vllm_compilation_config(
         max_num_seqs=256,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
     )
@@ -715,6 +857,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         mode="FULL", capture_sizes=[1, 4, 5, 8]
     ).get_vllm_compilation_config(
         max_num_seqs=8,
+        max_model_len=4096,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
         enable_sequence_parallel=False,
     )
@@ -725,6 +868,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
 def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=1,
+        max_model_len=4096,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
     )
@@ -739,6 +883,7 @@ def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
             mode="FULL", capture_sizes=[1, 2, 3]
         ).get_vllm_compilation_config(
             max_num_seqs=3,
+            max_model_len=4096,
             expert_sequence_parallel_size=4,
             enable_sequence_parallel=False,
         )
@@ -782,6 +927,50 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
+@pytest.mark.parametrize(
+    "num_tokens,valid_modes,batch_invariant,expected",
+    [
+        (2, None, False, (CUDAGraphMode.FULL, True)),
+        # 3 decodes pad to 8, past the largest decode graph (2): mixed graph.
+        (3, None, False, (CUDAGraphMode.FULL, False)),
+        # Batch-invariant runs keep them eager on the decode kernels.
+        (3, None, True, (CUDAGraphMode.NONE, False)),
+        # DP sync pads a decoding rank to a peer's batch and allows only FULL:
+        # a decode graph up to the largest one, else the mixed graph.
+        (2, {CUDAGraphMode.FULL}, False, (CUDAGraphMode.FULL, True)),
+        (16, {CUDAGraphMode.FULL}, True, (CUDAGraphMode.FULL, False)),
+    ],
+)
+def test_full_mode_decode_dispatch(
+    monkeypatch, num_tokens, valid_modes, batch_invariant, expected
+):
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.vllm.worker.is_in_batch_invariant_mode",
+        lambda: batch_invariant,
+    )
+    # An explicit device: CPU CI has no platform for vLLM to infer one from.
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    config.compilation_config = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        cudagraph_capture_sizes=[1, 2, 8, 16],
+        max_cudagraph_capture_size=16,
+    )
+    config.scheduler_config = SchedulerConfig(
+        max_model_len=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+        is_encoder_decoder=False,
+    )
+    dispatcher = TorchTitanCudagraphDispatcher(config)
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
+
+    mode, descriptor = dispatcher.dispatch(
+        num_tokens, uniform_decode=True, valid_modes=valid_modes
+    )
+    assert (mode, descriptor.uniform) == expected
+
+
 def test_only_weights_use_cumem_allocator(monkeypatch):
     base_worker_cls = TorchTitanGPUWorker.__mro__[1]
     monkeypatch.setattr(
@@ -802,6 +991,7 @@ def test_only_weights_use_cumem_allocator(monkeypatch):
 def test_cuda_graph_default_mode_is_full():
     cfg = VLLMCudaGraphConfig().get_vllm_compilation_config(
         max_num_seqs=256,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
@@ -813,6 +1003,7 @@ def test_cuda_graph_full_mode_no_compile():
     # FULL captures the whole forward (incl. attention) with no inductor compile.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=256,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
@@ -821,32 +1012,63 @@ def test_cuda_graph_full_mode_no_compile():
 
 
 def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
-    # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs (plus
-    # max_num_seqs itself when not a power of 2).
+    # FULL_DECODE_ONLY only graphs decode, so capture up to max_num_seqs itself.
     cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
         max_num_seqs=500,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
-    assert cfg.cudagraph_capture_sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 500]
+    sizes = cfg.cudagraph_capture_sizes
+    assert 40 in sizes  # 34 sequences pad to 40, not 64
+    assert sizes[-1] == 500  # a full decode batch has its own graph
 
 
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
     # FULL also graphs prefill, so sizes extend to the chunked-prefill chunk
-    # (max_num_batched_tokens, 2048) on top of max_num_seqs.
+    # (max_num_batched_tokens) on a coarser ladder past 1024.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
         max_num_seqs=500,
+        max_model_len=16384,
+        expert_sequence_parallel_size=1,
+        enable_sequence_parallel=False,
+        max_num_batched_tokens=16384,
+    )
+    sizes = cfg.cudagraph_capture_sizes
+    assert 40 in sizes  # 34 sequences pad to 40, not 64
+    assert 500 in sizes  # a full decode batch has its own graph
+    assert sizes[-1] == 16384  # the largest prefill chunk is graphed
+
+
+def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
+    # A step packs at most max_num_seqs requests of at most max_model_len tokens each.
+    kwargs = dict(
+        max_num_seqs=8,
+        max_model_len=1000,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
     )
-    assert cfg.cudagraph_capture_sizes[-1] == 2048
-    assert 500 in cfg.cudagraph_capture_sizes  # decode batch captured exactly
+    # Packed prefills reach the 2048-token budget, so it is graphed.
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
+    assert cfg.cudagraph_capture_sizes[-2:] == [1536, 2048]
+    one_request = {**kwargs, "max_num_seqs": 1}
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**one_request)
+    assert cfg.cudagraph_capture_sizes[-2:] == [992, 1000]
+    with pytest.raises(ValueError, match="no step reaches"):
+        VLLMCudaGraphConfig(
+            mode="FULL", capture_sizes=[512, 2048]
+        ).get_vllm_compilation_config(**one_request)
+    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
+        **{**kwargs, "max_num_seqs": 1500}
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 1500
 
 
 def test_cuda_graph_rejects_nonpositive_max_num_seqs():
     with pytest.raises(ValueError, match="max_num_seqs must be positive"):
         VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(
             max_num_seqs=0,
+            max_model_len=4096,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
         )
@@ -864,6 +1086,7 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
         mode="FULL", capture_sizes=[1, 4, 5, 8]
     ).get_vllm_compilation_config(
         max_num_seqs=8,
+        max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
     )

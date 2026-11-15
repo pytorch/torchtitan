@@ -62,7 +62,7 @@ def test_position_sampling_and_permutation_spmd_types(grid_order):
             encoder.positional_embedding_vlm,
             {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I},
         )
-        spmd.assert_type(rope.cache, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.I})
+        spmd.assert_type(rope.cache, {"dp": spmd.R, "cp": spmd.I, "tp": spmd.R})
         positions = encoder._get_pos_emb(4, 6, device)
         rope_positions = encoder._make_rope_positions(4, 6, device)
         permutation, _ = encoder._get_sparse_perm_and_slens(4, 6, device)

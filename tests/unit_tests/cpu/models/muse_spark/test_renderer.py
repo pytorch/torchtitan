@@ -23,6 +23,7 @@ def tokenizer(tmp_path):
         "<|eot|>": 200008,
         "<|start|>": 200022,
         "<|message|>": 200023,
+        "<|patch|>": 200092,
     }
     vocab = {chr(index): index for index in range(128)} | special_tokens
     (tmp_path / "tokenizer.json").write_text(
@@ -247,8 +248,28 @@ def test_function_schemas_match_published_template(renderer, tokenizer):
     ],
 )
 def test_rejects_media_content(renderer, content):
-    with pytest.raises(ValueError, match="text-only"):
+    with pytest.raises(ValueError, match="does not support"):
         renderer.render_ids([{"role": "user", "content": content}])
+
+
+def test_image_renders_one_patch_token(renderer, tokenizer):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": b"unused"},
+                {"type": "text", "text": "<|patch|>?"},
+            ],
+        },
+        {"role": "assistant", "content": "yes"},
+    ]
+    rendered = renderer.render(messages)
+    text = tokenizer.decode(rendered.token_ids, skip_special_tokens=False)
+
+    assert "user<|message|><|patch|>< |patch|>?<|eot|>" in text
+    assert rendered.token_ids.count(200092) == 1
+    patch_index = rendered.token_ids.index(200092)
+    assert not rendered.sampled_mask[patch_index]
 
 
 @pytest.mark.xfail(strict=True, reason="Review item 3: tool parsing ignores recipients")

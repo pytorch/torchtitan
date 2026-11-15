@@ -227,7 +227,7 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         }
 
     def _build_from_hf_map(self) -> dict[str, str]:
-        config = cast(Any, self.model_config)
+        config = cast("MuseSparkModel.Config", self.model_config)
         mapping = {
             "model.language_model.embed_tokens.weight": (
                 "tok_embeddings.embedding.weight"

@@ -31,7 +31,6 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Sigmoid,
     Softmax,
-    TransformerBlock,
     UnaryActivationFn,
 )
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
@@ -303,7 +302,7 @@ def build_mla_moe_layers(
     norm_eps: float = 1e-6,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[DeepSeekV3TransformerBlock.Config]:
     """Build the sharded per-layer ``DeepSeekV3TransformerBlock`` configs.
 
     Layers with layer_id < n_dense_layers get a DenseFeedForward.
@@ -408,7 +407,7 @@ def _build_dsv3_layers(
     router_num_expert_groups: int | None = None,
     router_num_limited_groups: int | None = None,
     **kwargs,
-) -> list[TransformerBlock.Config]:
+) -> list[DeepSeekV3TransformerBlock.Config]:
     """Thin wrapper: ``build_mla_moe_layers`` with DeepSeek V3's own inits."""
     return build_mla_moe_layers(
         **kwargs,
@@ -538,7 +537,6 @@ def _debugmodel(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -619,7 +617,6 @@ def _16b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -703,7 +700,6 @@ def _236b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -788,7 +784,6 @@ def _671b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,

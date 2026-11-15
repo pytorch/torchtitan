@@ -24,6 +24,7 @@ from torchtitan.rl.actors.system import ActorSystem
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
+    _validate_token_ids,
     GenerationServer,
     VerifiersGenerationMetadata,
 )
@@ -535,7 +536,7 @@ def test_generation_server_forwards_token_request() -> None:
         received = []
 
         async def generate_fn(
-            prompt_token_ids,
+            prompt,
             *,
             request_id,
             group_id,
@@ -544,7 +545,7 @@ def test_generation_server_forwards_token_request() -> None:
         ):
             received.append(
                 {
-                    "prompt_token_ids": prompt_token_ids,
+                    "prompt_token_ids": prompt.token_ids,
                     "request_id": request_id,
                     "group_id": group_id,
                     "routing_session_id": routing_session_id,
@@ -617,7 +618,24 @@ def test_generation_server_forwards_token_request() -> None:
             request["routing_session_id"] == "group=1/rollout=2" for request in received
         )
         assert all(request["sampling_config"].seed == 4 for request in received)
-        assert payload["choices"][0]["token_ids"] == [31, 32]
+        assert payload == {
+            "request_id": "group=1/rollout=2/request=1",
+            "choices": [
+                {
+                    "index": 0,
+                    "token_ids": [31, 32],
+                    "logprobs": {
+                        "content": [
+                            {"token": "token_id:31", "logprob": -0.1},
+                            {"token": "token_id:32", "logprob": -0.2},
+                        ]
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "prompt_logprobs": None,
+            "kv_transfer_params": None,
+        }
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
@@ -634,7 +652,7 @@ def test_generation_server_forwards_token_request() -> None:
 def test_generation_server_rejects_aborted_generation() -> None:
     async def run_test() -> None:
         async def generate_fn(
-            prompt_token_ids,
+            prompt,
             *,
             request_id,
             group_id,
@@ -661,6 +679,9 @@ def test_generation_server_rejects_aborted_generation() -> None:
                     json={
                         "token_ids": [10, 11],
                         "sampling_params": {
+                            "temperature": 1.0,
+                            "top_p": 1.0,
+                            "max_tokens": 2,
                             "torchtitan_group_id": 1,
                             "stop_token_ids": [99],
                         },
@@ -705,12 +726,34 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
+def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
+    async def run_test() -> None:
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.get(
+                    f"http://{server.host}:{server.port}/healthz"
+                )
+                assert response.status == 200
+        finally:
+            await server.close()
+
+    # One DEBUG record: no INFO line, and still logged. Set the level explicitly: imports can
+    # change the root level.
+    with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
+        asyncio.run(run_test())
+    access_records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert [r.levelno for r in access_records] == [logging.DEBUG]
+    assert access_records[0].getMessage().startswith("GET /healthz 200 ")
+
+
 def test_generation_server_rejects_prompt_without_room_for_output() -> None:
     async def run_test() -> None:
         prompt_lengths = []
 
-        async def generate_fn(prompt_token_ids, **kwargs):
-            prompt_lengths.append(len(prompt_token_ids))
+        async def generate_fn(prompt, **kwargs):
+            prompt_lengths.append(len(prompt.token_ids))
             raise RuntimeError("generator reached")
 
         server = GenerationServer.Config(max_rollout_tokens=8).build()
@@ -726,6 +769,9 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
                         json={
                             "token_ids": [1] * num_tokens,
                             "sampling_params": {
+                                "temperature": 1.0,
+                                "top_p": 1.0,
+                                "max_tokens": 2,
                                 "torchtitan_group_id": 1,
                                 "stop_token_ids": [99],
                             },
@@ -742,6 +788,28 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
         assert "maximum context length" in errors[1]
 
     asyncio.run(run_test())
+
+
+@pytest.mark.parametrize(
+    "token_ids, accepted",
+    [
+        ([], True),
+        ([0, 151643], True),
+        ([1, True], False),
+        ([1, 2.0], False),
+        ([[1]], False),
+        ([1, None], False),
+        ((1, 2), False),
+    ],
+)
+def test_validate_token_ids(token_ids, accepted) -> None:
+    if accepted:
+        assert _validate_token_ids(token_ids, field_name="token_ids") == token_ids
+        return
+    with pytest.raises(
+        ValueError, match="token_ids must be a list of integer token IDs"
+    ):
+        _validate_token_ids(token_ids, field_name="token_ids")
 
 
 def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
@@ -975,6 +1043,20 @@ def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -
         return finished
 
     assert asyncio.run(run_test()) == [1]
+
+
+def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
+    sampling_params = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 5,
+        "stop_token_ids": [1],
+    }
+    for name in ("temperature", "top_p", "max_tokens"):
+        with pytest.raises(ValueError, match=rf"must include \['{name}'\]"):
+            _parse_sampling_config(
+                {key: value for key, value in sampling_params.items() if key != name}
+            )
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

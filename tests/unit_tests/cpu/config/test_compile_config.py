@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 import torch
+from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse_loss
@@ -99,6 +100,34 @@ def test_local_compile_forwards_compile_kwargs(monkeypatch) -> None:
         "dynamic": True,
         "options": options,
     }
+
+
+def test_local_compile_keeps_grad_of_async_collective_input() -> None:
+    # Module-boundary redistributions return un-awaited AsyncCollectiveTensors.
+    class ToAsyncCollective(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return AsyncCollectiveTensor(x.clone())
+
+        @staticmethod
+        def backward(ctx, grad):
+            return grad
+
+    class AotEagerLocalCompileConfig(LocalCompileConfig):
+        @staticmethod
+        def _compile(reference, **compile_kwargs):
+            compile_kwargs.pop("options", None)
+            return torch.compile(reference, backend="aot_eager", **compile_kwargs)
+
+    @local_compile("test_async_collective_input", batch_invariant=True)
+    def double(value: torch.Tensor) -> torch.Tensor:
+        return value * 2
+
+    AotEagerLocalCompileConfig(regions=["test_async_collective_input"]).apply()
+    weight = torch.ones(3, requires_grad=True)
+    double(ToAsyncCollective.apply(weight)).sum().backward()
+
+    torch.testing.assert_close(weight.grad, torch.full((3,), 2.0))
 
 
 def test_local_compile_rejects_fullgraph_false() -> None:

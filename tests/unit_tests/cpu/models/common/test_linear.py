@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchtitan.models.common.linear.linear as linear_module
-import torchtitan.models.common.vision_encoder as vision_encoder_module
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
@@ -22,7 +21,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+from torchtitan.distributed.spmd_types import (
+    disable_dense_sp,
+    set_current_spmd_mesh,
+    spmd_dense_sp_enabled,
+)
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -30,7 +33,6 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
 
 class TestLinear(unittest.TestCase):
@@ -149,6 +151,48 @@ class TestLinear(unittest.TestCase):
 
 
 class TestGroupedLinear(unittest.TestCase):
+    def test_scores_use_fp32_without_saving_fp32_input(self):
+        """Keep score precision without doubling the saved activation storage."""
+        torch.manual_seed(42)
+        grouped = GroupedLinear.Config(
+            group_size=1, in_features=4, out_features=4
+        ).build()
+        input_RI = torch.randn(8, 4, dtype=torch.bfloat16, requires_grad=True)
+        scores_R = torch.linspace(0.01, 0.99, 8, requires_grad=True)
+        reference_RI = input_RI.detach().clone().requires_grad_(True)
+        reference_scores_R = scores_R.detach().clone().requires_grad_(True)
+        expected_RI = (reference_RI.float() * reference_scores_R.reshape(-1, 1)).to(
+            input_RI.dtype
+        )
+        saved = []
+
+        def pack(tensor):
+            saved.append((tensor.dtype, tuple(tensor.shape)))
+            return tensor
+
+        def identity_projection(*, input_RI, weight_EOI, offsets_E):
+            return input_RI
+
+        # Isolate score multiplication from the accelerator-only grouped GEMM.
+        with (
+            patch.object(grouped, "_grouped_mm", side_effect=identity_projection),
+            torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor),
+        ):
+            actual_RI = grouped(
+                input_RI, torch.tensor([8], dtype=torch.int32), scores_R=scores_R
+            )
+        grad_RI = torch.randn_like(actual_RI)
+        actual_RI.backward(grad_RI)
+        expected_RI.backward(grad_RI)
+
+        torch.testing.assert_close(actual_RI, expected_RI, rtol=0, atol=0)
+        torch.testing.assert_close(input_RI.grad, reference_RI.grad, rtol=0, atol=0)
+        torch.testing.assert_close(
+            scores_R.grad, reference_scores_R.grad, rtol=0, atol=0
+        )
+        self.assertIn((torch.bfloat16, (8, 4)), saved)
+        self.assertNotIn((torch.float32, (8, 4)), saved)
+
     def test_num_linears_preserves_projection_axis_without_copy(self):
         """Multiple projections retain a zero-copy logical output axis."""
         grouped = GroupedLinear.Config(
@@ -242,38 +286,58 @@ class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
                     assert redistribute.call_args.kwargs["src"] == spmd.P
                     assert redistribute.call_args.kwargs["dst"] == expected_type
 
-    def test_vision_row_parallel_output_is_always_invariant(self):
-        input = torch.randn(3, 4)
-        tp_group = object()
-        linear = InvariantRowParallelLinear.Config(
-            in_features=4,
-            out_features=2,
-            bias=True,
-        ).build()
+    def _row_reduction_dst(self, linear: nn.Module) -> spmd.PerMeshAxisSpmdType:
+        """Run ``linear`` with decoder SP registered but disabled for the region
+        (as in a vision encoder) and return its output reduction's ``dst``."""
+        import torchtitan.distributed.spmd_types as spmd_types_module
+        import torchtitan.models.common.linear.async_linear as async_module
 
+        tp_group = object()
         with (
             patch.object(
-                vision_encoder_module,
-                "spmd_mesh_group",
-                return_value=tp_group,
+                spmd_types_module._MESH_TLS, "dense_sp_enabled", True, create=True
             ),
+            patch.object(async_module, "_tp_group_from_context", return_value=tp_group),
+            patch.object(linear_module, "spmd_mesh_group", return_value=tp_group),
             patch.object(
                 linear_module.spmd,
                 "convert",
                 side_effect=lambda tensor, *_args, **_kwargs: tensor,
-            ) as convert,
+            ),
             patch.object(
-                vision_encoder_module.spmd,
+                linear_module.spmd,
                 "redistribute",
                 side_effect=lambda tensor, *_args, **_kwargs: tensor,
             ) as redistribute,
+            disable_dense_sp(),
         ):
-            linear(input)
-
-        assert convert.call_args.kwargs["src"] == spmd.I
-        assert convert.call_args.kwargs["dst"] == spmd.P
+            linear(torch.randn(3, 4))
         assert redistribute.call_args.kwargs["src"] == spmd.P
-        assert redistribute.call_args.kwargs["dst"] == spmd.I
+        return redistribute.call_args.kwargs["dst"]
+
+    def test_disable_dense_sp_restores_the_registered_setting(self):
+        import torchtitan.distributed.spmd_types as spmd_types_module
+
+        with patch.object(
+            spmd_types_module._MESH_TLS, "dense_sp_enabled", True, create=True
+        ):
+            with self.assertRaises(RuntimeError):
+                with disable_dense_sp():
+                    self.assertFalse(spmd_dense_sp_enabled())
+                    raise RuntimeError
+            self.assertTrue(spmd_dense_sp_enabled())
+
+    def test_row_parallel_output_is_invariant_with_dense_sp_disabled(self):
+        linear = RowParallelLinear.Config(in_features=4, out_features=2, bias=True)
+        assert self._row_reduction_dst(linear.build()) == spmd.I
+
+    def test_async_row_parallel_falls_back_with_dense_sp_disabled(self):
+        """Async TP converts every RowParallelLinear, including vision encoder
+        ones; without dense SP there is no reduce-scatter to fuse."""
+        from torchtitan.models.common.linear.async_linear import AsyncRowParallelLinear
+
+        linear = AsyncRowParallelLinear.Config(in_features=4, out_features=2, bias=True)
+        assert self._row_reduction_dst(linear.build()) == spmd.I
 
 
 class TestBiasedRowParallelLinearDistributed(DTensorTestBase):
@@ -300,32 +364,30 @@ class TestBiasedRowParallelLinearDistributed(DTensorTestBase):
         input_dtensor = distribute_tensor(input, mesh, (Shard(1),))
         weight_dtensor = distribute_tensor(weight, mesh, (Shard(1),))
         local_input = input_dtensor.to_local().detach().requires_grad_()
-        for linear_cls in (RowParallelLinear, InvariantRowParallelLinear):
-            with self.subTest(linear_cls=linear_cls.__name__):
-                linear = (
-                    linear_cls.Config(
-                        in_features=4,
-                        out_features=2,
-                        bias=True,
-                    )
-                    .build()
-                    .to(self.device_type)
-                )
-                linear.weight = nn.Parameter(weight_dtensor.to_local())
-                linear.bias = nn.Parameter(bias.detach().clone())
-                with set_current_spmd_mesh(mesh), typecheck(local=False):
-                    linear._parameters["weight"] = spmd.assert_type(
-                        linear.weight, {tp_group: spmd.S(1)}
-                    )
-                    linear._parameters["bias"] = spmd.assert_type(
-                        linear.bias, {tp_group: spmd.I}
-                    )
-                    typed_input = spmd.assert_type(local_input, {tp_group: spmd.S(1)})
-                    actual = linear(typed_input)
-                    actual.sum().backward()
+        linear = (
+            RowParallelLinear.Config(
+                in_features=4,
+                out_features=2,
+                bias=True,
+            )
+            .build()
+            .to(self.device_type)
+        )
+        linear.weight = nn.Parameter(weight_dtensor.to_local())
+        linear.bias = nn.Parameter(bias.detach().clone())
+        with set_current_spmd_mesh(mesh), typecheck(local=False):
+            linear._parameters["weight"] = spmd.assert_type(
+                linear.weight, {tp_group: spmd.S(1)}
+            )
+            linear._parameters["bias"] = spmd.assert_type(
+                linear.bias, {tp_group: spmd.I}
+            )
+            typed_input = spmd.assert_type(local_input, {tp_group: spmd.S(1)})
+            actual = linear(typed_input)
+            actual.sum().backward()
 
-                torch.testing.assert_close(actual, expected)
-                torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
 
 
 def _linear_pair(*, num_linears=1, bias=False, dtype=torch.float32):

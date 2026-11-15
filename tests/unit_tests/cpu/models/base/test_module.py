@@ -470,5 +470,72 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         model._parallelize(None)
 
 
+class TestBufferDtypeGuard(unittest.TestCase):
+    class WithBuffer(Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.linspace(0, 1, 7))
+            self.register_buffer("buf", torch.linspace(0, 1, 7), persistent=False)
+            self.register_buffer("optional", None)
+
+        def reset_parameters(self):
+            nn.init.ones_(self.weight)
+
+        def _init_self_buffers(self, *, buffer_device=None):
+            self.buf = torch.linspace(
+                0, 1, 7, device=buffer_device, dtype=torch.float32
+            )
+
+    def test_rejected_cast_preserves_buffer(self):
+        for cast in (
+            lambda m: m.half(),
+            lambda m: m.bfloat16(),
+            lambda m: m.double(),
+            lambda m: m.to(torch.bfloat16),
+            lambda m: m.to("meta", torch.bfloat16),
+            lambda m: m.type(torch.float16),
+        ):
+            for parent_type in (Sequential, nn.Sequential):
+                with self.subTest(cast=cast, parent=parent_type):
+                    child = self.WithBuffer()
+                    original = child.buf
+                    expected = original.clone()
+                    with self.assertRaisesRegex(
+                        ValueError, "before to_empty.*init_states"
+                    ):
+                        cast(parent_type(child))
+                    self.assertIs(child.buf, original)
+                    torch.testing.assert_close(child.buf, expected, rtol=0, atol=0)
+                    self.assertIsNone(child.optional)
+
+    def test_meta_cast_materialize_initialize(self):
+        for dtype in (torch.float16, torch.bfloat16, torch.float64):
+            with self.subTest(dtype=dtype):
+                with torch.device("meta"):
+                    m = self.WithBuffer()
+                m.to(dtype)
+                self.assertEqual(m.buf.dtype, dtype)
+                m.to_empty(device="cpu")
+                m.init_states(buffer_device=torch.device("cpu"))
+                self.assertEqual(m.weight.dtype, dtype)
+                torch.testing.assert_close(m.buf, torch.linspace(0, 1, 7))
+
+    def test_device_moves_and_materialized_to_empty(self):
+        m = self.WithBuffer()
+        expected = m.buf.clone()
+        m.float().cpu().to(memory_format=torch.contiguous_format)
+        torch.testing.assert_close(m.buf, expected, rtol=0, atol=0)
+        m.to_empty(device="cpu")
+        self.assertEqual(m.buf.dtype, torch.float32)
+        m.to("meta")
+        self.assertTrue(m.buf.is_meta)
+
+    def test_spmd_annotations_preserved(self):
+        m = self.WithBuffer()
+        spmd.assert_type(m.buf, SpmdType({}))
+        m.to_empty(device="cpu")
+        self.assertTrue(spmd.has_local_type(m.buf))
+
+
 if __name__ == "__main__":
     unittest.main()

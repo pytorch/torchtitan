@@ -15,6 +15,8 @@ from typing import Any
 from monarch.actor import Actor, concurrent_endpoint, current_size
 
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
 
@@ -34,21 +36,19 @@ class _InterGeneratorRouterActorEndpoints:
     @concurrent_endpoint
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
         routing_session_id: str | None,
-        sampling_config: Any | None,
-        metrics_prefix: str,
-    ) -> Any:
+        sampling_config: SamplingConfig | None,
+    ) -> Completion:
         return await super().generate(
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
         )
 
     @concurrent_endpoint

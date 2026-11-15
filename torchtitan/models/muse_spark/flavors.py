@@ -8,12 +8,15 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
-from typing import cast, Literal
+from typing import Any, cast, Literal
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -21,8 +24,8 @@ from torchtitan.config.transform import (
 )
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import (
+    DeterministicVarlenInnerAttention,
     FlexInnerAttention,
-    QKVLinear,
     SlidingWindowFlexInnerAttention,
     SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
@@ -66,7 +69,6 @@ from torchtitan.models.common.nn_modules import Conv1d, GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.rope import ComplexRoPE, ComplexVisionRoPE, RoPE
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
@@ -94,6 +96,7 @@ from .model import (
     MuseSparkLMHead,
     MuseSparkModel,
     MuseSparkNormPreservingResidualConnection,
+    MuseSparkQKVLinear,
     MuseSparkRMSNorm,
     MuseSparkRMSNormWithInputScale,
     MuseSparkTransformerBlock,
@@ -116,6 +119,54 @@ from .vision_encoder_sharding import (
     cp_replicated_vision_sharding_config,
     navit_encoder_sharding_config,
 )
+
+
+# Muse Spark Open encodes images as <|image_start|> + repeated <|patch|> +
+# <|image_end|>; videos as <|vid_start|> + timestamped runs of <|video|>, separated
+# by <|vid_frame_separator|>, then <|vid_end|>; and audio as <|soft_audio_start|> +
+# repeated <|audio|> + <|soft_audio_end|>.
+MUSE_SPARK_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "audio_token": "<|audio|>",
+    "audio_start_token": "<|soft_audio_start|>",
+    "audio_end_token": "<|soft_audio_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+
+# TODO: Add the Muse Spark Open tokens to tests/assets/tokenizer and remove
+# this debug-only mapping.
+MUSE_SPARK_DEBUG_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+    "audio_token": "<|media_pad|>",
+    "audio_start_token": "<|media_begin|>",
+    "audio_end_token": "<|media_end|>",
+    "pad_token": "<|endoftext|>",
+}
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``). Video applies the image settings to every frame.
+MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "patch_order": "raster",
+    "video_resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    # The released processor_config.json resamples with LANCZOS.
+    "image_interpolation_mode": "lanczos",
+}
 
 
 # The query is scaled by this tuned constant divided by sqrt(head_dim) after
@@ -389,7 +440,7 @@ def _attention_config(
         n_kv_heads=num_kv_heads,
         head_dim=head_dim,
         dim=dim,
-        qkv_linear=QKVLinear.Config(
+        qkv_linear=MuseSparkQKVLinear.Config(
             head_dim=head_dim,
             n_heads=num_heads,
             n_kv_heads=num_kv_heads,
@@ -559,7 +610,7 @@ def _muse_spark_navit_attention_config(
         dim=latent_dim,
         num_heads=num_heads,
         rope=rope,
-        inner_attention=FlexInnerAttention.Config(
+        inner_attention=DeterministicVarlenInnerAttention.Config(
             sharding_config=vision_inner_attention_sharding_config(),
         ),
         wq=Linear.Config(
@@ -580,7 +631,7 @@ def _muse_spark_navit_attention_config(
             bias=True,
             sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
         ),
-        proj=InvariantRowParallelLinear.Config(
+        proj=RowParallelLinear.Config(
             in_features=latent_dim,
             out_features=latent_dim,
             bias=True,
@@ -602,7 +653,7 @@ def _muse_spark_navit_mlp_config(
             bias=True,
             sharding_config=vision_colwise_sharding_config(),
         ),
-        fc2=InvariantRowParallelLinear.Config(
+        fc2=RowParallelLinear.Config(
             in_features=mlp_hidden_dim,
             out_features=latent_dim,
             bias=True,
@@ -628,7 +679,6 @@ def muse_spark_navit_encoder_config(
     use_rope: bool = True,
     rope_theta: float = 10000.0,
     max_rope_positions: int = 8193,
-    grid_sample_mode: str = "bilinear",
 ) -> NaViTEncoder.Config:
     head_dim = latent_dim // num_heads
     output_dim = latent_dim * downsample_factor**2
@@ -688,7 +738,6 @@ def muse_spark_navit_encoder_config(
             normalized_shape=latent_dim,
             sharding_config=invariant_norm_sharding_config(),
         ),
-        grid_sample_mode=grid_sample_mode,
         pos_emb_grid_order="legacy_spark",
         param_init=_VISION_POSITION_INIT,
         sharding_config=navit_encoder_sharding_config(),
@@ -763,7 +812,6 @@ def _muse_spark_config(
     load_balance_coeff: float | None,
     expert_bias_init: float,
     attn_backend: str,
-    moe_comm_backend: str,
     parallelism: ParallelismConfig,
     dataset_modalities: tuple[Literal["vision", "audio"], ...],
     audio_encoder: MuseSparkAudioEncoder.Config,
@@ -775,8 +823,6 @@ def _muse_spark_config(
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     if attn_backend not in {"flex", "varlen"}:
         raise ValueError("Muse Spark supports only attn_backend='flex' or 'varlen'")
-    if moe_comm_backend != "standard":
-        raise ValueError("Muse Spark supports only moe_comm_backend='standard'")
 
     assert len(post_norm_gain_centers) == num_layers
 
@@ -932,7 +978,6 @@ def _muse_spark_config(
 
 def _debugmodel(
     attn_backend: str,
-    moe_comm_backend: str,
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
@@ -995,7 +1040,6 @@ def _debugmodel(
         load_balance_coeff=None,
         expert_bias_init=0.125,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
         dataset_modalities=dataset_modalities,
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
@@ -1006,7 +1050,6 @@ def _debugmodel(
 
 def _muse_spark_816b_a42b(
     attn_backend: str,
-    moe_comm_backend: str,
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
@@ -1049,7 +1092,6 @@ def _muse_spark_816b_a42b(
         load_balance_coeff=1e-3,
         expert_bias_init=0.0,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
         dataset_modalities=dataset_modalities,
         audio_encoder=audio_encoder,
         vision_encoder=vision_encoder,
@@ -1091,7 +1133,6 @@ def build_model_config(
     *,
     parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
-    moe_comm_backend: str = "standard",
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> MuseSparkModel.Config:
@@ -1111,7 +1152,6 @@ def build_model_config(
         )
     config = get_config(
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
         seq_len=context_len,
         parallelism=ParallelismConfig() if parallelism is None else parallelism,
     )

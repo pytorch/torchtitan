@@ -12,8 +12,54 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from torch.distributed._functional_collectives import AsyncCollectiveTensor
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+
+
+class _WaitAsyncCollective(torch.autograd.Function):
+    """Wait on an ``AsyncCollectiveTensor`` and keep its autograd edge."""
+
+    @staticmethod
+    def forward(  # pyrefly: ignore [bad-override]
+        ctx, x: AsyncCollectiveTensor
+    ) -> torch.Tensor:
+        return x.trigger_wait()
+
+    @staticmethod
+    def backward(  # pyrefly: ignore [bad-override]
+        ctx, grad: torch.Tensor
+    ) -> torch.Tensor:
+        return grad
+
+
+def _wait_async_collective_inputs(
+    compiled: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Pass compiled regions plain tensors instead of un-awaited collectives.
+
+    Async redistributions, such as those at Module boundaries, return
+    ``AsyncCollectiveTensor``s. AOTAutograd unwraps such an input with
+    ``trigger_wait()``, which returns the inner tensor without
+    ``requires_grad``, so the compiled region's output has no grad path back to
+    the collective input. Only top-level arguments are awaited; no region
+    currently receives an async collective inside a container.
+    TODO(pytorch/pytorch#201700): Remove once AOTAutograd keeps the
+    ``requires_grad`` of an unwrapped ``AsyncCollectiveTensor`` input.
+    """
+
+    def wait(value: Any) -> Any:
+        if isinstance(value, AsyncCollectiveTensor):
+            return _WaitAsyncCollective.apply(value)
+        return value
+
+    @functools.wraps(compiled)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        args = tuple(wait(value) for value in args)
+        kwargs = {name: wait(value) for name, value in kwargs.items()}
+        return compiled(*args, **kwargs)
+
+    return run
 
 
 _LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[["LocalCompileConfig"], None]]] = {}
@@ -87,7 +133,9 @@ def local_compile(
                     "batch-invariant mode; remove it from local_compile.regions."
                 )
             if enabled:
-                fn = config._compile(reference, fullgraph=True, **compile_kwargs)
+                fn = _wait_async_collective_inputs(
+                    config._compile(reference, fullgraph=True, **compile_kwargs)
+                )
             else:
                 fn = reference
 
@@ -105,12 +153,20 @@ def compile(
     reference: Callable[..., Any],
     **compile_kwargs: Any,
 ) -> Callable[..., Any]:
-    """Create an always-compiled helper controlled by ``LocalCompileConfig``."""
-    fn = LocalCompileConfig()._compile(reference, **compile_kwargs)
+    """Create a helper that always runs compiled, such as FlexAttention.
+
+    The helper is compiled with Inductor when the module loads, so it runs
+    compiled even if ``LocalCompileConfig.apply()`` never runs. ``apply()``
+    compiles it again with the config's ``_compile``, so an out-of-tree backend
+    that overrides ``_compile`` also compiles these helpers.
+    """
+    fn = _wait_async_collective_inputs(
+        LocalCompileConfig()._compile(reference, **compile_kwargs)
+    )
 
     def bind_compile(config: LocalCompileConfig) -> None:
         nonlocal fn
-        fn = config._compile(reference, **compile_kwargs)
+        fn = _wait_async_collective_inputs(config._compile(reference, **compile_kwargs))
 
     @functools.wraps(reference)
     def wrapped(*args: Any, **kwargs: Any) -> Any:

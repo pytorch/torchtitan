@@ -14,11 +14,11 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.components.data.multimodal.vision_processor import (
+    NaViTPatchGridResize,
     VisionProcessor,
 )
-from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -48,6 +48,7 @@ from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3 import (
     build_model_config,
     KIMI_K3_SPECIAL_TOKENS,
+    KIMI_K3_VISION_PROCESSOR_KWARGS,
     KimiK3Model,
 )
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
@@ -63,28 +64,9 @@ from torchtitan_recipes.tests.models.kimi_k2_7 import (
 def _kimi_k3_multimodal_dataloader(
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
-    processor = dataset.processor
-    if not isinstance(processor, VisionProcessor.Config):
-        raise ValueError("Kimi K3 multimodal data requires VisionProcessor.Config")
-
-    processor = VisionProcessor.Config(
-        sample_processor=processor.sample_processor,
-        patch_size=14,
-        temporal_patch_size=1,
-        spatial_merge_size=2,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=256,
-        max_patches_per_side=16,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
     return GrainDataLoader.Config(
-        dataset=replace(dataset, processor=processor),
+        dataset=dataset,
         collator=MultiModalCollator.Config(
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
         ),
     )
@@ -115,6 +97,13 @@ def kimi_k3_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**KIMI_K3_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        # Small images keep the debug vision encoder's grids short.
+        vision_processor=replace(
+            VisionProcessor.Config(**KIMI_K3_VISION_PROCESSOR_KWARGS),
+            resize=NaViTPatchGridResize.Config(
+                max_patches=256, max_patches_per_side=16
+            ),
+        ),
         dataloader=_kimi_k3_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(

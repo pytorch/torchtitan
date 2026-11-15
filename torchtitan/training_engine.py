@@ -28,7 +28,11 @@ from torchtitan.config.configs import (
     TrainingConfig,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed import (
+    maybe_apply_numa_binding,
+    ParallelismContext,
+    utils as dist_utils,
+)
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graph_teardown,
     accelerator_graphs_supported,
@@ -41,6 +45,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
@@ -308,6 +313,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.device = utils.get_local_device()
         # Device has to be set before creating TorchFT manager.
         device_module.set_device(self.device)
+        # Before anything allocates pinned host memory (FSDP CPU offload
+        # shards, pinned batches, EMA copies), so it lands on the GPU's NUMA node.
+        maybe_apply_numa_binding(self.device.index, device_type)
         config = self.config
         set_batch_invariance(config.debug.batch_invariant)
         # TODO: Remove this workaround once supported PyTorch builds ship
@@ -389,6 +397,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             utils.set_default_dtype(TORCH_DTYPE_MAP[self.precision.dtype]),
         ):
             model = self.model_config.build()
+        maybe_store_frozen_params_in_param_dtype_(model, self.precision)
         self.model_cls = type(model)
         adapter_cls = type(model).state_dict_adapter_cls
         self.state_dict_adapter = (
@@ -953,10 +962,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         """Signal that one training-loop iteration has completed."""
         self.profiler.step()
 
-    def close_profiler(self) -> None:
-        """Close the profiler if it was started."""
+    def close_profiler(self, exc: BaseException | None = None) -> None:
+        """Close the profiler if it was started.
+
+        Args:
+            exc: The exception that ended training, if any. It is passed to
+                ``Profiler.__exit__`` so an OOM writes the exit memory snapshot.
+        """
         if hasattr(self, "profiler"):
-            self.profiler.__exit__(None, None, None)
+            if exc is None:
+                self.profiler.__exit__(None, None, None)
+            else:
+                self.profiler.__exit__(type(exc), exc, exc.__traceback__)
             del self.profiler
 
     def close(self) -> None:

@@ -24,81 +24,23 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.local_compile import compile
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.distributed.spmd_types import disable_dense_sp
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    local_head_split,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.models.common.rope import RoPE
 
 compiled_create_block_mask = compile(create_block_mask)
-
-
-class InvariantRowParallelLinear(Linear):
-    """Row-parallel vision projection with an invariant TP output.
-
-    Vision residual activations remain invariant even when decoder sequence
-    parallelism is enabled, so this boundary always performs ``P -> I``. Like
-    ``RowParallelLinear``, the projection and the reduction are the separately
-    controlled remat regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Linear.Config):
-        pass
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self.weight, self.bias
-        linear_fn = remat.region(
-            self._linear,
-            self.remat_region_name("linear"),
-            recompute=self.remat_should_recompute("linear"),
-        )
-        if bias is not None and tp_group is not None:
-            bias = spmd.convert(
-                bias,
-                tp_group,
-                src=spmd.I,
-                dst=spmd.P,
-                expert_mode=True,
-            )
-            # The selected local compute may be native, LoRA, or quantized.
-            # Its row-sharded operands and bias jointly produce a partial output.
-            # TODO: Remove this suppression once spmd_types recognizes the
-            # rowwise F.linear type combination [V, V, P] -> P.
-            with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
-            if spmd.is_type_checking():
-                spmd.assert_local_type_like(
-                    output,
-                    input,
-                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
-                )
-        else:
-            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
-        if tp_group is None:
-            return output
-        # A recomputed reduction after a saved projection keeps the TP-times
-        # larger partial output for replay; save both to avoid it.
-        return remat.region(
-            spmd.redistribute,
-            self.remat_region_name("tp_reduce"),
-            recompute=self.remat_should_recompute("tp_reduce"),
-        )(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=spmd.I,
-            backward_options={"op_dtype": output.dtype},
-        )
 
 
 def create_block_diagonal_mask(
@@ -153,7 +95,10 @@ class VisionMLP(Module):
 
 
 class VisionAttention(Module):
-    """Multi-head self-attention with FlexInnerAttention over visual patches.
+    """Multi-head self-attention over visual patches.
+
+    The inner attention is flex (``BlockMask`` metadata) or varlen
+    (``VarlenAttentionMetadata``); the encoder builds the matching metadata.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
     applied via the configured ``rope`` module so this class is reused
@@ -190,7 +135,7 @@ class VisionAttention(Module):
         self.wv = config.wv.build()
         self.proj = config.proj.build()
         self.rope = config.rope.build() if config.rope is not None else None
-        self.flex_attention = config.inner_attention.build()
+        self.inner_attention = config.inner_attention.build()
 
     def _qkv(
         self, x_TD: torch.Tensor
@@ -205,7 +150,7 @@ class VisionAttention(Module):
         x: torch.Tensor,
         *,
         positions: torch.Tensor,
-        attention_mask: BlockMask,
+        attention_mask: BlockMask | VarlenAttentionMetadata,
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
 
@@ -219,7 +164,7 @@ class VisionAttention(Module):
             q_THDh, k_THDh = self.rope(q_THDh, k_THDh, positions=positions)
 
         out_THDh = remat.region(
-            self.flex_attention,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(q_THDh, k_THDh, v_THDh, attention_metadata=attention_mask)
@@ -246,12 +191,16 @@ class VisionTransformerBlock(Module):
         self.attn = config.attn.build()
         self.mlp = config.mlp.build()
 
+    # The encoder forward already runs under disable_dense_sp, but activation
+    # remat replays each block during backward, after that scope has exited.
+    # Entering it here keeps the replay's TP layout equal to the forward's.
+    @disable_dense_sp()
     def forward(
         self,
         x: torch.Tensor,
         *,
         positions: torch.Tensor,
-        attention_mask: BlockMask,
+        attention_mask: BlockMask | VarlenAttentionMetadata,
     ) -> torch.Tensor:
         attn_out = self.attn(
             self.norm1(x),
