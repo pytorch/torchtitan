@@ -7,8 +7,7 @@
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
 import asyncio
-import pickle
-import subprocess
+import json
 import sys
 from pathlib import PurePosixPath
 from types import SimpleNamespace
@@ -17,7 +16,6 @@ import pytest
 
 pytest.importorskip("verifiers")
 
-import verifiers.v1 as vf
 
 from renderers import CustomRendererConfig
 
@@ -25,33 +23,35 @@ from torchtitan.components.renderer import RenderersConfigAdapter
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.rl.controller.controller import Controller
-from torchtitan.rl.examples.verifiers import env_server
+from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
     TerminalBenchTerminusHarnessConfig,
 )
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
-    _terminal_bench_rollouter_config,
+    terminal_bench_env_config,
+    terminal_bench_rollouter_config,
 )
 from verifiers.v1.runtimes import ProgramResult
-from verifiers.v1.serve import env_config_data
-from verifiers.v1.tasksets.harbor import HarborEnvConfig
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
+from verifiers.v1.utils.loaders import (
+    load_environment,
+    load_harness,
+    resolve_env_config,
+)
 
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
 MAX_TURNS = 64
-MAX_CONCURRENT_ROLLOUTS = 64
 
 
 def _rollouter_config(train_dataset: str, validation_dataset: str):
-    return _terminal_bench_rollouter_config(
-        train_dataset,
-        validation_dataset,
+    return terminal_bench_rollouter_config(
+        train_env=terminal_bench_env_config(dataset=train_dataset, max_turns=MAX_TURNS),
+        validation_env=terminal_bench_env_config(
+            dataset=validation_dataset, max_turns=MAX_TURNS
+        ),
         max_context_length=MAX_CONTEXT_LENGTH,
-        max_turns=MAX_TURNS,
-        max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
     )
 
 
@@ -93,7 +93,7 @@ def _run_terminus_program(
 
     harness_config = _rollouter_config(
         TRAIN_DATASET, EVAL_DATASET
-    ).verifiers_env_server.environment.agent.harness
+    ).training_dataloader.dataset.env.agent.harness
     harness = load_harness(harness_config.model_copy(update=options))
     runtime = _RecordingRuntime()
     asyncio.run(
@@ -215,72 +215,20 @@ def test_tmux_server_outlives_launch_until_cleanup() -> None:
     assert list(runtime.files) == ["/tmp/vf-terminus-2-trace.prompts.json"]
 
 
-def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
-    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
-    environment = config.verifiers_env_server.environment
-
-    assert isinstance(environment, HarborEnvConfig)
-    assert isinstance(environment.agent.runtime, vf.DockerConfig)
-    assert isinstance(environment.agent.harness, TerminalBenchTerminusHarnessConfig)
-    assert environment.agent.harness.version == "0.22.0"
-    assert config.worker.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
-    assert environment.agent.max_turns == MAX_TURNS
-    assert environment.agent.timeout.rollout == 7200
-    assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
-    assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
-    assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
-    worker_config = resolve_env_config(env_config_data(environment))
-    assert worker_config.agent.harness == environment.agent.harness
+def test_each_worker_loads_the_terminal_bench_taskset_and_harness() -> None:
+    """The env a worker builds from a sample's JSON: the ids resolve to this example's package."""
+    env_config = _rollouter_config(
+        TRAIN_DATASET, EVAL_DATASET
+    ).training_dataloader.dataset.env
+    env = load_environment(resolve_env_config(json.loads(env_config.model_dump_json())))
+    assert type(env.taskset) is taskset.TerminalTaskset
     assert isinstance(
-        load_harness(worker_config.agent.harness), TerminalBenchTerminusHarness
+        load_harness(env.config.agent.harness), TerminalBenchTerminusHarness
     )
-
-
-def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
-    """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
-    resolves the env config, whose taskset id names the example's installed package. It must
-    find the taskset and the harness without importing torch, vLLM or Monarch.
-    """
-    captured = {}
-
-    def serve_env(**kwargs) -> None:
-        captured["main"] = sys.modules["__main__"]
-        captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
-        captured["config_data"] = pickle.dumps(kwargs["config_data"])
-
-    monkeypatch.setattr(env_server, "serve_env", serve_env)
-    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
-    monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
-    monkeypatch.setenv("no_proxy", "")
-    monkeypatch.setenv("NO_PROXY", "")
-    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).verifiers_env_server
-    env_server._run_env_server_process(
-        environment=env_config_data(config.environment),
-        serve=config.serve,
-        address_queue=None,
-        death_pipe=None,
-    )
-
-    # Spawn re-runs __main__ in each worker if it has a module name or a file.
-    assert captured["main"].__spec__ is None
-    assert not hasattr(captured["main"], "__file__")
-    worker = f"""
-import pickle, sys
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
-pickle.loads({captured["log_setup"]!r})()
-env_config = resolve_env_config(pickle.loads({captured["config_data"]!r}))
-print(type(load_harness(env_config.agent.harness)).__name__)
-print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.split() == ["TerminalBenchTerminusHarness", "[]"]
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:
-    with pytest.raises(ValueError, match="different datasets"):
+    with pytest.raises(ValueError, match="different tasksets"):
         _rollouter_config(EVAL_DATASET, EVAL_DATASET)
 
 
@@ -313,11 +261,15 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.generator.engine.cuda_graph.mode == "FULL_DECODE_ONLY"
     assert config.num_generators == 8
     assert config.generator.parallelism.data_parallel_degree == 1
+    rollouter = config.rollouter
+    assert rollouter.training_dataloader.dataset.env.taskset.dataset == TRAIN_DATASET
+    assert rollouter.validation_dataset.env.taskset.dataset == EVAL_DATASET
+    # `Controller.__init__` dumps the config: a pydantic env config becomes a dict, not its repr.
+    dumped_rollouter = config.to_dict()["rollouter"]
     assert (
-        config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
-        == TRAIN_DATASET
+        dumped_rollouter["validation_dataset"]["env"]["taskset"]["dataset"]
+        == EVAL_DATASET
     )
-    assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
 
 
 def _num_kv_heads(model: object) -> int:
@@ -350,7 +302,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     assert config.generator.model.max_context_length == 16384
     assert config.rollouter.worker.generation_server.max_rollout_tokens == 16384
     assert config.generator.sampling.max_tokens == 4096
-    assert config.rollouter.verifiers_env_server.environment.agent.max_turns == 8
+    assert config.rollouter.training_dataloader.dataset.env.agent.max_turns == 8
     assert config.generator.engine.cuda_graph.mode == "NONE"
     assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
     assert _num_kv_heads(config.generator.model) == 2
@@ -359,10 +311,10 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     assert config.trainer.parallelism.data_parallel_shard_degree == 4
     assert config.num_generators == 4
     assert (
-        config.rollouter.training_dataloader.dataset.verifiers_taskset.dataset
+        config.rollouter.training_dataloader.dataset.env.taskset.dataset
         == TRAIN_DATASET
     )
-    assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
+    assert config.rollouter.validation_dataset.env.taskset.dataset == EVAL_DATASET
 
 
 @pytest.mark.parametrize(
@@ -436,8 +388,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     """Every model trains on the same loop; only size-dependent settings differ.
 
     Master weights stay fp32 (the default): at a 1e-6 learning rate bf16
-    parameters round most updates away. The env server must run every rollout
-    the controller keeps in flight, or the excess queues and the generators idle.
+    parameters round most updates away.
     """
     config = _terminal_bench_config(name)
     assert config.precision.dtype == "float32"
@@ -445,14 +396,9 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
     assert config.generator.sampling.max_tokens == 16384
-    agent = config.rollouter.verifiers_env_server.environment.agent
+    agent = config.rollouter.training_dataloader.dataset.env.agent
     assert agent.max_turns == 120
     assert (
         config.rollouter.worker.generation_server.max_rollout_tokens
         == config.trainer.model.max_context_length
-    )
-    loop = config.async_loop
-    serve = config.rollouter.verifiers_env_server.serve
-    assert serve.pool.num_workers * serve.max_concurrent >= (
-        loop.max_active_rollout_groups * loop.num_samples_per_prompt
     )

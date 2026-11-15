@@ -179,15 +179,13 @@ class MonarchActorSystem(ActorSystem):
         config: BaseRolloutWorker.Config,
         *,
         num_workers: int,
-        num_threads: int,
-        **kwargs: Any,
+        num_threads: int | None,
     ) -> list[Any]:
         self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
         actors = self._rollout_worker_mesh.spawn(
             "rollout_worker",
             RolloutWorkerActor,
             worker_config=config,
-            worker_kwargs=kwargs,
             num_threads=num_threads,
             structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )

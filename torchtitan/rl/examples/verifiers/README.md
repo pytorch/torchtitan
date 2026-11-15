@@ -1,81 +1,85 @@
 # Verifiers integration
 
-This directory contains the optional bridge between TitanRL and
-[Verifiers](https://github.com/PrimeIntellect-ai/verifiers). Other TitanRL
-recipes do not import or require Verifiers.
+Runs [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) envs in TitanRL, pinned to
+Verifiers 0.4.0 (the `verifiers.v1` API). Other TitanRL recipes don't import Verifiers.
 
-The ownership boundary is:
+- TitanRL picks the tasks, serves the model calls and trains on the scored groups.
+- Verifiers runs the env: the agent, its sandbox, its tools and the grade.
 
-- TitanRL loads samples, schedules rollout groups, routes generation, tracks
-  policy versions, computes advantages, and trains the policy.
-- Verifiers runs the environment, agent or tool loop, runtime, and task reward.
-- The adapter converts samples and traces between the two systems.
+The two examples, [`dapo_math/`](./dapo_math) and [`terminal_bench/`](./terminal_bench), each
+have their own README and dependencies. Start with DAPO math: single-turn, no sandbox.
 
-Reusable bridge code lives alongside this README. Each experiment has its own
-package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
-[`terminal_bench/`](./terminal_bench) (multi-turn terminal agent on Harbor tasks).
+Each task carries its env's config, and a worker serves every env it is sent. So one worker can
+run DAPO and Terminal-Bench groups side by side, and a run can validate on another env than it
+trains on. One training stream that mixes two envs isn't supported yet (a TODO in
+[`data.py`](./data.py)).
 
-## Integration flow
+## How it works
 
 One group, top to bottom. Each column is a process, or the agent in its runtime.
 
 ```text
-     controller      rollout worker            env server     agent        router     generator
-     (Rollouter)     (VerifiersRolloutWorker   (Verifiers)    (runtime)
-                     and its GenerationServer)
-          |                  |                      |              |            |           |
- 1        |--run_group------>|                      |              |            |           |
-          |                  |                      |              |            |           |
- 2        |                  |--task, per rollout-->|              |            |           |
-          |                  |                      |              |            |           |
- 3        |                  |                      |--start------>|            |           |
-          |                  |                      |              |            |           |
- 4        |                  |                      |<--chat-------|            |           |
-          |                  |                      |              |            |           |
- 5        |                  |<--token ids----------|              |            |           |
-          |                  |                      |              |            |           |
- 6        |                  |--reserve---------------------------------------->|           |
-          |                  |--generate---------------------------------------------------->|
-          |                  |                      |              |            |           |
- 7        |                  |--tokens, logprobs--->|--reply------>|            |           |
-          |                  |                      |              |            |           |
- 8        |                  |                      |--grade------>|            |           |
-          |                  |                      |              |            |           |
- 9        |                  |<--trace, reward------|              |            |           |
-          |                  |--release_session------------------------------->|           |
-          |                  |                      |              |            |           |
-10        |<--scored group---|                      |              |            |           |
+     controller      rollout worker                                          agent      router  generator
+     (Rollouter)     Verifiers env  interception  train client  Generation   (runtime)
+                                    server                      Server
+          |               |              |              |           |            |          |        |
+ 1        |--run_group--->|              |              |           |            |          |        |
+          |               |              |              |           |            |          |        |
+ 2        |               |--start agent------------------------------------->|          |        |
+          |               |              |              |           |            |          |        |
+ 3        |               |              |<--chat-------------------------------|          |        |
+          |               |              |              |           |            |          |        |
+ 4        |               |              |--messages--->|           |            |          |        |
+          |               |              |              |           |            |          |        |
+ 5        |               |              |              |--tokens-->|            |          |        |
+          |               |              |              |           |            |          |        |
+ 6        |               |              |              |           |--reserve------------>|        |
+          |               |              |              |           |            |          |        |
+ 7        |               |              |              |           |--generate------------------->|
+          |               |              |              |           |            |          |        |
+ 8        |               |              |              |<--tokens--|            |          |        |
+          |               |              |              |           |            |          |        |
+ 9        |               |              |--reply------------------------------>|          |        |
+          |               |              |              |           |            |          |        |
+10        |               |--grade------------------------------------------->|          |        |
+          |               |              |              |           |            |          |        |
+11        |               |--release_session------------------------------------------->|        |
+          |               |              |              |           |            |          |        |
+12        |<--group-------|              |              |           |            |          |        |
 ```
 
-1. The controller sends one task to a rollout worker. The task is plain data from
-   [`data.py`](./data.py).
-2. The worker sends the task to the env server once per rollout of the group: a plain dict,
-   msgpack over ZMQ ([`env_server.py`](./env_server.py)).
-3. The env server starts the agent in the env's runtime, e.g. a local process or a Docker
-   container. With a pool, one of its pool workers runs the rollout.
-4. Each agent turn, the agent sends a chat request to Verifiers' interception server, in the env
-   server. Verifiers' train client renders the messages to token ids.
-5. The token ids reach the rollout worker's [`GenerationServer`](./generation_server.py), over
-   HTTP on the controller host.
-6. The GenerationServer calls TitanRL's `generate_fn`, which reserves a generator at the router
-   and then calls that generator.
-7. The GenerationServer answers with the tokens and logprobs, and keeps the call's policy version
-   and generator metrics: the trace has no field for them. The agent gets its reply. Steps 4 to
-   7 repeat every turn.
-8. When the agent stops, Verifiers grades the rollout, e.g. by running the task's tests.
-9. The env server returns the rollout's traces. The worker releases each trace's routing session
-   at the router.
-10. The worker turns the rollout's trainable trace into TitanRL rollout turns
-    ([`rollouter.py`](./rollouter.py)), scores the group, computes its advantages, and returns it.
+1. The controller sends one task to the rollout worker with the fewest rollouts in flight. The
+   task is plain data from [`data.py`](./data.py), with the config of the env that runs it.
+   A worker runs many groups at once.
+2. The worker runs the task `group_size` times with Verifiers' `env.run_slot`. For each rollout,
+   Verifiers starts the agent in the env's runtime.
+3. Each agent turn, the agent sends a chat request to the interception server: Verifiers' HTTP
+   server in the worker that stands in for the model. A local Docker agent on Linux reaches it
+   through Verifiers' egress proxy, one more hop for the same request.
+4. The interception server hands the messages to Verifiers' train client.
+5. The train client renders them to tokens and posts them to the worker's
+   [`GenerationServer`](./generation_server.py), on loopback.
+6. The GenerationServer calls TitanRL's `generate_fn`, which reserves a generator at the router.
+7. `generate_fn` calls that generator.
+8. The GenerationServer answers with the tokens and logprobs, and keeps the call's policy
+   version and generator metrics.
+9. The agent gets its reply. Steps 3 to 9 repeat every turn.
+10. When the agent stops, Verifiers grades the rollout, e.g. by running the task's tests.
+11. The worker releases each trace's routing session at the router.
+12. The worker turns the trainable agent's trace into a TitanRL rollout
+    ([`rollouter.py`](./rollouter.py)). Other agents' traces, e.g. a judge's, don't train. The
+    worker returns the scored group. The controller frees the group's KV cache and trains on it.
 
-How many processes: the controller, its rollout workers (one per `rollouts_per_worker` training
-rollouts in flight), and one env server that all workers share. With a pool
-(`verifiers_env_server.serve.pool`), the env server runs its rollouts in its pool workers. So 4
-rollout workers and a pool of 8 add 4 + 1 + 8 processes to the controller, not 4 x 8.
+Shutdown, at the end of training:
 
-The taskset is set once, in the training dataset (`VerifiersTaskDataset.Config.verifiers_taskset`).
-`VerifiersRollouter.Config` fills the env server's taskset from it, so leave
-`verifiers_env_server.environment.taskset` unset.
+1. The controller closes the generators, so pending `generate_fn` calls fail fast.
+2. It waits a short time for the groups still running (`Rollouter.close`).
+3. It calls each worker's `close`. The worker cancels the rollouts still running: each one's
+   `run_slot` stops its own runtime, e.g. removes its container. Then the worker stops serving its
+   envs (their interception servers and shared tools), then its GenerationServer. A `close` that
+   raises, or that still runs after 60 s, is logged, and step 4 runs anyway.
+4. The controller stops the worker processes. Step 3 runs before this stop because Monarch gives
+   an actor's own cleanup 3 s, then fails the job.
 
 ## Taskset ids
 
@@ -114,16 +118,13 @@ torchtitan_recipes/rl/verifiers_my_task.py # recipe functions that return a Cont
 
 Install it with `pip install -e torchtitan/rl/examples/verifiers/my_task`. Start the recipe from a
 copy of [`verifiers_dapo_math.py`](../../../../torchtitan_recipes/rl/verifiers_dapo_math.py), and
-change its `VerifiersRollouter.Config`: your `TasksetConfig` with
-`id="torchtitan-verifiers-my-task"` (see "Taskset ids") in its training and validation datasets,
-and your agent, harness and runtime in `verifiers_env_server.environment`. Then run:
+change its env configs: your `TasksetConfig` with `id="torchtitan-verifiers-my-task"`, and your
+agent, harness and runtime. Training and validation each name their env, so one run can validate on
+another taskset. Set `ValidationConfig.steps` to your validation set's size, or to -1 to read it
+once. Then run:
 
 ```bash
 python -m torchtitan.rl.train \
   --module torchtitan_recipes.rl.verifiers_my_task \
   --config <recipe function name>
 ```
-
-See [DAPO Math](./dapo_math) for a complete single-turn example and
-[Terminal-Bench](./terminal_bench) for a multi-turn agent example. This
-integration pins Verifiers 0.4.0 and uses its `verifiers.v1` API.
