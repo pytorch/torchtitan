@@ -75,6 +75,3 @@ def _load_math_dataset(
     if name == "dapo_math":
         return DapoMathDataset.Config(shuffle=False).build(), 12643
     return AIME2025Dataset.Config().build(), 30
-
-
-__all__ = ["VerifiersMathTaskset"]

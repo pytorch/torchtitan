@@ -14,7 +14,6 @@ import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
-from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.rollout.data import RLDataset
 
 
@@ -61,10 +60,7 @@ class VerifiersTaskDataset(RLDataset):
             }
 
     def __init__(self, config: Config) -> None:
-        verifiers_taskset_config = config.verifiers_taskset.model_copy(
-            update={"id": register_local_taskset_alias(config.verifiers_taskset.id)}
-        )
-        verifiers_taskset = load_taskset(verifiers_taskset_config)
+        verifiers_taskset = load_taskset(config.verifiers_taskset)
         if config.num_tasks is None and verifiers_taskset.INFINITE:
             raise ValueError(
                 f"Verifiers taskset {config.verifiers_taskset.id!r} is infinite; "

@@ -1,0 +1,16 @@
+# The Terminal-Bench example as an installable Verifiers plugin, id
+# "torchtitan-verifiers-terminal-bench". Install it with its dependencies, next to TitanRL's RL
+# dependencies: pip install -e torchtitan/rl/examples/verifiers/terminal_bench
+[project]
+name = "torchtitan-verifiers-terminal-bench"
+version = "0.1.0"
+description = "TitanRL's Terminal-Bench example as a Verifiers taskset and harness"
+requires-python = ">=3.11"
+dependencies = ["verifiers==0.4.0", "harbor==0.24.0"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["torchtitan_verifiers_terminal_bench"]

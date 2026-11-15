@@ -71,14 +71,33 @@ One group, top to bottom. Each column is a process, or the agent in its runtime.
 How many processes: the controller, its rollout workers (one per `rollouts_per_worker` training
 rollouts in flight), and one env server that all workers share. With a pool
 (`verifiers_env_server.serve.pool`), the env server runs its rollouts in its pool workers. So 4
-rollout workers and a pool of 8 add 4 + 1 + 8 processes to the controller, not 4 x 8. The env server
-and each pool worker first run [`worker_setup.py`](./worker_setup.py), so that module must not
-import torch: importing torch costs each process about 0.5 GB of memory (peak RSS after
-`import torch`).
+rollout workers and a pool of 8 add 4 + 1 + 8 processes to the controller, not 4 x 8.
 
 The taskset is set once, in the training dataset (`VerifiersTaskDataset.Config.verifiers_taskset`).
 `VerifiersRollouter.Config` fills the env server's taskset from it, so leave
 `verifiers_env_server.environment.taskset` unset.
+
+## Taskset ids
+
+Verifiers loads a taskset, harness or env by id: the name of an installed package. It imports
+the package's module ("-" becomes "_") and takes the one class of that kind in its `__all__`:
+
+```text
+id "torchtitan-verifiers-terminal-bench"
+  import torchtitan_verifiers_terminal_bench
+  __all__ = ["HarborEnv", "TerminalBenchTerminusHarness", "TerminalTaskset"]
+  taskset -> TerminalTaskset, harness -> TerminalBenchTerminusHarness,
+  env -> HarborEnv (re-exported from Verifiers)
+```
+
+Leave the harness or the env unset, and Verifiers takes the one in the taskset's package, or its
+defaults: the `bash` harness and `SingleAgentEnv`. Don't reuse a built-in plugin's name (e.g.
+`harbor`, `bash`): Verifiers looks for its own first. A `Taskset` subclass needs its own package
+id: Verifiers picks the `Taskset` by id alone.
+
+Each example folder is such a package: its `pyproject.toml` names it, and its
+`torchtitan_verifiers_<example>/` module re-exports the example's classes. Install it, with its
+dependencies, by `pip install -e torchtitan/rl/examples/verifiers/<example>`.
 
 ## Add an experiment
 
@@ -88,15 +107,16 @@ For a task `my_task`:
 torchtitan/rl/examples/verifiers/my_task/
   __init__.py
   data.py                                  # your Taskset and its TasksetConfig
-  requirements.txt                         # its dependencies
+  pyproject.toml                           # package "torchtitan-verifiers-my-task", its dependencies
+  torchtitan_verifiers_my_task/__init__.py # __all__ re-exports your Taskset
 torchtitan_recipes/rl/verifiers_my_task.py # recipe functions that return a Controller.Config
 ```
 
-Install its dependencies with `pip install -r torchtitan/rl/examples/verifiers/my_task/requirements.txt`.
-Start the recipe from a copy of
-[`verifiers_dapo_math.py`](../../../../torchtitan_recipes/rl/verifiers_dapo_math.py), and change its
-`VerifiersRollouter.Config`: your `TasksetConfig` in its training and validation datasets, and
-your agent, harness and runtime in `verifiers_env_server.environment`. Then run:
+Install it with `pip install -e torchtitan/rl/examples/verifiers/my_task`. Start the recipe from a
+copy of [`verifiers_dapo_math.py`](../../../../torchtitan_recipes/rl/verifiers_dapo_math.py), and
+change its `VerifiersRollouter.Config`: your `TasksetConfig` with
+`id="torchtitan-verifiers-my-task"` (see "Taskset ids") in its training and validation datasets,
+and your agent, harness and runtime in `verifiers_env_server.environment`. Then run:
 
 ```bash
 python -m torchtitan.rl.train \

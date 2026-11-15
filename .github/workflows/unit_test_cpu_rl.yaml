@@ -83,7 +83,7 @@ jobs:
         for name in ("torch", "torchvision", "vllm"):
             print(f"{name}=={version(name)}")
         ' > "${RUNNER_TEMP}/nightly-constraints.txt"
-        uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt \
-          -r torchtitan/rl/examples/verifiers/terminal_bench/requirements.txt \
+        uv pip install -e torchtitan/rl/examples/verifiers/dapo_math \
+          -e torchtitan/rl/examples/verifiers/terminal_bench \
           --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv

@@ -59,7 +59,7 @@ def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
     config = VerifiersTaskDataset.Config(
         verifiers_taskset=data.VerifiersMathTasksetConfig(
-            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            id="torchtitan-verifiers-dapo-math",
             dataset="dapo_math",
         ),
         seed=7,
@@ -83,7 +83,7 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
     monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
     dataset = VerifiersTaskDataset.Config(
         verifiers_taskset=data.VerifiersMathTasksetConfig(
-            id="torchtitan.rl.examples.verifiers.dapo_math.data",
+            id="torchtitan-verifiers-dapo-math",
             dataset="dapo_math",
         ),
         num_tasks=2,
@@ -107,7 +107,6 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
         config.environment.taskset
         == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
-    assert config.local_taskset_module == data.__name__
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
