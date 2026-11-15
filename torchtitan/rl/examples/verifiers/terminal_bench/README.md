@@ -6,10 +6,12 @@ Terminus-2 agent works in the task's Docker container, every model call goes to
 TitanRL's generators, and the task's own tests grade the result. Verifiers runs the
 agent and the grading through the [Verifiers bridge](../README.md).
 
-> **Toy sandbox.** Local Docker keeps this example self-contained; it is not a sandbox
-> for real training. Containers run untrusted task code on the controller host and, by
-> default, share its network. For real training, plug in a mature sandbox as the
-> Verifiers runtime. Do not use `SubprocessConfig`: it runs the agent on the host.
+> **Toy sandbox.** Local Docker keeps this example self-contained; it is a placeholder, not a
+> sandbox for real training. Containers run untrusted task code on the controller host. They sit
+> on Docker's shared bridge network and reach the internet through the host. For real training,
+> use your sandbox provider of choice as the Verifiers runtime: see "Sandboxes" in the
+> [Verifiers README](../README.md#sandboxes). Do not use `SubprocessConfig`: it runs the agent on
+> the host.
 
 ## How it works
 

@@ -6,8 +6,30 @@ Verifiers 0.4.1 (the `verifiers.v1` API). Other TitanRL recipes don't import Ver
 - TitanRL picks the tasks, serves the model calls and trains on the scored groups.
 - Verifiers runs the env: the agent, its sandbox, its tools and the grade.
 
-The two examples, [`dapo_math/`](./dapo_math) and [`terminal_bench/`](./terminal_bench), each
-have their own README and dependencies. Start with DAPO math: single-turn, no sandbox.
+Words used below:
+
+```text
+taskset    the list of tasks and how each is graded, e.g. a benchmark's
+harness    the program that runs the agent, e.g. Terminus-2
+runtime    where an agent runs: a local process, a Docker container, a remote sandbox
+env        a taskset plus the agent that solves it: its harness and runtime
+trace      Verifiers' record of one agent's run: each message and model call
+group      the rollouts of one task, scored together
+```
+
+A Verifiers env is what a recipe configures (`vf.SingleAgentEnvConfig`). The two examples,
+[`dapo_math/`](./dapo_math) and [`terminal_bench/`](./terminal_bench), each with its own README and
+dependencies:
+
+```text
+env              taskset                          harness                  runtime
+DAPO math        DAPO math, graded by             none: one model call     a local process
+                 Math-Verify
+Terminal-Bench   TMax or Terminal-Bench, graded   Terminus-2, many turns   a Docker container
+                 by each task's tests                                      per rollout
+```
+
+Start with DAPO math: single-turn, no sandbox.
 
 Each task carries its env's config, and a worker serves every env it is sent. So one worker can
 run DAPO and Terminal-Bench groups side by side, and a run can validate on another env than it
@@ -105,6 +127,71 @@ each reply, back to the agent                            the new completion only
   top-k logprobs on, the batcher's packed step becomes the largest message. A recipe that turns
   either on also sets `async_loop.batcher.rdma_min_tensor_bytes`, so those tensors go by RDMA:
   Monarch caps a message at 10 GiB and fails the whole actor mesh above it.
+
+## Concurrency
+
+One cap: the controller keeps at most K groups of G rollouts in flight, with
+K = `(target_offpolicy_steps + 1) x num_prompts_per_train_step` and G = `num_samples_per_prompt`.
+A group is in flight from when a worker starts it until it returns to the controller. The rest
+follows from K x G:
+
+| what | how many | set by |
+|---|---|---|
+| rollout workers, processes on the controller host | ceil(K x G / rollouts_per_worker) | `Rollouter.Config.rollouts_per_worker` (default 64) |
+| rollouts per worker | a sizing target: whole groups are placed, so a worker can hold up to one group more (groups of 24 at 64: 72); a group larger than it raises | the same |
+| sandboxes | one per running rollout: at most K x G, plus the validation tasks | the agent's runtime |
+| interception servers per worker | one per `multiplex` rollouts in flight (Verifiers' default 32); never shrink | Verifiers: the env's `interception.multiplex` |
+| renderers per worker | one per 256 model calls in flight (Verifiers' default `multiplex`); never shrink | fixed: the worker builds its train client without `multiplex` |
+| threads per worker | `num_threads_per_worker`; None is Python's default, min(32, CPUs + 4) | `Rollouter.Config.num_threads_per_worker` (default 4) |
+| controller host CPUs | one per worker, plus local sandboxes | the host |
+
+- Placement: the Rollouter counts rollouts in flight per worker and sends each group to the
+  worker with the lowest count. It is a list of numbers in the controller, so it works wherever
+  the workers run. A group's count drops when the whole group returns.
+- A whole group runs on one worker, so a group larger than `rollouts_per_worker` raises when the
+  config is built. Raise `rollouts_per_worker` to at least the group size. Example: groups of 128
+  at the default 64 raise; set `rollouts_per_worker=128` and 16 groups run on 16 workers, one
+  group each.
+- Each rollout starts its own sandbox and removes it when it ends. Validation sends all its tasks
+  at once, beside training (`ValidationConfig.steps`). Usually far fewer run: a group stays in
+  flight until its slowest rollout ends.
+- Verifiers' pools grow with the load and never shrink. Loading a second renderer stops the
+  worker's event loop for a moment. At the default 64 rollouts per worker and groups of at most
+  64, a worker holds under 128 rollouts, so it keeps one renderer. A local runtime (Docker too)
+  opens no tunnel; a remote provider without its own tunnel opens one per interception server.
+  Set the interception pool in the env's `interception.multiplex`. The renderer pool stays at
+  Verifiers' default: the worker builds its train client itself.
+- Threads run renders and blocking runtime calls. A render waiting for the renderer lock holds a
+  thread, so a small pool stalls other thread work, e.g. sandbox cleanup. More threads don't
+  render faster: renders hold Python's GIL.
+- CPUs: a local Docker sandbox shares the controller host's CPUs with the workers. `--cpus`
+  limits a container but reserves nothing: count one CPU per worker plus each running sandbox's
+  limit. A remote provider runs sandboxes on its own machines.
+
+## Sandboxes
+
+Each recipe picks a runtime for its agent, e.g. `vf.DockerConfig()` for local runs. Docker is a
+placeholder: real training uses the sandbox provider of your choice, as a Verifiers runtime.
+
+- A remote sandbox provider plugs in as a Verifiers custom runtime (`runtime.type = "custom"`;
+  Verifiers' `docs/runtimes.md`). It implements `start`, `exec`, `write`, and `cleanup` or
+  `teardown`.
+- The agent's model calls come back to the worker's interception server. A provider that brings
+  its own tunnel sets `is_local = True` and rewrites the URL in `host_url`. Then Verifiers opens no
+  tunnel and needs no port per worker.
+- Retry lost sandboxes with Verifiers' retries, e.g. `RetryRule(type="SandboxError")`. The worker
+  releases the routing session of every attempt.
+- Each run has one Verifiers run id (`VerifiersRolloutWorker.Config.run_id`, exported as
+  `VF_RUN_ID`). It labels the run's sandboxes. Verifiers' run-wide limits (e.g.
+  `creates_per_min`) count over every worker that shares a home directory: a lock file in
+  `~/.cache/verifiers`.
+- A worker that is killed can't clean up. A provider's leases reclaim its sandboxes. Docker
+  containers stay. Once the run has stopped, remove them with the command below. Don't run it
+  while the run is live: its containers carry the same label.
+
+```bash
+docker rm -f $(docker ps -aq --filter label=verifiers.run=<run_id>)
+```
 
 ## Failed rollouts
 
