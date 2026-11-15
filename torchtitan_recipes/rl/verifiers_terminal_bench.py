@@ -40,10 +40,7 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.rollouter import (
-    RewardFromVerifiers,
-    VerifiersRolloutWorker,
-)
+from torchtitan.rl.examples.verifiers.rollouter import VerifiersRolloutWorker
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarnessConfig,
 )
@@ -62,7 +59,6 @@ from torchtitan.rl.rollout.recorder import (
     RolloutSampleRecorder,
 )
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -125,13 +121,7 @@ def terminal_bench_rollouter_config(
             ),
         ),
         validation_dataset=VerifiersTaskDataset.Config(env=validation_env),
-        worker=VerifiersRolloutWorker.Config(
-            rubric=Rubric.Config(
-                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
-                error_reward=0.0,
-            ),
-            max_rollout_tokens=max_context_length,
-        ),
+        worker=VerifiersRolloutWorker.Config(max_rollout_tokens=max_context_length),
         # Python's default pool, 32 threads on 28+ CPUs: each render that waits for the renderer
         # lock holds a thread, so a small pool stalls other thread work such as sandbox cleanup.
         # TODO: 4 threads are enough once Verifiers waits for its renderer lock on the event loop.

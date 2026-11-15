@@ -18,7 +18,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 import verifiers.v1 as vf
@@ -34,7 +34,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationSession,
 )
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
-from torchtitan.rl.rollout.rubric import RewardFn
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric, RubricOutput
 from torchtitan.rl.rollout.types import (
     GenerateFn,
     Prompt,
@@ -61,7 +61,8 @@ _CLOSE_TIMEOUT_S = 30.0
 
 
 class RewardFromVerifiers(RewardFn):
-    """Pass through the reward that Verifiers computed during the rollout."""
+    """The grade Verifiers gave the rollout (`Trace.reward`), kept on its last turn.
+    0.0 for a rollout with no turns."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(RewardFn.Config):
@@ -69,10 +70,11 @@ class RewardFromVerifiers(RewardFn):
 
     async def __call__(self, rollout: Rollout, env_input: object) -> float:
         del env_input
-        for turn in reversed(rollout.turns):
-            if VERIFIERS_REWARD_KEY in turn.env_rewards:
-                return float(turn.env_rewards[VERIFIERS_REWARD_KEY])
-        return 0.0
+        return (
+            rollout.turns[-1].env_rewards[VERIFIERS_REWARD_KEY]
+            if rollout.turns
+            else 0.0
+        )
 
 
 def _default_run_id() -> str:
@@ -92,10 +94,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
     trace becomes one TitanRL `Rollout`.
 
     Example:
-        VerifiersRolloutWorker.Config(
-            rubric=Rubric.Config(reward_fns=[RewardFromVerifiers.Config()]),
-            max_rollout_tokens=32768,
-        )
+        VerifiersRolloutWorker.Config(max_rollout_tokens=32768)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -107,6 +106,14 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         run_id: str = field(default_factory=_default_run_id)
         """Verifiers' run id (`VF_RUN_ID`). It labels the run's sandboxes, e.g. its Docker
         containers, and scopes Verifiers' run-wide limits, e.g. `creates_per_min`."""
+
+        rubric: Rubric.Config = field(
+            default_factory=lambda: Rubric.Config(
+                reward_fns=[RewardFromVerifiers.Config()]
+            )
+        )
+        """Verifiers' grade as each trained rollout's reward. Which rollouts train: the "Failed
+        rollouts" table in this folder's README."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -238,6 +245,41 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             rollouts_or_errors=rollouts_or_errors, sample=sample, group_id=group_id
         )
 
+    async def score_group(
+        self, rollouts: list[Rollout], env_input: object
+    ) -> list[RubricOutput]:
+        """Verifiers' grade for each rollout that trains (the "Failed rollouts" table in this
+        folder's README), and reward None for the rest, so they don't train. A timed-out
+        validation rollout also keeps its grade:
+
+            COMPLETED, group 7         its grade
+            ERROR_TIMEOUT, group 7     None        (training; the rubric skips it)
+            ERROR_TIMEOUT, group -3    its grade   (validation)
+
+        Only the rollouts that keep a grade reach the rubric.
+        """
+        keeps_grade = []
+        for rollout in rollouts:
+            # Validation groups have negative ids (`Controller`'s `_validation_group_ids`).
+            is_validation_timeout = (
+                rollout.group_id < 0 and rollout.status is RolloutStatus.ERROR_TIMEOUT
+            )
+            keeps_grade.append(
+                rollout.status in _TRAINED_STATUSES or is_validation_timeout
+            )
+        graded_rollouts = [
+            rollout for rollout, keep in zip(rollouts, keeps_grade, strict=True) if keep
+        ]
+        # Like `make_scored_group`: a group-level rubric never gets an empty list.
+        grades = iter(
+            await super().score_group(rollouts=graded_rollouts, env_input=env_input)
+            if graded_rollouts
+            else []
+        )
+        return [
+            next(grades) if keep else RubricOutput(reward=None) for keep in keeps_grade
+        ]
+
     async def _serving_env(self, env_config_json: str) -> vf.Env:
         """The env for `env_config_json`, loaded and serving from its first group on.
 
@@ -313,60 +355,118 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                 f"(episode error: {episode.last_error})"
             )
         (trace,) = trainable_traces
-
-        # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
-        turns = trace_to_rollout_turns(
+        return trace_to_rollout(
+            episode=episode,
             trace=trace,
             session=sessions[trace.id],
             group_id=group_id,
             rollout_id=episode_index,
         )
-        status = self.rollout_status(verifiers_episode=episode, trace=trace)
-        if not turns:
-            # Verifiers records an overlong first prompt as a failed model call; vLLM and the
-            # renderer both word it "maximum context length".
-            first_prompt_too_long = any(
-                call.error is not None
-                and "maximum context length" in call.error.message
-                for call in trace.calls
-            )
-            if first_prompt_too_long:
-                # The harness builds the first prompt, so the dataset can't be filtered for it;
-                # flag it here as a data problem, not a policy one.
-                logger.warning(
-                    "rollout group=%d/rollout=%d: the first prompt of task %s does not fit the "
-                    "context; marking ERROR",
-                    group_id,
-                    episode_index,
-                    trace.task.key,
-                )
-            status = RolloutStatus.ERROR
-        logs = verifiers_rollout_logs(verifiers_episode=episode, trace=trace)
-        if status.is_error():
-            log_failed_rollout(logs=logs, group_id=group_id, rollout_id=episode_index)
-        else:
-            turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
-        return Rollout(
-            group_id=group_id,
-            rollout_id=episode_index,
-            status=status,
-            turns=turns,
-            logs=logs,
-        )
 
-    @staticmethod
-    def rollout_status(*, verifiers_episode: Any, trace: Any) -> RolloutStatus:
-        # Verifiers flags an expired deadline with is_timeout: a stage's on its trace (which can keep
-        # ok=True), the whole episode's on the episode.
-        if trace.is_timeout or verifiers_episode.is_timeout:
-            return RolloutStatus.ERROR_TIMEOUT
-        if not verifiers_episode.ok or not trace.ok:
+
+def trace_to_rollout(
+    episode: vf.Episode,
+    trace: vf.Trace,
+    *,
+    session: GenerationSession,
+    group_id: int,
+    rollout_id: int,
+) -> Rollout:
+    """One trainable agent run of `episode` as a TitanRL rollout."""
+    turns = trace_to_rollout_turns(
+        trace=trace, session=session, group_id=group_id, rollout_id=rollout_id
+    )
+    # TODO: keep the grade of a rollout with no turns, e.g. a validation timeout before the
+    # policy's first reply. `RewardFromVerifiers` reads 0.0 for it today. It needs an env-reward
+    # field on core `Rollout` (env rewards sit on turns), which only Verifiers would use.
+    if turns:
+        # The rubric reads it through `RewardFromVerifiers`.
+        turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
+    status = rollout_status(episode=episode, trace=trace)
+    if status not in _TRAINED_STATUSES:
+        # One line per rollout that failed. `Rollout.logs["errors"]` keeps every error,
+        # tracebacks included.
+        last_error = trace.last_error or episode.last_error
+        timing = trace.timing
+        logger.warning(
+            "Verifiers rollout failed: group=%d rollout=%d task=%s status=%s stop=%s turns=%d "
+            "dropped=%s error=%s | boot=%.0fs setup=%.0fs agent=%.0fs scoring=%.0fs",
+            group_id,
+            rollout_id,
+            trace.task.key,
+            status.value,
+            trace.stop_condition,
+            trace.num_turns,
+            trace.dropped,
+            None if last_error is None else f"{last_error.type}: {last_error.message}",
+            timing.boot.duration,
+            timing.setup.duration,
+            timing.agent.duration,
+            timing.scoring.duration,
+        )
+    return Rollout(
+        group_id=group_id,
+        rollout_id=rollout_id,
+        status=status,
+        turns=turns,
+        logs={
+            "verifiers_trace_id": trace.id,
+            "task_key": trace.task.key,
+            "stop_condition": trace.stop_condition,
+            "errors": [
+                error.model_dump(mode="json")
+                for error in (*episode.errors, *trace.errors)
+            ],
+        },
+    )
+
+
+# The statuses that train, with Verifiers' grade as their reward: the "trains" column of the
+# "Failed rollouts" table in this folder's README.
+_TRAINED_STATUSES = frozenset(
+    {
+        RolloutStatus.COMPLETED,
+        RolloutStatus.TRUNCATED_MAX_TURNS,
+        RolloutStatus.TRUNCATED_LENGTH,
+    }
+)
+
+
+def rollout_status(episode: vf.Episode, trace: vf.Trace) -> RolloutStatus:
+    """The status of a finished Verifiers rollout. The "Failed rollouts" table in this folder's
+    README lists each status and whether it trains.
+    """
+    # After a retry, `errors` still holds the earlier attempts' errors; the final attempt's
+    # verdict is `ok`.
+    if trace.dropped is not None:
+        return RolloutStatus.ERROR_INFRA
+    failed = not (episode.ok and trace.ok)
+    # A deadline that came with an error, e.g. a sandbox that never started, is that error.
+    if trace.is_timeout and not failed:
+        return RolloutStatus.ERROR_TIMEOUT
+    if failed:
+        # Verifiers' train client turns the renderer's refusal of an overlong prompt into a
+        # ProviderError with status 400 on that call. The generation server answers every
+        # failure with 500, so a 400 means that refusal.
+        last_call_error = trace.calls[-1].error if trace.calls else None
+        if (
+            last_call_error is not None
+            and last_call_error.type == "ProviderError"
+            and last_call_error.status_code == 400
+        ):
+            return RolloutStatus.TRUNCATED_PROMPT_TOO_LONG
+        # Before the policy's first sampled token, a failed harness couldn't install or launch:
+        # an infra failure.
+        if trace.stop_condition == "harness_error" and trace.num_turns > 0:
             return RolloutStatus.ERROR
-        if not trace.is_truncated:
-            return RolloutStatus.COMPLETED
-        if trace.stop_condition == "max_turns":
-            return RolloutStatus.TRUNCATED_MAX_TURNS
+        return RolloutStatus.ERROR_INFRA
+    if trace.num_turns == 0:
+        return RolloutStatus.ERROR_INFRA
+    if trace.stop_condition == "max_turns":
+        return RolloutStatus.TRUNCATED_MAX_TURNS
+    if trace.is_truncated:
         return RolloutStatus.TRUNCATED_LENGTH
+    return RolloutStatus.COMPLETED
 
 
 def trace_to_rollout_turns(
@@ -469,66 +569,6 @@ def _true_spans(mask: np.ndarray) -> list[tuple[int, int]]:
         np.diff(np.concatenate(([False], mask, [False])).astype(np.int8))
     )
     return list(zip(edges[::2].tolist(), edges[1::2].tolist()))
-
-
-def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]:
-    """Summarize how a Verifiers rollout ended, for ``Rollout.logs``.
-
-    Verifiers' own "rollout done" line prints only the error type or stop
-    condition. This keeps the error messages and tracebacks (a failed
-    harness's message ends with its stderr), per-phase wall time and model-call
-    latency. For example, ``agent_sec=7200 model_sec=6900
-    slowest_model_call_sec=1801`` on an agent timeout points at slow generation,
-    not the task.
-    """
-    timing = trace.timing
-    call_seconds = [call.time.duration for call in trace.calls]
-    return {
-        "verifiers_trace_id": trace.id,
-        "task": trace.task.key,
-        "stop_condition": trace.stop_condition,
-        "errors": [
-            error.model_dump(mode="json")
-            for error in (*verifiers_episode.errors, *trace.errors)
-        ],
-        "setup_sec": timing.setup.duration,
-        "agent_sec": timing.agent.duration,
-        "model_sec": timing.agent.model.duration,
-        "harness_sec": timing.agent.harness.duration,
-        "scoring_sec": timing.scoring.duration,
-        "model_calls": len(call_seconds),
-        "failed_model_calls": sum(call.error is not None for call in trace.calls),
-        "slowest_model_call_sec": max(call_seconds, default=0.0),
-    }
-
-
-def log_failed_rollout(logs: dict[str, Any], *, group_id: int, rollout_id: int) -> None:
-    """Log the last error and timing from ``verifiers_rollout_logs`` in one line."""
-    error = logs["errors"][-1] if logs["errors"] else {}
-    traceback_tail = " | ".join(
-        (error.get("traceback") or "").strip().splitlines()[-3:]
-    )
-    logger.warning(
-        "Verifiers rollout failed: trace=%s group=%d rollout=%d task=%s stop=%s "
-        "error=%s: %s | setup=%.0fs agent=%.0fs (model=%.0fs harness=%.0fs) "
-        "scoring=%.0fs | model_calls=%d failed_calls=%d slowest_call=%.0fs | %s",
-        logs["verifiers_trace_id"],
-        group_id,
-        rollout_id,
-        logs["task"],
-        logs["stop_condition"],
-        error.get("type"),
-        error.get("message"),
-        logs["setup_sec"],
-        logs["agent_sec"],
-        logs["model_sec"],
-        logs["harness_sec"],
-        logs["scoring_sec"],
-        logs["model_calls"],
-        logs["failed_model_calls"],
-        logs["slowest_model_call_sec"],
-        traceback_tail,
-    )
 
 
 def _bypass_proxy_for_loopback() -> None:
