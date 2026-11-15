@@ -300,7 +300,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
 
     assert config.trainer.model.max_context_length == 16384
     assert config.generator.model.max_context_length == 16384
-    assert config.rollouter.worker.generation_server.max_rollout_tokens == 16384
+    assert config.rollouter.worker.max_rollout_tokens == 16384
     assert config.generator.sampling.max_tokens == 4096
     assert config.rollouter.training_dataloader.dataset.env.agent.max_turns == 8
     assert config.generator.engine.cuda_graph.mode == "NONE"
@@ -399,6 +399,6 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     agent = config.rollouter.training_dataloader.dataset.env.agent
     assert agent.max_turns == 120
     assert (
-        config.rollouter.worker.generation_server.max_rollout_tokens
+        config.rollouter.worker.max_rollout_tokens
         == config.trainer.model.max_context_length
     )

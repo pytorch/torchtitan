@@ -217,4 +217,4 @@ def test_verifiers_dapo_recipe_loads() -> None:
         ]
     )
     assert isinstance(config.rollouter.worker, VerifiersRolloutWorker.Config)
-    assert config.rollouter.worker.generation_server.max_rollout_tokens == 10240
+    assert config.rollouter.worker.max_rollout_tokens == 10240

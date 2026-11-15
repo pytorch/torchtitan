@@ -36,7 +36,6 @@ from torchtitan.rl.controller.controller import (
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRolloutWorker,
@@ -92,9 +91,7 @@ def _verifiers_math_rollouter_config(*, max_rollout_tokens: int) -> Rollouter.Co
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
             ),
-            generation_server=GenerationServer.Config(
-                max_rollout_tokens=max_rollout_tokens
-            ),
+            max_rollout_tokens=max_rollout_tokens,
         ),
         # Python's default thread pool, as `verifiers_terminal_bench.py` explains.
         num_threads_per_worker=None,

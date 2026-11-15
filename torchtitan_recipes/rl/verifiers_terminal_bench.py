@@ -40,7 +40,6 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRolloutWorker,
@@ -130,9 +129,7 @@ def terminal_bench_rollouter_config(
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
             ),
-            generation_server=GenerationServer.Config(
-                max_rollout_tokens=max_context_length
-            ),
+            max_rollout_tokens=max_context_length,
         ),
         # Python's default pool, 32 threads on 28+ CPUs: each render that waits for the renderer
         # lock holds a thread, so a small pool stalls other thread work such as sandbox cleanup.
