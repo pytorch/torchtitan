@@ -93,14 +93,16 @@ def terminal_bench_env_config(
             ``TerminalTasksetConfig`` and ``TerminalBenchTerminusHarnessConfig``.
     """
     return vf.SingleAgentEnvConfig(
-        taskset=TerminalTasksetConfig(id=package_id, dataset=dataset),
+        taskset=TerminalTasksetConfig(
+            id=package_id, dataset=dataset, ignore_timeouts=False
+        ),
         agent=vf.AgentConfig(
             harness=TerminalBenchTerminusHarnessConfig(id=package_id, version="0.22.0"),
             runtime=vf.DockerConfig(),
             max_turns=max_turns,
-            # The only time limits: the taskset config's `ignore_timeouts=True` (Verifiers'
-            # default) drops each task's own. Why: `examples/verifiers/terminal_bench/README.md`.
-            timeout=AgentTimeoutConfig(setup=600, rollout=7200, scoring=12000),
+            # Setup and agent timeouts apply to every task. Grading uses the task's verifier
+            # timeout from task.toml (ignore_timeouts=False), else Harbor's 600 s.
+            timeout=AgentTimeoutConfig(setup=600, rollout=7200),
         ),
     )
 
