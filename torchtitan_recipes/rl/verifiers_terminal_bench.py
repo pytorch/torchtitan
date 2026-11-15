@@ -76,9 +76,10 @@ TERMINAL_BENCH_PACKAGE_ID = "torchtitan-verifiers-terminal-bench"
 
 
 def terminal_bench_env_config(
-    dataset: str, *, max_turns: int
+    dataset: str, *, max_turns: int, package_id: str = TERMINAL_BENCH_PACKAGE_ID
 ) -> vf.SingleAgentEnvConfig:
-    """Verifiers' single-agent env on a Harbor dataset: Terminus-2 in a local Docker container.
+    """Verifiers' single-agent env on a Harbor dataset, in a local Docker container. The default
+    package's harness is Terminus-2.
 
     Docker is a placeholder for local runs. Set another runtime with
     ``env.model_copy(update={"agent": env.agent.model_copy(update={"runtime": ...})})``.
@@ -86,13 +87,15 @@ def terminal_bench_env_config(
     Args:
         dataset: Harbor dataset id, e.g. ``"local/tmax@v1"``.
         max_turns: The agent's turn limit.
+        package_id: The installed package whose module's ``__all__`` exports the Taskset and
+            the Harness (and an Env, if it needs its own). Default: this example's. Its Taskset
+            and Harness configs must accept the fields set here, those of
+            ``TerminalTasksetConfig`` and ``TerminalBenchTerminusHarnessConfig``.
     """
     return vf.SingleAgentEnvConfig(
-        taskset=TerminalTasksetConfig(id=TERMINAL_BENCH_PACKAGE_ID, dataset=dataset),
+        taskset=TerminalTasksetConfig(id=package_id, dataset=dataset),
         agent=vf.AgentConfig(
-            harness=TerminalBenchTerminusHarnessConfig(
-                id=TERMINAL_BENCH_PACKAGE_ID, version="0.22.0"
-            ),
+            harness=TerminalBenchTerminusHarnessConfig(id=package_id, version="0.22.0"),
             runtime=vf.DockerConfig(),
             max_turns=max_turns,
             # The only time limits: the taskset config's `ignore_timeouts=True` (Verifiers'
