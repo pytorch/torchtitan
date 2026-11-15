@@ -120,12 +120,11 @@ class ActorSystem(Configurable, abc.ABC):
         config: BaseRolloutWorker.Config,
         *,
         num_workers: int,
-        num_threads: int,
-        **kwargs: Any,
+        num_threads: int | None,
     ) -> list[Any]:
         """Spawn ``num_workers`` rollout worker processes on the controller host, each with a
-        default thread pool of ``num_threads`` threads; returns one single-actor handle per
-        worker. ``kwargs`` go to each worker's constructor."""
+        default thread pool of ``num_threads`` threads (None: Python's default); returns one
+        single-actor handle per worker."""
 
     @abc.abstractmethod
     async def stop_rollout_workers(self) -> None:

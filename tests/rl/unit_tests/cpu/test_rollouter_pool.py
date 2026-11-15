@@ -66,7 +66,6 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
         RolloutWorkerActor.__init__(
             actor,
             worker_config=worker_config,
-            worker_kwargs={},
             num_threads=1,
             # Bound like the controller's; the worker overrides source and rank.
             structured_logger_init_fn=functools.partial(
@@ -223,7 +222,6 @@ def test_monarch_spawns_rollout_workers_on_controller_host(monkeypatch) -> None:
         assert args[1] is RolloutWorkerActor
         assert kwargs == {
             "worker_config": "worker_config",
-            "worker_kwargs": {},
             "num_threads": 2,
             "structured_logger_init_fn": structured_logger_init_fn,
         }

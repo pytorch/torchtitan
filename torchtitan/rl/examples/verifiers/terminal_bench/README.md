@@ -13,17 +13,14 @@ agent and the grading through the [Verifiers bridge](../README.md).
 
 ## How it works
 
-Each rollout takes the path in the Verifiers README's
-[integration flow](../README.md#integration-flow). Here:
+The [Verifiers README](../README.md#how-it-works) draws one group's path. Here:
 
-- **Agent.** The env server starts a Docker container from the task's `docker_image` and runs
-  Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and
-  reads the screen back. Each agent turn is one model call.
-- **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the container
-  and reads the reward file it writes.
-
-Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task. A validation
-starts with training and runs beside it (`ValidationConfig`).
+- The agent is Terminus-2 ([`harness.py`](./harness.py)), in a container from the task's
+  `docker_image`. It types commands into a tmux shell and reads the screen back.
+- Verifiers grades a rollout by running the task's `tests/test.sh` in the container and reading
+  the reward file it writes.
+- Validation runs one greedy sample per Terminal-Bench 2.1 task, beside training
+  (`ValidationConfig`).
 
 | What | Where |
 | --- | --- |
@@ -31,7 +28,7 @@ starts with training and runs beside it (`ValidationConfig`).
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
 | Verifiers' Harbor taskset for Terminal-Bench and TMax; Verifiers imports it through `torchtitan_verifiers_terminal_bench/` | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
-| Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
+| Bridge: task dataset, rollout worker, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |
 
 ## Run
@@ -82,22 +79,24 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - Each task must declare a pullable `[environment].docker_image`. Verifiers does not
   build Dockerfiles, and a single Dockerfile-only task makes the dataset fail to load.
   `prepare_tmax.py` writes each TMax task's published image.
-- The tasks' own timeouts are ignored; the timeouts in the recipe file apply.
+- Each task's own time limits are ignored, as Verifiers does by default
+  (`ignore_timeouts=True` on the taskset config): they were set for Harbor's own runtime, so they
+  would also measure inference speed. The recipe's limits apply: setup 600 s, rollout 7,200 s,
+  scoring 12,000 s. Set `ignore_timeouts=False` to apply the tasks' limits too.
 - The validation id has no `@ref`, so it uses whichever revision is in the cache. Pin a
   ref for numbers you want to compare; Terminal-Bench 2.0 and 2.1 are not
   interchangeable.
 - Without Harbor Hub access, pre-populate `~/.cache/harbor` with an exported task tree.
-- To use other datasets, change the ids passed to `_terminal_bench_rollouter_config` in the recipe file.
-  The training and validation datasets must differ.
+- To use other datasets, change the ids passed to `terminal_bench_env_config` in the recipe
+  file. The training and validation datasets must differ.
 
 ## If every reward is 0
 
 - **A grader that never ran scores 0.** Verifiers ignores `tests/test.sh`'s exit status
   and scores a missing or unreadable reward file as 0, the same as a failed task.
   Terminal-Bench 2.1 test scripts install their test tools (`apt-get`, `uv`, pytest)
-  when they run, so the container needs outbound network while grading. With its
-  default network policy, Verifiers' Docker runtime uses host networking, so the
-  controller host needs that access.
+  when they run, so the container needs outbound network while grading. Its traffic
+  leaves through the controller host, so that host needs the access.
 - **The run fails after 10 untrainable batches.** A group whose samples all get the
   same reward is dropped (`TrainingSampleBuilder.drop_zero_std_reward_groups`). The
   batcher warns after each batch's worth of such groups in a row and raises

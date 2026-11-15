@@ -54,7 +54,7 @@ class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetCon
     config: VerifiersMathTasksetConfig
 
     def load(self) -> list[VerifiersMathTask]:
-        """Build the tasks consumed by both the dataset and environment server."""
+        """Every task of the chosen dataset, for training or validation."""
         dataset, num_tasks = _load_math_dataset(self.config.dataset)
         return [
             VerifiersMathTask(

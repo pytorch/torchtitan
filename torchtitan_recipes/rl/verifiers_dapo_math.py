@@ -36,11 +36,9 @@ from torchtitan.rl.controller.controller import (
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
-    VerifiersRollouter,
     VerifiersRolloutWorker,
 )
 from torchtitan.rl.generator.generator import Generator
@@ -50,6 +48,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -61,38 +60,32 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 # verified.
 
 
-def _math_taskset_config(
+def _math_env_config(
     dataset: Literal["dapo_math", "aime2025"],
-) -> VerifiersMathTasksetConfig:
-    return VerifiersMathTasksetConfig(
-        id="torchtitan-verifiers-dapo-math", dataset=dataset
+) -> vf.SingleAgentEnvConfig:
+    """One model call per task, graded by the taskset's Math-Verify reward."""
+    return vf.SingleAgentEnvConfig(
+        taskset=VerifiersMathTasksetConfig(
+            id="torchtitan-verifiers-dapo-math", dataset=dataset
+        ),
+        agent=vf.AgentConfig(
+            harness=VerifiersNullHarnessConfig(id="null"),
+            runtime=vf.SubprocessConfig(),
+            max_turns=1,
+        ),
     )
 
 
-def _verifiers_math_rollouter_config(
-    *, max_rollout_tokens: int
-) -> VerifiersRollouter.Config:
-    return VerifiersRollouter.Config(
+def _verifiers_math_rollouter_config(*, max_rollout_tokens: int) -> Rollouter.Config:
+    return Rollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
-                verifiers_taskset=_math_taskset_config("dapo_math")
+                env=_math_env_config("dapo_math"),
+                select=vf.SelectConfig(shuffle=True, seed=42),
             ),
         ),
         validation_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=_math_taskset_config("aime2025"),
-        ),
-        verifiers_env_server=VerifiersEnvServer.Config(
-            environment=vf.SingleAgentEnvConfig(
-                agent=vf.AgentConfig(
-                    runtime=vf.SubprocessConfig(),
-                    max_turns=1,
-                    harness=VerifiersNullHarnessConfig(id="null"),
-                ),
-            ),
-            serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=1),
-                address="tcp://127.0.0.1:0",
-            ),
+            env=_math_env_config("aime2025")
         ),
         worker=VerifiersRolloutWorker.Config(
             rubric=Rubric.Config(
@@ -103,6 +96,8 @@ def _verifiers_math_rollouter_config(
                 max_rollout_tokens=max_rollout_tokens
             ),
         ),
+        # Python's default thread pool, as `verifiers_terminal_bench.py` explains.
+        num_threads_per_worker=None,
     )
 
 

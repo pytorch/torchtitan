@@ -119,16 +119,20 @@ class Rollouter(Configurable):
         (`Controller.Config.num_rollout_workers`). Whole groups are placed, so a worker can hold up
         to one group more."""
 
-        num_threads_per_worker: int = 4
+        num_threads_per_worker: int | None = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
-        behind every `asyncio.to_thread` call in that process."""
+        behind every `asyncio.to_thread` call in that process. None: Python's default,
+        min(32, CPUs + 4)."""
 
         def __post_init__(self) -> None:
             if self.rollouts_per_worker < 1:
                 raise ValueError(
                     f"rollouts_per_worker must be at least 1, got {self.rollouts_per_worker}"
                 )
-            if self.num_threads_per_worker < 1:
+            if (
+                self.num_threads_per_worker is not None
+                and self.num_threads_per_worker < 1
+            ):
                 raise ValueError(
                     "num_threads_per_worker must be at least 1, got "
                     f"{self.num_threads_per_worker}"
@@ -180,10 +184,6 @@ class Rollouter(Configurable):
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
-        # Constructor args of each rollout worker known only at setup, e.g. a server address.
-        # TODO: VerifiersRollouter is the only user. Once its env runs in the rollout worker, remove
-        # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
-        worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Spawn `num_workers` rollout workers through `actor_system` and set each one up.
         `BaseRolloutWorker.setup_async` describes the other arguments."""
@@ -195,7 +195,6 @@ class Rollouter(Configurable):
             self._config.worker,
             num_workers=num_workers,
             num_threads=self._config.num_threads_per_worker,
-            **(worker_kwargs or {}),
         )
         self._num_rollouts_in_flight = [0] * num_workers
         await asyncio.gather(

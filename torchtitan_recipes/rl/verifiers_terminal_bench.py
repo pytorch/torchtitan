@@ -13,8 +13,6 @@ Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 The Muse Glimmer example is capped at its model's 16K context length.
 """
 
-import math
-
 import verifiers.v1 as vf
 
 from renderers import CustomRendererConfig, Qwen35RendererConfig
@@ -42,11 +40,9 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
-    VerifiersRollouter,
     VerifiersRolloutWorker,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
@@ -66,6 +62,7 @@ from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
+from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
@@ -79,71 +76,55 @@ from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
-_ENV_SERVER_WORKERS = 16
 # Verifiers id of the example's taskset and harness: the package that exports both
 # (`torchtitan/rl/examples/verifiers/terminal_bench/pyproject.toml`).
-_TERMINAL_BENCH_PACKAGE_ID = "torchtitan-verifiers-terminal-bench"
+TERMINAL_BENCH_PACKAGE_ID = "torchtitan-verifiers-terminal-bench"
 
 
-def _terminal_bench_rollouter_config(
-    train_dataset: str,
-    validation_dataset: str,
+def terminal_bench_env_config(dataset: str, *, max_turns: int) -> HarborEnvConfig:
+    """Verifiers' Harbor env on a Harbor dataset: Terminus-2 in a local Docker container.
+
+    Docker is a placeholder for local runs. Set another runtime with
+    ``env.model_copy(update={"agent": env.agent.model_copy(update={"runtime": ...})})``.
+
+    Args:
+        dataset: Harbor dataset id, e.g. ``"local/tmax@v1"``.
+        max_turns: The agent's turn limit.
+    """
+    return HarborEnvConfig(
+        taskset=TerminalTasksetConfig(id=TERMINAL_BENCH_PACKAGE_ID, dataset=dataset),
+        agent=vf.AgentConfig(
+            harness=TerminalBenchTerminusHarnessConfig(
+                id=TERMINAL_BENCH_PACKAGE_ID, version="0.22.0"
+            ),
+            runtime=vf.DockerConfig(),
+            max_turns=max_turns,
+            # The only time limits: the taskset config's `ignore_timeouts=True` (Verifiers'
+            # default) drops each task's own. Why: `examples/verifiers/terminal_bench/README.md`.
+            timeout=AgentTimeoutConfig(setup=600, rollout=7200, scoring=12000),
+        ),
+    )
+
+
+def terminal_bench_rollouter_config(
+    train_env: vf.EnvConfig,
+    validation_env: vf.EnvConfig,
     *,
     max_context_length: int,
-    max_turns: int,
-    max_concurrent_rollouts: int,
-) -> VerifiersRollouter.Config:
-    """Select Harbor datasets by id.
+) -> Rollouter.Config:
+    """Train on ``train_env``'s tasks, shuffled; validate on ``validation_env``'s.
 
-    ``max_context_length`` is the generator's sequence length; the generation
-    server caps each rollout at it. ``max_turns`` is the agent turn limit,
-    which Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server;
-    set it to the number of rollouts the controller keeps in flight, or the
-    excess queues in the env server and the generators idle.
+    ``max_context_length`` is the generator's sequence length.
     """
-    if train_dataset == validation_dataset:
-        raise ValueError(
-            "Training and Terminal-Bench evaluation must use different datasets"
-        )
-
-    return VerifiersRollouter.Config(
+    if train_env.taskset == validation_env.taskset:
+        raise ValueError("Training and validation must use different tasksets")
+    return Rollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
-                verifiers_taskset=TerminalTasksetConfig(
-                    id=_TERMINAL_BENCH_PACKAGE_ID, dataset=train_dataset
-                ),
-                seed=42,
-                shuffle=True,
+                env=train_env, select=vf.SelectConfig(shuffle=True, seed=42)
             ),
         ),
-        validation_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=TerminalTasksetConfig(
-                id=_TERMINAL_BENCH_PACKAGE_ID, dataset=validation_dataset
-            ),
-            seed=99,
-            shuffle=False,
-        ),
-        verifiers_env_server=VerifiersEnvServer.Config(
-            environment=HarborEnvConfig(
-                agent=vf.AgentConfig(
-                    harness=TerminalBenchTerminusHarnessConfig(
-                        id=_TERMINAL_BENCH_PACKAGE_ID, version="0.22.0"
-                    ),
-                    runtime=vf.DockerConfig(),
-                    max_turns=max_turns,
-                    timeout=AgentTimeoutConfig(
-                        setup=600,
-                        rollout=7200,
-                        scoring=12000,
-                    ),
-                ),
-            ),
-            serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
-                max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
-                address="tcp://127.0.0.1:0",
-            ),
-        ),
+        validation_dataset=VerifiersTaskDataset.Config(env=validation_env),
         worker=VerifiersRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
@@ -152,8 +133,12 @@ def _terminal_bench_rollouter_config(
             generation_server=GenerationServer.Config(
                 max_rollout_tokens=max_context_length
             ),
-            connection_timeout_sec=1800.0,
         ),
+        # Python's default pool, 32 threads on 28+ CPUs: each render that waits for the renderer
+        # lock holds a thread, so a small pool stalls other thread work such as sandbox cleanup.
+        # TODO: 4 threads are enough once Verifiers waits for its renderer lock on the event loop.
+        #   Today it waits in a thread.
+        num_threads_per_worker=None,
     )
 
 
@@ -197,13 +182,12 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
-            train_dataset="local/tmax@v1",
-            validation_dataset="terminal-bench/terminal-bench-2-1",
+        rollouter=terminal_bench_rollouter_config(
+            train_env=terminal_bench_env_config(dataset="local/tmax@v1", max_turns=120),
+            validation_env=terminal_bench_env_config(
+                dataset="terminal-bench/terminal-bench-2-1", max_turns=120
+            ),
             max_context_length=max_context_length,
-            max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -340,13 +324,12 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
-            train_dataset="local/tmax@v1",
-            validation_dataset="terminal-bench/terminal-bench-2-1",
+        rollouter=terminal_bench_rollouter_config(
+            train_env=terminal_bench_env_config(dataset="local/tmax@v1", max_turns=120),
+            validation_env=terminal_bench_env_config(
+                dataset="terminal-bench/terminal-bench-2-1", max_turns=120
+            ),
             max_context_length=max_context_length,
-            max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -460,13 +443,12 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
         ),
         async_loop=async_loop,
-        rollouter=_terminal_bench_rollouter_config(
-            train_dataset="local/tmax@v1",
-            validation_dataset="terminal-bench/terminal-bench-2-1",
+        rollouter=terminal_bench_rollouter_config(
+            train_env=terminal_bench_env_config(dataset="local/tmax@v1", max_turns=8),
+            validation_env=terminal_bench_env_config(
+                dataset="terminal-bench/terminal-bench-2-1", max_turns=8
+            ),
             max_context_length=max_context_length,
-            max_turns=8,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             CustomRendererConfig(
