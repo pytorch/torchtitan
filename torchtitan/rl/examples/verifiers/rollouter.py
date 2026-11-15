@@ -202,11 +202,6 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         # The EnvServer's ZMQ address, passed by `VerifiersRollouter.setup_async`.
         # TODO: remove it with the env server, once the Verifiers env runs in the rollout worker.
         self._env_server_address = env_server_address
-        # TODO: drop this loopback bridge. `generate_fn` already calls the reserved generator
-        # directly (look-aside routing); dropping the bridge needs an HTTP endpoint on each
-        # generator, a reserve per model call from Verifiers' client, and another home for the
-        # policy versions recorded here.
-        # Never closed, like the env client: the worker process exits with the pool.
         self._generation_server: GenerationServer = config.generation_server.build()
         self._verifiers_env_client: VerifiersEnvClient
         self._verifiers_train_client_config: VerifiersTrainClientConfig
