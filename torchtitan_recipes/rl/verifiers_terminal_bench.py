@@ -125,6 +125,11 @@ def terminal_bench_rollouter_config(
         ),
         validation_dataset=VerifiersTaskDataset.Config(env=validation_env),
         worker=VerifiersRolloutWorker.Config(max_rollout_tokens=max_context_length),
+        # The README's toy sandbox: task containers run on the controller's host, the one host
+        # whose Docker the example expects. On another host without Docker, every rollout would
+        # fail at once.
+        # TODO: spread the workers once every worker host runs Docker (or a real sandbox).
+        workers_on_controller_host=True,
         # Python's default pool, 32 threads on 28+ CPUs: each render that waits for the renderer
         # lock holds a thread, so a small pool stalls other thread work such as sandbox cleanup.
         # TODO: 4 threads are enough once Verifiers waits for its renderer lock on the event loop.

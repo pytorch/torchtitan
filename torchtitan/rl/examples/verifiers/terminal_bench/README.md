@@ -12,6 +12,11 @@ agent and the grading through the [Verifiers bridge](../README.md).
 > use your sandbox provider of choice as the Verifiers runtime: see "Sandboxes" in the
 > [Verifiers README](../README.md#sandboxes). Do not use `SubprocessConfig`: it runs the agent on
 > the host.
+>
+> The recipes set `workers_on_controller_host=True`, so a multi-host job still runs every
+> rollout worker, and so every container, on the controller host. With it False and a launcher,
+> the workers spread over the job's other hosts, and each of those hosts needs Docker, the
+> task images and outbound network while grading.
 
 ## How it works
 

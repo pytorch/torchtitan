@@ -137,13 +137,13 @@ follows from K x G:
 
 | what | how many | set by |
 |---|---|---|
-| rollout workers, processes on the controller host | ceil(K x G / rollouts_per_worker) | `Rollouter.Config.rollouts_per_worker` (default 64) |
+| rollout workers, processes on the controller host (by default) | ceil(K x G / rollouts_per_worker) | `Rollouter.Config.rollouts_per_worker` (default 64) |
 | rollouts per worker | a sizing target: whole groups are placed, so a worker can hold up to one group more (groups of 24 at 64: 72); a group larger than it raises | the same |
 | sandboxes | one per running rollout: at most K x G, plus the validation tasks | the agent's runtime |
 | interception servers per worker | one per `multiplex` rollouts in flight (Verifiers' default 32); never shrink | Verifiers: the env's `interception.multiplex` |
 | renderers per worker | one per 256 model calls in flight (Verifiers' default `multiplex`); never shrink | fixed: the worker builds its train client without `multiplex` |
 | threads per worker | `num_threads_per_worker`; None is Python's default, min(32, CPUs + 4) | `Rollouter.Config.num_threads_per_worker` (default 4) |
-| controller host CPUs | one per worker, plus local sandboxes | the host |
+| CPUs of a host that runs workers | one per worker, plus local sandboxes | the host |
 
 - Placement: the Rollouter counts rollouts in flight per worker and sends each group to the
   worker with the lowest count. It is a list of numbers in the controller, so it works wherever
@@ -164,9 +164,13 @@ follows from K x G:
 - Threads run renders and blocking runtime calls. A render waiting for the renderer lock holds a
   thread, so a small pool stalls other thread work, e.g. sandbox cleanup. More threads don't
   render faster: renders hold Python's GIL.
-- CPUs: a local Docker sandbox shares the controller host's CPUs with the workers. `--cpus`
-  limits a container but reserves nothing: count one CPU per worker plus each running sandbox's
-  limit. A remote provider runs sandboxes on its own machines.
+- Hosts: the workers run on the controller's host, and see no GPU (`CUDA_VISIBLE_DEVICES=""`).
+  With a launcher and `Rollouter.Config.workers_on_controller_host=False`, they spread over the
+  job's other hosts, and so do their local sandboxes. Then `run_group` and the router calls cross
+  hosts.
+- CPUs: a local Docker sandbox shares its host's CPUs with the workers. `--cpus` limits a
+  container but reserves nothing: count one CPU per worker plus each running sandbox's limit. A
+  remote provider runs sandboxes on its own machines.
 
 ## Sandboxes
 
