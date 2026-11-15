@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import base64
 from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 from aiohttp import web
 
 from torchtitan.rl.observability import metrics as m
@@ -20,9 +21,6 @@ from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt
 
 if TYPE_CHECKING:
     from torchtitan.rl.generator.types import SamplingConfig
-
-# Stands in for the logprobs content list; `_generate` splices the real list in.
-_LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 
 
 @dataclass(slots=True)
@@ -134,8 +132,8 @@ class GenerationServer:
                                           "stop_token_ids": [151645], "logprobs": 1, ...}}
             reply    {"request_id": "9f3c.../call=0",
                       "choices": [{"token_ids": [9707, 151645], "finish_reason": "stop",
-                                   "logprobs": {"content": [{"token": "token_id:9707",
-                                                             "logprob": -0.01}, ...]}}]}
+                                   "completion_logprobs": {"data": "<base64 float32>",
+                                                           "shape": [2], "dtype": "float32"}}]}
         """
         session_id = request.headers["X-Session-ID"]
         # TODO: parse with a faster JSON library (e.g. orjson): this takes about 8 ms at 128K tokens.
@@ -179,30 +177,22 @@ class GenerationServer:
 
         # TODO: when score centering's top-k logprobs come, add them here for the completion only:
         #   a per-token array must not ride the prompt, which every call re-sends.
-        # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
-        # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
-        logprobs_content = ",".join(
-            f'{{"token":"token_id:{token_id}","logprob":{logprob!r}}}'
-            for token_id, logprob in zip(
-                completion.token_ids, completion.token_logprobs, strict=True
-            )
-        )
+        logprobs = np.asarray(completion.token_logprobs, dtype=np.float32)
         choice = {
             "index": 0,
             "token_ids": completion.token_ids,
             "finish_reason": completion.finish_reason,
-            "logprobs": {"content": _LOGPROBS_CONTENT_PLACEHOLDER},
+            # The renderer's packed form: one float32 per token, base64. No dict per token.
+            "completion_logprobs": {
+                "data": base64.b64encode(logprobs.tobytes()).decode(),
+                "shape": [len(logprobs)],
+                "dtype": "float32",
+            },
         }
         # TODO: add `usage` (token counts) before the Verifiers pin moves past 0.4.1. Verifiers
         #   main requires it (PrimeIntellect-ai/verifiers#2542). 0.4.0 and 0.4.1 count the
         #   tokens themselves and ignore it, so no test can check it yet.
-        response_text = json.dumps({"request_id": request_id, "choices": [choice]})
-        head, _, tail = response_text.rpartition(
-            json.dumps(_LOGPROBS_CONTENT_PLACEHOLDER)
-        )
-        return web.Response(
-            text=f"{head}[{logprobs_content}]{tail}", content_type="application/json"
-        )
+        return web.json_response({"request_id": request_id, "choices": [choice]})
 
 
 def _sampling_config(sampling_params: dict[str, Any]) -> SamplingConfig:

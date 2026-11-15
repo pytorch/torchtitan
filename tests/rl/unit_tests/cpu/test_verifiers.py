@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
@@ -23,11 +25,7 @@ pytest.importorskip("verifiers")
 import verifiers.v1 as vf
 from aiohttp import ClientSession
 from openai import AsyncOpenAI
-from renderers.client import (
-    _parse_completion_logprobs,
-    _resolve_max_prompt_len,
-    parse_generate_response,
-)
+from renderers.client import _resolve_max_prompt_len, parse_generate_response
 
 from torchtitan.rl.examples.verifiers import rollouter as verifiers_rollouter
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
@@ -37,9 +35,9 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationSession,
 )
 from torchtitan.rl.examples.verifiers.rollouter import (
-    _trainable_token_spans,
     log_failed_rollout,
     RewardFromVerifiers,
+    trace_to_rollout_turns,
     VERIFIERS_REWARD_KEY,
     verifiers_rollout_logs,
     VerifiersRolloutWorker,
@@ -48,6 +46,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
+from verifiers.v1.types import AssistantMessage, UserMessage
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -224,214 +223,118 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
     assert parsed.tool_calls[0].arguments == {"query": "hello"}
 
 
-def test_trainable_token_spans() -> None:
-    assert _trainable_token_spans([False, True, True, False, True]) == [
-        (1, 3),
-        (4, 5),
-    ]
-
-
-def test_verifiers_trace_preserves_generation_metadata() -> None:
-    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
-
-    node = SimpleNamespace(
-        token_ids=[10, 11, 12, 13],
-        mask=[False, False, True, True],
-        sampled=True,
-        message=VerifiersAssistantMessage(content="Answer: $42$"),
+def _node(token_ids: list[int], mask: list[bool], message) -> SimpleNamespace:
+    """A message node; each sampled token's logprob is -0.1 x its token id."""
+    sampled_token_ids = np.array(token_ids)[np.array(mask, dtype=bool)]
+    return SimpleNamespace(
+        token_ids=np.array(token_ids, dtype=np.int32),
+        mask=np.array(mask),
+        logprobs=(-0.1 * sampled_token_ids).astype(np.float32),
+        sampled=isinstance(message, AssistantMessage),
+        message=message,
     )
-    trace = SimpleNamespace(
-        nodes=[node],
-        branches=[
-            SimpleNamespace(
-                nodes=[node],
-                token_ids=[10, 11, 12, 13],
-                logprobs=[0.0, 0.0, -0.2, -0.3],
-            )
-        ],
+
+
+def _branch(
+    index: int, nodes: list[SimpleNamespace], *, trainable: bool = True
+) -> SimpleNamespace:
+    """A branch's token ids and logprobs, as Verifiers concatenates them: logprob -0.1 x token id
+    on sampled tokens, 0.0 elsewhere."""
+    token_ids = np.concatenate([node.token_ids for node in nodes])
+    mask = np.concatenate([node.mask for node in nodes])
+    return SimpleNamespace(
+        index=index,
+        nodes=nodes,
+        trainable=trainable,
+        token_ids=token_ids,
+        logprobs=np.where(mask, -0.1 * token_ids, 0.0).astype(np.float32),
     )
-    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
-        trace=trace,
+
+
+def _turns(branches: list[SimpleNamespace], *, metrics: list[m.Metric] | None = None):
+    nodes = list(
+        {id(node): node for branch in branches for node in branch.nodes}.values()
+    )
+    return trace_to_rollout_turns(
+        SimpleNamespace(id="trace-1", nodes=nodes, branches=branches),
         session=GenerationSession(
-            group_id=0,
-            min_policy_version=3,
-            max_policy_version=4,
-            metrics=[],
-        ),
-        group_id=5,
-        rollout_id=2,
-    )
-
-    assert len(turns) == 1
-    assert turns[0].prompt_prefix_len == 0
-    assert turns[0].prompt_delta_token_ids.tolist() == [10, 11]
-    assert turns[0].completion_token_ids.tolist() == [12, 13]
-    assert turns[0].completion_logprobs.tolist() == pytest.approx([-0.2, -0.3])
-    assert turns[0].completion_message == {
-        "role": "assistant",
-        "content": "Answer: $42$",
-    }
-    assert turns[0].min_policy_version == 3
-    assert turns[0].max_policy_version == 4
-
-
-def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
-    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
-
-    first_node = SimpleNamespace(
-        token_ids=[10, 11],
-        mask=[False, True],
-        sampled=True,
-        message=VerifiersAssistantMessage(content="first"),
-    )
-    second_node = SimpleNamespace(
-        token_ids=[12, 13],
-        mask=[False, True],
-        sampled=True,
-        message=VerifiersAssistantMessage(content="second"),
-    )
-    trace = SimpleNamespace(
-        nodes=[first_node, second_node],
-        branches=[
-            SimpleNamespace(
-                nodes=[first_node, second_node],
-                token_ids=[10, 11, 12, 13],
-                logprobs=[0.0, -0.1, 0.0, -0.2],
-            )
-        ],
-    )
-    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
-        trace=trace,
-        session=GenerationSession(
-            group_id=0,
+            group_id=5,
             min_policy_version=3,
             max_policy_version=8,
-            metrics=[],
+            metrics=metrics or [],
         ),
         group_id=5,
         rollout_id=2,
     )
 
-    assert [turn.min_policy_version for turn in turns] == [3, 3]
-    assert [turn.max_policy_version for turn in turns] == [8, 8]
-    # turn 1's prompt [10, 11, 12] continues turn 0's [10] + [11], so it stores only [12]
+
+def test_trace_turns_store_each_prompt_as_a_delta() -> None:
+    """user [1, 2], assistant [3, 4] (3 is the role scaffold), tool [5], assistant [6, 7]."""
+    queue_time = m.Metric("generator/queue_time_ms", m.Mean(1.0))
+    first, tool, second = (
+        _node([3, 4], [False, True], AssistantMessage(content="ls")),
+        _node([5], [False], UserMessage(content="a.txt")),
+        _node([6, 7], [False, True], AssistantMessage(content="cat a.txt")),
+    )
+    user = _node([1, 2], [False, False], UserMessage(content="task"))
+    turns = _turns([_branch(0, [user, first, tool, second])], metrics=[queue_time])
+
     stored = [
         (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
     ]
-    assert stored == [(0, [10]), (2, [12])]
-    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13]]
+    assert stored == [(0, [1, 2, 3]), (4, [5, 6])]
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[4], [7]]
     assert [turn.completion_logprobs.tolist() for turn in turns] == [
-        pytest.approx([-0.1]),
-        pytest.approx([-0.2]),
-    ]
-
-
-def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
-    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
-
-    def node(token_ids: list[int], content: str) -> SimpleNamespace:
-        message = VerifiersAssistantMessage(content=content)
-        return SimpleNamespace(
-            token_ids=token_ids, mask=[False, True], sampled=True, message=message
-        )
-
-    shared = node([10, 11], "a")
-    first_leaf = node([12, 13], "b")
-    second_leaf = node([14, 15], "c")
-    trace = SimpleNamespace(
-        nodes=[shared, first_leaf, second_leaf],
-        branches=[
-            SimpleNamespace(
-                nodes=[shared, first_leaf],
-                token_ids=[10, 11, 12, 13],
-                logprobs=[0.0, -0.1, 0.0, -0.2],
-            ),
-            SimpleNamespace(
-                nodes=[shared, second_leaf],
-                token_ids=[10, 11, 14, 15],
-                logprobs=[0.0, -0.1, 0.0, -0.3],
-            ),
-        ],
-    )
-    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
-        trace=trace,
-        session=GenerationSession(
-            group_id=0, min_policy_version=1, max_policy_version=1, metrics=[]
-        ),
-        group_id=5,
-        rollout_id=2,
-    )
-
-    # The shared node trains once; the second branch's prompt [10, 11, 14] keeps [10, 11] of the
-    # previous turn's [10, 11, 12, 13], so it stores (2, [14]) and the builder opens a new sample.
-    stored = [
-        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
-    ]
-    assert stored == [(0, [10]), (2, [12]), (2, [14])]
-    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13], [15]]
-
-
-def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
-    from verifiers.v1.types import (
-        AssistantMessage as VerifiersAssistantMessage,
-        UserMessage as VerifiersUserMessage,
-    )
-
-    def node(content: str, sampled: bool) -> SimpleNamespace:
-        message = (
-            VerifiersAssistantMessage(content=content)
-            if sampled
-            else VerifiersUserMessage(content=content)
-        )
-        return SimpleNamespace(
-            token_ids=[0], mask=[sampled], sampled=sampled, message=message
-        )
-
-    # Two branches share the prompt and the first command, then diverge.
-    task, first, out, second, other_out, other = (
-        node("task", False),
-        node("ls", True),
-        node("a.txt", False),
-        node("cat a.txt", True),
-        node("No such file", False),
-        node("pwd", True),
-    )
-    trace = SimpleNamespace(
-        nodes=[task, first, out, second, other_out, other],
-        branches=[
-            SimpleNamespace(
-                nodes=branch_nodes,
-                token_ids=[0] * len(branch_nodes),
-                logprobs=[0.0] * len(branch_nodes),
-            )
-            for branch_nodes in (
-                [task, first, out, second],
-                [task, first, other_out, other],
-            )
-        ],
-    )
-    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
-        trace=trace,
-        session=GenerationSession(
-            group_id=0, min_policy_version=0, max_policy_version=0, metrics=[]
-        ),
-        group_id=0,
-        rollout_id=0,
-    )
-
-    assert [turn.completion_message["content"] for turn in turns] == [
-        "ls",
-        "cat a.txt",
-        "pwd",
+        pytest.approx([-0.4]),
+        pytest.approx([-0.7]),
     ]
     assert [turn.env_messages for turn in turns] == [
+        [{"role": "user", "content": "a.txt"}],
+        [],
+    ]
+    assert [(turn.min_policy_version, turn.max_policy_version) for turn in turns] == [
+        (3, 8)
+    ] * 2
+    assert [turn.metrics for turn in turns] == [[queue_time], []]
+
+
+def test_trace_turns_from_two_branches() -> None:
+    """A compaction-like second branch: the shared assistant node trains once, the second
+    branch's first new turn is a delta on the previous turn, and a branch Verifiers marks
+    untrainable adds nothing."""
+    shared = _node([10, 11], [False, True], AssistantMessage(content="a"))
+    reply = _node([12], [False], UserMessage(content="out"))
+    first_leaf = _node([13, 14], [False, True], AssistantMessage(content="b"))
+    second_leaf = _node([15, 16], [False, True], AssistantMessage(content="c"))
+    ignored_leaf = _node([17, 18], [False, True], AssistantMessage(content="d"))
+    turns = _turns(
         [
-            {"role": "user", "content": "a.txt"},
-            {"role": "user", "content": "No such file"},
-        ],
+            _branch(0, [shared, reply, first_leaf]),
+            _branch(1, [shared, reply, second_leaf]),
+            _branch(2, [shared, ignored_leaf], trainable=False),
+        ]
+    )
+
+    stored = [
+        (turn.prompt_prefix_len, turn.prompt_delta_token_ids.tolist()) for turn in turns
+    ]
+    # Turn 2's prompt [10, 11, 12, 15] keeps [10, 11, 12] of turn 1's [10, 11, 12, 13, 14].
+    assert stored == [(0, [10]), (2, [12, 13]), (3, [15])]
+    assert [turn.completion_message["content"] for turn in turns] == ["a", "b", "c"]
+    assert [turn.env_messages for turn in turns] == [
+        [{"role": "user", "content": "out"}],
         [],
         [],
     ]
+
+
+def test_trace_turns_refuse_a_sampled_token_without_a_logprob() -> None:
+    """`branch.logprobs` would read 0.0 for it, and train on that."""
+    user = _node([1, 2], [False, False], UserMessage(content="task"))
+    answer = _node([3, 4], [False, True], AssistantMessage(content="ls"))
+    answer.logprobs = np.empty(0, dtype=np.float32)
+    with pytest.raises(ValueError, match="1 sampled tokens but 0 logprobs"):
+        _turns([_branch(0, [user, answer])])
 
 
 def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
@@ -575,7 +478,9 @@ def test_generation_server_serves_generate_fn_per_session() -> None:
     ]
     [choice] = replies[1]["choices"]
     assert choice["token_ids"] == [31, 32]
-    assert _parse_completion_logprobs(choice, [31, 32]) == pytest.approx([-0.1, -0.2])
+    packed = choice["completion_logprobs"]
+    logprobs = np.frombuffer(base64.b64decode(packed["data"]), dtype=packed["dtype"])
+    assert logprobs.tolist() == pytest.approx([-0.1, -0.2])
     assert (
         session.num_calls,
         session.min_policy_version,
@@ -785,15 +690,8 @@ def test_rollout_status_maps_timeouts_to_error_timeout(
 
 
 def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
-    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
-
     # The agent stage timed out, but Verifiers kept ok=True and still graded the reply.
-    node = SimpleNamespace(
-        token_ids=[10, 11],
-        mask=[False, True],
-        sampled=True,
-        message=VerifiersAssistantMessage(content="answer"),
-    )
+    node = _node([10, 11], [False, True], AssistantMessage(content="answer"))
     span = SimpleNamespace(duration=0.0)
     trace = SimpleNamespace(
         id="trace",
@@ -812,9 +710,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         ),
         calls=[],
         nodes=[node],
-        branches=[
-            SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
-        ],
+        branches=[_branch(0, [node])],
     )
     worker = object.__new__(VerifiersRolloutWorker)
     worker._generation_server = SimpleNamespace(

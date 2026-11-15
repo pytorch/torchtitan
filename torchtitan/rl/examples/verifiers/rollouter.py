@@ -315,7 +315,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         (trace,) = trainable_traces
 
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
-        turns = self.trace_to_rollout_turns(
+        turns = trace_to_rollout_turns(
             trace=trace,
             session=sessions[trace.id],
             group_id=group_id,
@@ -368,53 +368,65 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             return RolloutStatus.TRUNCATED_MAX_TURNS
         return RolloutStatus.TRUNCATED_LENGTH
 
-    @staticmethod
-    def trace_to_rollout_turns(
-        *,
-        trace: Any,
-        session: GenerationSession,
-        group_id: int,
-        rollout_id: int,
-    ) -> list[RolloutTurn]:
-        """Flatten a Verifiers trace into TitanRL rollout turns, one per span of trainable tokens.
 
-        Example, one branch: user [1, 2], sampled [3, 4], tool result [5, 6], sampled [7, 8].
+def trace_to_rollout_turns(
+    trace: vf.Trace,
+    *,
+    session: GenerationSession,
+    group_id: int,
+    rollout_id: int,
+) -> list[RolloutTurn]:
+    """Flatten a Verifiers trace into rollout turns: one turn per run of sampled tokens.
 
-            turn 0   prompt [1, 2]               completion [3, 4]   env_messages [tool result]
-            turn 1   prompt [1, 2, 3, 4, 5, 6]   completion [7, 8]
+    A trace is a graph of messages; each root-to-leaf path is a branch. A compaction, which
+    rewrites the history, starts a new branch:
 
-        A node shared by several branches is emitted once. Every turn gets the session's
-        policy-version range; turn 0 also its generator metrics.
-        """
-        node_index = {id(node): index for index, node in enumerate(trace.nodes)}
-        trained_nodes: set[int] = set()
-        replied_nodes: set[int] = set()
-        last_turn_by_node: dict[int, RolloutTurn] = {}
-        turns: list[RolloutTurn] = []
-        # The last appended turn's prompt + completion; not reset between branches
-        previous_token_ids: list[int] = []
+        branch 0: user [1, 2]  A1 [3, 4]  tool [5]  A2 [6]
+        branch 1: user [1, 2]  summary [7]  A3 [8]
 
-        for branch in trace.branches:
-            token_ids = branch.token_ids
-            logprobs = branch.logprobs
-            branch_offset = 0
-            reply_to: RolloutTurn | None = None
-            for node in branch.nodes:
-                index = node_index[id(node)]
-                mask = list(node.mask)
-                if node.sampled and any(mask):
-                    if index in trained_nodes:
-                        mask = [False] * len(mask)
-                    else:
-                        trained_nodes.add(index)
-                for start, end in _trainable_token_spans(mask):
-                    absolute_start = branch_offset + start
-                    absolute_end = branch_offset + end
-                    prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-                        prompt=Prompt(token_ids=token_ids[:absolute_start]),
-                        previous=Prompt(token_ids=previous_token_ids),
+        turn  prompt_prefix_len  prompt_delta  completion  env_messages
+        0     0                  [1, 2]        [3, 4]      [tool]
+        1     4                  [5]           [6]         []
+        2     2                  [7]           [8]         []    <- doesn't extend turn 1:
+                                                                    a new training sample
+
+    A message several branches share becomes one turn; a branch with `trainable=False` adds
+    none. Every turn gets the session's policy-version range; turn 0 also its generator metrics.
+    """
+    # Each node's position in the trace. Keyed by id(node), the object's identity: a pydantic
+    # node can't be a dict key.
+    node_index = {id(node): index for index, node in enumerate(trace.nodes)}
+    branches = [branch for branch in trace.branches if branch.trainable]
+
+    # Pass 1: one turn per run of sampled tokens, in branch order.
+    turns: list[RolloutTurn] = []
+    turn_by_node: dict[int, RolloutTurn] = {}
+    # The last turn's prompt + completion, as (branch index, end offset in that branch).
+    previous_branch, previous_end = -1, 0
+    previous_token_ids = np.empty(0, dtype=np.int32)
+    for branch in branches:
+        token_ids, logprobs = branch.token_ids, branch.logprobs
+        node_start = 0
+        for node in branch.nodes:
+            index = node_index[id(node)]
+            if node.sampled and index not in turn_by_node:
+                # `branch.logprobs` reads 0.0 for a sampled token with no logprob: refuse that.
+                if len(node.logprobs) != node.mask.sum():
+                    raise ValueError(
+                        f"trace {trace.id}: a message has {node.mask.sum()} sampled tokens "
+                        f"but {len(node.logprobs)} logprobs"
                     )
-                    previous_token_ids = token_ids[:absolute_end]
+                for span_start, span_end in _true_spans(node.mask):
+                    start, end = node_start + span_start, node_start + span_end
+                    if branch.index == previous_branch:
+                        # Same branch: the prompt continues the last turn's tokens.
+                        prompt_prefix_len = previous_end
+                        prompt_delta_token_ids = token_ids[previous_end:start].copy()
+                    else:
+                        prompt_prefix_len, prompt_delta_token_ids = split_prompt(
+                            prompt=Prompt(token_ids=token_ids[:start].tolist()),
+                            previous=Prompt(token_ids=previous_token_ids.tolist()),
+                        )
                     turns.append(
                         RolloutTurn(
                             rollout_id=RolloutTurnID(
@@ -424,39 +436,39 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                             ),
                             prompt_prefix_len=prompt_prefix_len,
                             prompt_delta_token_ids=prompt_delta_token_ids,
-                            completion_token_ids=np.asarray(
-                                token_ids[absolute_start:absolute_end], dtype=np.int32
-                            ),
-                            completion_logprobs=np.asarray(
-                                logprobs[absolute_start:absolute_end], dtype=np.float32
-                            ),
+                            completion_token_ids=token_ids[start:end].copy(),
+                            completion_logprobs=logprobs[start:end].copy(),
                             min_policy_version=session.min_policy_version,
                             max_policy_version=session.max_policy_version,
                             completion_message=message_to_wire(node.message),
                             metrics=list(session.metrics) if not turns else [],
                         )
                     )
-                    last_turn_by_node[index] = turns[-1]
-                if node.sampled:
-                    reply_to = last_turn_by_node.get(index)
-                elif reply_to is not None and index not in replied_nodes:
-                    replied_nodes.add(index)
-                    reply_to.env_messages.append(message_to_wire(node.message))
-                branch_offset += len(node.token_ids)
-        return turns
+                    turn_by_node[index] = turns[-1]
+                    previous_branch, previous_end = branch.index, end
+                    previous_token_ids = token_ids[:end]
+            node_start += len(node.token_ids)
+
+    # Pass 2: a tool or user message after a turn is that turn's env reply, attached once.
+    env_message_nodes: set[int] = set()
+    for branch in branches:
+        replying_turn: RolloutTurn | None = None
+        for node in branch.nodes:
+            index = node_index[id(node)]
+            if node.sampled:
+                replying_turn = turn_by_node.get(index)
+            elif replying_turn is not None and index not in env_message_nodes:
+                env_message_nodes.add(index)
+                replying_turn.env_messages.append(message_to_wire(node.message))
+    return turns
 
 
-def _trainable_token_spans(mask: list[bool]) -> list[tuple[int, int]]:
-    """Return half-open token spans marked trainable by a Verifiers node mask."""
-    spans: list[tuple[int, int]] = []
-    start: int | None = None
-    for index, sampled in enumerate([*mask, False]):
-        if sampled and start is None:
-            start = index
-        elif not sampled and start is not None:
-            spans.append((start, index))
-            start = None
-    return spans
+def _true_spans(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Half-open spans of True values. Example: [F, T, T, F, T] -> [(1, 3), (4, 5)]."""
+    edges = np.flatnonzero(
+        np.diff(np.concatenate(([False], mask, [False])).astype(np.int8))
+    )
+    return list(zip(edges[::2].tolist(), edges[1::2].tolist()))
 
 
 def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]:

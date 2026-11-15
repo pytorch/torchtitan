@@ -1,7 +1,7 @@
 # Verifiers integration
 
 Runs [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) envs in TitanRL, pinned to
-Verifiers 0.4.0 (the `verifiers.v1` API). Other TitanRL recipes don't import Verifiers.
+Verifiers 0.4.1 (the `verifiers.v1` API). Other TitanRL recipes don't import Verifiers.
 
 - TitanRL picks the tasks, serves the model calls and trains on the scored groups.
 - Verifiers runs the env: the agent, its sandbox, its tools and the grade.
@@ -114,9 +114,8 @@ the package's module ("-" becomes "_") and takes the one class of that kind in i
 ```text
 id "torchtitan-verifiers-terminal-bench"
   import torchtitan_verifiers_terminal_bench
-  __all__ = ["HarborEnv", "TerminalBenchTerminusHarness", "TerminalTaskset"]
-  taskset -> TerminalTaskset, harness -> TerminalBenchTerminusHarness,
-  env -> HarborEnv (re-exported from Verifiers)
+  __all__ = ["TerminalBenchTerminusHarness", "TerminalTaskset"]
+  taskset -> TerminalTaskset, harness -> TerminalBenchTerminusHarness
 ```
 
 Leave the harness or the env unset, and Verifiers takes the one in the taskset's package, or its
