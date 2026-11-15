@@ -31,8 +31,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationServer,
-    GROUP_ID_SAMPLING_PARAM,
-    VerifiersGenerationMetadata,
+    GenerationSession,
 )
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn
@@ -95,14 +94,15 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
     Example:
         VerifiersRolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardFromVerifiers.Config()]),
-            generation_server=GenerationServer.Config(max_rollout_tokens=32768),
+            max_rollout_tokens=32768,
         )
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseRolloutWorker.Config):
-        generation_server: GenerationServer.Config
-        """Local HTTP bridge from Verifiers to TitanRL generation; each rollout worker runs one."""
+        max_rollout_tokens: int
+        """The generator's context length. A model call whose prompt leaves no room for one
+        output token is refused before it reaches the generator."""
 
         run_id: str = field(default_factory=_default_run_id)
         """Verifiers' run id (`VF_RUN_ID`). It labels the run's sandboxes, e.g. its Docker
@@ -111,7 +111,9 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._config = config
-        self._generation_server: GenerationServer = config.generation_server.build()
+        self._generation_server = GenerationServer(
+            max_rollout_tokens=config.max_rollout_tokens
+        )
         self._release_session_fn: ReleaseSessionFn
         self._client_config: vf.TrainClientConfig
         # One env per env config, built on its first group. `close` stops serving them.
@@ -148,10 +150,9 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         os.environ["VF_RUN_ID"] = self._config.run_id
         _bypass_proxy_for_loopback()
         self._release_session_fn = release_session_fn
-        self._generation_server.set_generate_fn(generate_fn)
-        await self._generation_server.start()
+        base_url = await self._generation_server.start(generate_fn)
         self._client_config = vf.TrainClientConfig(
-            base_url=self._generation_server.base_url,
+            base_url=base_url,
             # The loopback server checks no key; an empty variable name sends Verifiers' "EMPTY".
             api_key_var="",
             renderer=renderer_config.get_renderers_config(),
@@ -267,37 +268,32 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         # One slot per episode, as `env.slots(task, n)` would plan: nothing couples them. The slot
         # holds the episode's traces, so they are freed when this episode returns.
         (slot,) = env.slots(task)
-        # Each trace Verifiers mints, a retried attempt's included, is a routing session:
-        # Verifiers sends the trace id as X-Session-ID.
+        # Each trace Verifiers mints, a retried attempt's included, is a routing session.
         session_ids: list[str] = []
+
+        def open_session(trace: vf.Trace) -> None:
+            session_ids.append(trace.id)
+            self._generation_server.open_session(session_id=trace.id, group_id=group_id)
+
         model_context = vf.ModelContext(
             client=self._client_config,
-            model=self._generation_server.model_id,
+            model=GenerationServer.MODEL_NAME,
             sampling=vf.SamplingConfig(
                 temperature=sampling.temperature,
                 top_p=sampling.top_p,
                 max_tokens=sampling.max_tokens,
                 seed=sampling.seed,
-                **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
         try:
             episode = await env.run_slot(
-                slot=slot,
-                ctx=model_context,
-                on_trace=lambda trace: session_ids.append(trace.id),
+                slot=slot, ctx=model_context, on_trace=open_session
             )
         finally:
-            # TODO: wait for each session's model calls in flight before its release. An agent
-            # that gives up on a call doesn't cancel the server's handler. Its `generate_fn` call
-            # can then reach the router after this release and pin the session again, until the
-            # router's `max_sessions` LRU evicts it. Blocked on the generation server counting
-            # each session's calls in flight.
-            #
-            # Release each session, and take what the generation server kept for it, so another
-            # agent's trace (a judge, a simulated user) leaves nothing on the server.
-            generation_metadata_by_session = {
-                session_id: self._generation_server.pop_generation_metadata(session_id)
+            # Close each session after its calls in flight end, then release it: an agent past
+            # its deadline drops its request, but the generator call behind it still runs.
+            sessions = {
+                session_id: await self._generation_server.close_session(session_id)
                 for session_id in session_ids
             }
             await asyncio.gather(
@@ -321,14 +317,14 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         # Convert Verifiers' graph trace to TitanRL's linear rollout turns.
         turns = self.trace_to_rollout_turns(
             trace=trace,
-            generation_metadata=generation_metadata_by_session[trace.id],
+            session=sessions[trace.id],
             group_id=group_id,
             rollout_id=episode_index,
         )
         status = self.rollout_status(verifiers_episode=episode, trace=trace)
         if not turns:
-            # Verifiers records an overlong first prompt as a failed model call; vLLM, the
-            # renderer and the generation server all word it "maximum context length".
+            # Verifiers records an overlong first prompt as a failed model call; vLLM and the
+            # renderer both word it "maximum context length".
             first_prompt_too_long = any(
                 call.error is not None
                 and "maximum context length" in call.error.message
@@ -376,7 +372,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
     def trace_to_rollout_turns(
         *,
         trace: Any,
-        generation_metadata: VerifiersGenerationMetadata | None,
+        session: GenerationSession,
         group_id: int,
         rollout_id: int,
     ) -> list[RolloutTurn]:
@@ -387,16 +383,9 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             turn 0   prompt [1, 2]               completion [3, 4]   env_messages [tool result]
             turn 1   prompt [1, 2, 3, 4, 5, 6]   completion [7, 8]
 
-        A node shared by several branches is emitted once. Every turn gets the rollout-wide
-        min/max policy version from the generation server; generator metrics go on turn 0 only.
+        A node shared by several branches is emitted once. Every turn gets the session's
+        policy-version range; turn 0 also its generator metrics.
         """
-        if generation_metadata is None:
-            if any(any(node.mask) for node in trace.nodes):
-                raise ValueError(
-                    "Verifiers trace has trainable tokens but no generation metadata"
-                )
-            return []
-
         node_index = {id(node): index for index, node in enumerate(trace.nodes)}
         trained_nodes: set[int] = set()
         replied_nodes: set[int] = set()
@@ -441,12 +430,10 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                             completion_logprobs=np.asarray(
                                 logprobs[absolute_start:absolute_end], dtype=np.float32
                             ),
-                            min_policy_version=generation_metadata.min_policy_version,
-                            max_policy_version=generation_metadata.max_policy_version,
+                            min_policy_version=session.min_policy_version,
+                            max_policy_version=session.max_policy_version,
                             completion_message=message_to_wire(node.message),
-                            metrics=(
-                                list(generation_metadata.metrics) if not turns else []
-                            ),
+                            metrics=list(session.metrics) if not turns else [],
                         )
                     )
                     last_turn_by_node[index] = turns[-1]

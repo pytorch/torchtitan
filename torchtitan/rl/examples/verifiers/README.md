@@ -81,6 +81,31 @@ Shutdown, at the end of training:
 4. The controller stops the worker processes. Step 3 runs before this stop because Monarch gives
    an actor's own cleanup 3 s, then fails the job.
 
+## What crosses each hop
+
+```text
+hop                                                      what crosses
+agent (local Docker on Linux) -> egress proxy (worker)   the whole chat history, as JSON
+egress proxy -> interception server                      the same bytes, relayed
+agent (any other runtime) -> interception server         the whole chat history, as JSON
+train client -> GenerationServer (loopback)              the whole prompt's token ids
+generate_fn -> generator (Monarch)                       the whole prompt's token ids
+generate_fn -> router                                    the request and session ids
+each reply, back to the agent                            the new completion only
+```
+
+- Each call carries the whole history: the agent speaks OpenAI chat, and the generator gets the
+  full prompt. So the bytes a rollout moves grow with turns x context. They cost worker CPU to
+  encode and decode, more than network time.
+- Memory grows only with the rollout's own length. The trace keeps each message once, with
+  only the tokens it adds; the GenerationServer keeps counters per session; a `Rollout` keeps each
+  turn's new prompt tokens and its completion.
+- Size limits. The GenerationServer reads request bodies up to 1 GiB; replies have no limit.
+  The largest Monarch message here is a worker's scored group, G rollouts. With router replay or
+  top-k logprobs on, the batcher's packed step becomes the largest message. A recipe that turns
+  either on also sets `async_loop.batcher.rdma_min_tensor_bytes`, so those tensors go by RDMA:
+  Monarch caps a message at 10 GiB and fails the whole actor mesh above it.
+
 ## Taskset ids
 
 Verifiers loads a taskset, harness or env by id: the name of an installed package. It imports

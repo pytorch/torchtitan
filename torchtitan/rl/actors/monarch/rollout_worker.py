@@ -70,6 +70,9 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
     ) -> RolloutGroup:
+        # TODO: once a group's per-token arrays (router replay rows, top-k logprobs) pass about
+        #   3 GiB, send RDMA handles in this reply, registered once per rollout and released after
+        #   the batcher reads them: Monarch caps a message at 10 GiB.
         return await self._worker.run_group(
             sample=sample,
             group_id=group_id,

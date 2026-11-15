@@ -22,14 +22,19 @@ pytest.importorskip("verifiers")
 
 import verifiers.v1 as vf
 from aiohttp import ClientSession
+from openai import AsyncOpenAI
+from renderers.client import (
+    _parse_completion_logprobs,
+    _resolve_max_prompt_len,
+    parse_generate_response,
+)
 
 from torchtitan.rl.examples.verifiers import rollouter as verifiers_rollouter
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
-    _parse_sampling_config,
-    _validate_token_ids,
+    _sampling_config,
     GenerationServer,
-    VerifiersGenerationMetadata,
+    GenerationSession,
 )
 from torchtitan.rl.examples.verifiers.rollouter import (
     _trainable_token_spans,
@@ -247,7 +252,8 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     )
     turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
-        generation_metadata=VerifiersGenerationMetadata(
+        session=GenerationSession(
+            group_id=0,
             min_policy_version=3,
             max_policy_version=4,
             metrics=[],
@@ -296,7 +302,8 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     )
     turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
-        generation_metadata=VerifiersGenerationMetadata(
+        session=GenerationSession(
+            group_id=0,
             min_policy_version=3,
             max_policy_version=8,
             metrics=[],
@@ -348,8 +355,8 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
     )
     turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
-        generation_metadata=VerifiersGenerationMetadata(
-            min_policy_version=1, max_policy_version=1, metrics=[]
+        session=GenerationSession(
+            group_id=0, min_policy_version=1, max_policy_version=1, metrics=[]
         ),
         group_id=5,
         rollout_id=2,
@@ -405,8 +412,8 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
     )
     turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
-        generation_metadata=VerifiersGenerationMetadata(
-            min_policy_version=0, max_policy_version=0, metrics=[]
+        session=GenerationSession(
+            group_id=0, min_policy_version=0, max_policy_version=0, metrics=[]
         ),
         group_id=0,
         rollout_id=0,
@@ -484,285 +491,208 @@ def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
     assert "error=None: None" in caplog.text
 
 
-def test_generation_server_forwards_token_request() -> None:
-    async def run_test() -> None:
-        received = []
+def _completion(request_id: str, **fields) -> Completion:
+    return Completion(
+        min_policy_version=fields.get("min_policy_version", 0),
+        max_policy_version=fields.get("max_policy_version", 0),
+        request_id=request_id,
+        token_ids=[31, 32],
+        token_logprobs=[-0.1, -0.2],
+        finish_reason=fields.get("finish_reason", "stop"),
+        metrics=fields.get("metrics", []),
+    )
 
-        async def generate_fn(
-            prompt,
-            *,
+
+_SAMPLING_PARAMS = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "max_tokens": 2,
+    "seed": 4,
+    "stop_token_ids": [99],
+    "top_k": -1,
+    "min_p": 0.0,
+    "logprobs": 1,
+    "skip_special_tokens": False,
+    "routed_experts_prompt_start": 41,
+}
+# Over aiohttp's default 1 MiB request limit even as compact JSON: 7 bytes per 6-digit id.
+_LONG_PROMPT = [151644] * 160_000
+
+
+def test_generation_server_serves_generate_fn_per_session() -> None:
+    """Two calls of one session: what `generate_fn` gets, what the renderer client reads back,
+    and what the session keeps (versions from 0 count, metrics folded). The second prompt is
+    over 1 MiB of JSON."""
+    received = []
+
+    async def generate_fn(
+        prompt, *, request_id, group_id, routing_session_id, sampling_config
+    ):
+        received.append(
+            (
+                len(prompt.token_ids),
+                request_id,
+                group_id,
+                routing_session_id,
+                sampling_config.seed,
+            )
+        )
+        call_index = int(request_id.rsplit("=", 1)[1])
+        return _completion(
             request_id,
-            group_id,
-            routing_session_id=None,
-            sampling_config=None,
-        ):
-            received.append(
-                {
-                    "prompt_token_ids": prompt.token_ids,
-                    "request_id": request_id,
-                    "group_id": group_id,
-                    "routing_session_id": routing_session_id,
-                    "sampling_config": sampling_config,
-                }
-            )
-            request_index = int(request_id.rsplit("=", 1)[1])
-            return Completion(
-                min_policy_version=7 - request_index,
-                max_policy_version=8 + request_index,
-                request_id=request_id,
-                token_ids=[31, 32],
-                token_logprobs=[-0.1, -0.2],
-                finish_reason="stop",
-                metrics=[
-                    m.Metric("generator/queue_time_ms", m.Mean(float(request_index))),
-                    m.Metric("generator/queue_time_ms", m.Max(float(request_index))),
-                ],
-            )
+            min_policy_version=call_index,
+            max_policy_version=call_index + 1,
+            metrics=[m.Metric("generator/queue_time_ms", m.Mean(float(call_index)))],
+        )
 
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
-        await server.start()
+    async def run() -> tuple[list[dict], GenerationSession]:
+        server = GenerationServer(max_rollout_tokens=4096)
+        base_url = await server.start(generate_fn)
+        server.open_session("trace-1", group_id=7)
+        replies = []
         try:
-            async with ClientSession() as session:
-                response = await session.get(f"{server.base_url}/models")
-                assert response.status == 200
-                assert await response.json() == {
-                    "object": "list",
-                    "data": [
-                        {
-                            "id": "torchtitan",
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": "torchtitan",
-                            "max_model_len": 40960,
-                        }
-                    ],
-                }
-                for _ in range(2):
-                    response = await session.post(
-                        f"http://{server.host}:{server.port}/inference/v1/generate",
-                        headers={"X-Session-ID": "group=1/rollout=2"},
+            async with ClientSession() as client:
+                for token_ids in ([10, 11], _LONG_PROMPT):
+                    response = await client.post(
+                        base_url.removesuffix("/v1") + "/inference/v1/generate",
+                        headers={"X-Session-ID": "trace-1"},
                         json={
-                            "token_ids": [10, 11],
-                            "sampling_params": {
-                                "temperature": 1.0,
-                                "top_p": 1.0,
-                                "max_tokens": 2,
-                                "seed": 4,
-                                "logprobs": 1,
-                                "torchtitan_group_id": 1,
-                                "stop_token_ids": [99],
-                            },
+                            "token_ids": token_ids,
+                            "sampling_params": _SAMPLING_PARAMS,
                         },
                     )
                     assert response.status == 200
-                    payload = await response.json()
-            generation_metadata = server.pop_generation_metadata("group=1/rollout=2")
+                    replies.append(parse_generate_response(await response.read()))
+            return replies, await server.close_session("trace-1")
         finally:
             await server.close()
 
-        assert [request["request_id"] for request in received] == [
-            "group=1/rollout=2/request=0",
-            "group=1/rollout=2/request=1",
-        ]
-        assert all(request["prompt_token_ids"] == [10, 11] for request in received)
-        assert all(request["group_id"] == 1 for request in received)
-        assert all(
-            request["routing_session_id"] == "group=1/rollout=2" for request in received
-        )
-        assert all(request["sampling_config"].seed == 4 for request in received)
-        assert payload == {
-            "request_id": "group=1/rollout=2/request=1",
-            "choices": [
-                {
-                    "index": 0,
-                    "token_ids": [31, 32],
-                    "logprobs": {
-                        "content": [
-                            {"token": "token_id:31", "logprob": -0.1},
-                            {"token": "token_id:32", "logprob": -0.2},
-                        ]
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "prompt_logprobs": None,
-            "kv_transfer_params": None,
-        }
-        assert generation_metadata is not None
-        assert generation_metadata.min_policy_version == 6
-        assert generation_metadata.max_policy_version == 9
-        # Both generations folded into one Mean and one Max
-        assert len(generation_metadata.metrics) == 2
-        assert m.MetricsProcessor._aggregate_metrics(generation_metadata.metrics) == {
-            "generator/queue_time_ms/mean": 0.5,
-            "generator/queue_time_ms/max": 1.0,
-        }
+    replies, session = asyncio.run(run())
 
-    asyncio.run(run_test())
-
-
-def test_generation_server_rejects_aborted_generation() -> None:
-    async def run_test() -> None:
-        async def generate_fn(
-            prompt,
-            *,
-            request_id,
-            group_id,
-            routing_session_id=None,
-            sampling_config=None,
-        ):
-            return Completion(
-                min_policy_version=7,
-                max_policy_version=7,
-                request_id=request_id,
-                token_ids=[],
-                token_logprobs=[],
-                finish_reason="abort",
-            )
-
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
-        await server.start()
-        try:
-            async with ClientSession() as session:
-                response = await session.post(
-                    f"http://{server.host}:{server.port}/inference/v1/generate",
-                    headers={"X-Session-ID": "group=1/rollout=2"},
-                    json={
-                        "token_ids": [10, 11],
-                        "sampling_params": {
-                            "temperature": 1.0,
-                            "top_p": 1.0,
-                            "max_tokens": 2,
-                            "torchtitan_group_id": 1,
-                            "stop_token_ids": [99],
-                        },
-                    },
-                )
-                assert response.status == 502
-                payload = await response.json()
-            generation_metadata = server.pop_generation_metadata("group=1/rollout=2")
-        finally:
-            await server.close()
-
-        assert payload == {
-            "error": "generation finished without a usable completion: abort"
-        }
-        assert generation_metadata is None
-
-    asyncio.run(run_test())
-
-
-def test_generation_server_requires_group_id() -> None:
-    async def run_test() -> None:
-        async def generate_fn(*args, **kwargs):
-            raise AssertionError("generate_fn must not run without a group id")
-
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
-        await server.start()
-        try:
-            async with ClientSession() as session:
-                response = await session.post(
-                    f"http://{server.host}:{server.port}/inference/v1/generate",
-                    headers={"X-Session-ID": "group=1/rollout=2"},
-                    json={"token_ids": [10, 11], "sampling_params": {}},
-                )
-                assert response.status == 400
-                payload = await response.json()
-        finally:
-            await server.close()
-
-        assert "torchtitan_group_id" in payload["error"]
-
-    asyncio.run(run_test())
-
-
-def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
-    async def run_test() -> None:
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        await server.start()
-        try:
-            async with ClientSession() as session:
-                response = await session.get(
-                    f"http://{server.host}:{server.port}/healthz"
-                )
-                assert response.status == 200
-        finally:
-            await server.close()
-
-    # One DEBUG record: no INFO line, and still logged. Set the level explicitly: imports can
-    # change the root level.
-    with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
-        asyncio.run(run_test())
-    access_records = [r for r in caplog.records if r.name == "aiohttp.access"]
-    assert [r.levelno for r in access_records] == [logging.DEBUG]
-    assert access_records[0].getMessage().startswith("GET /healthz 200 ")
-
-
-def test_generation_server_rejects_prompt_without_room_for_output() -> None:
-    async def run_test() -> None:
-        prompt_lengths = []
-
-        async def generate_fn(prompt, **kwargs):
-            prompt_lengths.append(len(prompt.token_ids))
-            raise RuntimeError("generator reached")
-
-        server = GenerationServer.Config(max_rollout_tokens=8).build()
-        server.set_generate_fn(generate_fn)
-        await server.start()
-        try:
-            async with ClientSession() as session:
-                statuses, errors = [], []
-                for num_tokens in (7, 8, 9):
-                    response = await session.post(
-                        f"http://{server.host}:{server.port}/inference/v1/generate",
-                        headers={"X-Session-ID": "group=1/rollout=2"},
-                        json={
-                            "token_ids": [1] * num_tokens,
-                            "sampling_params": {
-                                "temperature": 1.0,
-                                "top_p": 1.0,
-                                "max_tokens": 2,
-                                "torchtitan_group_id": 1,
-                                "stop_token_ids": [99],
-                            },
-                        },
-                    )
-                    statuses.append(response.status)
-                    errors.append((await response.json())["error"])
-        finally:
-            await server.close()
-
-        assert prompt_lengths == [7]
-        assert statuses == [500, 400, 400]
-        # vLLM's own wording, which Verifiers matches as a context overflow.
-        assert "maximum context length" in errors[1]
-
-    asyncio.run(run_test())
+    assert received == [
+        (2, "trace-1/call=0", 7, "trace-1", 4),
+        (len(_LONG_PROMPT), "trace-1/call=1", 7, "trace-1", 4),
+    ]
+    [choice] = replies[1]["choices"]
+    assert choice["token_ids"] == [31, 32]
+    assert _parse_completion_logprobs(choice, [31, 32]) == pytest.approx([-0.1, -0.2])
+    assert (
+        session.num_calls,
+        session.min_policy_version,
+        session.max_policy_version,
+    ) == (2, 0, 2)
+    assert m.MetricsProcessor._aggregate_metrics(session.metrics) == {
+        "generator/queue_time_ms/mean": 0.5
+    }
 
 
 @pytest.mark.parametrize(
-    "token_ids, accepted",
+    "session_id, finish_reason",
+    [("trace-1", "abort"), ("trace-1", "error"), ("unknown", "stop")],
+)
+def test_generation_server_answers_500_without_a_usable_completion(
+    session_id: str, finish_reason: str
+) -> None:
+    """500, not 400: the worker reads a 400 as a prompt past the context."""
+
+    async def generate_fn(prompt, *, request_id, **kwargs):
+        return _completion(request_id, finish_reason=finish_reason)
+
+    async def run() -> int:
+        server = GenerationServer(max_rollout_tokens=4096)
+        base_url = await server.start(generate_fn)
+        server.open_session("trace-1", group_id=0)
+        try:
+            async with ClientSession() as client:
+                response = await client.post(
+                    base_url.removesuffix("/v1") + "/inference/v1/generate",
+                    headers={"X-Session-ID": session_id},
+                    json={"token_ids": [10], "sampling_params": _SAMPLING_PARAMS},
+                )
+                return response.status
+        finally:
+            await server.close()
+
+    assert asyncio.run(run()) == 500
+
+
+def test_closing_a_session_waits_for_its_call_in_flight() -> None:
+    """The agent hangs up mid-call (as at its deadline), but the generator call behind it still
+    runs: the session, and so its routing session, closes only after that call returns."""
+
+    async def run() -> int:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def generate_fn(prompt, *, request_id, **kwargs):
+            started.set()
+            await release.wait()
+            return _completion(request_id)
+
+        server = GenerationServer(max_rollout_tokens=4096)
+        base_url = await server.start(generate_fn)
+        server.open_session("trace-1", group_id=0)
+        try:
+            async with ClientSession() as client:
+                request = asyncio.create_task(
+                    client.post(
+                        base_url.removesuffix("/v1") + "/inference/v1/generate",
+                        headers={"X-Session-ID": "trace-1"},
+                        json={"token_ids": [10], "sampling_params": _SAMPLING_PARAMS},
+                    )
+                )
+                await started.wait()
+                request.cancel()
+                await asyncio.gather(request, return_exceptions=True)
+            close = asyncio.create_task(server.close_session("trace-1"))
+            await asyncio.sleep(0.1)
+            assert not close.done()
+            release.set()
+            return (await close).num_calls
+        finally:
+            await server.close()
+
+    assert asyncio.run(run()) == 1
+
+
+def test_renderer_refuses_a_prompt_with_no_room_for_an_output_token() -> None:
+    """The renderer client reads the cap from the model card, and refuses a longer prompt
+    before sending it. Fails if a renderers upgrade stops reading the card."""
+
+    async def run() -> int | None:
+        server = GenerationServer(max_rollout_tokens=4096)
+        base_url = await server.start(AsyncMock())
+        try:
+            client = AsyncOpenAI(base_url=base_url, api_key="EMPTY")
+            return await _resolve_max_prompt_len(client, GenerationServer.MODEL_NAME)
+        finally:
+            await server.close()
+
+    # vLLM needs room for one output token: a prompt of 4096 tokens is refused.
+    assert asyncio.run(run()) == 4095
+
+
+@pytest.mark.parametrize(
+    "update, error",
     [
-        ([], True),
-        ([0, 151643], True),
-        ([1, True], False),
-        ([1, 2.0], False),
-        ([[1]], False),
-        ([1, None], False),
-        ((1, 2), False),
+        ({}, None),
+        ({"top_k": 20}, "top_k=20 is unsupported"),
+        # An env that asks for top-k logprobs: the renderer client sends k + 2.
+        ({"logprobs": 7}, "logprobs=7 is unsupported"),
+        (
+            {"repetition_penalty": 1.1},
+            r"unsupported sampling parameters: \['repetition_penalty'\]",
+        ),
     ],
 )
-def test_validate_token_ids(token_ids, accepted) -> None:
-    if accepted:
-        assert _validate_token_ids(token_ids, field_name="token_ids") == token_ids
+def test_sampling_config_takes_only_what_the_generator_honors(update, error) -> None:
+    sampling_params = {**_SAMPLING_PARAMS, **update}
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            _sampling_config(sampling_params)
         return
-    with pytest.raises(
-        ValueError, match="token_ids must be a list of integer token IDs"
-    ):
-        _validate_token_ids(token_ids, field_name="token_ids")
+    assert _sampling_config(sampling_params) == SamplingConfig(
+        temperature=1.0, top_p=1.0, max_tokens=2, seed=4, stop_token_ids=[99]
+    )
 
 
 def _env_running(*traces, minted=None) -> SimpleNamespace:
@@ -809,7 +739,8 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
     )
     worker = object.__new__(VerifiersRolloutWorker)
     worker._generation_server = SimpleNamespace(
-        model_id="model", pop_generation_metadata=lambda trace_id: None
+        open_session=lambda session_id, group_id: None,
+        close_session=AsyncMock(return_value=GenerationSession(group_id=1)),
     )
     worker._client_config = object()
     worker._release_session_fn = AsyncMock()
@@ -887,9 +818,11 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     )
     worker = object.__new__(VerifiersRolloutWorker)
     worker._generation_server = SimpleNamespace(
-        model_id="model",
-        pop_generation_metadata=lambda trace_id: VerifiersGenerationMetadata(
-            min_policy_version=0, max_policy_version=0, metrics=[]
+        open_session=lambda session_id, group_id: None,
+        close_session=AsyncMock(
+            return_value=GenerationSession(
+                group_id=1, min_policy_version=0, max_policy_version=0
+            )
         ),
     )
     worker._client_config = object()
@@ -940,9 +873,15 @@ def test_rollout_releases_every_session_verifiers_minted() -> None:
         ]
     ]
     worker = object.__new__(VerifiersRolloutWorker)
-    popped_trace_ids = []
+    opened_session_ids, closed_session_ids = [], []
+
+    async def close_session(session_id: str) -> GenerationSession:
+        closed_session_ids.append(session_id)
+        return GenerationSession(group_id=1)
+
     worker._generation_server = SimpleNamespace(
-        model_id="model", pop_generation_metadata=popped_trace_ids.append
+        open_session=lambda session_id, group_id: opened_session_ids.append(session_id),
+        close_session=close_session,
     )
     worker._client_config = object()
     release_session_fn = AsyncMock()
@@ -964,7 +903,7 @@ def test_rollout_releases_every_session_verifiers_minted() -> None:
         {"routing_session_id": "opponent"},
         {"routing_session_id": "policy"},
     ]
-    assert popped_trace_ids == ["retried", "opponent", "policy"]
+    assert opened_session_ids == closed_session_ids == ["retried", "opponent", "policy"]
     assert rollout.group_id == 1
 
 
@@ -973,7 +912,7 @@ def _worker(monkeypatch, load_environment) -> VerifiersRolloutWorker:
     monkeypatch.setattr(verifiers_rollouter.vf, "resolve_env_config", lambda data: data)
     worker = VerifiersRolloutWorker.Config(
         rubric=Rubric.Config(reward_fns=[RewardFromVerifiers.Config()]),
-        generation_server=GenerationServer.Config(max_rollout_tokens=4096),
+        max_rollout_tokens=4096,
     ).build()
     worker._release_session_fn = AsyncMock()
     worker._client_config = vf.TrainClientConfig(
@@ -1139,22 +1078,3 @@ def test_a_failing_rollout_is_error_infra_once_every_sibling_finished(
     ]
     # `RewardFromVerifiers` gives a rollout with no turns 0.0.
     assert [rollout.reward for rollout in group.rollouts] == [None, 0.0]
-
-
-def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
-    sampling_params = {
-        "temperature": 0.0,
-        "top_p": 1.0,
-        "max_tokens": 5,
-        "stop_token_ids": [1],
-    }
-    for name in ("temperature", "top_p", "max_tokens"):
-        with pytest.raises(ValueError, match=rf"must include \['{name}'\]"):
-            _parse_sampling_config(
-                {key: value for key, value in sampling_params.items() if key != name}
-            )
-
-
-def test_parse_sampling_config_requires_stop_token_ids() -> None:
-    with pytest.raises(ValueError, match="stop_token_ids"):
-        _parse_sampling_config({"temperature": 1.0})
