@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 from collections.abc import Sequence
 from typing import Any
@@ -15,6 +16,8 @@ from typing import Any
 from monarch.actor import Actor, concurrent_endpoint, current_size
 
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.observability.metrics.process import ProcessStats
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
 
@@ -30,6 +33,8 @@ class _InterGeneratorRouterActorEndpoints:
             num_actors == 1
         ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
         super().__init__(config, generators=generators)
+        # No children: the router starts no processes, so no /proc scan in its loop.
+        self._process_stats = ProcessStats("router", children=False)
 
     @concurrent_endpoint
     async def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
@@ -50,6 +55,12 @@ class _InterGeneratorRouterActorEndpoints:
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         await super().sync_log_step(step)
+
+    @concurrent_endpoint
+    async def process_metrics(self) -> list[m.Metric]:
+        """The router process's CPU since the previous call, and its memory."""
+        # Reading smaps_rollup walks the page tables; in a thread, the router's loop doesn't wait.
+        return await asyncio.to_thread(self._process_stats.metrics)
 
     @concurrent_endpoint
     async def release_session(self, routing_session_id: str) -> None:
