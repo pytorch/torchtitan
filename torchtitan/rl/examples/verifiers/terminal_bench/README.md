@@ -13,45 +13,42 @@ agent and the grading through the [Verifiers bridge](../README.md).
 
 ## How it works
 
-Boxes are processes or containers; arrows are numbered in the order one rollout uses
-them.
+One group, top to bottom. Each rollout sends its own task (row 1), runs rows 2-5 and returns
+its own trace (row 6). Rows 3-4 repeat for each agent turn. Each column is one kind of process,
+or the containers. The rollouter runs N = `worker_pool_size` rollout workers. Row numbers match
+the steps below.
 
 ```text
-+------------------------- GPU actors (Monarch) -------------------------+
-|  vLLM generators (router picks one) <-- new weights -- trainer (GRPO)  |
-+-------^-----------------------------------------------------^----------+
-        | 4. generate                                         | 7. batch
-+-------|-------- controller process (torchtitan.rl.train) ---|----------+
-|  GenerationServer       dataset -> VerifiersRollouter -> batcher       |
-|  (localhost HTTP)                       |      ^                       |
-+-------^---------------------------------|------|-----------------------+
-        | 4. token ids            1. task |      | 6. trace, reward
-+-------|---------------------------------v------|-----------------------+
-|  Verifiers env server (spawned process)                                |
-|  per rollout: interception server (chat messages <-> token ids)        |
-|               and a Docker runtime                                     |
-+-------^---------------------------------|------------------------------+
-        | 3. chat request   2. Terminus-2 |
-        |    each turn      5. test.sh    v
-+-------|---------- Docker container, one per rollout -------------------+
-|  Terminus-2 agent <--> tmux shell                                      |
-|  tests/test.sh -> reward file                                          |
-+------------------------------------------------------------------------+
+   controller       rollout worker     env server        container       generators      trainer
+     (CPU)             (CPU, xN)       (Verifiers)     (per rollout)        (GPU)         (GPU)
+        |                  |                |                |                |             |
+ 1      |--group---------->|--task--------->|                |                |             |
+ 2      |                  |                |--start-------->|                |             |
+ 3      |                  |                |<-chat request--|                |             |
+ 4      |                  |<-token ids-----|                |                |             |
+        |                  |--generate--------------------------------------->|             |
+ 5      |                  |                |--run test.sh-->|                |             |
+ 6      |<-scored group----|<-trace, reward-|                |                |             |
+ 7      |--batch, packed by the batcher process-------------------------------------------->|
+        |                  |                |                |                |<-new weights|
 ```
 
-1. **Task.** `VerifiersRollouter` sends the sampled task to the env server once per
-   rollout in the group.
-2. **Agent.** The env server starts a container from the task's `docker_image` and runs
-   Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a
-   tmux shell and reads the screen back.
+1. **Task.** The controller sends each group to a rollout worker process
+   (`VerifiersRolloutWorker`), which sends the sampled task to the env server (ZMQ) once
+   per rollout in the group.
+2. **Agent.** One of the env server's pool workers (`verifiers_env_server.serve.pool`)
+   starts a container from the task's `docker_image` and runs Terminus-2 in it
+   ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and reads
+   the screen back.
 3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
    which records the turn in the rollout's trace.
-4. **Generation.** The request reaches TitanRL's `GenerationServer` as token ids and is
-   served by the vLLM generators.
+4. **Generation.** The request reaches the rollout worker's `GenerationServer` as token
+   ids (HTTP). The server sends them to the vLLM generator that the router picks.
 5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
    container and reads the reward file it writes.
-6. **Trace.** `VerifiersRollouter` turns the trace into rollout turns, with the exact
-   tokens the generators sampled, and computes group advantages.
+6. **Trace.** The rollout worker turns the trace into rollout turns, with the exact
+   tokens the generators sampled, computes group advantages and returns the finished
+   group to the controller.
 7. **Training.** The batcher feeds the trainer, and the generators load the new weights
    after each step.
 
