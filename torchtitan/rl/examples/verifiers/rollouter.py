@@ -135,6 +135,8 @@ class VerifiersRollouter(Rollouter):
         *,
         actor_system: ActorSystem,
         num_workers: int,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
@@ -154,6 +156,8 @@ class VerifiersRollouter(Rollouter):
         await super().setup_async(
             actor_system=actor_system,
             num_workers=num_workers,
+            generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
@@ -205,12 +209,15 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         # TODO: remove it with the env server, once the Verifiers env runs in the rollout worker.
         self._env_server_address = env_server_address
         self._generation_server: GenerationServer = config.generation_server.build()
+        self._release_session_fn: ReleaseSessionFn
         self._verifiers_env_client: VerifiersEnvClient
         self._verifiers_train_client_config: VerifiersTrainClientConfig
 
     async def setup_async(
         self,
         *,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
@@ -226,6 +233,8 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                 "so its client can construct the same renderer in the "
                 "environment-server process"
             )
+        self._release_session_fn = release_session_fn
+        self._generation_server.set_generate_fn(generate_fn)
         # The EnvServer and the rollout workers both run on the controller host, so the
         # agents reach this server on the loopback address.
         await self._generation_server.start()
@@ -246,25 +255,18 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
     async def run_group(
         self,
         *,
-        generate_fn: GenerateFn,
-        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
-        # Each group replaces this one slot. That is safe because every group's generate_fn routes the
-        # same way; keep per-group state out of it.
-        self._generation_server.set_generate_fn(generate_fn)
-
         # Run the group's rollouts in the env server, all at once.
         # return_exceptions: every sibling ends before the controller frees the group's KV
         # cache. A sibling still generating would hold it again, and nothing would free it.
         rollouts_or_errors = await asyncio.gather(
             *(
                 self._run_single_rollout(
-                    release_session_fn=release_session_fn,
                     sample=sample,
                     sampling=(
                         sampling
@@ -285,7 +287,6 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
     async def _run_single_rollout(
         self,
         *,
-        release_session_fn: ReleaseSessionFn,
         sample: object,
         sampling: SamplingConfig,
         group_id: int,
@@ -321,14 +322,12 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             for trace in verifiers_episode.traces
         }
 
-        async def release(session_id: str) -> None:
-            try:
-                await release_session_fn(routing_session_id=session_id)
-            except Exception:
-                # Not fatal: `max_sessions` evicts an unreleased session.
-                logger.exception("releasing routing session %s failed", session_id)
-
-        await asyncio.gather(*(release(trace.id) for trace in verifiers_episode.traces))
+        await asyncio.gather(
+            *(
+                self._release_session_fn(routing_session_id=trace.id)
+                for trace in verifiers_episode.traces
+            )
+        )
         traces = [trace for trace in verifiers_episode.traces if trace.agent.trainable]
         if len(traces) != 1:
             raise ValueError(

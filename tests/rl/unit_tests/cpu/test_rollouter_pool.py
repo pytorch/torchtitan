@@ -98,6 +98,7 @@ class _Worker:
         self.setup_async = _CallOneEndpoint()
         self.run_group = _RunGroupEndpoint()
         self.sync_log_step = _CallOneEndpoint()
+        self.close = _CallOneEndpoint()
 
 
 class _ActorSystem:
@@ -105,6 +106,8 @@ class _ActorSystem:
         self.workers = workers
         self.spawn_kwargs = None
         self.stopped = False
+        # Each worker's number of close calls when the workers stopped.
+        self.close_calls_at_stop: list[int] = []
 
     async def spawn_rollout_workers(self, config, **kwargs) -> list[_Worker]:
         self.spawn_kwargs = {"config": config, **kwargs}
@@ -112,6 +115,7 @@ class _ActorSystem:
 
     async def stop_rollout_workers(self) -> None:
         self.stopped = True
+        self.close_calls_at_stop = [len(worker.close.calls) for worker in self.workers]
 
 
 class _WorkerActorMesh:
@@ -174,6 +178,8 @@ async def _setup(rollouter: Rollouter, num_workers: int = 1) -> _ActorSystem:
     await rollouter.setup_async(
         actor_system=actor_system,
         num_workers=num_workers,
+        generate_fn="generate_fn",
+        release_session_fn="release_session_fn",
         tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
@@ -184,8 +190,6 @@ async def _setup(rollouter: Rollouter, num_workers: int = 1) -> _ActorSystem:
 def _dispatch(rollouter: Rollouter, group_id: int, group_size: int = 2) -> asyncio.Task:
     return asyncio.create_task(
         rollouter.run_group_rollouts(
-            generate_fn="generate_fn",
-            release_session_fn="release_session_fn",
             sample="sample",
             group_id=group_id,
             group_size=group_size,
@@ -230,7 +234,7 @@ def test_monarch_spawns_rollout_workers_on_controller_host(monkeypatch) -> None:
     asyncio.run(run())
 
 
-def test_setup_sets_up_every_worker_and_close_stops_them() -> None:
+def test_setup_sets_up_every_worker_and_close_closes_each_before_the_stop() -> None:
     async def run() -> None:
         rollouter = _rollouter_without_datasets()
         actor_system = await _setup(rollouter, num_workers=2)
@@ -243,6 +247,8 @@ def test_setup_sets_up_every_worker_and_close_stops_them() -> None:
         for worker in actor_system.workers:
             assert worker.setup_async.calls == [
                 {
+                    "generate_fn": "generate_fn",
+                    "release_session_fn": "release_session_fn",
                     "tokenizer_config": "tokenizer_config",
                     "renderer_config": "renderer_config",
                     "hf_assets_path": "hf_assets_path",
@@ -250,7 +256,7 @@ def test_setup_sets_up_every_worker_and_close_stops_them() -> None:
                 }
             ]
         await rollouter.close()
-        assert actor_system.stopped
+        assert actor_system.close_calls_at_stop == [1, 1]
 
     asyncio.run(run())
 
@@ -284,8 +290,6 @@ def test_each_group_goes_to_the_worker_with_the_fewest_rollouts_in_flight() -> N
         await asyncio.sleep(0)
         assert group_ids_per_worker() == [[0, 4], [1, 3], [2, 5]]
         assert workers[1].run_group.calls[0] == {
-            "generate_fn": "generate_fn",
-            "release_session_fn": "release_session_fn",
             "sample": "sample",
             "group_id": 1,
             "group_size": 2,
@@ -335,6 +339,29 @@ def test_close_waits_for_run_group_of_cancelled_caller() -> None:
         assert loop_errors == []
 
     asyncio.run(run())
+
+
+def test_each_worker_close_that_fails_or_hangs_is_logged_and_the_workers_still_stop(
+    monkeypatch, caplog
+) -> None:
+    async def run() -> None:
+        monkeypatch.setattr(rollouter_module, "_WORKER_CLOSE_TIMEOUT_S", 0.01)
+        rollouter = _rollouter_without_datasets()
+        actor_system = await _setup(rollouter, num_workers=3)
+        loop = asyncio.get_running_loop()
+        hung_close, failed_close = loop.create_future(), loop.create_future()
+        failed_close.set_exception(RuntimeError("env stop failed"))
+        actor_system.workers[0].close.call_one = lambda: hung_close
+        actor_system.workers[2].close.call_one = lambda: failed_close
+
+        await rollouter.close()
+
+        assert actor_system.stopped
+        assert hung_close.cancelled()
+
+    asyncio.run(run())
+    assert "Rollout worker 0 close still running" in caplog.text
+    assert "Rollout worker 2 close failed" in caplog.text
 
 
 def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:

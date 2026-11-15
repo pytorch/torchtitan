@@ -762,9 +762,15 @@ class Controller(Configurable):
         generator_router = self.generator_router
 
         async def release_session(*, routing_session_id: str) -> None:
-            await generator_router.release_session.call_one(
-                routing_session_id=routing_session_id
-            )
+            try:
+                await generator_router.release_session.call_one(
+                    routing_session_id=routing_session_id
+                )
+            except Exception:
+                # Not fatal: the router's `max_sessions` LRU evicts a session nobody released.
+                logger.exception(
+                    "releasing routing session %s failed", routing_session_id
+                )
 
         return release_session
 
@@ -850,6 +856,8 @@ class Controller(Configurable):
             await self._rollouter.setup_async(
                 actor_system=actor_system,
                 num_workers=self._num_rollout_workers,
+                generate_fn=self._make_generate_fn(),
+                release_session_fn=self._make_release_session_fn(),
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
@@ -906,16 +914,12 @@ class Controller(Configurable):
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
-        generate = self._make_generate_fn()
-        release_session_fn = self._make_release_session_fn()
         # Each id is used once, so validations that run at the same time never share one.
         group_ids = [next(self._validation_group_ids) for _ in samples]
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
-                    generate_fn=generate,
-                    release_session_fn=release_session_fn,
                     sample=sample,
                     group_id=group_id,
                     group_size=1,
@@ -1048,19 +1052,12 @@ class Controller(Configurable):
         )
 
         # rollout_loop
-        generate_fn = self._make_generate_fn()
-        release_session_fn = self._make_release_session_fn()
-
         # One rollout loop per active buffer slot: lets generation fill every active slot,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
             asyncio.create_task(
-                self._rollout_loop(
-                    group_buffer=self._group_buffer,
-                    generate_fn=generate_fn,
-                    release_session_fn=release_session_fn,
-                ),
+                self._rollout_loop(group_buffer=self._group_buffer),
                 name=f"rollout_loop_{slot_index}",
             )
             for slot_index in range(max_active_rollout_groups)
@@ -1226,13 +1223,7 @@ class Controller(Configurable):
             )
         logger.info("Buffer closed; data input loop stopping")
 
-    async def _rollout_loop(
-        self,
-        *,
-        group_buffer: RolloutGroupWorkBuffer,
-        generate_fn: GenerateFn,
-        release_session_fn: ReleaseSessionFn,
-    ) -> None:
+    async def _rollout_loop(self, *, group_buffer: RolloutGroupWorkBuffer) -> None:
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
         Staleness is bounded by the buffer's active-slot budget. Raw rollouts are recorded before any drop,
@@ -1253,8 +1244,6 @@ class Controller(Configurable):
             try:
                 with sl.log_trace_span("rollout_group"):
                     group = await self._rollouter.run_group_rollouts(
-                        generate_fn=generate_fn,
-                        release_session_fn=release_session_fn,
                         sample=work.sample,
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,

@@ -180,10 +180,10 @@ def test_rollout_keeps_each_image_on_its_placeholders(
     env = TokenEnv.Config(max_rollout_tokens=1024).build(
         message_env=_TwoImageEnv(image_paths), renderer=renderer
     )
+    worker._generate_fn = generate_fn
+    worker._release_session_fn = release_session_fn
     rollout = asyncio.run(
         worker._run_single_rollout(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
             env=env,
             sampling=SamplingConfig(),
             group_id=0,

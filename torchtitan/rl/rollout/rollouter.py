@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 # Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
 _RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
 
+# How long `Rollouter.close` waits for the workers' own `close` calls, e.g. stopping their
+# sandboxes, before it stops the worker processes anyway. Docker removes a container in seconds;
+# a teardown stuck longer must not hold up the job's exit.
+_WORKER_CLOSE_TIMEOUT_S = 60.0
+
 
 class Rollouter(Configurable):
     """Turns a problem (train/val datasets and a rollout worker config) into scored rollouts, the
@@ -60,15 +65,13 @@ class Rollouter(Configurable):
     turns a problem into rollouts: its worker builds the envs, drives them against the inference engine
     (via a `generate_fn` the controller provides), and scores the results with `score_group`.
 
-    The flow for one prompt group: the controller passes a `generate_fn` callable; each rollout
-    drives its own calls, so the generator runs a whole group's calls together in one continuous
-    batch.
+    The flow for one prompt group: each rollout drives its own calls to `generate_fn`, so the
+    generator runs a whole group's calls together in one continuous batch.
 
+        await rollouter.setup_async(generate_fn=generate_fn, ...)   # once
         index, sample = rollouter.get_training_sample()
         group = await rollouter.run_group_rollouts(     # one worker runs and scores the group
-            generate_fn=generate_fn, release_session_fn=release_session_fn,
-            sample=sample, group_id=index,
-            group_size=N, sampling=sampling)
+            sample=sample, group_id=index, group_size=N, sampling=sampling)
 
     Example:
         rollouter = Rollouter.Config(
@@ -171,6 +174,8 @@ class Rollouter(Configurable):
         *,
         actor_system: ActorSystem,
         num_workers: int,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
@@ -180,7 +185,8 @@ class Rollouter(Configurable):
         # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn `num_workers` rollout workers through `actor_system` and set each one up."""
+        """Spawn `num_workers` rollout workers through `actor_system` and set each one up.
+        `BaseRolloutWorker.setup_async` describes the other arguments."""
         if self._workers:
             raise RuntimeError("rollout worker pool is already initialized")
 
@@ -195,6 +201,8 @@ class Rollouter(Configurable):
         await asyncio.gather(
             *(
                 worker.setup_async.call_one(
+                    generate_fn=generate_fn,
+                    release_session_fn=release_session_fn,
                     tokenizer_config=tokenizer_config,
                     renderer_config=renderer_config,
                     hf_assets_path=hf_assets_path,
@@ -205,17 +213,21 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Wait for in-flight `run_group` calls, then stop the rollout worker pool.
+        """Wait for in-flight `run_group` calls, close each worker, then stop the worker processes.
 
-        Close the generators first, so pending `generate_fn` calls fail fast:
+        Close the generators first, so pending `generate_fn` calls fail fast. Then:
 
-            generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
-            run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
+            1. wait for the run_group calls; cancel those still running after
+               _RUN_GROUP_DRAIN_TIMEOUT_S
+            2. call each worker's close(), e.g. it stops its sandboxes. A close that raises, or
+               that still runs after _WORKER_CLOSE_TIMEOUT_S, is logged
+            3. stop_rollout_workers(), even after a failed close
 
-        Why wait: if a worker stops while a generator (or the generator router) still owes it a reply,
-        Monarch fails that actor and the finished job exits 130.
+        Why wait: if a worker stops while a generator (or the generator router) still owes it a
+        reply, Monarch fails that actor and the finished job exits 130. Why close first: Monarch
+        cancels an actor's `__cleanup__` after 3 s (its cleanup timeout) and fails the job.
         """
-        actor_system = self._actor_system
+        workers, actor_system = self._workers, self._actor_system
         self._workers = []
         self._actor_system = None
         calls = tuple(self._inflight_run_group_calls)
@@ -230,8 +242,30 @@ class Rollouter(Configurable):
                 for call in pending:
                     call.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-        if actor_system is not None:
-            await actor_system.stop_rollout_workers()
+        try:
+            # Like the drain above: a close that hangs must not hide another worker's failed close.
+            close_calls = [
+                asyncio.ensure_future(worker.close.call_one()) for worker in workers
+            ]
+            if close_calls:
+                await asyncio.wait(close_calls, timeout=_WORKER_CLOSE_TIMEOUT_S)
+            for worker_index, call in enumerate(close_calls):
+                if not call.done():
+                    logger.error(
+                        "Rollout worker %d close still running after %.0f s; stopping it",
+                        worker_index,
+                        _WORKER_CLOSE_TIMEOUT_S,
+                    )
+                    call.cancel()
+                elif call.exception() is not None:
+                    logger.error(
+                        "Rollout worker %d close failed",
+                        worker_index,
+                        exc_info=call.exception(),
+                    )
+        finally:
+            if actor_system is not None:
+                await actor_system.stop_rollout_workers()
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
@@ -242,8 +276,6 @@ class Rollouter(Configurable):
     async def run_group_rollouts(
         self,
         *,
-        generate_fn: GenerateFn,
-        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -253,9 +285,6 @@ class Rollouter(Configurable):
         return its scored group.
 
         Args:
-            generate_fn: Async callable that returns a Completion given a prompt.
-            release_session_fn: Async callable each rollout calls after its last turn, to
-                release resources associated to that session. E.g. generator's kv-cache.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -283,8 +312,6 @@ class Rollouter(Configurable):
         self._next_worker_index = (worker_index + 1) % num_workers
         call = asyncio.ensure_future(
             self._workers[worker_index].run_group.call_one(
-                generate_fn=generate_fn,
-                release_session_fn=release_session_fn,
                 sample=sample,
                 group_id=group_id,
                 group_size=group_size,
@@ -336,15 +363,37 @@ class BaseRolloutWorker(Configurable, ABC):
         self.rubric: Rubric = config.rubric.build()
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
 
+    @abstractmethod
     async def setup_async(
         self,
         *,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
-        """Called once in the worker process after it is spawned."""
+        """Called once in the worker process after it is spawned.
+
+        Args:
+            generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release resources associated to that session. E.g. generator's kv-cache.
+            tokenizer_config: The model's tokenizer.
+            renderer_config: Turns messages into prompt tokens and completions into messages.
+            hf_assets_path: The model's Hugging Face folder, for the tokenizer files.
+            vision_processor_config: `Controller.Config.vision_processor`; None for text prompts.
+        """
+
+    async def close(self) -> None:
+        """Free what `setup_async` started, e.g. servers and sandboxes. Free only what is still
+        up, and return at once when nothing is, because a close can also come:
+
+            twice                   the Rollouter's close, then the actor's `__cleanup__`
+            before setup ends       `setup_async` never ran, raised, or is still running
+            during another close    `__cleanup__` after the Rollouter's close timed out
+        """
 
     async def score_group(
         self,
@@ -368,8 +417,6 @@ class BaseRolloutWorker(Configurable, ABC):
     async def run_group(
         self,
         *,
-        generate_fn: GenerateFn,
-        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -379,9 +426,6 @@ class BaseRolloutWorker(Configurable, ABC):
         `return_exceptions=True` and passes them to `make_scored_group`.
 
         Args:
-            generate_fn: Async callable that returns a Completion given a prompt.
-            release_session_fn: Async callable each rollout calls after its last turn, to
-                release resources associated to that session. E.g. generator's kv-cache.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -475,20 +519,23 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
         self._renderer: Renderer
+        self._generate_fn: GenerateFn
+        self._release_session_fn: ReleaseSessionFn
 
     async def setup_async(
         self,
         *,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
-        """Build the renderer that each rollout's `TokenEnv` uses.
-
-        ``vision_processor_config``: `Controller.Config.vision_processor`, for a renderer that
-        reads image files; None for text prompts.
-        """
+        """Store `generate_fn` and `release_session_fn`, and build the renderer that each
+        rollout's `TokenEnv` uses."""
+        self._generate_fn = generate_fn
+        self._release_session_fn = release_session_fn
         tokenizer = tokenizer_config.build(tokenizer_path=hf_assets_path)
         vision_processor = (
             vision_processor_config.build()
@@ -525,8 +572,6 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
     async def run_group(
         self,
         *,
-        generate_fn: GenerateFn,
-        release_session_fn: ReleaseSessionFn,
         sample: object,
         group_id: int,
         group_size: int,
@@ -547,8 +592,6 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             rollouts_or_errors = await asyncio.gather(
                 *(
                     self._run_single_rollout(
-                        generate_fn=generate_fn,
-                        release_session_fn=release_session_fn,
                         env=env,
                         # Offset the base seed per sample so a group's n=1
                         # requests are diverse yet reproducible run-to-run.
@@ -574,8 +617,6 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
     async def _run_single_rollout(
         self,
         *,
-        generate_fn: GenerateFn,
-        release_session_fn: ReleaseSessionFn,
         env: TokenEnv,
         sampling: SamplingConfig,
         group_id: int,
@@ -588,10 +629,6 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         For custom logic, users can override this method.
 
         Args:
-            generate_fn: Async callable that runs one generation; keeps the worker
-                decoupled from the generator actor.
-            release_session_fn: Async callable this rollout calls once after its last turn,
-                with its `routing_session_id`.
             env: The env for this rollout; `run_group` closes it.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
@@ -617,7 +654,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 )
 
                 # generator call
-                completion = await generate_fn(
+                completion = await self._generate_fn(
                     prompt=env_step.next_prompt,
                     request_id=turn_rollout_id.to_string(),
                     group_id=group_id,
@@ -673,11 +710,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             status = RolloutStatus.ERROR_INFRA
             logs["error"] = repr(error)
 
-        try:
-            await release_session_fn(routing_session_id=routing_session_id)
-        except Exception:
-            # Not fatal: `max_sessions` evicts an unreleased session.
-            logger.exception("releasing routing session %s failed", routing_session_id)
+        await self._release_session_fn(routing_session_id=routing_session_id)
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,

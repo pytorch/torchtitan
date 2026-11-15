@@ -19,7 +19,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
-from torchtitan.rl.rollout.types import RolloutGroup
+from torchtitan.rl.rollout.types import GenerateFn, ReleaseSessionFn, RolloutGroup
 
 
 class RolloutWorkerActor(Actor):
@@ -46,12 +46,16 @@ class RolloutWorkerActor(Actor):
     async def setup_async(
         self,
         *,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         await self._worker.setup_async(
+            generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
@@ -62,16 +66,12 @@ class RolloutWorkerActor(Actor):
     async def run_group(
         self,
         *,
-        generate_fn: Any,
-        release_session_fn: Any,
         sample: object,
         group_id: int,
         group_size: int,
         sampling: Any,
     ) -> RolloutGroup:
         return await self._worker.run_group(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
             sample=sample,
             group_id=group_id,
             group_size=group_size,
@@ -81,3 +81,14 @@ class RolloutWorkerActor(Actor):
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         sl.set_step(step)
+
+    @concurrent_endpoint
+    async def close(self) -> None:
+        """The Rollouter calls this before it stops the worker: a slow close (e.g. stopping
+        sandboxes) can't run in `__cleanup__`, which Monarch cancels after 3 s."""
+        await self._worker.close()
+
+    async def __cleanup__(self, exc: Exception | None) -> None:
+        """Monarch runs this when the actor stops; a killed process skips it. It closes a worker
+        the Rollouter didn't, e.g. after an error."""
+        await self._worker.close()
