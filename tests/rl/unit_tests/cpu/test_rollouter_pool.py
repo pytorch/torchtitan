@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import functools
 import gc
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -71,10 +72,12 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
             structured_logger_init_fn=functools.partial(
                 lambda **kwargs: init_calls.append(kwargs), source="rl", rank=0
             ),
+            first_worker_index=4,
         )
 
         assert actor._worker is worker
-        assert init_calls == [{"source": "rl_rollout_worker", "rank": 2}]
+        # Rank 2 in the proc mesh of a host whose first worker is the pool's worker 4.
+        assert init_calls == [{"source": "rl_rollout_worker", "rank": 6}]
 
     asyncio.run(run())
 
@@ -98,6 +101,7 @@ class _Worker:
         self.run_group = _RunGroupEndpoint()
         self.sync_log_step = _CallOneEndpoint()
         self.close = _CallOneEndpoint()
+        self.hostname = _CallOneEndpoint()
 
 
 class _ActorSystem:
@@ -162,7 +166,9 @@ class _ControllerHost:
 def _rollouter_without_datasets() -> Rollouter:
     rollouter = object.__new__(Rollouter)
     rollouter._config = SimpleNamespace(
-        worker="worker_config", num_threads_per_worker=2
+        worker="worker_config",
+        num_threads_per_worker=2,
+        workers_on_controller_host=False,
     )
     rollouter._workers = []
     rollouter._num_rollouts_in_flight = []
@@ -212,11 +218,11 @@ def test_monarch_spawns_rollout_workers_on_controller_host(monkeypatch) -> None:
         actor_system = MonarchActorSystem(MonarchActorSystem.Config())
 
         handles = await actor_system.spawn_rollout_workers(
-            "worker_config", num_workers=3, num_threads=2
+            "worker_config", num_workers=3, num_threads=2, on_controller_host=True
         )
 
         assert handles == workers
-        assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
+        assert host.spawn_kwargs["per_host"] == {"cpus": 3}
         args, kwargs = worker_mesh.spawn_args
         assert args[0] == "rollout_worker"
         assert args[1] is RolloutWorkerActor
@@ -224,6 +230,7 @@ def test_monarch_spawns_rollout_workers_on_controller_host(monkeypatch) -> None:
             "worker_config": "worker_config",
             "num_threads": 2,
             "structured_logger_init_fn": structured_logger_init_fn,
+            "first_worker_index": 0,
         }
         await actor_system.stop_rollout_workers()
         assert worker_mesh.actor_mesh.stopped
@@ -241,6 +248,7 @@ def test_setup_sets_up_every_worker_and_close_closes_each_before_the_stop() -> N
             "config": "worker_config",
             "num_workers": 2,
             "num_threads": 2,
+            "on_controller_host": False,
         }
         for worker in actor_system.workers:
             assert worker.setup_async.calls == [
@@ -417,3 +425,45 @@ def test_a_run_group_that_fails_to_send_leaves_its_worker_count_unchanged() -> N
         await rollouter.close()
 
     asyncio.run(run())
+
+
+def test_the_other_hosts_stop_when_one_worker_mesh_fails_to_stop(caplog) -> None:
+    class _Mesh:
+        def __init__(self, error: Exception | None = None) -> None:
+            self.error = error
+            self.stopped = False
+
+        async def stop(self) -> None:
+            await asyncio.sleep(0)
+            if self.error is not None:
+                raise self.error
+            self.stopped = True
+
+    actor_system = MonarchActorSystem(MonarchActorSystem.Config())
+    meshes = [_Mesh(), _Mesh(RuntimeError("host unreachable")), _Mesh()]
+    actor_system._rollout_worker_meshes = list(meshes)
+
+    asyncio.run(actor_system.stop_rollout_workers())
+
+    assert [mesh.stopped for mesh in meshes] == [True, False, True]
+    assert "Rollout worker mesh 1 stop failed" in caplog.text
+
+
+def test_too_many_spread_workers_for_one_host_raise_before_any_worker_spawns(
+    monkeypatch,
+) -> None:
+    """Spread workers on a one-node run all go to this host. The controller's check skips them
+    (it can't see the hosts), so the spawn checks: 24 workers over 8 CPUs raise, and no worker
+    spawns."""
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: range(8))
+    host = _ControllerHost(worker_mesh=None)
+    monkeypatch.setattr(provisioning, "this_host", lambda: host)
+    actor_system = MonarchActorSystem(MonarchActorSystem.Config())
+
+    with pytest.raises(ValueError, match="24 of 24 rollout workers go to one host"):
+        asyncio.run(
+            actor_system.spawn_rollout_workers(
+                "worker_config", num_workers=24, num_threads=2, on_controller_host=False
+            )
+        )
+    assert host.spawn_kwargs is None

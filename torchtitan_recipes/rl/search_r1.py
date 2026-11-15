@@ -92,6 +92,10 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
             ),
             advantage=AdvantageEstimator.Config(should_std_normalize=True),
         ),
+        # The README starts the retriever on the launch host at 127.0.0.1:8000, which workers
+        # on other hosts can't reach.
+        # TODO: start the retriever where every host can reach it, then let the workers spread.
+        workers_on_controller_host=True,
     )
 
 

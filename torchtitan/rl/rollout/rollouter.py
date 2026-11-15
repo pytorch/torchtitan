@@ -119,6 +119,19 @@ class Rollouter(Configurable):
         (`Controller.Config.num_rollout_workers`). Whole groups are placed, so a worker can hold up
         to one group more."""
 
+        # TODO: default to False once a multi-node run with spread workers matches one with the
+        #   workers on the controller's host.
+        workers_on_controller_host: bool = True
+        """Where the rollout workers run:
+
+            True    every worker on the controller's host
+            False   the actor system spreads them over the job's other hosts; a one-node run
+                    keeps them on this host
+
+        Keep True when an env needs something only that host has, e.g. a retriever on its
+        127.0.0.1, its Docker daemon, or image files on its disk (`TokenEnv` reads each image by
+        path in the worker)."""
+
         num_threads_per_worker: int | None = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
         behind every `asyncio.to_thread` call in that process. None: Python's default,
@@ -195,6 +208,7 @@ class Rollouter(Configurable):
             self._config.worker,
             num_workers=num_workers,
             num_threads=self._config.num_threads_per_worker,
+            on_controller_host=self._config.workers_on_controller_host,
         )
         self._num_rollouts_in_flight = [0] * num_workers
         await asyncio.gather(
@@ -300,6 +314,8 @@ class Rollouter(Configurable):
         # TODO: lower a worker's count as each rollout ends. Today the group's whole count drops
         #   when the group returns, so a group waiting for one slow rollout still counts all of
         #   them. Placing single rollouts (the TODO in `Controller.Config`) fixes this.
+        # TODO: before groups of tens of GB (1M-token rollouts, 128 per group), reserve each group's
+        #   bytes per worker host at admission, or pick by bytes with a fail-fast guard.
         num_workers = len(self._workers)
         worker_index = min(
             range(num_workers),

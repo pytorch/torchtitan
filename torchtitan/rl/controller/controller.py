@@ -630,13 +630,18 @@ class Controller(Configurable):
             seed=config.generator.debug.seed,
             stop_token_ids=list(self.renderer.get_stop_token_ids()),
         )
-        # Checked at construction, so a bad worker count fails before any process spawns. Each
-        # worker is a Python process on this host (`ActorSystem.spawn_rollout_workers`).
+        # Checked at construction, so a bad worker count fails before any process spawns. By
+        # default each worker is a Python process on this host (`ActorSystem.spawn_rollout_workers`).
+        # Workers spread over the job's other hosts are checked per host when they spawn
+        # (`MonarchActorSystem.spawn_rollout_workers`).
         # TODO: also count the CPUs that sandboxes of a local runtime (e.g. Docker containers)
         #   take on this host: they share it with the workers, and their limits reserve nothing.
         self._num_rollout_workers = config.num_rollout_workers
         num_cpus = len(os.sched_getaffinity(0))
-        if self._num_rollout_workers > num_cpus:
+        if (
+            config.rollouter.workers_on_controller_host
+            and self._num_rollout_workers > num_cpus
+        ):
             async_loop = config.async_loop
             raise ValueError(
                 f"{async_loop.max_active_rollout_groups} training groups of "
