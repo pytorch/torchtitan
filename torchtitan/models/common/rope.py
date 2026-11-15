@@ -126,12 +126,6 @@ def _compute_inv_freq(
             scaling.original_seq_len,
             scaling.truncate,
         )
-    if scaling is not None and not isinstance(
-        scaling, (Llama3ScalingConfig, YaRNScalingConfig)
-    ):
-        raise ValueError(
-            "RoPE scaling must be None, Llama3ScalingConfig, or YaRNScalingConfig."
-        )
     inv_freq_F = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     if isinstance(scaling, Llama3ScalingConfig):
         wavelength_F = 2 * math.pi / inv_freq_F
@@ -201,6 +195,58 @@ class RoPE(Module):
         """
         raise NotImplementedError
 
+    def _reshape_cache(
+        self,
+        query: torch.Tensor,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return a cache aligned to ``query`` and ``positions``.
+
+        Args:
+            query: Query tensor with shape ``[T, N, H]``.
+            positions: Optional position IDs with shape ``[T]``.
+
+        Returns:
+            Prepared RoPE cache for the concrete RoPE format.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def apply_rotary_emb(
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        rope_cache: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply a prepared RoPE cache to query and optional key.
+
+        Args:
+            query: Query tensor with shape ``[T, N, H]``.
+            key: Optional key tensor with the same leading dimensions as
+                ``query``. If ``None``, only ``query`` is rotated and returned.
+            rope_cache: Prepared cache broadcastable to ``query`` and ``key``
+                according to the concrete RoPE format.
+            inverse: Whether to apply the inverse rotation.
+
+        Returns:
+            Rotated query tensor when ``key`` is ``None``; otherwise rotated
+            query and key tensors with the same shapes and dtypes as inputs.
+        """
+        raise NotImplementedError
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary embeddings to query and optional key tensors."""
+        reshaped_cache = self._reshape_cache(query, positions)
+        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         # TODO: In long-term we need to have buffer abstraction in `Module`` class to infer the buffer_device
         if buffer_device is None:
@@ -243,9 +289,7 @@ class ComplexRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+        return super().forward(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute complex cis values.
@@ -410,8 +454,7 @@ class ComplexVisionRoPE(ComplexRoPE):
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply the rotation outside the text ``"rope"`` compile region."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+        return RoPE.forward(self, query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Complex rotation table ``(max_context_length, dim / 4)``."""
@@ -458,9 +501,7 @@ class CosSinRoPE(RoPE):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+        return super().forward(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.

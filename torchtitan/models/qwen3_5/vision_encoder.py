@@ -35,7 +35,7 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
+from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE, RoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -217,8 +217,7 @@ class CosSinVisionRoPE(CosSinRoPE):
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Apply the rotation outside the text ``"rope"`` compile region."""
-        reshaped_cache = self._reshape_cache(query, positions)
-        return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
+        return RoPE.forward(self, query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Compute the per-coordinate angle table.
