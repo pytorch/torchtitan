@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Rollout
+from torchtitan.rl.rollout.types import Rollout, RolloutStatus
 
 logger = logging.getLogger(__name__)
 
@@ -236,8 +236,8 @@ def compute_policy_age_metrics(
 
 
 def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metric]:
-    """Build rollout-derived metrics: lengths, truncation, reward breakdown, and each turn's
-    per-generation metrics (the latter keep their own generator-side keys, unprefixed).
+    """Build rollout-derived metrics, e.g. lengths and a rate per status. Each turn's
+    per-generation metrics are passed through under their own generator-side keys, unprefixed.
 
     Args:
         prefix: Metric namespace (e.g. `"rollout"` or `"validation"`).
@@ -260,7 +260,11 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
     ]
 
     truncated = [float(rollout.status.is_truncated()) for rollout in rollouts]
+    unscored = [float(rollout.reward is None) for rollout in rollouts]
     rewards = [rollout.reward for rollout in rollouts if rollout.reward is not None]
+    all_rewards = [
+        0.0 if rollout.reward is None else rollout.reward for rollout in rollouts
+    ]
     num_turns = [float(len(rollout.turns)) for rollout in rollouts]
 
     out: list[m.Metric] = [
@@ -276,8 +280,24 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/num_turns", m.Mean.from_list(num_turns)),
         m.Metric(f"{prefix}/num_turns", m.Max.from_list(num_turns)),
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
+        # Rollouts with reward None: not scored, so not trained.
+        m.Metric(f"{prefix}/unscored_rate", m.Mean.from_list(unscored)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
+        # Over every rollout, an unscored one counted as 0: `_reward` leaves the unscored ones
+        # out, so it reads higher as more rollouts fail. Example: 8 rollouts at 1.0 and 2
+        # unscored: `_reward` 1.0, `_reward_all` 0.8.
+        m.Metric(f"{prefix}_reward_all", m.Mean.from_list(all_rewards)),
     ]
+
+    # One rate per status, so a status added to `RolloutStatus` is recorded with no change here.
+    out.extend(
+        m.Metric(
+            f"{prefix}/status_rate/{status.value}",
+            m.Mean.from_list([float(rollout.status is status) for rollout in rollouts]),
+        )
+        for status in RolloutStatus
+        if status.is_terminal()
+    )
 
     # Per-component reward breakdown
     values_by_name: dict[str, list[float]] = defaultdict(list)

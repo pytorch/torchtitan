@@ -58,8 +58,9 @@ class RubricOutput:
         >>> RubricOutput(reward=0.5, reward_breakdown={"RewardCorrect": 1.0, "RewardFormat": 0.0})
     """
 
-    reward: float
-    """Final scalar reward for this rollout; assigned to `Rollout.reward`."""
+    reward: float | None
+    """Final scalar reward for this rollout; assigned to `Rollout.reward`. None: no reward signal
+    (e.g. a judge that failed), so the rollout gets no advantage and isn't trained."""
 
     reward_breakdown: dict[str, float] = field(default_factory=dict)
     """Per-reward-fn outputs (unweighted), keyed by reward-fn class name.
