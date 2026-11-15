@@ -57,10 +57,7 @@ from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
 from torchtitan.models.deepseek_v3.model import DeepSeekV3TransformerBlock
 from .model import KimiK25Model, KimiK2Model
 from .qk_clip import QKClipFlexInnerAttention
-from .sharding import (
-    moonvit_encoder_sharding_config,
-    moonvit_projector_sharding_config,
-)
+from .sharding import moonvit_encoder_sharding_config, moonvit_projector_sharding_config
 
 from .vision_encoder import KimiK25VisionEncoder, VisionProjector
 
