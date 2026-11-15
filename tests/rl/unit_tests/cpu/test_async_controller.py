@@ -1067,7 +1067,12 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
             reward=0.0,
             turns=[turn],
         )
-        return RolloutGroup(group_id=group_id, rollouts=[rollout])
+        # A worker's own group metrics, e.g. the Verifiers worker's phase times.
+        return RolloutGroup(
+            group_id=group_id,
+            rollouts=[rollout],
+            metrics=[m.Metric("verifiers/setup_time_s", m.Mean(3.0))],
+        )
 
     controller = object.__new__(Controller)
     controller._validation_group_ids = itertools.count(start=-1, step=-1)
@@ -1093,5 +1098,6 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     ]
     assert keys["validation_generator/queue_time_ms/mean"] == 2.0
     assert keys["validation_math_verify/timeouts/sum"] == 2.0
+    assert keys["validation_verifiers/setup_time_s/mean"] == 3.0
     assert "generator/queue_time_ms/mean" not in keys
     assert "math_verify/timeouts/sum" not in keys

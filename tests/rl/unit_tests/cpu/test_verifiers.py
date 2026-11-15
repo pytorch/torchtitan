@@ -35,6 +35,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationSession,
 )
 from torchtitan.rl.examples.verifiers.rollouter import (
+    phase_time_metrics,
     rollout_status,
     trace_to_rollout,
     trace_to_rollout_turns,
@@ -721,6 +722,18 @@ def test_sampling_config_takes_only_what_the_generator_honors(update, error) -> 
     )
 
 
+def test_phase_times_leave_out_a_phase_that_never_finished() -> None:
+    """A sandbox that failed to start: boot ended, and no later phase ran."""
+    timing = vf.Timing(boot=vf.TimeSpan(start=10.0, end=30.0))
+
+    metrics = phase_time_metrics(SimpleNamespace(timing=timing))
+
+    assert m.MetricsProcessor._aggregate_metrics(metrics) == {
+        "verifiers/boot_time_s/mean": 20.0,
+        "verifiers/boot_time_s/max": 20.0,
+    }
+
+
 def _worker(monkeypatch, load_environment) -> VerifiersRolloutWorker:
     monkeypatch.setattr(verifiers_rollouter.vf, "load_environment", load_environment)
     monkeypatch.setattr(verifiers_rollouter.vf, "resolve_env_config", lambda data: data)
@@ -860,6 +873,7 @@ def test_a_rollout_releases_every_session_verifiers_minted(monkeypatch) -> None:
             nodes=[],
             branches=[],
             reward=0.0,
+            timing=vf.Timing(),
         )
         for trace_id, trainable in [
             ("retried", True),
@@ -882,7 +896,7 @@ def test_a_rollout_releases_every_session_verifiers_minted(monkeypatch) -> None:
         lambda episode, trace: RolloutStatus.COMPLETED,
     )
 
-    rollout = asyncio.run(
+    rollout, metrics = asyncio.run(
         worker._run_episode(
             env=SimpleNamespace(slots=lambda task: [None], run_slot=run_slot),
             task=None,
@@ -899,6 +913,10 @@ def test_a_rollout_releases_every_session_verifiers_minted(monkeypatch) -> None:
     ]
     assert worker._generation_server._sessions == {}
     assert rollout.logs["verifiers_trace_id"] == "final"
+    # The fake traces' spans never end, so the attempts are the only metric: retried and final.
+    assert [(metric.key, metric.value.value) for metric in metrics] == [
+        ("verifiers/num_attempts", 2.0)
+    ]
 
 
 def test_a_failing_rollout_is_error_infra_once_every_sibling_finished(
@@ -907,14 +925,15 @@ def test_a_failing_rollout_is_error_infra_once_every_sibling_finished(
     """The controller frees the group once `run_group` returns; no sibling may still be generating."""
     finished = []
 
-    async def run_episode(*, episode_index: int, **kwargs) -> Rollout:
+    async def run_episode(*, episode_index: int, **kwargs) -> tuple[Rollout, list]:
         if episode_index == 0:
             raise RuntimeError("rollout 0 failed")
         await asyncio.sleep(0.01)
         finished.append(episode_index)
-        return Rollout(
+        rollout = Rollout(
             group_id=1, rollout_id=episode_index, status=RolloutStatus.COMPLETED
         )
+        return rollout, []
 
     def load_environment(env_config: dict) -> SimpleNamespace:
         return SimpleNamespace(
