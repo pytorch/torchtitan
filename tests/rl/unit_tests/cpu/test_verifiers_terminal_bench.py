@@ -32,7 +32,7 @@ from torchtitan_recipes.rl.verifiers_terminal_bench import (
     terminal_bench_env_config,
     terminal_bench_rollouter_config,
 )
-from verifiers.v1.runtimes import ProgramResult
+from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.utils.loaders import (
     load_environment,
     load_harness,
@@ -56,9 +56,13 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
 
 
 class _RecordingRuntime:
-    """Records the program the harness prepares, how it runs it, and other commands."""
+    """Records the program the harness prepares and every command it runs, in order."""
 
     def __init__(self) -> None:
+        # The methods below stand in for Verifiers' Runtime; fail if it renames one.
+        assert all(
+            hasattr(Runtime, name) for name in ("prepare_uv_script", "run", "write")
+        )
         self.commands: list[tuple[list[str], dict[str, str]]] = []
         self.files: dict[str, bytes] = {}
 
@@ -66,13 +70,9 @@ class _RecordingRuntime:
         self.source = source
         return ["terminus_harness"]
 
-    async def run_program(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
-        self.argv = argv
-        self.program_env = env
-        return ProgramResult(exit_code=0, stdout="", stderr="")
-
-    async def run(self, argv: list[str], env: dict[str, str]) -> None:
+    async def run(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
         self.commands.append((argv, env))
+        return ProgramResult(exit_code=0, stdout="", stderr="")
 
     async def write(self, path: str, data: bytes) -> None:
         self.files[path] = data
@@ -114,9 +114,10 @@ def _run_terminus_program(
     [(prompts_path, prompts)] = runtime.files.items()
     local_prompts = tmp_path / "prompts.json"
     local_prompts.write_bytes(prompts)
-    argv = [arg.replace(prompts_path, str(local_prompts)) for arg in runtime.argv]
+    [(program_argv, _)] = runtime.commands
+    argv = [arg.replace(prompts_path, str(local_prompts)) for arg in program_argv]
 
-    recorded = SimpleNamespace(argv=runtime.argv, kwargs={}, calls=[])
+    recorded = SimpleNamespace(argv=program_argv, kwargs={}, calls=[])
 
     async def llm_call(*args: object, message_history: list[dict]) -> list[dict]:
         return message_history
@@ -203,13 +204,14 @@ def test_tmux_server_outlives_launch_until_cleanup() -> None:
             SimpleNamespace(prompt="Fix the parser in /app.", system_prompt=None),
         )
     )
-    assert runtime.commands == []
+    # Launch ran the program only.
+    [(_, program_env)] = runtime.commands
 
     asyncio.run(harness.cleanup(trace, runtime))
-    [(argv, env)] = runtime.commands
+    [_, (argv, env)] = runtime.commands
     assert "tmux kill-server" in argv[-1]
     assert env == {"TMUX_TMPDIR": "/tmp/vf-terminus-2-trace"}
-    assert runtime.program_env["TMUX_TMPDIR"] == env["TMUX_TMPDIR"]
+    assert program_env["TMUX_TMPDIR"] == env["TMUX_TMPDIR"]
     # The prompts file cleanup removes is the one launch wrote.
     assert '"$TMUX_TMPDIR.prompts.json"' in argv[-1]
     assert list(runtime.files) == ["/tmp/vf-terminus-2-trace.prompts.json"]

@@ -71,7 +71,6 @@ from torchtitan.rl.routing.strategies import (
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
-from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -80,8 +79,10 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 TERMINAL_BENCH_PACKAGE_ID = "torchtitan-verifiers-terminal-bench"
 
 
-def terminal_bench_env_config(dataset: str, *, max_turns: int) -> HarborEnvConfig:
-    """Verifiers' Harbor env on a Harbor dataset: Terminus-2 in a local Docker container.
+def terminal_bench_env_config(
+    dataset: str, *, max_turns: int
+) -> vf.SingleAgentEnvConfig:
+    """Verifiers' single-agent env on a Harbor dataset: Terminus-2 in a local Docker container.
 
     Docker is a placeholder for local runs. Set another runtime with
     ``env.model_copy(update={"agent": env.agent.model_copy(update={"runtime": ...})})``.
@@ -90,7 +91,7 @@ def terminal_bench_env_config(dataset: str, *, max_turns: int) -> HarborEnvConfi
         dataset: Harbor dataset id, e.g. ``"local/tmax@v1"``.
         max_turns: The agent's turn limit.
     """
-    return HarborEnvConfig(
+    return vf.SingleAgentEnvConfig(
         taskset=TerminalTasksetConfig(id=TERMINAL_BENCH_PACKAGE_ID, dataset=dataset),
         agent=vf.AgentConfig(
             harness=TerminalBenchTerminusHarnessConfig(

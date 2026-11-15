@@ -113,7 +113,7 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
         program = await runtime.prepare_uv_script(
             self._program_source(), self.config.resolved_env
         )
-        return await runtime.run_program([*program, *args], env)
+        return await runtime.run([*program, *args], env)
 
     async def cleanup(self, trace: Trace, runtime: Runtime) -> None:
         """Stop Terminus-2's tmux server. Verifiers calls this after scoring, so

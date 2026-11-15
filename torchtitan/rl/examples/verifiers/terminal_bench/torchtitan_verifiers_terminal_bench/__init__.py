@@ -9,13 +9,9 @@
 See "Taskset ids" in torchtitan/rl/examples/verifiers/README.md.
 """
 
-# Verifiers 0.4.0 runs a taskset with the Env its package exports.
-# TODO: drop this export with the Verifiers 0.4.1 pin.
-from verifiers.v1.tasksets.harbor import HarborEnv
-
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import TerminalTaskset
 
-__all__ = ["HarborEnv", "TerminalBenchTerminusHarness", "TerminalTaskset"]
+__all__ = ["TerminalBenchTerminusHarness", "TerminalTaskset"]
