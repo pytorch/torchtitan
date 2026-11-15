@@ -134,6 +134,7 @@ class VerifiersRollouter(Rollouter):
         self,
         *,
         actor_system: ActorSystem,
+        num_workers: int,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
@@ -152,6 +153,7 @@ class VerifiersRollouter(Rollouter):
         env_server_address = await self._verifiers_env_server.start()
         await super().setup_async(
             actor_system=actor_system,
+            num_workers=num_workers,
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,

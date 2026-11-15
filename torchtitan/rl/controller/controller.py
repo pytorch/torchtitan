@@ -421,6 +421,17 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
+            rollouts_per_worker = self.rollouter.rollouts_per_worker
+            group_size = self.async_loop.num_samples_per_prompt
+            # The rollouter places whole groups, so one group must fit on one worker.
+            # TODO: place single rollouts, each on the least-loaded worker, so a group can spread over
+            #   several workers; that removes this guard.
+            if group_size > rollouts_per_worker:
+                raise ValueError(
+                    f"async_loop.num_samples_per_prompt={group_size} is over "
+                    f"rollouter.rollouts_per_worker={rollouts_per_worker}: a whole group runs on one "
+                    "worker, so raise rollouts_per_worker or use smaller groups"
+                )
             # TODO: support "gpu_fetch" by reading into generator GPU memory
             # (https://github.com/pytorch/torchtitan/issues/6070).
             if (
@@ -567,6 +578,25 @@ class Controller(Configurable):
             # the engine torchtitan builds.
             return min(max_num_seqs, max_num_batched_tokens)
 
+        @property
+        def num_rollout_workers(self) -> int:
+            """Training rollouts in flight / `rollouter.rollouts_per_worker`, rounded up.
+
+            Example (rollouts_per_worker=64):
+                groups in flight x size   workers
+                8 x 8                     1
+                48 x 32                   24
+                256 x 16                  64
+            """
+            async_loop = self.async_loop
+            # TODO: grow the pool at run time when workers stay busy, e.g. add a worker when the mean
+            #   load passes 90% of rollouts_per_worker; Monarch spawns the workers once, at setup.
+            return math.ceil(
+                async_loop.max_active_rollout_groups
+                * async_loop.num_samples_per_prompt
+                / self.rollouter.rollouts_per_worker
+            )
+
     def __init__(self, config: Config):
         self.config = config
         config.resolve_overrides()
@@ -600,6 +630,21 @@ class Controller(Configurable):
             seed=config.generator.debug.seed,
             stop_token_ids=list(self.renderer.get_stop_token_ids()),
         )
+        # Checked at construction, so a bad worker count fails before any process spawns. Each
+        # worker is a Python process on this host (`ActorSystem.spawn_rollout_workers`).
+        # TODO: also count the CPUs that sandboxes of a local runtime (e.g. Docker containers)
+        #   take on this host: they share it with the workers, and their limits reserve nothing.
+        self._num_rollout_workers = config.num_rollout_workers
+        num_cpus = len(os.sched_getaffinity(0))
+        if self._num_rollout_workers > num_cpus:
+            async_loop = config.async_loop
+            raise ValueError(
+                f"{async_loop.max_active_rollout_groups} training groups of "
+                f"{async_loop.num_samples_per_prompt} in flight at "
+                f"rollouter.rollouts_per_worker={config.rollouter.rollouts_per_worker} need "
+                f"{self._num_rollout_workers} rollout workers, over this host's {num_cpus} CPUs: "
+                "raise rollouts_per_worker"
+            )
         self._rollouter: Rollouter = config.rollouter.build()
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
@@ -804,6 +849,7 @@ class Controller(Configurable):
 
             await self._rollouter.setup_async(
                 actor_system=actor_system,
+                num_workers=self._num_rollout_workers,
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
@@ -1005,7 +1051,7 @@ class Controller(Configurable):
         generate_fn = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
 
-        # One rollout worker per active buffer slot: lets generation fill every active slot,
+        # One rollout loop per active buffer slot: lets generation fill every active slot,
         # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
         # TODO: support warm start
         rollout_tasks = [
@@ -1015,9 +1061,9 @@ class Controller(Configurable):
                     generate_fn=generate_fn,
                     release_session_fn=release_session_fn,
                 ),
-                name=f"rollout_worker_{group_worker_id}",
+                name=f"rollout_loop_{slot_index}",
             )
-            for group_worker_id in range(max_active_rollout_groups)
+            for slot_index in range(max_active_rollout_groups)
         ]
 
         # data_input_loop
@@ -1202,7 +1248,7 @@ class Controller(Configurable):
         while True:
             work = await group_buffer.claim_next()
             if work is None:  # group_buffer closed/shutdown signal
-                logger.info("Buffer closed; rollout worker stopping")
+                logger.info("Buffer closed; rollout loop stopping")
                 return
             try:
                 with sl.log_trace_span("rollout_group"):

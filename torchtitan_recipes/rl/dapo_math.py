@@ -429,6 +429,17 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
+    rollouter = _dapo_math_rollouter_config(
+        validation_dataset=AIME2025Dataset.Config(),
+        token_env=TokenEnv.Config(
+            max_rollout_tokens=max_total_tokens,
+            max_num_turns=1,
+        ),
+    )
+    # Each worker also runs up to 4 Math-Verify processes (`RewardMathVerify.num_processes`). At
+    # the default 64, 160 groups of 16 would start 40 workers and up to 160 of those processes on
+    # the controller host; 256 starts 10 workers.
+    rollouter.rollouts_per_worker = 256
     config = Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-30B-A3B-Base",
         dump_folder=f"outputs/rl/qwen3_30b_a3b_dapo_math_8k_{expert_precision}",
@@ -439,13 +450,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             target_offpolicy_steps=4,
             validation=ValidationConfig(steps=30, freq=25),
         ),
-        rollouter=_dapo_math_rollouter_config(
-            validation_dataset=AIME2025Dataset.Config(),
-            token_env=TokenEnv.Config(
-                max_rollout_tokens=max_total_tokens,
-                max_num_turns=1,
-            ),
-        ),
+        rollouter=rollouter,
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=1,
         metrics=MetricsProcessor.Config(

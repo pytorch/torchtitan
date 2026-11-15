@@ -109,18 +109,21 @@ class Rollouter(Configurable):
         """How a rollout group is built, driven, scored and advantaged. Selects the
         `BaseRolloutWorker` subclass by config type; one worker is built per pool process."""
 
-        worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        # All of a worker's rollouts share one event loop: a higher value starts fewer processes,
+        # but each model call waits longer on that loop. At 64, 32 groups of 8 run on 4 workers.
+        rollouts_per_worker: int = 64
+        """Training rollouts in flight per rollout worker; sets the worker count
+        (`Controller.Config.num_rollout_workers`). Whole groups are placed, so a worker can hold up
+        to one group more."""
 
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
         behind every `asyncio.to_thread` call in that process."""
 
         def __post_init__(self) -> None:
-            if self.worker_pool_size < 1:
+            if self.rollouts_per_worker < 1:
                 raise ValueError(
-                    "worker_pool_size must be at least 1, got "
-                    f"{self.worker_pool_size}"
+                    f"rollouts_per_worker must be at least 1, got {self.rollouts_per_worker}"
                 )
             if self.num_threads_per_worker < 1:
                 raise ValueError(
@@ -135,8 +138,11 @@ class Rollouter(Configurable):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
         self._training_dataloader = iter(training_dataloader)
 
-        # The worker pool's actor handle and the actor system that spawned it.
-        self._worker_actors: Any | None = None
+        # One single-actor handle per worker process, its rollouts in flight, and the actor system
+        # that spawned them.
+        self._workers: list[Any] = []
+        self._num_rollouts_in_flight: list[int] = []
+        self._next_worker_index = 0
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
         self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
@@ -164,6 +170,7 @@ class Rollouter(Configurable):
         self,
         *,
         actor_system: ActorSystem,
+        num_workers: int,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
@@ -173,22 +180,28 @@ class Rollouter(Configurable):
         # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
-        if self._worker_actors is not None:
+        """Spawn `num_workers` rollout workers through `actor_system` and set each one up."""
+        if self._workers:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
-        self._worker_actors = await actor_system.spawn_rollout_workers(
+        self._workers = await actor_system.spawn_rollout_workers(
             self._config.worker,
-            num_workers=self._config.worker_pool_size,
+            num_workers=num_workers,
             num_threads=self._config.num_threads_per_worker,
             **(worker_kwargs or {}),
         )
-        await self._worker_actors.setup_async.call(
-            tokenizer_config=tokenizer_config,
-            renderer_config=renderer_config,
-            hf_assets_path=hf_assets_path,
-            vision_processor_config=vision_processor_config,
+        self._num_rollouts_in_flight = [0] * num_workers
+        await asyncio.gather(
+            *(
+                worker.setup_async.call_one(
+                    tokenizer_config=tokenizer_config,
+                    renderer_config=renderer_config,
+                    hf_assets_path=hf_assets_path,
+                    vision_processor_config=vision_processor_config,
+                )
+                for worker in self._workers
+            )
         )
 
     async def close(self) -> None:
@@ -203,7 +216,7 @@ class Rollouter(Configurable):
         Monarch fails that actor and the finished job exits 130.
         """
         actor_system = self._actor_system
-        self._worker_actors = None
+        self._workers = []
         self._actor_system = None
         calls = tuple(self._inflight_run_group_calls)
         if calls:
@@ -222,8 +235,9 @@ class Rollouter(Configurable):
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
-        if self._worker_actors is not None:
-            await self._worker_actors.sync_log_step.call(step)
+        await asyncio.gather(
+            *(worker.sync_log_step.call_one(step) for worker in self._workers)
+        )
 
     async def run_group_rollouts(
         self,
@@ -235,7 +249,8 @@ class Rollouter(Configurable):
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
-        """Send one prompt group to a rollout worker and return its scored group.
+        """Send one prompt group to the rollout worker with the fewest rollouts in flight, and
+        return its scored group.
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
@@ -249,13 +264,25 @@ class Rollouter(Configurable):
         Returns:
             One scored `RolloutGroup`.
         """
-        if self._worker_actors is None:
+        if not self._workers:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
-        # endpoint of one worker in the pool.
+        # Fewest rollouts in flight. A tie goes to the next worker after the last one picked, so
+        # tied workers take turns.
+        # TODO: lower a worker's count as each rollout ends. Today the group's whole count drops
+        #   when the group returns, so a group waiting for one slow rollout still counts all of
+        #   them. Placing single rollouts (the TODO in `Controller.Config`) fixes this.
+        num_workers = len(self._workers)
+        worker_index = min(
+            range(num_workers),
+            key=lambda index: (
+                self._num_rollouts_in_flight[index],
+                (index - self._next_worker_index) % num_workers,
+            ),
+        )
+        self._next_worker_index = (worker_index + 1) % num_workers
         call = asyncio.ensure_future(
-            self._worker_actors.run_group.choose(
+            self._workers[worker_index].run_group.call_one(
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 sample=sample,
@@ -264,16 +291,22 @@ class Rollouter(Configurable):
                 sampling=sampling,
             )
         )
+
+        def on_done(call: asyncio.Future[RolloutGroup]) -> None:
+            self._num_rollouts_in_flight[worker_index] -= group_size
+            self._inflight_run_group_calls.discard(call)
+            # A cancelled caller never reads the error; read it so asyncio does not log it.
+            if not call.cancelled():
+                call.exception()
+
         self._inflight_run_group_calls.add(call)
-        call.add_done_callback(self._on_run_group_call_done)
+        call.add_done_callback(on_done)
+        # Counted once the call is sent: `call_one` raises before it returns a Future when it can't
+        # send, e.g. an argument that doesn't pickle. asyncio schedules done callbacks, so `on_done`
+        # can't run before this line.
+        self._num_rollouts_in_flight[worker_index] += group_size
         # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
         return await asyncio.shield(call)
-
-    def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
-        self._inflight_run_group_calls.discard(call)
-        # A cancelled caller never reads the error; read it so asyncio does not log it.
-        if not call.cancelled():
-            call.exception()
 
     def state_dict(self) -> dict[str, object]:
         """Return the checkpoint state of the training input iterator."""
