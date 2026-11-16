@@ -185,6 +185,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             return {}
         attention_metadata = model._get_attention_metadata(
             self.positions,
+            padding_mask=torch.zeros_like(self.labels, dtype=torch.bool),
             max_num_documents=BATCH_SIZE,
         )
         return {"attention_metadata": attention_metadata}
