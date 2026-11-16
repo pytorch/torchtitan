@@ -1,0 +1,4 @@
+== python ask02_cache_ignores_fake.py
+fresh cache A  -> fake v1: AssertionError: expected size 32==32, stride 64==1 at dim=0; expected size 64==64, stride 1==32 at dim=1
+same cache A   -> fake v2: AssertionError: expected size 32==32, stride 64==1 at dim=0; expected size 64==64, stride 1==32 at dim=1
+fresh cache B  -> fake v2: ok

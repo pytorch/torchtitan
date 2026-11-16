@@ -1,0 +1,15 @@
+== python obs_whole_graph_vs_region.py
+2.15.0.dev20260926+cu130 NVIDIA GB300
+stack_bwd eager (fwd+bwd)                               0.803 ms   top kernel 0.324 ms void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_imp  ideal 0.151 ms (1.07 GB at 7.1 TB/s)
+stack_bwd compiled, default cat lowering                0.260 ms   top kernel 0.199 ms triton_poi_fused_mul_silu_silu_backward_stack_0  ideal 0.151 ms (1.07 GB at 7.1 TB/s)
+stack_bwd compiled, ConcatKernel (both cat knobs = 0)    0.159 ms   top kernel 0.097 ms triton_poi_fused_mul_silu_silu_backward_0  ideal 0.151 ms (1.07 GB at 7.1 TB/s)
+stack_bwd activation compiled, unbind/stack eager       0.242 ms   top kernel 0.101 ms triton_poi_fused_mul_silu_silu_backward_0  ideal 0.151 ms (1.07 GB at 7.1 TB/s)
+combine eager (fwd)                                     1.807 ms   top kernel 0.636 ms void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_imp  ideal 0.074 ms (0.53 GB at 7.1 TB/s)
+combine compiled as one graph (scores inlined)          0.088 ms   top kernel 0.085 ms triton_poi_fused__to_copy_add_div_gather_index_mul_select_sigmoid_slic  ideal 0.074 ms (0.53 GB at 7.1 TB/s)
+combine scores compiled separately, passed in           0.077 ms   top kernel 0.074 ms triton_poi_fused__to_copy_add_index_mul_select_slice_view_0  ideal 0.074 ms (0.53 GB at 7.1 TB/s)
+options= (per compile):   ['triton_poi_fused_mul_silu_silu_backward_0', 'triton_poi_fused_mul_silu_unbind_0']
+global config patch:      ['triton_poi_fused_mul_silu_silu_backward_0', 'triton_poi_fused_mul_silu_unbind_0']
+default:                  ['triton_poi_fused_mul_silu_silu_backward_stack_0', 'triton_poi_fused_mul_silu_unbind_0']
+token_sum compiled as one graph (score chain inlined)    0.207 ms   top kernel 0.204 ms triton_poi_fused__to_copy_add_div_gather_index_mul_select_sigmoid_unsq  ideal 0.074 ms (0.53 GB at 7.1 TB/s)
+token_sum, one graph, assert_indirect_indexing=False    0.115 ms   top kernel 0.113 ms triton_poi_fused__to_copy_add_div_gather_index_mul_select_sigmoid_unsq  ideal 0.074 ms (0.53 GB at 7.1 TB/s)
+token_sum, scores compiled separately, passed in        0.079 ms   top kernel 0.074 ms triton_poi_fused__to_copy_add_index_mul_select_unsqueeze_view_0  ideal 0.074 ms (0.53 GB at 7.1 TB/s)

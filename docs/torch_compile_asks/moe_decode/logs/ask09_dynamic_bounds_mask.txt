@@ -1,0 +1,6 @@
+== python ask09_dynamic_bounds_mask.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+us per call at T = [4096, 16384, 65536] (CUDA graph):
+  dynamic                         49.5   158.5   636.4
+  dynamic + prefer_nd_tiling      29.1    94.5   397.1
+  static                          28.9    92.1   351.0

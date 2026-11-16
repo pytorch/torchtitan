@@ -1,0 +1,14 @@
+== python ask12_split_reduction_size_hint.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+--- default
+T=    1: graph   8.7 us, 1 kernels, kernel sum   0.9 us: 0.9
+T=   34: graph  12.9 us, 2 kernels, kernel sum   4.5 us: 2.8  1.8
+T=  256: graph  12.8 us, 2 kernels, kernel sum   4.4 us: 2.8  1.6
+T= 4096: graph  12.7 us, 2 kernels, kernel sum   4.9 us: 3.2  1.7
+T=16384: graph  12.3 us, 2 kernels, kernel sum   5.7 us: 4.0  1.7
+--- split_reductions=False
+T=    1: graph  13.2 us, 1 kernels, kernel sum   0.7 us: 0.7
+T=   34: graph  12.6 us, 1 kernels, kernel sum   1.2 us: 1.2
+T=  256: graph  12.1 us, 1 kernels, kernel sum   1.6 us: 1.6
+T= 4096: graph  12.4 us, 1 kernels, kernel sum   6.1 us: 6.1
+T=16384: graph  26.9 us, 1 kernels, kernel sum  19.9 us: 19.9

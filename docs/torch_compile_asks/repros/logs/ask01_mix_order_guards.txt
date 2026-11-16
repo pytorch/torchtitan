@@ -1,0 +1,3 @@
+== python ask01_mix_order_guards.py
+non_strict=False: graphs=3; guard failures: ["0/0: tensor 'stack' size mismatch at index 0. expected 16384, actual 8192", '0/1: 4096 <= stack.size()[0] <= 268435456  # (_functorch/_aot_autograd/autograd_cache.py:1415 in evaluate_guar', "0/0: tensor 'stack' size mismatch at index 0. expected 16384, actual 2048"]
+non_strict=True: graphs=2; guard failures: ["0/0: tensor 'stack' size mismatch at index 0. expected 16384, actual 8192"]
