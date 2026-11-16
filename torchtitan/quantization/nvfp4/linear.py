@@ -405,12 +405,8 @@ class NVFP4Linear(Linear):
                 instance._sharding_config = replace(
                     sc,
                     state_shardings=state_shardings,
-                    in_src_shardings={
-                        **(sc.in_src_shardings or {}),
-                        "input": in_layout,
-                    },
-                    in_dst_shardings={
-                        **(sc.in_dst_shardings or {}),
+                    input_shardings={
+                        **(sc.input_shardings or {}),
                         "input": in_layout,
                     },
                     local_spmd=True,

@@ -61,12 +61,33 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """Defer FSDP gradient reduction until the last accumulation step."""
 
+    fsdp_enable_cpu_offloading: bool = False
+    """
+    Whether to apply CPU offloading of parameters, gradients, and optimizer states in FSDP
+    """
+
     fsdp_symm_mem_scope: FSDPSymmMemScope = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.
     "dense" skips any module with routed experts. An MoE transformer block is
     one FSDP module, so its attention parameters are skipped along with its
     experts.
+    """
+
+    fsdp_unshard_in_current_stream: bool = False
+    """
+    Issue FSDP pre-forward/pre-backward all-gathers on the current (compute)
+    stream instead of on separate all-gather streams, via
+    ``FSDPModule.set_unshard_in_current_stream``. All-gather
+    buffers are then allocated in the compute stream's memory pool, avoiding
+    inter-stream fragmentation. All-gathers still overlap with compute via
+    explicit forward/backward prefetching, but the pre-all-gather copy-in and
+    dtype cast no longer overlap with compute.
+
+    Supported for decoders whose FSDP units run in the order
+    ``tok_embeddings -> layers -> norm/lm_head``, which is the chain the
+    explicit prefetching follows. Raises for models with MTP layers or
+    multimodal encoders, and for Flux.
     """
 
     tensor_parallel_degree: int = 1

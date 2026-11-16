@@ -334,7 +334,9 @@ class TestCpMlaMetadata(unittest.TestCase):
     @staticmethod
     def _get_attention_metadata(config):
         attention = Attention.Config(n_heads=4, inner_attention=config)
-        decoder = SimpleNamespace(config=SimpleNamespace(layers=[attention]))
+        decoder = SimpleNamespace(
+            config=SimpleNamespace(layers=[attention], max_context_length=8)
+        )
         return Decoder._get_attention_metadata(cast(Decoder, decoder), torch.arange(8))
 
     def test_all_gather_uses_cp_backend_key(self):
@@ -838,9 +840,6 @@ class TestCpGroup(unittest.TestCase):
         ):
             self._kernel().forward(q, k, v)
 
-    def test_cp_attention_holds_no_mesh_state(self):
-        self.assertNotIn("cp_group", CPInnerAttention.__dict__)
-
 
 class TestAllGather(unittest.TestCase):
     def test_gathers_k_and_v_over_the_cp_group(self):
@@ -1026,17 +1025,6 @@ class TestUlysses(unittest.TestCase):
         parallelism.tensor_parallel_degree = 2
         with self.assertRaisesRegex(ValueError, r"n_kv_heads \(2\)"):
             validate_context_parallel(model, parallelism)
-
-    def test_shared_base_is_a_cp_attention(self):
-        self.assertTrue(issubclass(UlyssesInnerAttention, CPInnerAttention))
-        self.assertTrue(
-            issubclass(UlyssesInnerAttention.Config, CPInnerAttention.Config)
-        )
-
-    def test_is_still_a_flex_kernel(self):
-        config = UlyssesFlexInnerAttention.Config()
-        self.assertIsInstance(config, UlyssesInnerAttention.Config)
-        self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_is_not_an_attention_backend(self):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
@@ -1276,11 +1264,6 @@ class TestMLAContextParallelAttention(unittest.TestCase):
 
 
 class TestUlyssesVarlen(unittest.TestCase):
-    def test_is_still_a_varlen_kernel(self):
-        config = UlyssesVarlenInnerAttention.Config()
-        self.assertIsInstance(config, UlyssesInnerAttention.Config)
-        self.assertIsInstance(config, VarlenInnerAttention.Config)
-
     def test_dispatches_to_varlen_inner_attention(self):
         q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
         mask = object()

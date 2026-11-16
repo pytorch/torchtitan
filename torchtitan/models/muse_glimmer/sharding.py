@@ -45,7 +45,7 @@ def vision_bank_indices_placement(*, enable_sp: bool) -> SpmdType:
 def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Attention input boundary shared by ``qkv_linear`` and ``o_gate``."""
     return ShardingConfig(
-        in_src_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
+        input_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
     )
 
 
@@ -56,10 +56,8 @@ def scaleless_head_norm_sharding_config() -> ShardingConfig:
     """
     head_shard = attention_activation_placement()
     return ShardingConfig(
-        in_src_shardings={"input": head_shard},
-        in_dst_shardings={"input": head_shard},
-        out_src_shardings=head_shard,
-        out_dst_shardings=head_shard,
+        input_shardings={"input": head_shard},
+        output_shardings=head_shard,
     )
 
 
@@ -75,20 +73,6 @@ def cp_replicated_vision_sharding_config() -> ShardingConfig:
     activation = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
     return ShardingConfig(
         state_shardings={"weight": state, "bias": state},
-        in_src_shardings={"input": activation},
-        in_dst_shardings={"input": activation},
-        out_src_shardings=activation,
-        out_dst_shardings=activation,
+        input_shardings={"input": activation},
+        output_shardings=activation,
     )
-
-
-def perception_emb_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Scaleless norm on the projected vision features before fusion.
-
-    With SP, its output is gathered to TP-replicated so each rank can select
-    vision rows for its local token shard.
-    """
-    vision_norm = cp_replicated_vision_sharding_config()
-    if enable_sp:
-        vision_norm.out_dst_shardings = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
-    return vision_norm

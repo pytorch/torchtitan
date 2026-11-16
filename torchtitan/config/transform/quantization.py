@@ -21,7 +21,6 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.nvfp4 import _get_nvfp4_grouped_linear_cls, NVFP4Linear
@@ -37,7 +36,6 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
-    InvariantRowParallelLinear,
 )
 
 
@@ -52,6 +50,12 @@ def _validate_quantizable_linear(
         raise ValueError(
             f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
             f"supported Linear classes are {supported}."
+        )
+    if config.preserve_dtype_params:
+        raise ValueError(
+            f"Cannot quantize {fqn!r}: it lists preserve_dtype_params "
+            f"{config.preserve_dtype_params}. List only the Linears to quantize in "
+            "the converter's fqns; an empty fqns selects every Linear."
         )
 
 

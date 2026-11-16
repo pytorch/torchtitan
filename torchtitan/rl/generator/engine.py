@@ -39,7 +39,9 @@ class GenerationEngine(Configurable, abc.ABC):
         model_path: Path to the HF model checkpoint (tokenizer assets and, with a
             ``checkpointer``, initial weights).
         max_num_seqs: Upper bound on concurrently scheduled sequences.
-        model_dtype: Data type for model weights (auto, float16, bfloat16, float32).
+        precision: The trainer's parameter and compute dtypes, which the engine's model
+            mirrors: it computes in ``param_dtype`` and receives the trainer's weights
+            in the dtypes the trainer sends them.
         gpu_memory_limit: Fraction of GPU memory the engine may use.
         max_num_batched_tokens: Max tokens scheduled per engine step, or None for the
             engine's default.
@@ -48,10 +50,12 @@ class GenerationEngine(Configurable, abc.ABC):
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.
         debug: Debug and determinism settings.
         reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
-            all KV. When False, a request may reuse only KV computed under its
-            ``min_policy_version``.
+            all KV (and vLLM's encoder cache for image prompts). When False, a request may
+            reuse only KV and image embeddings salted with its ``min_policy_version``.
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
+        vision_processor: Preprocesses image prompts' files (`PromptImage.data`). None:
+            text only; requests with images are rejected.
         rank: Global rank of this process.
         generator_name: Name of the generator, for engine metrics.
         output_dir: Output directory, for engine metrics.
