@@ -8,16 +8,13 @@ import os
 import pickle
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from torchtitan.experiments.graph_trainer.configs import (
-    EpOverlapConfig,
-    GraphTrainerCompileConfig,
-)
+from torchtitan.experiments.graph_trainer.configs import EpOverlapConfig
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 
 
@@ -79,6 +76,14 @@ class TestDiskStorageAdapter(unittest.TestCase):
             storage = DiskStorageAdapter(tmpdir)
             with self.assertRaises(ValueError):
                 storage.save("../../escape", b"data")
+
+
+@dataclass
+class _StubCompileConfig:
+    extra_passes: list = field(default_factory=list)
+    memory_policy: str = "default"
+    full_recompute_save_ops: str = ""
+    ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
 
 
 @dataclass
@@ -259,7 +264,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        cfg = GraphTrainerCompileConfig()
+        cfg = _StubCompileConfig()
         dims = _StubParallelismContext()
 
         fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
@@ -273,8 +278,8 @@ class TestConfigFingerprint(unittest.TestCase):
         )
 
         dims = _StubParallelismContext()
-        cfg_a = GraphTrainerCompileConfig(memory_policy="full")
-        cfg_b = GraphTrainerCompileConfig(
+        cfg_a = _StubCompileConfig(memory_policy="full")
+        cfg_b = _StubCompileConfig(
             memory_policy="full",
             full_recompute_save_ops=(
                 "layers.*.feed_forward.router.gate :: aten.mm.dtype"
@@ -290,7 +295,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        cfg = GraphTrainerCompileConfig()
+        cfg = _StubCompileConfig()
         dims = _StubParallelismContext()
 
         model_a = _make_stub_model(params=[("w", torch.zeros(4, 4))], buffers=[])
@@ -304,7 +309,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        cfg = GraphTrainerCompileConfig()
+        cfg = _StubCompileConfig()
         model = _make_stub_model()
 
         dims_tp2 = _StubParallelismContext(tp=2)
@@ -320,16 +325,14 @@ class TestConfigFingerprint(unittest.TestCase):
 
         dims = _StubParallelismContext()
 
-        cfg_a = GraphTrainerCompileConfig(extra_passes=["pass_a"])
-        cfg_b = GraphTrainerCompileConfig(extra_passes=["pass_a", "pass_b"])
+        cfg_a = _StubCompileConfig(extra_passes=["pass_a"])
+        cfg_b = _StubCompileConfig(extra_passes=["pass_a", "pass_b"])
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
         fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
         self.assertNotEqual(fp_a, fp_b)
 
-        cfg_graph_batch = GraphTrainerCompileConfig(
-            ep_overlap=EpOverlapConfig(enabled=True)
-        )
-        cfg_graph_seq = GraphTrainerCompileConfig(
+        cfg_graph_batch = _StubCompileConfig(ep_overlap=EpOverlapConfig(enabled=True))
+        cfg_graph_seq = _StubCompileConfig(
             ep_overlap=EpOverlapConfig(
                 enabled=True,
                 chunk_dim="seq",
@@ -351,8 +354,8 @@ class TestConfigFingerprint(unittest.TestCase):
 
         dims = _StubParallelismContext()
 
-        cfg_ab = GraphTrainerCompileConfig(extra_passes=["a", "b"])
-        cfg_ba = GraphTrainerCompileConfig(extra_passes=["b", "a"])
+        cfg_ab = _StubCompileConfig(extra_passes=["a", "b"])
+        cfg_ba = _StubCompileConfig(extra_passes=["b", "a"])
         fp_ab = compute_config_fingerprint(_make_stub_model(), cfg_ab, dims)
         fp_ba = compute_config_fingerprint(_make_stub_model(), cfg_ba, dims)
         self.assertNotEqual(fp_ab, fp_ba)
