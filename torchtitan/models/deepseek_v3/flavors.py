@@ -19,10 +19,8 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
     FeedForward,
     HiMidLoLinear,
     Linear,
@@ -31,8 +29,8 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Sigmoid,
     Softmax,
-    TransformerBlock,
     UnaryActivationFn,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.config_utils import (
@@ -48,7 +46,6 @@ from torchtitan.models.common.decoder_sharding import (
     mla_attention_local_spmd_sharding_config,
     mla_kv_projection_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     replicated_state_sharding_config,
     residual_activation_placement,
@@ -298,11 +295,10 @@ def build_mla_moe_layers(
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
-    first_layer_sharding_config: ShardingConfig | None = None,
     norm_eps: float = 1e-6,
     enable_sp: bool,
     enable_ep: bool,
-) -> list[TransformerBlock.Config]:
+) -> list[DeepSeekV3TransformerBlock.Config]:
     """Build the sharded per-layer ``DeepSeekV3TransformerBlock`` configs.
 
     Layers with layer_id < n_dense_layers get a DenseFeedForward.
@@ -311,9 +307,7 @@ def build_mla_moe_layers(
     Router and expert inits are constructed per-layer so depth-scaled
     initializers are correct for each layer's position. The router factory lets
     architecture variants select their routing policy without changing this
-    shared layer builder; it must return a sharded router config.
-    ``first_layer_sharding_config`` sets layer 0's own boundary, for decoders
-    whose embedding output is not in the residual layout. ``norm_eps`` is the
+    shared layer builder; it must return a sharded router config. ``norm_eps`` is the
     epsilon of each block's ``attention_norm`` and ``ffn_norm`` (HF
     ``rms_norm_eps``); the MLA q/kv norms keep 1e-6.
     """
@@ -396,7 +390,6 @@ def build_mla_moe_layers(
                     sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
-                sharding_config=first_layer_sharding_config if layer_id == 0 else None,
             )
         )
     return layers
@@ -407,7 +400,7 @@ def _build_dsv3_layers(
     router_num_expert_groups: int | None = None,
     router_num_limited_groups: int | None = None,
     **kwargs,
-) -> list[TransformerBlock.Config]:
+) -> list[DeepSeekV3TransformerBlock.Config]:
     """Thin wrapper: ``build_mla_moe_layers`` with DeepSeek V3's own inits."""
     return build_mla_moe_layers(
         **kwargs,
@@ -455,9 +448,7 @@ def _build_mtp_layers(
                 mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=1e-6,
-                    sharding_config=pre_lm_head_norm_sharding_config(
-                        enable_sp=enable_sp
-                    ),
+                    sharding_config=norm_sharding_config(enable_sp=enable_sp),
                 ),
                 sharding_config=mtp_block_sharding_config(enable_sp=enable_sp),
             )
@@ -521,7 +512,7 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -531,7 +522,7 @@ def _debugmodel(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -541,7 +532,6 @@ def _debugmodel(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -606,7 +596,7 @@ def _16b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -616,7 +606,7 @@ def _16b(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -626,7 +616,6 @@ def _16b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -694,7 +683,7 @@ def _236b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -704,7 +693,7 @@ def _236b(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -714,7 +703,6 @@ def _236b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
@@ -783,7 +771,7 @@ def _671b(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -793,7 +781,7 @@ def _671b(
             normalized_shape=dim,
             eps=1e-6,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+            sharding_config=norm_sharding_config(enable_sp=enable_sp),
         ),
         lm_head=Linear.Config(
             in_features=dim,
@@ -803,7 +791,6 @@ def _671b(
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
-            # pyrefly: ignore [bad-argument-type]
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
