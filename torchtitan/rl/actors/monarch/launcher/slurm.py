@@ -66,6 +66,11 @@ class SlurmLauncher(MonarchLauncher):
     the job reads the job state that ``submit`` writes there.
     """
 
+    # Slurm typically runs the batch script on the allocation's first node. `SlurmJob` gives the
+    # first nodes to the first mesh of `Layout.mesh_nodes`, the trainer's: `MonarchLauncher._layout`
+    # places it first.
+    controller_on_first_trainer_host = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(MonarchLauncher.Config):
         gpus_per_node: int = 8

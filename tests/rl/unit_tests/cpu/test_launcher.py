@@ -158,7 +158,11 @@ def test_layout_fits_the_hosts(sizes):
     }
 
     # Raises if the roles sharing a mesh need more GPUs than its hosts have.
-    _check_gpus_per_host(layout.host_meshes(meshes), trainer_dp, generator_tp)
+    _check_gpus_per_host(
+        layout.host_meshes(meshes, controller_on_first_trainer_host=False),
+        trainer_dp,
+        generator_tp,
+    )
 
 
 def test_layout_host_meshes_shares_one_object():
@@ -174,7 +178,9 @@ def test_layout_host_meshes_shares_one_object():
     )
     node_0, node_1 = object(), object()
 
-    host_meshes = layout.host_meshes({"node_0": node_0, "node_1": node_1})
+    host_meshes = layout.host_meshes(
+        {"node_0": node_0, "node_1": node_1}, controller_on_first_trainer_host=False
+    )
 
     assert host_meshes.trainer is node_0
     assert host_meshes.generators[0] is node_0
@@ -193,7 +199,10 @@ def test_layout_host_meshes_maps_generators_by_name():
         },
     )
 
-    host_meshes = layout.host_meshes({name: name for name in layout.mesh_nodes})
+    host_meshes = layout.host_meshes(
+        {name: name for name in layout.mesh_nodes},
+        controller_on_first_trainer_host=False,
+    )
 
     assert host_meshes.trainer == "trainer"
     assert host_meshes.generators == ["generator_0", "generator_1"]
@@ -373,6 +382,7 @@ def test_launch_controller_builds_the_actor_system_on_acquired_hosts(
         trainer="hosts[node_0]",
         generators=["hosts[node_0]", "hosts[node_0]"],
         gpus_per_node=8,
+        controller_on_first_trainer_host=False,
     )
     assert actor_system._host_meshes == host_meshes
     assert spawned["host_meshes"] == host_meshes
