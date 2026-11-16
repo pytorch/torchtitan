@@ -117,6 +117,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         sync_log_step=sync_log_step,
         commit_training_sample_ids=lambda group_ids: None,
         state_dict=lambda: {},
+        metrics=lambda: [],
     )
     controller._group_buffer = SimpleNamespace(
         metrics=lambda: [], release_active_groups=release_active_groups

@@ -43,6 +43,7 @@ from torchtitan.rl.rollout.rollouter import (
     Rollouter,
     RolloutWorkerRoles,
 )
+from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
 
 
 class _RunGroupEndpoint:
@@ -293,7 +294,13 @@ def _rollouter_without_datasets() -> Rollouter:
     rollouter._workers = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
+    rollouter._worker_loads = []
+    rollouter._worker_strategy = LeastLoadedRoutingStrategy.Config().build()
     return rollouter
+
+
+def _rollouts_in_flight(rollouter: Rollouter) -> list[int]:
+    return [worker.reserved_load for worker in rollouter._worker_loads]
 
 
 async def _setup(
@@ -732,44 +739,74 @@ def test_rollout_workers_spread_over_the_hosts_of_a_job(tmp_path, monkeypatch):
     )
 
 
-def test_a_group_goes_to_one_worker(monkeypatch) -> None:
+def test_each_group_goes_to_the_worker_with_the_fewest_rollouts_in_flight(
+    monkeypatch,
+) -> None:
     async def run() -> None:
         actor_mesh = _WorkerActorMesh(num_workers=3)
+        workers = actor_mesh.workers
         rollouter = _rollouter_without_datasets()
+        # No workers yet, as for a Rollouter subclass that overrides `setup_async`: no gauges.
+        assert rollouter.metrics() == []
         await _setup(rollouter, actor_mesh, monkeypatch)
 
-        dispatch = asyncio.create_task(
-            rollouter.run_group_rollouts(
-                generate_fn="generate_fn",
-                release_session_fn="release_session_fn",
-                sample="sample",
-                group_id=1,
-                group_size=2,
-                sampling="sampling",
+        async def dispatch(*, group_id: int, group_size: int) -> asyncio.Task:
+            task = asyncio.create_task(
+                rollouter.run_group_rollouts(
+                    generate_fn="generate_fn",
+                    release_session_fn="release_session_fn",
+                    sample="sample",
+                    group_id=group_id,
+                    group_size=group_size,
+                    sampling="sampling",
+                )
             )
-        )
-        # `run_group_rollouts` sends the call before its first wait.
-        await asyncio.sleep(0)
-        calls = [worker.run_group.calls for worker in actor_mesh.workers]
-        assert sorted(calls, key=len) == [
-            [],
-            [],
-            [
-                {
-                    "generate_fn": "generate_fn",
-                    "release_session_fn": "release_session_fn",
-                    "sample": "sample",
-                    "group_id": 1,
-                    "group_size": 2,
-                    "sampling": "sampling",
-                }
-            ],
-        ]
+            # `run_group_rollouts` sends the call before its first wait.
+            await asyncio.sleep(0)
+            return task
 
-        for worker in actor_mesh.workers:
+        def group_ids_by_worker() -> list[list[int]]:
+            return [
+                [call["group_id"] for call in worker.run_group.calls]
+                for worker in workers
+            ]
+
+        # Groups of 4, 2 and 2 fill the 3 workers in order. The group of 1 goes to worker 1:
+        # it ties worker 2 at 2 rollouts, and was chosen longer ago.
+        group_a = await dispatch(group_id=0, group_size=4)
+        await dispatch(group_id=1, group_size=2)
+        await dispatch(group_id=2, group_size=2)
+        await dispatch(group_id=3, group_size=1)
+        assert group_ids_by_worker() == [[0], [1, 3], [2]]
+        assert _rollouts_in_flight(rollouter) == [4, 3, 2]
+        assert {metric.key: metric.value.value for metric in rollouter.metrics()} == {
+            "rollout_worker/num_rollouts_in_flight_max": 4.0,
+            "rollout_worker/num_rollouts_in_flight_mean": 3.0,
+        }
+        assert workers[0].run_group.calls[0] == {
+            "generate_fn": "generate_fn",
+            "release_session_fn": "release_session_fn",
+            "sample": "sample",
+            "group_id": 0,
+            "group_size": 4,
+            "sampling": "sampling",
+        }
+
+        # Worker 0's group returns, so worker 0 has the fewest rollouts in flight.
+        workers[0].run_group.release.set()
+        assert (await group_a).group_id == 0
+        assert _rollouts_in_flight(rollouter) == [0, 3, 2]
+        workers[0].run_group.release.clear()
+        await dispatch(group_id=4, group_size=2)
+        # Workers 0 and 2 tie at 2 rollouts. Worker 2 was chosen longer ago, so it gets group 5.
+        await dispatch(group_id=5, group_size=1)
+        assert group_ids_by_worker() == [[0, 4], [1, 3], [2, 5]]
+        assert _rollouts_in_flight(rollouter) == [2, 3, 3]
+
+        for worker in workers:
             worker.run_group.release.set()
-        assert (await dispatch).group_id == 1
         await rollouter.close()
+        assert _rollouts_in_flight(rollouter) == [0, 0, 0]
         assert actor_mesh.stopped
 
     asyncio.run(run())
@@ -803,6 +840,8 @@ def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
         rollouter = _rollouter_without_datasets()
         worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
         await _dispatch_then_cancel_caller(rollouter, worker)
+        # The worker still runs the group of 2, so it still counts.
+        assert _rollouts_in_flight(rollouter) == [2]
 
         close = asyncio.create_task(rollouter.close())
         await asyncio.sleep(0)
@@ -814,6 +853,7 @@ def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
         worker.run_group.release.set()
         await close
         assert worker_mesh.stopped
+        assert _rollouts_in_flight(rollouter) == [0]
         assert not worker.run_group.cancelled.is_set()
         # The cancelled caller never reads the error; the done callback must, or asyncio logs it here.
         gc.collect()
@@ -988,3 +1028,32 @@ def test_setup_fails_naming_a_missing_dataset_dir(tmp_path) -> None:
         match=re.escape(f"{data_dir} is missing on host {socket.gethostname()}."),
     ):
         asyncio.run(run())
+
+
+def test_a_run_group_that_fails_to_send_leaves_its_worker_count_unchanged(
+    monkeypatch,
+) -> None:
+    async def run() -> None:
+        actor_mesh = _WorkerActorMesh(num_workers=1)
+        (worker,) = actor_mesh.workers
+        rollouter = _rollouter_without_datasets()
+        await _setup(rollouter, actor_mesh, monkeypatch)
+
+        def call_one_with_an_unpicklable_argument(**kwargs) -> None:
+            # Monarch's `call_one` raises this before it sends anything.
+            raise TypeError("cannot pickle '_thread.lock' object")
+
+        worker.run_group.call_one = call_one_with_an_unpicklable_argument
+        with pytest.raises(TypeError, match="cannot pickle"):
+            await rollouter.run_group_rollouts(
+                generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
+                sample="sample",
+                group_id=1,
+                group_size=2,
+                sampling="sampling",
+            )
+        assert _rollouts_in_flight(rollouter) == [0]
+        await rollouter.close()
+
+    asyncio.run(run())
