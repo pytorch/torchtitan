@@ -18,6 +18,7 @@ from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 
+from .attention import DeepSeekMLAAttention
 from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
@@ -28,7 +29,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        pass
+        attention: DeepSeekMLAAttention.Config  # pyrefly: ignore [bad-override]
 
     def __init__(self, config: Config):
         super().__init__()
@@ -77,6 +78,8 @@ class DeepSeekV3Model(MTPDecoder):
     class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
+        # pyrefly: ignore [bad-override]
+        layers: list[DeepSeekV3TransformerBlock.Config]
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=[

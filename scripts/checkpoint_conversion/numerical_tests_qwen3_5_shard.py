@@ -63,7 +63,7 @@ def run_worker(args):
         expert_parallel_degree=args.ep,
     )
     config = build_model_config(
-        "debugmodel_moe",
+        "debugmodel_moe_mm",
         attn_backend="flex",
         seq_len=seq_len,
         parallelism=parallelism,
