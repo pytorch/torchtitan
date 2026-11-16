@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 
 import torch
 from tensorboard.compat.proto.summary_pb2 import (  # generated protobuf class
-    Summary,
+    Summary,  # pyrefly: ignore [missing-module-attribute]
 )
 from torch.distributed.pipelining.schedules import (
     get_schedule_class,

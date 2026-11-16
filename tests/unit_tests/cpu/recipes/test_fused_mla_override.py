@@ -27,7 +27,7 @@ from torchtitan.models.common.attention.cp_mla import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.rope import ComplexRoPE, YaRNScalingConfig
+from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 from torchtitan_recipes.overrides.fused_mla import (
@@ -201,9 +201,11 @@ class TestFusedMLANumerics(unittest.TestCase):
         self.rope = ComplexRoPE.Config(
             dim=self.rope_dim,
             max_context_length=128,
-            scaling=YaRNScalingConfig(
-                factor=40.0, beta_fast=32.0, beta_slow=1.0, original_seq_len=4096
-            ),
+            scaling="yarn",
+            rope_factor=40.0,
+            beta_fast=32.0,
+            beta_slow=1.0,
+            original_seq_len=4096,
         ).build()
         self.rope = self.rope.to(cuda)
         self.positions = torch.arange(self.num_tokens, device=cuda)

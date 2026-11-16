@@ -209,7 +209,7 @@ class CosSinVisionRoPE(CosSinRoPE):
                 raise ValueError(
                     f"2D RoPE requires head_dim divisible by 4, got {self.dim}."
                 )
-            if self.scaling is not None:
+            if self.scaling != "none":
                 raise ValueError("CosSinVisionRoPE does not support frequency scaling.")
 
     def forward(
@@ -229,12 +229,13 @@ class CosSinVisionRoPE(CosSinRoPE):
         Returns:
             Cache of shape ``(max_context_length, dim / 4)``.
         """
-        half_dim = self.dim // 2
+        cfg = self.config
+        half_dim = cfg.dim // 2
         inv_freq_F = 1.0 / (
-            self.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
+            cfg.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
         )
         positions_P = torch.arange(
-            self.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
+            cfg.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
         )
         return torch.outer(positions_P, inv_freq_F)
 
