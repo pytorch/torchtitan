@@ -130,9 +130,11 @@ rollouter = Rollouter.Config(
 ```
 
 Subclass `MessageEnvRolloutWorker` or `Rollouter` only when an experiment changes their
-behavior. For example, the Verifiers integration keeps a custom
-`VerifiersRollouter` because it owns an external environment server and a
-different rollout protocol.
+behavior; a worker whose env isn't a `MessageEnv` subclasses `BaseRolloutWorker`.
+For example, the Verifiers integration keeps a custom
+`VerifiersRollouter` because it owns an external environment server, and a
+`VerifiersRolloutWorker` (no `MessageEnv` or `TokenEnv`)
+because Verifiers runs a different rollout protocol.
 
 The default path handles rollout, scoring, batching, training, and model state dict transfer.
 
