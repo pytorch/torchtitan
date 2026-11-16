@@ -15,7 +15,6 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
-
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optim import (
@@ -44,7 +43,6 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
-
 from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
@@ -320,12 +318,16 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     Trainer keeps fp32 master weights; FSDP mixed precision
     (precision.param_dtype="bfloat16", the default) casts them to bf16 for the
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
+    On ROCm, override generator.engine.cuda_graph.mode to "NONE".
     """
     config = rl_grpo_qwen3_0_6b_flex()
     # Batch invariance requires strict on-policy: the generator must run the
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
+    # Keep vLLM's 2x scheduler capacity within the temporary 64-request page-map
+    # limit. Remove after https://github.com/vllm-project/vllm/issues/66460.
+    config.async_loop.num_prompts_per_train_step = 4
     # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
     config.precision = dataclasses.replace(config.precision, dtype="float32")
     config.trainer = dataclasses.replace(

@@ -38,10 +38,8 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
-    enable_rocm_batch_invariant_page_mapping,
+    configure_batch_invariance,
     force_trainer_logprobs_for_batch_invariance,
-    validate_flex_page_mapping_request_limit,
-    validate_rocm_flex_attention,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.multimodal_wrapper import (
@@ -100,27 +98,6 @@ def add_extra_vllm_engine_args(
             f"extra_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
         )
     engine_kwargs.update(extra_engine_args)
-
-
-def _configure_rocm_flex_batch_invariance(
-    model: Decoder.Config,
-    *,
-    batch_invariant: bool,
-    cuda_graph: VLLMCudaGraphConfig,
-    max_num_seqs: int,
-) -> None:
-    if not batch_invariant or torch.version.hip is None:
-        return
-
-    validate_rocm_flex_attention(model, owner="generator")
-    validate_flex_page_mapping_request_limit(max_num_seqs)
-    if cuda_graph.mode != "NONE":
-        # TODO: Support graph replay after
-        # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
-        raise ValueError(
-            "ROCm FlexAttention batch invariance requires cuda_graph.mode='NONE'"
-        )
-    enable_rocm_batch_invariant_page_mapping()
 
 
 class VLLMEngine(GenerationEngine):
@@ -279,12 +256,12 @@ class VLLMEngine(GenerationEngine):
         max_num_seqs: int,
     ) -> None:
         """Configure process-wide vLLM state before building an engine."""
-        _configure_rocm_flex_batch_invariance(
-            model,
-            batch_invariant=batch_invariant,
-            cuda_graph=cuda_graph,
-            max_num_seqs=max_num_seqs,
-        )
+        if batch_invariant:
+            configure_batch_invariance(
+                model,
+                cuda_graph_mode=cuda_graph.mode,
+                max_num_seqs=max_num_seqs,
+            )
 
         register_to_vllm(
             model,

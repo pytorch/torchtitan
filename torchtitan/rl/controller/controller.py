@@ -532,32 +532,21 @@ class Controller(Configurable):
                         )
 
                     from torchtitan.rl.generator.vllm.batch_invariance import (
-                        validate_flex_page_mapping_request_limit,
-                        validate_rocm_flex_attention,
+                        validate_platform_batch_invariance,
                     )
 
                     # Recipes and overrides may mutate nested generator fields after
                     # its initial construction.
                     self.generator.validate_batch_invariance()
-                    validate_rocm_flex_attention(self.trainer.model, owner="trainer")
-
                     cuda_graph = getattr(self.generator.engine, "cuda_graph", None)
-                    if cuda_graph is not None and cuda_graph.mode != "NONE":
-                        # TODO: Support graph replay after
-                        # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
-                        raise ValueError(
-                            "ROCm FlexAttention batch invariance requires "
-                            "cuda_graph.mode='NONE'"
-                        )
-
-                    # Validation requests are included only after the rollouter is
-                    # built; the engine validates the final max_num_seqs value.
-                    static_max_num_seqs = min(
-                        self.async_loop.max_active_rollout_groups
-                        * self.async_loop.num_samples_per_prompt,
-                        512,
+                    validate_platform_batch_invariance(
+                        self.trainer.model,
+                        owner="trainer",
+                        cuda_graph_mode=(
+                            None if cuda_graph is None else cuda_graph.mode
+                        ),
+                        max_num_seqs=self.max_num_seqs_per_generator_dp_rank,
                     )
-                    validate_flex_page_mapping_request_limit(static_max_num_seqs)
 
                 if not (
                     self.trainer.debug.deterministic

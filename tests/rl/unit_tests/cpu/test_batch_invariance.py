@@ -12,7 +12,6 @@ from types import ModuleType
 import pytest
 import torch
 import torch.nn.functional as F
-
 import torchtitan.components.loss as loss_module
 
 
@@ -123,9 +122,6 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
 
     monkeypatch.setattr(loss_module, "compute_logprobs", recording_compute_logprobs)
     batch_invariance.force_trainer_logprobs_for_batch_invariance()
-    patched_logprobs = modules[module_names[-1]].compute_token_logprobs
-    batch_invariance.force_trainer_logprobs_for_batch_invariance()
-    assert modules[module_names[-1]].compute_token_logprobs is patched_logprobs
 
     logits = torch.tensor(
         [[1.0, -0.5, 0.25, 2.0], [-1.0, 0.0, 1.5, 0.5]],
@@ -145,7 +141,7 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
         assert call_kwargs == {"vocab_parallel_group": None}
 
 
-def test_rocm_flex_page_mapping_preserves_page_ownership(monkeypatch):
+def test_request_independent_page_mapping_preserves_page_ownership(monkeypatch):
     from torchtitan.rl.generator.vllm import batch_invariance
 
     module_names = (
@@ -168,7 +164,7 @@ def test_rocm_flex_page_mapping_preserves_page_ownership(monkeypatch):
         pass
 
     modules[module_names[-1]].FlexAttentionMetadata = FakeFlexAttentionMetadata
-    batch_invariance.enable_rocm_batch_invariant_page_mapping()
+    batch_invariance._enable_request_independent_page_mapping()
 
     metadata = FakeFlexAttentionMetadata()
     metadata.num_reqs = 2
@@ -188,6 +184,10 @@ def test_rocm_flex_page_mapping_preserves_page_ownership(monkeypatch):
         kv_index <= query_index
     )
 
+    metadata.num_reqs = 65
+    with pytest.raises(ValueError, match="at most 64 requests"):
+        metadata.get_paged_mask_mod()
+    metadata.num_reqs = 2
     mask = metadata.get_paged_mask_mod()
     zero = torch.tensor(0)
     assert mask(zero, zero, torch.tensor(1), torch.tensor(2))

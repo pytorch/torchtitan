@@ -737,6 +737,7 @@ def test_rocm_batch_invariant_runtime_requires_flex_attention():
             dist_moe_runtime=None,
             batch_invariant=True,
             model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             max_num_seqs=8,
         )
@@ -745,7 +746,9 @@ def test_rocm_batch_invariant_runtime_requires_flex_attention():
 def test_rocm_batch_invariant_runtime_enforces_request_limit():
     with (
         patch.object(torch.version, "hip", "7.15.26333"),
-        patch.object(vllm_engine_module, "validate_rocm_flex_attention"),
+        patch(
+            "torchtitan.rl.generator.vllm.batch_invariance._require_full_flex_attention"
+        ),
         pytest.raises(ValueError, match="at most 64 concurrent requests"),
     ):
         VLLMEngine.configure_runtime(
@@ -756,6 +759,7 @@ def test_rocm_batch_invariant_runtime_enforces_request_limit():
             dist_moe_runtime=None,
             batch_invariant=True,
             model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
             max_num_seqs=65,
         )

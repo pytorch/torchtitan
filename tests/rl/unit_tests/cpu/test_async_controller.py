@@ -19,7 +19,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 import pytest
 import torch
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    SlidingWindowFlexInnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -90,7 +94,7 @@ def test_rocm_batch_invariance_config_validation():
             Controller(config)
         config.generator.engine.cuda_graph.mode = "NONE"
         config.__post_init__()
-        config.async_loop.num_prompts_per_train_step = 9
+        config.async_loop.num_prompts_per_train_step = 5
         with pytest.raises(ValueError, match="at most 64 concurrent requests"):
             config.__post_init__()
 
@@ -108,6 +112,16 @@ def test_rocm_batch_invariance_config_validation():
                 match=f"every {owner} attention layer",
             ):
                 config.__post_init__()
+
+        config = alphabet_sort.rl_grpo_qwen3_0_6b_flex_batch_invariant()
+        config.generator.engine.cuda_graph.mode = "NONE"
+        config.generator.model.layers[
+            -1
+        ].attention.inner_attention = SlidingWindowFlexInnerAttention.Config(
+            sliding_window_size=128
+        )
+        with pytest.raises(ValueError, match="every generator attention layer"):
+            config.__post_init__()
 
 
 def test_batch_invariance_requires_matching_generator_debug_config():

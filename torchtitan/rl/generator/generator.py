@@ -216,12 +216,11 @@ class Generator(Configurable):
                     "cached KV cannot cross a policy update"
                 )
 
-            if torch.version.hip is not None:
-                from torchtitan.rl.generator.vllm.batch_invariance import (
-                    validate_rocm_flex_attention,
-                )
+            from torchtitan.rl.generator.vllm.batch_invariance import (
+                validate_platform_batch_invariance,
+            )
 
-                validate_rocm_flex_attention(self.model, owner="generator")
+            validate_platform_batch_invariance(self.model, owner="generator")
 
     def __init__(
         self,

@@ -4,7 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Runtime helper for bitwise trainer/generator numerics parity."""
+"""Runtime helpers for bitwise trainer/generator numerics parity.
+
+The ROCm page-mapping branch is temporary. Remove it and its request limit once
+https://github.com/vllm-project/vllm/issues/66460 provides a supported path.
+"""
 
 import logging
 
@@ -14,19 +18,19 @@ from torchtitan.models.common.decoder import Decoder
 
 logger = logging.getLogger(__name__)
 
-MAX_FLEX_BATCH_INVARIANT_REQUESTS = 64
+_MAX_REQUEST_INDEPENDENT_PAGE_MAPPING_REQUESTS = 64
 
 
-def validate_flex_page_mapping_request_limit(num_requests: int) -> None:
-    if num_requests > MAX_FLEX_BATCH_INVARIANT_REQUESTS:
+def _validate_request_independent_page_mapping_limit(num_requests: int) -> None:
+    if num_requests > _MAX_REQUEST_INDEPENDENT_PAGE_MAPPING_REQUESTS:
         raise ValueError(
             "ROCm FlexAttention batch invariance supports at most "
-            f"{MAX_FLEX_BATCH_INVARIANT_REQUESTS} concurrent requests, "
+            f"{_MAX_REQUEST_INDEPENDENT_PAGE_MAPPING_REQUESTS} concurrent requests, "
             f"got {num_requests}"
         )
 
 
-def validate_rocm_flex_attention(
+def _require_full_flex_attention(
     model: Decoder.Config,
     *,
     owner: str,
@@ -38,15 +42,38 @@ def validate_rocm_flex_attention(
     )
     if not attention_configs or any(
         not isinstance(attention.inner_attention, FlexInnerAttention.Config)
+        or not attention.inner_attention.is_full_attention
         for attention in attention_configs
     ):
         raise ValueError(
-            "batch_invariant mode on ROCm requires FlexAttention "
+            "batch_invariant mode on ROCm requires FlexAttention (full attention) "
             f"for every {owner} attention layer"
         )
 
 
-def enable_rocm_batch_invariant_page_mapping() -> None:
+def validate_platform_batch_invariance(
+    model: Decoder.Config,
+    *,
+    owner: str,
+    cuda_graph_mode: str | None = None,
+    max_num_seqs: int | None = None,
+) -> None:
+    """Validate platform-specific batch-invariance constraints."""
+    if torch.version.hip is None:
+        return
+
+    _require_full_flex_attention(model, owner=owner)
+    if cuda_graph_mode is not None and cuda_graph_mode != "NONE":
+        # TODO: Support graph replay after
+        # https://github.com/pytorch/torchtitan/issues/5725 is resolved.
+        raise ValueError(
+            "ROCm FlexAttention batch invariance requires cuda_graph.mode='NONE'"
+        )
+    if max_num_seqs is not None:
+        _validate_request_independent_page_mapping_limit(max_num_seqs)
+
+
+def _enable_request_independent_page_mapping() -> None:
     """Use a request-independent page lookup for ROCm FlexAttention.
 
     On the tested gfx950 Qwen capture, vLLM's request-indexed page lookup
@@ -63,6 +90,11 @@ def enable_rocm_batch_invariant_page_mapping() -> None:
     # TODO: Replace this internal-method override with a supported vLLM page mapping
     # after https://github.com/vllm-project/vllm/issues/66460 is resolved.
     def get_paged_mask_mod(self):
+        if self.num_reqs > _MAX_REQUEST_INDEPENDENT_PAGE_MAPPING_REQUESTS:
+            raise ValueError(
+                "request-independent page mapping supports at most "
+                f"{_MAX_REQUEST_INDEPENDENT_PAGE_MAPPING_REQUESTS} requests"
+            )
         active_mapping = self.physical_to_logical[: self.num_reqs]
         valid_mapping = active_mapping >= 0
         # A physical page is either exclusive to one request or shared as the
@@ -118,7 +150,24 @@ def enable_rocm_batch_invariant_page_mapping() -> None:
         return global_page_mask_mod
 
     FlexAttentionMetadata.get_paged_mask_mod = get_paged_mask_mod
-    logger.info("Enabled ROCm batch-invariant page mapping for vLLM FlexAttention")
+    logger.info("Enabled request-independent page mapping for vLLM FlexAttention")
+
+
+def configure_batch_invariance(
+    model: Decoder.Config,
+    *,
+    cuda_graph_mode: str,
+    max_num_seqs: int,
+) -> None:
+    """Configure vLLM's batch-invariant runtime before engine construction."""
+    validate_platform_batch_invariance(
+        model,
+        owner="generator",
+        cuda_graph_mode=cuda_graph_mode,
+        max_num_seqs=max_num_seqs,
+    )
+    if torch.version.hip is not None:
+        _enable_request_independent_page_mapping()
 
 
 def force_trainer_logprobs_for_batch_invariance() -> None:
