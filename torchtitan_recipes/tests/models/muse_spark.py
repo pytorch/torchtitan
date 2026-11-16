@@ -28,7 +28,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    MXFP8LinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import (
@@ -54,26 +53,13 @@ from torchtitan_recipes.models.muse_spark import (
     _muse_spark_context_parallel_transform,
     _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
     _MUSE_SPARK_HF_ASSETS_PATH,
+    _muse_spark_mxfp8_linear_transform,
     _ultradata_lora_sft_optim,
     _ultradata_lora_sft_transform,
     _ultradata_sft_dataloader,
     _with_dist_moe,
     muse_spark_mm_dataloader,
 )
-
-
-_MUSE_SPARK_MXFP8_LINEAR_FQNS = [
-    "attention",
-    "feed_forward.pooler",
-    "feed_forward.unpooler",
-]
-
-
-def _muse_spark_mxfp8_linear_transform() -> MXFP8LinearTransform:
-    """Quantize debug-model attention and compressed-MoE projections."""
-    return MXFP8LinearTransform(
-        fqns=list(_MUSE_SPARK_MXFP8_LINEAR_FQNS),
-    )
 
 
 def muse_spark_debugmodel(
