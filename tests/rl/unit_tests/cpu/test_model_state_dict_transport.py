@@ -58,6 +58,7 @@ class _FakeTransport:
     def __init__(self):
         self.url = str(next(self._urls)).encode()
         self.connected = set()
+        self.unregistered = []
 
     def register_memory(self, tensor):
         assert tensor.numel() > 0 and tensor.is_contiguous()
@@ -69,10 +70,19 @@ class _FakeTransport:
     def connect(self, url):
         self.connected.add(url)
 
-    def read(self, local, remote, *, async_op):
+    def read(self, local, remote, *, async_op, timeout=None):
         assert remote.url in self.connected
         assert local.shape == remote.data.shape
         local.copy_(remote.data)
+        return _FakeWork()
+
+    def unregister_memory(self, memory):
+        self.unregistered.append(memory)
+
+
+class _FakeWork:
+    def wait(self, timeout=None):
+        return True
 
 
 async def _wait_all(works, *, timeout):
@@ -305,6 +315,65 @@ def test_no_reads(monkeypatch):
         [{"w": (((0, 0), (0, 3)), torch.float32)}],
     )
     assert out["w"].shape == (0, 3)
+
+
+def test_gpu_fetch_reads_into_registered_tensors(monkeypatch):
+    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
+    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    initial = {
+        "a": torch.arange(8, dtype=torch.bfloat16),
+        "b": torch.arange(8, dtype=torch.bfloat16) + 20,
+    }
+    layout = m.shard_layout(initial)
+    trainer = ModelStateDictTransport(config)
+    source = trainer.register_trainer_source(
+        initial,
+        generator_rank_layouts=[layout],
+        transfer_dtype=None,
+        preserve_dtype_keys=frozenset(),
+    )
+    generator = ModelStateDictTransport(config)
+    generator.connect_generator_gpu(layout, sources=[source], rank=0, generator_index=0)
+
+    trainer.stage(initial)
+    destination = {key: torch.zeros_like(value) for key, value in initial.items()}
+    assert generator.read_into(destination) == destination.keys()
+    for key in initial:
+        torch.testing.assert_close(destination[key], initial[key], rtol=0, atol=0)
+    # Each load registers its destinations and unregisters them after.
+    assert len(generator._transport.unregistered) == len(initial)
+
+
+def test_gpu_fetch_unpacks_staged_pieces(monkeypatch):
+    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
+    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    full = torch.arange(8 * 6, dtype=torch.float32).reshape(8, 6)
+    boxes = {}
+    monkeypatch.setattr(
+        m, "_global_offset_and_local_shape", lambda tensor: boxes[id(tensor)]
+    )
+    layout = {"w": m.TensorShard((0, 0), (8, 6), torch.float32)}
+    sources = []
+    for box in _boxes(full.shape, 2, 1):
+        local = full[_index(*box)]
+        boxes[id(local)] = box
+        trainer = ModelStateDictTransport(config)
+        sources.append(
+            trainer.register_trainer_source(
+                {"w": local},
+                generator_rank_layouts=[layout],
+                transfer_dtype=None,
+                preserve_dtype_keys=frozenset(),
+            )
+        )
+        trainer.stage({"w": local})
+
+    generator = ModelStateDictTransport(config)
+    generator.connect_generator_gpu(layout, sources=sources, rank=0, generator_index=0)
+    assert set(generator._gpu_packed) == {"w"}
+    destination = {"w": torch.zeros_like(full)}
+    generator.read_into(destination)
+    torch.testing.assert_close(destination["w"], full, rtol=0, atol=0)
 
 
 def test_shared_rank_layouts():

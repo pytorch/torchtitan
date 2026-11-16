@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Moves the trainer's model state dict into the generators' prefetch buffers with
-one-sided reads over a ``torch.distributed._transport`` backend.
+"""Moves the trainer's model state dict into the generators' prefetch buffers or
+GPU weights with one-sided reads over a ``torch.distributed._transport`` backend.
 
 See ``MODEL_STATE_DICT_TRANSPORT.md``.
 """
@@ -318,7 +318,8 @@ class ModelStateDictTransport(Configurable):
 
     Trainer: ``register_trainer_source`` once, then ``stage`` per push.
     Generator: ``connect_generator`` once, then ``read`` per prefetch and
-    ``copy_prefetched_`` per load.
+    ``copy_prefetched_`` per load; or, reading straight into GPU weights,
+    ``connect_generator_gpu`` once, then ``read_into`` per load.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -346,6 +347,10 @@ class ModelStateDictTransport(Configurable):
         self._reads: list[tuple[Any, Any]] | None = None
         self._prefetched: dict[str, torch.Tensor] = {}
         self._packed: dict[str, list[tuple[tuple[slice, ...], torch.Tensor]]] = {}
+        # Generator, GPU fetch: (read, remote buffer) per read, or None until
+        # connected; and the pieces of each packed key.
+        self._gpu_reads: list[tuple[_Read, Any]] | None = None
+        self._gpu_packed: dict[str, list[_PackedPiece]] = {}
 
     def register_trainer_source(
         self,
@@ -479,6 +484,94 @@ class ModelStateDictTransport(Configurable):
             ]
             for key, pieces in packed.items()
         }
+
+    def connect_generator_gpu(
+        self,
+        layout: dict[str, TensorShard],
+        *,
+        sources: list[TrainerSource],
+        rank: int,
+        generator_index: int,
+    ) -> None:
+        """Connect to every trainer rank and plan reads straight into GPU tensors,
+        which ``read_into`` registers during each load.
+
+        Args:
+            layout: ``shard_layout`` of the tensors loads read into, which the
+                trainer staged for.
+            sources: Every trainer rank's ``register_trainer_source`` result.
+            rank: This rank within its generator.
+            generator_index: Index of this rank's generator.
+        """
+        reads, packed = _plan_reads(
+            sources, layout, rank=rank, generator_index=generator_index
+        )
+        for source in sources:
+            self._transport.connect(source.url)
+        self._gpu_packed = packed
+        self._gpu_reads = [
+            (
+                read,
+                sources[read.source].remote_buffer.slice(read.byte_offset, read.nbytes),
+            )
+            for read in reads
+        ]
+
+    def read_into(self, state_dict: dict[str, torch.Tensor]) -> Iterable[str]:
+        """Read ``state_dict``'s tensors in place from the trainer's staging buffers,
+        registering them for the reads; packed keys are read into a temporary
+        contiguous buffer and unpacked. Returns its keys."""
+        assert self._gpu_reads is not None, "connect_generator_gpu must be called first"
+        tensors = {key: _local(tensor) for key, tensor in state_dict.items()}
+        # The reads bypass the stream: finish queued writes to the tensors first.
+        if any(tensor.device.type != "cpu" for tensor in tensors.values()):
+            torch.accelerator.current_stream().synchronize()
+        memories = {}
+        registered = {}
+        packed_buffers = {}
+        try:
+            for key, tensor in tensors.items():
+                if key in self._gpu_packed:
+                    tensor = packed_buffers[key] = torch.empty_like(
+                        tensor, memory_format=torch.contiguous_format
+                    )
+                # Tied keys share a tensor: register it once.
+                destination = (tensor.data_ptr(), tensor.nbytes, tensor.device)
+                if destination not in registered:
+                    registered[destination] = self._transport.register_memory(
+                        tensor.view(-1)
+                    )
+                memories[key] = registered[destination]
+            works = [
+                self._transport.read(
+                    memories[read.key].to_mutable_view(
+                        read.local_byte_offset, read.nbytes
+                    ),
+                    remote,
+                    async_op=True,
+                    timeout=self._read_timeout_s,
+                )
+                for read, remote in self._gpu_reads
+                if read.key in memories
+            ]
+            for work in works:
+                work.wait()
+            with torch.no_grad():
+                for key, buffer in packed_buffers.items():
+                    flat = buffer.view(-1)
+                    for p in self._gpu_packed[key]:
+                        tensors[key][p.index].copy_(
+                            flat[p.offset : p.offset + math.prod(p.shape)].view(
+                                p.shape
+                            ),
+                            non_blocking=True,
+                        )
+            if packed_buffers and torch.accelerator.is_available():
+                torch.accelerator.current_stream().synchronize()
+        finally:
+            for memory in registered.values():
+                self._transport.unregister_memory(memory)
+        return state_dict.keys()
 
     async def read(self) -> None:
         """Fill the prefetch buffers from the trainer's staging buffers.

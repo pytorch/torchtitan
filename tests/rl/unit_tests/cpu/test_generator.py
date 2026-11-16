@@ -629,7 +629,9 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     reset_kv_cache: bool, serves_images: bool
 ):
     model = SimpleNamespace(
-        model_state_dict_loader=SimpleNamespace(load=lambda fetch: None)
+        model_state_dict_loader=SimpleNamespace(
+            load=lambda fetch, local_storage=False: None
+        )
     )
     engine = _vllm_engine(
         reset_kv_cache_on_model_state_dict_load=reset_kv_cache, model=model

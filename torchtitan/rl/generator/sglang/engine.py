@@ -70,6 +70,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
+from torchtitan.rl.model_state_dict_transport import TensorShard
 
 logger = logging.getLogger(__name__)
 
@@ -507,6 +508,10 @@ class SGLangEngine(GenerationEngine):
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         return self._get_model().model_state_dict_loader.prefetched_model_state_dict
 
+    @property
+    def model_state_dict_layout(self) -> dict[str, TensorShard]:
+        return self._get_model().model_state_dict_loader.model_state_dict_layout
+
     def add_requests(
         self, requests: list[EngineRequest]
     ) -> list[tuple[str, Exception]]:
@@ -713,7 +718,10 @@ class SGLangEngine(GenerationEngine):
         return finished
 
     def load_model_state_dict(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+        self,
+        fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]],
+        *,
+        local_storage: bool = False,
     ) -> None:
         """Fetch the model state dict into the model's weights one FSDP group at a time,
         and reset the KV cache when configured."""
@@ -735,7 +743,9 @@ class SGLangEngine(GenerationEngine):
             # scheduled makes no progress for watchdog_timeout, and a load takes as
             # long as its fetch. pause_generation clears the batch in the reset path.
             scheduler.cur_batch_for_debug = None
-            self._get_model().model_state_dict_loader.load(fetch)
+            self._get_model().model_state_dict_loader.load(
+                fetch, local_storage=local_storage
+            )
             scheduler.forward_stream.wait_stream(scheduler.schedule_stream)
             if self._reset_kv_cache_on_model_state_dict_load:
                 self._finished.extend(
