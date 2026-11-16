@@ -63,9 +63,6 @@ jobs:
         bash scripts/install_rl_env.sh --skip-base --flash-attn 3,4 --nvcc
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-        # ModelStateDictTransport's Mooncake reads pinned CPU memory over RDMA or
-        # TCP only; force TCP so runners without RDMA devices work.
-        export MC_FORCE_TCP=1
 
         python - <<'PY'
         import torch

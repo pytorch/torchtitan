@@ -3,11 +3,11 @@
 `ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
 model state dict into the generators' prefetched model state dicts with
 one-sided RDMA reads over a `torch.distributed._transport` backend
-(`backend="mooncake"`, the default, or `"nixl"`). It is the default
-`Controller.Config.model_state_dict_transport`; select NIXL with:
+(`backend="nixl"`, the default, or `"mooncake"`). It is the default
+`Controller.Config.model_state_dict_transport`; select Mooncake with:
 
 ```python
-config.model_state_dict_transport = ModelStateDictTransport.Config(backend="nixl")
+config.model_state_dict_transport = ModelStateDictTransport.Config(backend="mooncake")
 ```
 
 It is a separate path rather than a TorchStore transport: the trainer and
@@ -32,8 +32,7 @@ uses node 0's NICs, which can cut read bandwidth several times. On IPv6-only
 hosts set `MC_USE_IPV6=1`; Mooncake's handshake otherwise resolves peer
 hostnames over IPv4. Without RDMA devices Mooncake falls back to its NVLink
 transport, which cannot read pinned CPU memory, and reads fail with
-`Mooncake transfer submission failed`; set `MC_FORCE_TCP=1` (as the RL CI
-workflows do) or use NIXL.
+`Mooncake transfer submission failed`; set `MC_FORCE_TCP=1`.
 
 NIXL needs `nixl==1.5.0` and `nixl-cu13==1.5.0` (installed by
 `scripts/install_rl_env.sh`) and uses its UCX plugin; select NICs and

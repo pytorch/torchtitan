@@ -95,9 +95,6 @@ jobs:
           set -eux
           source .venv/bin/activate
           export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-          # ModelStateDictTransport's Mooncake reads pinned CPU memory over RDMA or
-          # TCP only; force TCP so runners without RDMA devices work.
-          export MC_FORCE_TCP=1
 
           python -m tests.integration_tests.run_tests \
             "$RUNNER_TEMP/artifacts-to-be-uploaded/rl/integration" --ngpu 8 \
