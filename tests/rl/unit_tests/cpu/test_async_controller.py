@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import dataclasses
 import itertools
 import json
 import logging
@@ -61,6 +62,90 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+def _controller_config_with_groups(
+    *, num_groups: int, group_size: int, rollouts_per_worker: int = 128
+) -> Controller.Config:
+    """A CI recipe with `num_groups` training groups of `group_size` in flight."""
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
+    async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        num_prompts_per_train_step=num_groups,
+        num_samples_per_prompt=group_size,
+    )
+    rollouter = dataclasses.replace(
+        config.rollouter, rollouts_per_worker=rollouts_per_worker
+    )
+    # `replace` reruns `__post_init__`, so the group-size check runs.
+    return dataclasses.replace(config, async_loop=async_loop, rollouter=rollouter)
+
+
+def test_num_rollout_workers_rounds_up_training_rollouts_over_rollouts_per_worker() -> (
+    None
+):
+    # 20 groups of 16: 320 rollouts in flight / 128 per worker = 2.5
+    config = _controller_config_with_groups(num_groups=20, group_size=16)
+    assert config.num_rollout_workers == 3
+
+
+# rollouts_per_worker=0 must raise this ValueError too: `num_rollout_workers` divides by it.
+@pytest.mark.parametrize("group_size, rollouts_per_worker", [(256, 128), (8, 0)])
+def test_a_group_larger_than_rollouts_per_worker_raises(
+    group_size, rollouts_per_worker
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"num_samples_per_prompt \({group_size}\) is larger than "
+        rf"rollouter.rollouts_per_worker \({rollouts_per_worker}\)",
+    ):
+        _controller_config_with_groups(
+            num_groups=16,
+            group_size=group_size,
+            rollouts_per_worker=rollouts_per_worker,
+        )
+
+
+def test_rollout_loop_keeps_the_metrics_a_worker_sent_with_its_group() -> None:
+    """A rollout worker adds its own metrics to each training group (event-loop lag, peak memory).
+    The controller adds the rollout metrics next to them."""
+    work = SimpleNamespace(sample="prompt", group_id=7)
+    claims = [work, None]
+    finalized: list[RolloutGroup] = []
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        worker_metric = m.Metric("rollout_worker/event_loop_lag_ms", m.Max(5.0))
+        return RolloutGroup(group_id=group_id, rollouts=[], metrics=[worker_metric])
+
+    async def claim_next():
+        return claims.pop(0)
+
+    async def finalize_work(group: RolloutGroup) -> None:
+        finalized.append(group)
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(num_samples_per_prompt=1)
+    )
+    controller._sampling = SamplingConfig()
+    controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    group_buffer = SimpleNamespace(claim_next=claim_next, finalize_work=finalize_work)
+
+    asyncio.run(
+        controller._rollout_loop(
+            group_buffer=group_buffer, generate_fn=None, release_session_fn=None
+        )
+    )
+
+    keys = m.MetricsProcessor._aggregate_metrics(finalized[0].metrics)
+    assert keys["rollout_worker/event_loop_lag_ms/max"] == 5.0
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:

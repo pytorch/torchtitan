@@ -233,6 +233,10 @@ class AsyncLoopConfig(Configurable.Config):
                 "num_prompts_per_train_step must be >= 1, got "
                 f"{self.num_prompts_per_train_step}"
             )
+        if self.num_samples_per_prompt < 1:
+            raise ValueError(
+                f"num_samples_per_prompt must be >= 1, got {self.num_samples_per_prompt}"
+            )
         if self.target_offpolicy_steps < 0:
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
@@ -421,6 +425,17 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
+            group_size = self.async_loop.num_samples_per_prompt
+            rollouts_per_worker = self.rollouter.rollouts_per_worker
+            # TODO: place single rollouts on workers, instead of groups
+            # so we can have less idle time as rollouts finish. This would require
+            # rethinking where group-level postprocessing runs.
+            if group_size > rollouts_per_worker:
+                raise ValueError(
+                    f"async_loop.num_samples_per_prompt ({group_size}) is larger than "
+                    f"rollouter.rollouts_per_worker ({rollouts_per_worker}). Please raise "
+                    "rollouter.rollouts_per_worker or lower async_loop.num_samples_per_prompt."
+                )
             # TODO: support "gpu_fetch" by reading into generator GPU memory
             # (https://github.com/pytorch/torchtitan/issues/6070).
             if (
@@ -566,6 +581,24 @@ class Controller(Configurable):
             # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
             # the engine torchtitan builds.
             return min(max_num_seqs, max_num_batched_tokens)
+
+        @property
+        def num_rollout_workers(self) -> int:
+            """Max training rollouts in flight / `rollouter.rollouts_per_worker`, rounded up. Validation
+            rollouts are not counted: they share these workers.
+
+            Example (rollouts_per_worker=128):
+                groups in flight x group size   workers
+                8 x 8                           1
+                32 x 8                          2
+                48 x 32                         12
+            """
+            async_loop = self.async_loop
+            return math.ceil(
+                async_loop.max_active_rollout_groups
+                * async_loop.num_samples_per_prompt
+                / self.rollouter.rollouts_per_worker
+            )
 
     def __init__(self, config: Config):
         self.config = config
@@ -755,6 +788,12 @@ class Controller(Configurable):
 
         max_num_seqs = config.max_num_seqs_per_generator_dp_rank
         logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
+        num_rollout_workers = config.num_rollout_workers
+        logger.info(
+            "%d rollout workers (rollouts_per_worker=%d)",
+            num_rollout_workers,
+            config.rollouter.rollouts_per_worker,
+        )
 
         with sl.log_trace_span("mesh_spawn"):
             actor_system = await self._build_actor_system()
@@ -804,6 +843,7 @@ class Controller(Configurable):
 
             await self._rollouter.setup_async(
                 actor_system=actor_system,
+                num_workers=num_rollout_workers,
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
@@ -1005,8 +1045,8 @@ class Controller(Configurable):
         generate_fn = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
 
-        # One rollout worker per active buffer slot: lets generation fill every active slot,
-        # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
+        # One rollout loop per group that can be in flight at once (`max_active_rollout_groups`).
+        # A loop is an asyncio task: it rolls out one group at a time, on the worker the rollouter picks.
         # TODO: support warm start
         rollout_tasks = [
             asyncio.create_task(
@@ -1015,9 +1055,9 @@ class Controller(Configurable):
                     generate_fn=generate_fn,
                     release_session_fn=release_session_fn,
                 ),
-                name=f"rollout_worker_{group_worker_id}",
+                name=f"rollout_loop_{loop_index}",
             )
-            for group_worker_id in range(max_active_rollout_groups)
+            for loop_index in range(max_active_rollout_groups)
         ]
 
         # data_input_loop
@@ -1147,7 +1187,8 @@ class Controller(Configurable):
 
     async def _maybe_validate_after_training(self, *, step: int) -> None:
         """Log the validations that ended, then run one more on the final policy if
-        `validate_after_training`, and log it. run() calls it after cancelling the running ones."""
+        `validate_after_training`, and log it. run() calls it after cancelling the running ones.
+        """
         self._log_ended_validations(step=step)
         if self.config.async_loop.validation.validate_after_training:
             metrics = await self.validate(step=step)
@@ -1202,7 +1243,7 @@ class Controller(Configurable):
         while True:
             work = await group_buffer.claim_next()
             if work is None:  # group_buffer closed/shutdown signal
-                logger.info("Buffer closed; rollout worker stopping")
+                logger.info("Buffer closed; rollout loop stopping")
                 return
             try:
                 with sl.log_trace_span("rollout_group"):
@@ -1214,7 +1255,7 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
+                group.metrics += compute_rollout_metrics(
                     prefix="rollout", rollouts=group.rollouts
                 )
 
@@ -1483,7 +1524,8 @@ class Controller(Configurable):
 
     def _start_push_model_state_dict(self) -> asyncio.Task[float]:
         """Send the trainer's model state dict push now, so each trainer rank starts it before the next
-        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
+        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds.
+        """
         start = time.perf_counter()
         push = self.trainer.all_ranks.push_model_state_dict.call()
 

@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import time
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
@@ -809,3 +811,33 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def test_event_loop_lag_measures_a_blocked_loop() -> None:
+    async def run() -> tuple[list[m.Metric], list[m.Metric]]:
+        lag = m.EventLoopLag("controller", interval_s=0.01)
+        # Let the lag task start its first sleep.
+        await asyncio.sleep(0.02)
+        time.sleep(0.3)
+        # Yield, so the lag task wakes up late and records the block.
+        await asyncio.sleep(0.05)
+        after_block = lag.flush()
+        await asyncio.sleep(0.05)
+        after_no_block = lag.flush()
+        lag.close()
+        return after_block, after_no_block
+
+    after_block, after_no_block = asyncio.run(run())
+    blocked = {type(metric.value): metric.value for metric in after_block}
+    assert [metric.key for metric in after_block] == [
+        "controller/event_loop_lag_ms",
+        "controller/event_loop_lag_ms_per_s",
+    ]
+    assert blocked[m.Max].value >= 250.0
+    # The Mean holds the late ms over the seconds the flush covers, which include the 0.3 s block.
+    assert blocked[m.Mean].value >= 250.0
+    assert blocked[m.Mean].count >= 0.3
+    # The flush started over: no block since, so only small scheduling delays count.
+    not_blocked = {type(metric.value): metric.value for metric in after_no_block}
+    assert not_blocked[m.Max].value < 200.0
+    assert not_blocked[m.Mean].value < 200.0

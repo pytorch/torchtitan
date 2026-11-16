@@ -9,6 +9,7 @@
 import asyncio
 import functools
 import gc
+import time
 from types import SimpleNamespace
 
 from torchtitan.observability import structured_logger as sl
@@ -18,6 +19,7 @@ from torchtitan.rl.actors.monarch import (
 )
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
+from torchtitan.rl.observability import metrics as m
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
@@ -76,6 +78,78 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
     asyncio.run(run())
 
 
+class _LoopBlockingWorker:
+    """Holds its event loop for 0.3 s in setup and for `sample` seconds in each group, as a slow
+    tokenizer build or render would."""
+
+    async def setup_async(self, **kwargs) -> None:
+        time.sleep(0.3)
+
+    async def run_group(
+        self, *, sample: float, group_id: int, **kwargs
+    ) -> RolloutGroup:
+        time.sleep(sample)
+        # Yield, so the lag task wakes up late and records the delay before the group returns.
+        await asyncio.sleep(0.1)
+        return RolloutGroup(group_id=group_id, rollouts=[])
+
+
+def test_rollout_worker_reports_its_event_loop_lag() -> None:
+    """A training group gets the worker's event-loop lag since its previous training group, and
+    its peak memory:
+        setup holds the loop for 0.3 s                not counted
+        training group                                lag < 250 ms
+        validation group holds the loop for 0.3 s     no metrics
+        training group                                lag >= 250 ms
+    """
+
+    async def run() -> list[RolloutGroup]:
+        actor = object.__new__(RolloutWorkerActor)
+        RolloutWorkerActor.__init__(
+            actor,
+            worker_config=SimpleNamespace(build=_LoopBlockingWorker),
+            worker_kwargs={},
+            num_threads=1,
+            structured_logger_init_fn=None,
+        )
+        # Let the loop run between the spawn and the setup call, as in a real actor. Then a lag task
+        # started in `__init__` would record setup's 0.3 s hold, so the "not counted" row can fail.
+        await asyncio.sleep(0)
+        # Call each endpoint's own body, which `concurrent_endpoint` keeps as `__wrapped__`.
+        # The wrapper needs a Monarch response port, and this test has none.
+        setup_async = RolloutWorkerActor.setup_async._method.__wrapped__
+        run_group = RolloutWorkerActor.run_group._method.__wrapped__
+        await setup_async(
+            actor, tokenizer_config=None, renderer_config=None, hf_assets_path=""
+        )
+        kwargs = dict(
+            generate_fn=None, release_session_fn=None, group_size=1, sampling=None
+        )
+        groups = [
+            await run_group(actor, sample=0.0, group_id=0, **kwargs),
+            await run_group(actor, sample=0.3, group_id=-1, **kwargs),
+            await run_group(actor, sample=0.0, group_id=1, **kwargs),
+        ]
+        actor._event_loop_lag.close()
+        return groups
+
+    first_training, validation, second_training = asyncio.run(run())
+    assert validation.metrics == []
+    first_metrics = m.MetricsProcessor._aggregate_metrics(first_training.metrics)
+    second_metrics = m.MetricsProcessor._aggregate_metrics(second_training.metrics)
+    lag_mean = next(
+        metric.value
+        for metric in second_training.metrics
+        if metric.key == "rollout_worker/event_loop_lag_ms_per_s"
+    )
+    # The lag task checks every 0.05 s, so the 0.3 s hold reads at least 0.25 s.
+    assert first_metrics["rollout_worker/event_loop_lag_ms/max"] < 250.0
+    assert second_metrics["rollout_worker/event_loop_lag_ms/max"] >= 250.0
+    # `Mean.value` is the total ms late. The 0.3 s hold adds at least 250 ms.
+    assert lag_mean.value >= 250.0
+    assert second_metrics["rollout_worker/peak_memory_gib/max"] > 0.0
+
+
 class _SetupEndpoint:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -125,11 +199,7 @@ def _rollouter_without_datasets() -> Rollouter:
 
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
-    rollouter._config = SimpleNamespace(
-        worker=worker_config,
-        worker_pool_size=3,
-        num_threads_per_worker=2,
-    )
+    rollouter._config = SimpleNamespace(worker=worker_config, num_threads_per_worker=2)
     rollouter._worker_actors = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
@@ -146,6 +216,7 @@ async def _setup(
     monkeypatch.setattr(provisioning, "this_host", lambda: host)
     await rollouter.setup_async(
         actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
+        num_workers=3,
         tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
@@ -168,6 +239,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
 
         await rollouter.setup_async(
             actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
+            num_workers=3,
             tokenizer_config="tokenizer_config",
             renderer_config="renderer_config",
             hf_assets_path="hf_assets_path",

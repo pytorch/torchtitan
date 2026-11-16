@@ -18,7 +18,6 @@ import numpy as np
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
-
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
@@ -108,19 +107,17 @@ class Rollouter(Configurable):
         """How a rollout group is built, driven, scored and advantaged. Selects the
         `BaseRolloutWorker` subclass by config type; one worker is built per pool process."""
 
-        worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        rollouts_per_worker: int = 128
+        """Training rollouts in flight per rollout worker process.
+        It sets the pool size, rounded up: 300 training rollouts in flight / 128 per worker -> 3 workers."""
 
+        # TODO: at 128 rollouts per worker, renders and parses (`TokenEnv`) may queue on these threads,
+        #   and the event-loop lag metric doesn't show that wait. A span around the render would.
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
         behind every `asyncio.to_thread` call in that process."""
 
         def __post_init__(self) -> None:
-            if self.worker_pool_size < 1:
-                raise ValueError(
-                    "worker_pool_size must be at least 1, got "
-                    f"{self.worker_pool_size}"
-                )
             if self.num_threads_per_worker < 1:
                 raise ValueError(
                     "num_threads_per_worker must be at least 1, got "
@@ -163,6 +160,7 @@ class Rollouter(Configurable):
         self,
         *,
         actor_system: ActorSystem,
+        num_workers: int,
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
@@ -172,14 +170,14 @@ class Rollouter(Configurable):
         # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn `num_workers` rollout workers through `actor_system` and initialize them."""
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
             self._config.worker,
-            num_workers=self._config.worker_pool_size,
+            num_workers=num_workers,
             num_threads=self._config.num_threads_per_worker,
             **(worker_kwargs or {}),
         )
