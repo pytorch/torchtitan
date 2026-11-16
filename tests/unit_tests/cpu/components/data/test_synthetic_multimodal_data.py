@@ -30,6 +30,7 @@ from torchtitan.components.data.sources import IndexedJsonlSource
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan_recipes.tests.datasets import synthetic_multimodal
 
 
@@ -271,6 +272,14 @@ def test_synthetic_loader_restores_exact_next_batch(audio_tokenizer, dataset_nam
         actual_value = actual[key]
         if isinstance(expected_value, torch.Tensor):
             assert torch.equal(actual_value, expected_value), key
+        elif isinstance(expected_value, VarlenAttentionMetadata):
+            assert torch.equal(actual_value.cu_seq_q, expected_value.cu_seq_q), key
+            assert torch.equal(actual_value.cu_seq_k, expected_value.cu_seq_k), key
+            assert actual_value.max_q == expected_value.max_q, key
+            assert actual_value.max_k == expected_value.max_k, key
+            assert actual_value.cu_seq_q_cpu == expected_value.cu_seq_q_cpu, key
+            assert actual_value.cu_seq_k_cpu == expected_value.cu_seq_k_cpu, key
+            assert actual_value.window_size == expected_value.window_size, key
         else:
             assert actual_value == expected_value, key
     media_key = (
@@ -336,3 +345,24 @@ def test_audio_collator_omits_audio_kwargs_without_waveforms(audio_tokenizer):
         }
         & batch.model_kwargs.keys()
     )
+
+
+def test_collator_builds_varlen_metadata_on_cpu(audio_tokenizer):
+    tokens = torch.tensor([1, 2, 3, 4, 5])
+    batch = _collator(audio_tokenizer)(
+        [
+            {
+                "input_ids": tokens,
+                "labels": tokens.clone(),
+                "positions": torch.tensor([0, 1, 0, 1, 2]),
+                "pixel_values": [],
+                "pixel_values_videos": [],
+                "waveforms": [],
+            }
+        ]
+    )
+
+    metadata = batch.model_kwargs["varlen_metadata"]
+    assert metadata.cu_seq_q_cpu == [0, 2, 5, 16]
+    assert metadata.cu_seq_k_cpu == [0, 2, 5, 16]
+    assert metadata.cu_seq_q.device.type == "cpu"

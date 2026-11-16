@@ -329,6 +329,8 @@ class VarlenAttentionMetadata:
     cu_seq_k: torch.Tensor
     max_q: int
     max_k: int
+    cu_seq_q_cpu: list[int] | None = None
+    cu_seq_k_cpu: list[int] | None = None
     window_size: tuple[int, int] = (-1, 0)
     """``window_size=(left, right)`` controls the attention window relative to
     each query position. ``left`` is how many tokens before the query to attend
@@ -1178,9 +1180,12 @@ def create_varlen_metadata_for_document(
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
+    cu_seqlens_cpu = packed_cu_seqlens.tolist() if device.type == "cpu" else None
     return VarlenAttentionMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
         max_k=max_seqlen,
+        cu_seq_q_cpu=cu_seqlens_cpu,
+        cu_seq_k_cpu=cu_seqlens_cpu,
     )

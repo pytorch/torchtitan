@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import spmd_types as spmd
@@ -23,7 +23,12 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
 )
 from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import AttentionMetadata, AttentionMetadataMap
+from torchtitan.models.common.attention import (
+    AttentionMetadata,
+    AttentionMetadataMap,
+    VarlenAttentionMetadata,
+)
+from torchtitan.models.common.attention.linear_attention import LinearAttentionMetadata
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -342,14 +347,31 @@ class KimiK3MultimodalModel(KimiK3Model, MultimodalModel):
         """Build metadata, CP-shard inputs, and annotate K3 layouts."""
         del kwargs
         loss_kwargs = input_dict.pop("loss_kwargs", {})
+        varlen_metadata = input_dict.pop("varlen_metadata", None)
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            input_dict["attention_metadata"] = self._get_attention_metadata(
+            attention_metadata = self._get_attention_metadata(
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
             )
+            if varlen_metadata is not None:
+                attention_metadata = dict(attention_metadata)
+                device = positions.device
+                varlen_metadata = replace(
+                    varlen_metadata,
+                    cu_seq_q=varlen_metadata.cu_seq_q.to(device),
+                    cu_seq_k=varlen_metadata.cu_seq_k.to(device),
+                )
+                for backend, metadata in attention_metadata.items():
+                    if isinstance(metadata, LinearAttentionMetadata):
+                        attention_metadata[backend] = replace(
+                            metadata, varlen=varlen_metadata
+                        )
+                    elif isinstance(metadata, VarlenAttentionMetadata):
+                        attention_metadata[backend] = varlen_metadata
+            input_dict["attention_metadata"] = attention_metadata
 
         pixel_values = input_dict.get("pixel_values")
         if (

@@ -19,6 +19,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.models.common.attention import create_varlen_metadata_for_document
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 
 from .mrope import get_mrope_positions
@@ -63,6 +64,7 @@ class MultiModalCollator(Collator):
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._num_tokens_per_microbatch = context.num_tokens_per_microbatch
         self._max_context_length = context.max_context_length
+        self._max_num_documents = context.max_num_documents
         self._num_mtp_layers = context.num_mtp_layers
         self.max_images_per_microbatch = config.max_images_per_microbatch
         self.vision_processor = context.vision_processor
@@ -307,7 +309,14 @@ class MultiModalCollator(Collator):
 
         # Pad text.
         input_ids, labels, positions, padding_mask = self.collate_text(rows)
+        varlen_metadata = create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=self._max_num_documents,
+            max_context_length=self._max_context_length,
+        )
         model_kwargs = {
+            "varlen_metadata": varlen_metadata,
             "pixel_values": patches,
             "grid_thw": grids,
             "pixel_values_videos": video_patches,
