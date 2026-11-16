@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from functools import partial
 from typing import Any, cast, NamedTuple, TYPE_CHECKING
 
 import torch
@@ -21,7 +22,6 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymmMemScope
-from torchtitan.distributed.flex_shard_fsdp import record_param_layouts
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -462,11 +462,19 @@ def _apply_flex_shard(
     setting, and a root bucket takes the parameters left over, as
     ``fully_shard(model)`` does. Gradients are summed over ``dp_mesh`` without
     division, as ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets'
-    collectives then match FSDP2's byte for byte.
+    collectives then match FSDP2's byte for byte. Each sharded parameter's
+    ``param_init`` function is wrapped with flex_shard's ``init_from_full``, so
+    the shards start as one device's initialization.
     """
     # flex_shard is an optional dependency, needed only for this backend.
     # pyrefly: ignore [missing-import]
-    from flex_shard import BucketSpec, flex_shard, MixedPrecisionPolicy
+    from flex_shard import (
+        BucketSpec,
+        flex_shard,
+        get_flex_shard_global_layouts,
+        init_from_full,
+        MixedPrecisionPolicy,
+    )
 
     # pyrefly: ignore [missing-import]
     from flex_shard.custom_placements.shard import Shard as FlexShardShard
@@ -522,7 +530,24 @@ def _apply_flex_shard(
         buckets.append(bucket(root_fqns, reshard_after_forward=False))
 
     flex_shard(model, buckets=buckets)
-    record_param_layouts(model)
+    # FlexShard parameters are plain local shards. Wrap each one's param_init
+    # function so that it fills the full parameter and the shard keeps its part:
+    # one device's initialization, whatever the sharding. to_empty() replaces
+    # the parameters but keeps the modules, so the wrapped functions survive it.
+    # validate_flex_shard_training rejects modules without param_init, whose
+    # reset_parameters() would bypass this.
+    for fqn, layout in get_flex_shard_global_layouts(model).items():
+        module_fqn, _, name = fqn.rpartition(".")
+        module = model.get_submodule(module_fqn)
+        assert isinstance(module, Module) and module._param_init is not None, fqn
+        if name in module._param_init:
+            # A new dict: modules built from one Config share its param_init.
+            module._param_init = {
+                **module._param_init,
+                name: partial(
+                    init_from_full, layout=layout, init_fn=module._param_init[name]
+                ),
+            }
     logger.info("Applied FlexShard to the model")
 
 
