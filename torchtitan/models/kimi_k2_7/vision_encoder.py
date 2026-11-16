@@ -180,7 +180,7 @@ def _compute_2d_rope_cache(
         ang = torch.stack([x_ang, y_ang], dim=-1).reshape(h * w, head_dim // 2)
         for i in indices:
             t = grids[i][0]
-            angles[i] = ang.repeat(t, 1)
+            angles[i] = ang if t == 1 else ang.repeat(t, 1)
 
     # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
     packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
