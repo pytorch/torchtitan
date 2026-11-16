@@ -142,10 +142,15 @@ class TrainingSampleBuilder(Configurable):
         """
         metrics: list[m.Metric] = list(rollout_group.metrics)
 
+        rollouts = [
+            rollout for rollout in rollout_group.rollouts
+            if rollout.status.is_trainable() and rollout.reward is not None
+        ]
+
         # TODO(async-rl): generalize these group-level filters into an ordered, user-pluggable filter
         # list (e.g. drop groups with all-0 / all-1 advantage), run in sequence on each RolloutGroup.
         # Failed generation: empty group carrying its failure metric.
-        if not rollout_group.rollouts:
+        if not rollouts:
             return TrainingSampleGroup(
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
@@ -153,7 +158,7 @@ class TrainingSampleBuilder(Configurable):
         # Untrainable: any sibling with no completion tokens -> drop the whole group
         if any(
             not any(len(turn.completion_token_ids) > 0 for turn in rollout.turns)
-            for rollout in rollout_group.rollouts
+            for rollout in rollouts
         ):
             metrics.append(
                 m.Metric(
@@ -165,8 +170,8 @@ class TrainingSampleBuilder(Configurable):
             )
 
         # Zero-std reward: no learning signal across siblings.
-        rewards = [rollout.reward for rollout in rollout_group.rollouts]
-        is_zero_std = len(rewards) > 1 and statistics.pstdev(rewards) == 0.0
+        rewards = [rollout.reward for rollout in rollouts]
+        is_zero_std = len(rollout_group.rollouts) > 1 and statistics.pstdev(rewards) == 0.0
         metrics.append(
             m.Metric(
                 "rollout_reward/group_zero_std_frac",
@@ -189,7 +194,7 @@ class TrainingSampleBuilder(Configurable):
         branches_per_rollout: list[float] = []
         num_samples_dropped_no_valid_tokens = 0
         num_rollouts_dropped_empty_completion = 0
-        for rollout in rollout_group.rollouts:
+        for rollout in rollouts:
             # A later turn with no completion (e.g. a request aborted before its first token): drop the
             # rollout, so `rollout_to_training_samples` doesn't raise and stop the run.
             if any(
@@ -235,7 +240,7 @@ class TrainingSampleBuilder(Configurable):
             training_sample.max_policy_version
             for training_sample in unfiltered_training_samples
         ]
-        advantages = [rollout.advantage for rollout in rollout_group.rollouts]
+        advantages = [rollout.advantage for rollout in rollouts]
         metrics += [
             m.Metric(
                 "training_sample_builder/num_training_samples",

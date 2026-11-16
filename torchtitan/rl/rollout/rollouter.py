@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -21,15 +22,19 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.rl.actors.system import ActorSystem
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
+    classify_rollout_error,
     GenerateFn,
     ReleaseSessionFn,
     Rollout,
+    RolloutError,
     RolloutGroup,
     RolloutStatus,
     RolloutTurn,
@@ -38,8 +43,6 @@ from torchtitan.rl.rollout.types import (
 
 if TYPE_CHECKING:
     from renderers import Renderer
-
-    from torchtitan.rl.actors.system import ActorSystem
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator.types import SamplingConfig
@@ -50,6 +53,10 @@ logger = logging.getLogger(__name__)
 # How long `Rollouter.close` waits for in-flight `run_group` calls before stopping their workers anyway.
 # Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
 _RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
+
+
+class RolloutInfraBudgetExceeded(RuntimeError):
+    """The run has exceeded its infrastructure failure budget."""
 
 
 class Rollouter(Configurable):
@@ -115,7 +122,25 @@ class Rollouter(Configurable):
         """Size of each worker process's default thread pool executor, i.e. the pool
         behind every `asyncio.to_thread` call in that process."""
 
+        max_retries_per_prompt: int = 2
+        """Additional attempts for each infrastructure-failed sibling. Two retries
+        tolerate a brief outage while bounding generation cost to three attempts."""
+
+        max_infra_failures_per_run: int = 1000
+        """Abort after this many failed rollout attempts across training and validation.
+        The default allows transient failures in large groups but bounds a dead cluster.
+        Zero aborts on the first infrastructure failure."""
+
+        retry_backoff_s: float = 0.0
+        """Linear delay: this many seconds times the retry number. Zero disables delay."""
+
         def __post_init__(self) -> None:
+            if self.max_retries_per_prompt < 0:
+                raise ValueError("max_retries_per_prompt must be nonnegative")
+            if self.max_infra_failures_per_run < 0:
+                raise ValueError("max_infra_failures_per_run must be nonnegative")
+            if not math.isfinite(self.retry_backoff_s) or self.retry_backoff_s < 0:
+                raise ValueError("retry_backoff_s must be finite and nonnegative")
             if self.worker_pool_size < 1:
                 raise ValueError(
                     "worker_pool_size must be at least 1, got "
@@ -129,6 +154,10 @@ class Rollouter(Configurable):
 
     def __init__(self, config: Config) -> None:
         self._config = config
+        self._infra_failures = 0
+        self._infra_retries = 0
+        self._data_failures = 0
+        self._env_failures = 0
         training_dataloader = config.training_dataloader.build()
         if not isinstance(training_dataloader, RolloutDataLoader):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
@@ -251,22 +280,99 @@ class Rollouter(Configurable):
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
-        # endpoint of one worker in the pool.
-        call = asyncio.ensure_future(
-            self._worker_actors.run_group.choose(
-                generate_fn=generate_fn,
-                release_session_fn=release_session_fn,
-                sample=sample,
-                group_id=group_id,
-                group_size=group_size,
-                sampling=sampling,
+        group: RolloutGroup | None = None
+        attempted_ids = set(range(group_size))
+        for attempt in range(self._config.max_retries_per_prompt + 1):
+            if attempt and self._config.retry_backoff_s:
+                await asyncio.sleep(self._config.retry_backoff_s * attempt)
+            self._check_infra_budget()
+            kwargs: dict[str, Any] = {}
+            if attempt:
+                assert group is not None
+                kwargs = {"previous_rollouts": group.rollouts, "attempt": attempt}
+                self._infra_retries += len(attempted_ids)
+            try:
+                call = asyncio.ensure_future(
+                    self._worker_actors.run_group.choose(
+                        generate_fn=generate_fn,
+                        release_session_fn=release_session_fn,
+                        sample=sample,
+                        group_id=group_id,
+                        group_size=group_size,
+                        sampling=sampling,
+                        **kwargs,
+                    )
+                )
+                self._inflight_run_group_calls.add(call)
+                call.add_done_callback(self._on_run_group_call_done)
+                # A cancelled caller leaves the RPC tracked for close(); it never retries.
+                group = await asyncio.shield(call)
+            except Exception as error:
+                actor_system = self._actor_system
+                cause = (
+                    actor_system.unwrap_exception(error)
+                    if actor_system is not None
+                    else error
+                )
+                if not isinstance(cause, Exception):
+                    raise cause
+                status = classify_rollout_error(cause)
+                logger.exception("rollout group %d failed: %s", group_id, status)
+                previous = (
+                    {} if group is None else {r.rollout_id: r for r in group.rollouts}
+                )
+                group = RolloutGroup(
+                    group_id=group_id,
+                    rollouts=[
+                        Rollout(
+                            group_id=group_id,
+                            rollout_id=rollout_id,
+                            status=status,
+                            logs={"error": repr(cause)},
+                        )
+                        if rollout_id in attempted_ids
+                        else previous[rollout_id]
+                        for rollout_id in range(group_size)
+                    ],
+                    metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
+                )
+            assert group is not None
+            attempted = [r for r in group.rollouts if r.rollout_id in attempted_ids]
+            # No await between the shared counter update and budget check: all group
+            # coroutines execute on the controller's event loop.
+            self._infra_failures += sum(
+                r.status is RolloutStatus.ERROR_INFRA for r in attempted
             )
-        )
-        self._inflight_run_group_calls.add(call)
-        call.add_done_callback(self._on_run_group_call_done)
-        # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
-        return await asyncio.shield(call)
+            self._data_failures += sum(
+                r.status is RolloutStatus.ERROR_DATA for r in attempted
+            )
+            self._env_failures += sum(
+                r.status is RolloutStatus.ERROR_ENV for r in attempted
+            )
+            self._check_infra_budget()
+            attempted_ids = {
+                r.rollout_id for r in attempted if r.status is RolloutStatus.ERROR_INFRA
+            }
+            if not attempted_ids:
+                break
+        assert group is not None
+        return group
+
+    def _check_infra_budget(self) -> None:
+        if self._infra_failures > self._config.max_infra_failures_per_run:
+            raise RolloutInfraBudgetExceeded(
+                f"Rollout infrastructure failure budget exceeded: {self._infra_failures} "
+                f"> {self._config.max_infra_failures_per_run}"
+            )
+
+    def retry_metrics(self) -> list[m.Metric]:
+        """Cumulative controller-lifetime counts, including validation and exhausted attempts."""
+        return [
+            m.Metric("rollout_infra_retries_total", m.NoReduce(self._infra_retries)),
+            m.Metric("rollout_infra_failures_total", m.NoReduce(self._infra_failures)),
+            m.Metric("rollout_data_failures_total", m.NoReduce(self._data_failures)),
+            m.Metric("rollout_env_failures_total", m.NoReduce(self._env_failures)),
+        ]
 
     def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
         self._inflight_run_group_calls.discard(call)
@@ -339,6 +445,8 @@ class BaseRolloutWorker(Configurable, ABC):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        previous_rollouts: list[Rollout] | None = None,
+        attempt: int = 0,
     ) -> RolloutGroup:
         """Roll out one prompt group, then set each reward from `score_group` and each
         advantage from `advantage_estimator`.
@@ -351,10 +459,51 @@ class BaseRolloutWorker(Configurable, ABC):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
+            previous_rollouts: Retain every sibling except ERROR_INFRA on a retry.
+            attempt: Retry number, used to isolate generator request and session IDs.
 
         Returns:
             One scored `RolloutGroup`.
         """
+
+    async def make_scored_group(
+        self,
+        rollouts_or_errors: list[Rollout | BaseException],
+        sample: object,
+        *,
+        group_id: int,
+    ) -> RolloutGroup:
+        """Score and center valid siblings, retaining failed ones for recording and retry."""
+        rollouts: list[Rollout] = []
+        for rollout_id, result in enumerate(rollouts_or_errors):
+            if isinstance(result, Exception):
+                result = Rollout(
+                    group_id=group_id,
+                    rollout_id=rollout_id,
+                    status=classify_rollout_error(result),
+                    logs={"error": repr(result)},
+                )
+            elif isinstance(result, BaseException):
+                raise result
+            result.advantage = None
+            if not result.status.is_trainable():
+                result.reward = None
+                result.reward_breakdown = {}
+            rollouts.append(result)
+        trainable = [r for r in rollouts if r.status.is_trainable()]
+        if trainable:
+            outputs = await self.score_group(trainable, sample)
+            for rollout, output in zip(trainable, outputs, strict=True):
+                rollout.reward = output.reward
+                rollout.reward_breakdown = output.reward_breakdown
+        scored = [r for r in trainable if r.reward is not None]
+        if scored:
+            advantages = self.advantage_estimator(
+                RolloutGroup(group_id=group_id, rollouts=scored)
+            )
+            for rollout, advantage in zip(scored, advantages, strict=True):
+                rollout.advantage = advantage
+        return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
 
 class MessageEnvRolloutWorker(BaseRolloutWorker):
@@ -430,19 +579,41 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        previous_rollouts: list[Rollout] | None = None,
+        attempt: int = 0,
     ) -> RolloutGroup:
         """Build `group_size` envs from `sample`, run them concurrently, then score them and fill their advantages."""
-        # One prompt becomes [env] * group_size.
-        envs = self.make_env_group(
-            sample=sample,
-            group_size=group_size,
+        retained = (
+            {}
+            if previous_rollouts is None
+            else {
+                r.rollout_id: r
+                for r in previous_rollouts
+                if r.status is not RolloutStatus.ERROR_INFRA
+            }
         )
+        pending_ids = [i for i in range(group_size) if i not in retained]
+        # Rebuild only the failed siblings' single-use environments.
+        try:
+            envs = self.make_env_group(
+                sample=sample,
+                group_size=len(pending_ids),
+            )
+        except Exception as error:
+            # This is environment construction, not a failed worker RPC. Even an
+            # environment's TimeoutError must not be retried by the controller.
+            status = (
+                RolloutStatus.ERROR_DATA
+                if isinstance(error, (ValueError, TypeError))
+                else RolloutStatus.ERROR_ENV
+            )
+            raise RolloutError(status, repr(error)) from error
 
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
             # produce the rollouts
-            rollouts = await asyncio.gather(
+            results = await asyncio.gather(
                 *(
                     self._run_single_rollout(
                         generate_fn=generate_fn,
@@ -457,26 +628,25 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                         ),
                         group_id=group_id,
                         rollout_id=sample_idx,
+                        attempt=attempt,
                     )
-                    for sample_idx, env in enumerate(envs)
-                )
+                    for sample_idx, env in zip(pending_ids, envs, strict=True)
+                ),
+                return_exceptions=True,
             )
         finally:
             # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
 
-        # score
-        outputs = await self.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
-            rollout.reward = output.reward
-            rollout.reward_breakdown = output.reward_breakdown
-
-        # Post-scoring: turn group rewards into per-rollout advantages.
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self.advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
-            rollout.advantage = advantage
-        return group
+        pending = iter(results)
+        return await self.make_scored_group(
+            [
+                retained[i] if i in retained else next(pending)
+                for i in range(group_size)
+            ],
+            sample,
+            group_id=group_id,
+        )
 
     async def _run_single_rollout(
         self,
@@ -487,6 +657,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         sampling: SamplingConfig,
         group_id: int,
         rollout_id: int,
+        attempt: int = 0,
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
         until the env is terminal (env `done`, truncation, errors).
@@ -503,6 +674,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             group_id: The GRPO group id.
             rollout_id: Sibling index within the group; combined with the turn index into the
                 per-turn `RolloutTurnID`, and stored as `Rollout.rollout_id`.
+            attempt: Retry number; retries use distinct generator requests and sessions.
 
         Returns:
             One unscored `Rollout`; `run_group` fills its reward later.
@@ -511,8 +683,10 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         routing_session_id = RolloutTurnID(
             group_id=group_id, rollout_id=rollout_id, turn_id=0
         ).to_string(include_turn=False)
+        attempt_suffix = f"/attempt={attempt}" if attempt else ""
+        routing_session_id += attempt_suffix
         turns: list[RolloutTurn] = []
-        status = RolloutStatus.ERROR
+        logs: dict[str, Any] = {}
         try:
             env_step = await env.init()
             while not env_step.status.is_terminal():
@@ -522,14 +696,19 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                     turn_id=len(turns),
                 )
 
-                # generator call
-                completion = await generate_fn(
-                    prompt=env_step.next_prompt,
-                    request_id=turn_rollout_id.to_string(),
-                    group_id=group_id,
-                    routing_session_id=routing_session_id,
-                    sampling_config=sampling,
-                )
+                # Only transport errors from generation are retryable.
+                try:
+                    completion = await generate_fn(
+                        prompt=env_step.next_prompt,
+                        request_id=turn_rollout_id.to_string() + attempt_suffix,
+                        group_id=group_id,
+                        routing_session_id=routing_session_id,
+                        sampling_config=sampling,
+                    )
+                except Exception as error:
+                    raise RolloutError(
+                        classify_rollout_error(error), repr(error)
+                    ) from error
 
                 # env call
                 next_env_step = await env.step(completion)
@@ -564,25 +743,35 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 env_step = next_env_step
 
             status = env_step.status
-        except Exception:
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
+        except Exception as error:
+            status = (
+                error.status
+                if isinstance(error, RolloutError)
+                else RolloutStatus.ERROR_DATA
+                if isinstance(error, (ValueError, TypeError))
+                else RolloutStatus.ERROR_ENV
+            )
             logger.exception(
-                "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
+                "rollout %s/rollout=%d failed after %d turn(s): %s",
                 group_id,
                 rollout_id,
                 len(turns),
+                status,
             )
-            status = RolloutStatus.ERROR
-
-        try:
-            await release_session_fn(routing_session_id=routing_session_id)
-        except Exception:
-            # Not fatal: `max_sessions` evicts an unreleased session.
-            logger.exception("releasing routing session %s failed", routing_session_id)
+            logs["error"] = repr(error)
+        finally:
+            try:
+                await release_session_fn(routing_session_id=routing_session_id)
+            except Exception:
+                # Not fatal: max_sessions evicts an unreleased session. Retry IDs
+                # isolate the next attempt even if this release fails.
+                logger.exception(
+                    "releasing routing session %s failed", routing_session_id
+                )
         return Rollout(
             group_id=group_id,
             rollout_id=rollout_id,
             status=status,
             turns=turns,
+            logs=logs,
         )

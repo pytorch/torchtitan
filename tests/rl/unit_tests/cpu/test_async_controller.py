@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 import pytest
 import torch
+from torchtitan.rl.actors.system import ActorSystem
 from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -1021,6 +1022,9 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
     controller.generator_router = SimpleNamespace(
         reserve=SimpleNamespace(call_one=reserve),
         release_reservation=SimpleNamespace(broadcast=release),
+    )
+    controller.actor_system = SimpleNamespace(
+        unwrap_exception=ActorSystem.unwrap_exception
     )
     generate = controller._make_generate_fn()
     prompt = Prompt(token_ids=[1, 2])

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torchstore as ts
-from monarch.actor import ProcMesh
+from monarch.actor import ActorError, ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
@@ -67,6 +67,13 @@ class MonarchActorSystem(ActorSystem):
     @dataclass(kw_only=True, slots=True)
     class Config(ActorSystem.Config):
         pass
+
+    @staticmethod
+    def unwrap_exception(error: Exception) -> BaseException:
+        cause: BaseException = error
+        while isinstance(cause, ActorError):
+            cause = cause.exception
+        return cause
 
     def __init__(
         self,

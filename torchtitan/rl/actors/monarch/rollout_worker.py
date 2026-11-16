@@ -19,7 +19,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
-from torchtitan.rl.rollout.types import RolloutGroup
+from torchtitan.rl.rollout.types import Rollout, RolloutGroup
 
 
 class RolloutWorkerActor(Actor):
@@ -68,6 +68,8 @@ class RolloutWorkerActor(Actor):
         group_id: int,
         group_size: int,
         sampling: Any,
+        previous_rollouts: list[Rollout] | None = None,
+        attempt: int = 0,
     ) -> RolloutGroup:
         return await self._worker.run_group(
             generate_fn=generate_fn,
@@ -76,6 +78,8 @@ class RolloutWorkerActor(Actor):
             group_id=group_id,
             group_size=group_size,
             sampling=sampling,
+            previous_rollouts=previous_rollouts,
+            attempt=attempt,
         )
 
     @concurrent_endpoint

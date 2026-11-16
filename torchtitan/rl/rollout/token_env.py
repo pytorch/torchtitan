@@ -198,8 +198,8 @@ class TokenEnv(Configurable):
             add_generation_prompt=True,
         )
 
-        # Carry the prompt either way: ONGOING if it fits, else
-        # TRUNCATED_PROMPT_TOO_LONG so the over-budget prompt stays debuggable.
+        # An overlong initial prompt is a data error, before the policy has acted.
+        # Keep the prompt for diagnostics.
         prompt = await asyncio.to_thread(self._to_prompt, rendered)
         prompt_too_long = self._is_prompt_too_long(prompt_len=len(prompt.token_ids))
         if not prompt_too_long:
@@ -209,9 +209,7 @@ class TokenEnv(Configurable):
             next_prompt=prompt,
             next_prompt_messages=self._messages,
             status=(
-                RolloutStatus.TRUNCATED_PROMPT_TOO_LONG
-                if prompt_too_long
-                else RolloutStatus.ONGOING
+                RolloutStatus.ERROR_DATA if prompt_too_long else RolloutStatus.ONGOING
             ),
         )
 
@@ -275,14 +273,14 @@ class TokenEnv(Configurable):
 
         # Apply the user's env step under a timeout
         timeout = self._config.step_timeout_s
+        deadline = asyncio.timeout(timeout)
         try:
-            if timeout is None:
+            async with deadline:
                 step_output = await self._message_env.step(completion_message)
-            else:
-                step_output = await asyncio.wait_for(
-                    self._message_env.step(completion_message), timeout=timeout
-                )
         except TimeoutError:
+            if not deadline.expired():
+                # The environment raised, rather than the policy exceeding its deadline.
+                raise
             logger.warning("step timed out after %ss; -> ERROR_TIMEOUT", timeout)
             return TokenEnvOutput(
                 next_prompt=None,

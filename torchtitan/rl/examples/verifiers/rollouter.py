@@ -250,13 +250,25 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        previous_rollouts: list[Rollout] | None = None,
+        attempt: int = 0,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
         # Each group replaces this one slot. That is safe because every group's generate_fn routes the
         # same way; keep per-group state out of it.
         self._generation_server.set_generate_fn(generate_fn)
 
-        # Run the group's rollouts in the env server, all at once.
+        retained = (
+            {}
+            if previous_rollouts is None
+            else {
+                r.rollout_id: r
+                for r in previous_rollouts
+                if r.status is not RolloutStatus.ERROR_INFRA
+            }
+        )
+        # Verifiers allocates fresh trace/session IDs for each invocation.
+        # Run the group's pending rollouts in the env server, all at once.
         results = await asyncio.gather(
             *(
                 self._run_single_rollout(
@@ -271,26 +283,19 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                     rollout_id=rollout_id,
                 )
                 for rollout_id in range(group_size)
+                if rollout_id not in retained
             ),
             return_exceptions=True,
         )
-        # Raise only after every sibling finished: the caller releases the group next, and a
-        # sibling still generating would pin the group again, with nothing left to release it.
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
-        rollouts = results
-
-        outputs = await self.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
-            rollout.reward = output.reward
-            rollout.reward_breakdown = output.reward_breakdown
-
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self.advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
-            rollout.advantage = advantage
-        return group
+        pending = iter(results)
+        return await self.make_scored_group(
+            [
+                retained[i] if i in retained else next(pending)
+                for i in range(group_size)
+            ],
+            sample,
+            group_id=group_id,
+        )
 
     async def _run_single_rollout(
         self,

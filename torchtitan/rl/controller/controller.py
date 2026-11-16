@@ -131,7 +131,7 @@ from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
-from torchtitan.rl.rollout.rollouter import Rollouter
+from torchtitan.rl.rollout.rollouter import Rollouter, RolloutInfraBudgetExceeded
 from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
@@ -683,6 +683,8 @@ class Controller(Configurable):
         # `self`. A GenerateFn may be shipped to another process, where an actor
         # handle serializes cheaply and the whole controller does not.
         generator_router = self.generator_router
+        assert self.actor_system is not None
+        unwrap_exception = self.actor_system.unwrap_exception
 
         @sl.log_trace_span("generate")
         async def generate(
@@ -696,19 +698,25 @@ class Controller(Configurable):
             # TODO: a cancelled caller releases while the generator still runs its call,
             #   and a caller that dies never releases. Moot today: nothing cancels a
             #   generate call, and a dead rollout worker fails the run.
-            generator = await generator_router.reserve.call_one(
-                request_id, routing_session_id=routing_session_id
-            )
             try:
-                return await generator.generate.call_one(
-                    prompt,
-                    request_id=request_id,
-                    group_id=group_id,
-                    routing_session_id=routing_session_id,
-                    sampling_config=sampling_config,
+                generator = await generator_router.reserve.call_one(
+                    request_id, routing_session_id=routing_session_id
                 )
-            finally:
-                generator_router.release_reservation.broadcast(request_id)
+                try:
+                    return await generator.generate.call_one(
+                        prompt,
+                        request_id=request_id,
+                        group_id=group_id,
+                        routing_session_id=routing_session_id,
+                        sampling_config=sampling_config,
+                    )
+                finally:
+                    generator_router.release_reservation.broadcast(request_id)
+            except Exception as error:
+                cause = unwrap_exception(error)
+                if cause is error:
+                    raise
+                raise cause from error
 
         return generate
 
@@ -886,6 +894,15 @@ class Controller(Configurable):
         rollout_groups: list[RolloutGroup] = []
         num_failed_groups = 0
         for group_id, result in zip(group_ids, group_results, strict=True):
+            if isinstance(result, RolloutInfraBudgetExceeded):
+                self.metrics_processor.log(
+                    step=step,
+                    is_validation=False,
+                    metrics=self._rollouter.retry_metrics(),
+                )
+                raise result
+            if isinstance(result, asyncio.CancelledError):
+                raise result
             if isinstance(result, BaseException):
                 logger.error(
                     f"validation group {group_id} (step={step}) failed; dropping",
@@ -948,6 +965,7 @@ class Controller(Configurable):
         validation_metrics.append(
             m.Metric("validation/started_at_step", m.NoReduce(step))
         )
+        validation_metrics.extend(self._rollouter.retry_metrics())
         return validation_metrics
 
     async def run(self) -> None:
@@ -1214,8 +1232,8 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
-                    prefix="rollout", rollouts=group.rollouts
+                group.metrics.extend(
+                    compute_rollout_metrics(prefix="rollout", rollouts=group.rollouts)
                 )
 
                 # save rollout for inspection
@@ -1223,6 +1241,13 @@ class Controller(Configurable):
                     is_validation=False,
                     rollout_groups=[group],
                 )
+            except RolloutInfraBudgetExceeded:
+                self.metrics_processor.log(
+                    step=self._trainer_policy_version,
+                    is_validation=False,
+                    metrics=self._rollouter.retry_metrics(),
+                )
+                raise
             except Exception:
                 logger.exception(f"rollout group {work.group_id} failed; dropping")
                 group = RolloutGroup(
@@ -1449,6 +1474,7 @@ class Controller(Configurable):
                             for key, value in optimizer_result.metrics.items()
                         ],
                         *self._group_buffer.metrics(),
+                        *self._rollouter.retry_metrics(),
                         *time_metrics,
                         *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.

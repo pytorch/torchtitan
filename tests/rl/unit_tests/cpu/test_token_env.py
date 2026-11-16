@@ -338,3 +338,45 @@ def test_read_image_file_rejects_a_changed_file(tmp_path) -> None:
     assert token_env._read_image_file(str(path), image_hash) == b"file a"
     with pytest.raises(ValueError, match="changed after it was rendered"):
         token_env._read_image_file(str(changed), image_hash)
+
+
+def test_overlong_initial_prompt_is_a_data_failure() -> None:
+    env = TokenEnv.Config(max_rollout_tokens=3).build(
+        message_env=_ToolMessageEnv(), renderer=_RecordingRenderer()
+    )
+    output = asyncio.run(env.init())
+    assert output.status is RolloutStatus.ERROR_DATA
+    assert not output.status.is_trainable()
+
+
+@pytest.mark.parametrize("env_raises", [False, True])
+def test_environment_timeout_is_distinct_from_policy_deadline(env_raises: bool) -> None:
+    class TimeoutEnv(_ToolMessageEnv):
+        async def step(self, completion_message) -> MessageEnvStepOutput:
+            if env_raises:
+                raise TimeoutError("environment runtime failed")
+            await asyncio.Event().wait()
+            raise AssertionError("deadline should have cancelled the environment")
+
+    env = TokenEnv.Config(step_timeout_s=0.01).build(
+        message_env=TimeoutEnv(), renderer=_RecordingRenderer()
+    )
+
+    async def run():
+        await env.init()
+        return await env.step(
+            Completion(
+                min_policy_version=0,
+                max_policy_version=0,
+                request_id="r0",
+                token_ids=[4],
+                token_logprobs=[-0.5],
+                finish_reason="stop",
+            )
+        )
+
+    if env_raises:
+        with pytest.raises(TimeoutError, match="environment runtime failed"):
+            asyncio.run(run())
+    else:
+        assert asyncio.run(run()).status is RolloutStatus.ERROR_TIMEOUT

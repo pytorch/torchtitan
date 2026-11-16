@@ -80,6 +80,11 @@ class ActorSystem(Configurable, abc.ABC):
     class Config(Configurable.Config):
         pass
 
+    @staticmethod
+    def unwrap_exception(error: Exception) -> BaseException:
+        """Recover the original error class from an actor framework's RPC wrapper."""
+        return error
+
     @abc.abstractmethod
     async def provision(
         self,

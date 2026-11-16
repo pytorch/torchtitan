@@ -129,10 +129,17 @@ def _rollouter_without_datasets() -> Rollouter:
         worker=worker_config,
         worker_pool_size=3,
         num_threads_per_worker=2,
+        max_retries_per_prompt=2,
+        max_infra_failures_per_run=1000,
+        retry_backoff_s=0.0,
     )
     rollouter._worker_actors = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
+    rollouter._infra_failures = 0
+    rollouter._infra_retries = 0
+    rollouter._data_failures = 0
+    rollouter._env_failures = 0
     return rollouter
 
 
