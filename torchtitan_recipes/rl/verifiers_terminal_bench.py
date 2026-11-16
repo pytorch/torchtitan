@@ -74,7 +74,6 @@ from torchtitan.rl.routing.strategies import (
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
-from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
@@ -119,7 +118,7 @@ def _terminal_bench_rollouter_config(
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
             ),
-            environment=HarborEnvConfig(
+            environment=vf.SingleAgentEnvConfig(
                 taskset=training_taskset,
                 agent=vf.AgentConfig(
                     harness=TerminalBenchTerminusHarnessConfig(
