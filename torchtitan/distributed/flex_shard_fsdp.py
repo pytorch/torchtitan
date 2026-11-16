@@ -14,9 +14,9 @@ for byte, so training from the same parameters is bitwise identical.
 
 FlexShard parameters and grads are plain local shards, with no DTensor.
 ``init_param`` initializes each parameter as one device would, while each of
-FSDP2's DTensor shards draws its own random values. ``flex_shard_mesh`` gives
-the mesh a grad's norm is reduced over. One more difference changes only memory
-and communication: FSDP2 skips the embedding's backward all-gather
+FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm_mesh``
+gives the mesh a grad's norm is reduced over. One more difference changes only
+memory and communication: FSDP2 skips the embedding's backward all-gather
 (``set_unshard_in_backward``), which FlexShard can't yet, so it gathers the
 embedding again in backward, with the same values. FlexShard is imported only
 when it is selected.
@@ -25,6 +25,7 @@ when it is selected.
 import sys
 import weakref
 from collections.abc import Callable
+from importlib.util import find_spec
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -36,7 +37,8 @@ if TYPE_CHECKING:
     from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
-    "flex_shard_mesh",
+    "flex_shard_grad_norm_mesh",
+    "has_flex_shard_params",
     "init_param",
     "record_param_layouts",
     "validate_flex_shard_training",
@@ -88,7 +90,13 @@ def init_param(
     init_from_full(param, layout, init_fn)
 
 
-def flex_shard_mesh(param: torch.Tensor) -> DeviceMesh | None:
+def has_flex_shard_params(module: nn.Module) -> bool:
+    """Whether FlexShard sharded any of ``module``'s own parameters, which only
+    ``init_param`` initializes as one device would."""
+    return module in _PARAM_LAYOUTS
+
+
+def flex_shard_grad_norm_mesh(param: torch.Tensor) -> DeviceMesh | None:
     """The mesh ``param`` is sharded over if it's a FlexShard parameter, else None.
 
     A FlexShard parameter and its grad are plain local shards over the mesh of
@@ -202,4 +210,13 @@ def validate_flex_shard_training(
         raise ValueError(
             "parallelism.fsdp_backend=FlexShardConfig() does not support "
             f"{', '.join(unsupported)} yet."
+        )
+    # Checked here because flex_shard is imported only once the model is
+    # sharded, after distributed init and the model build.
+    if find_spec("flex_shard") is None:
+        raise ImportError(
+            "parallelism.fsdp_backend=FlexShardConfig() needs flex_shard "
+            "(github.com/meta-pytorch/flex_shard), which isn't installed. "
+            ".github/workflows/unit_test_gpu.yaml installs the commit torchtitan "
+            "is tested with."
         )

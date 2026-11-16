@@ -223,6 +223,9 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
     config.__post_init__()
 
 
+# CPU CI doesn't install flex_shard, which validate_flex_shard_training
+# requires last.
+@mock.patch("torchtitan.distributed.flex_shard_fsdp.find_spec", mock.Mock())
 def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
     # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
     # than silently shard with FSDP2.

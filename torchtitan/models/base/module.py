@@ -255,6 +255,16 @@ class Module(nn.Module, Configurable):
 
         reset = getattr(self, "reset_parameters", None)
         if callable(reset):
+            from torchtitan.distributed.flex_shard_fsdp import has_flex_shard_params
+
+            if has_flex_shard_params(self):
+                raise ValueError(
+                    f"{type(self).__name__} initializes its parameters with "
+                    "reset_parameters(), which parallelism.fsdp_backend="
+                    "FlexShardConfig() doesn't support: every rank would draw its "
+                    "shard as the whole parameter, with the same values. Set "
+                    "param_init on its Config."
+                )
             reset()
             return
 

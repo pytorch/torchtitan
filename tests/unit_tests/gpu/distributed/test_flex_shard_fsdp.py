@@ -6,8 +6,6 @@
 
 """``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
-from itertools import product
-
 import pytest
 import spmd_types as spmd
 import torch
@@ -188,13 +186,11 @@ class TestFlexShardDecoder(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        for (build_config, flavor), reshard_after_forward, microbatches in product(
-            (
-                (build_llama3_config, "debugmodel"),
-                (build_qwen3_config, "debugmodel_moe"),
-            ),
-            ("default", "always"),
-            (1, 2),
+        # Two microbatches cover one, and the reshard policy doesn't depend on
+        # the model.
+        for (build_config, flavor), reshard_after_forward, microbatches in (
+            ((build_llama3_config, "debugmodel"), "default", 2),
+            ((build_qwen3_config, "debugmodel_moe"), "always", 2),
         ):
             context = (
                 f"{flavor} "

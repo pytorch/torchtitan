@@ -714,7 +714,7 @@ def clip_grad_norm_(
     # FSDP over dp_shard and cp gives a (dp_shard_cp, tp) mesh, while FSDP
     # over dp_shard alone keeps (dp_shard, cp, tp). So group gradients by mesh.
     # FlexShard grads are plain local shards over their bucket's mesh.
-    from torchtitan.distributed.flex_shard_fsdp import flex_shard_mesh
+    from torchtitan.distributed.flex_shard_fsdp import flex_shard_grad_norm_mesh
 
     params_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
     for p in parameters:
@@ -722,7 +722,7 @@ def clip_grad_norm_(
             if isinstance(p.grad, DTensor):
                 mesh = p.grad.device_mesh
             else:
-                mesh = flex_shard_mesh(p)
+                mesh = flex_shard_grad_norm_mesh(p)
             params_by_mesh[mesh].append(p)
 
     norms = []
