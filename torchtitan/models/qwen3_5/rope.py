@@ -5,10 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 
 from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.decoder import Decoder
 
 
 class MRoPE(CosSinRoPE):
@@ -104,3 +108,12 @@ class MRoPE(CosSinRoPE):
             mrope_sin[..., col_indices] = sin_cache[:, col_indices][dim_pos]
 
         return torch.cat([mrope_cos, mrope_sin], dim=-1).unsqueeze(1)
+
+
+def get_mrope_config(model_config: "Decoder.Config") -> MRoPE.Config | None:
+    """The model's M-RoPE config if its image tokens take 3D M-RoPE positions (full
+    attention with ``MRoPE.Config``, e.g. Qwen3.5); None if they take 1D positions like
+    text."""
+    # MLA attention configs (e.g. DeepSeek V3, Kimi K3) have no ``rope`` field.
+    rope = getattr(model_config.first_full_attention, "rope", None)
+    return rope if isinstance(rope, MRoPE.Config) else None

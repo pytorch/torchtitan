@@ -29,6 +29,7 @@ import torch.distributed as dist
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -126,14 +127,17 @@ def _common_setup(config):
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
     ):
         model = model_config.build()
+    # Match the frozen parameter dtypes of TrainingEngine._initialize_model.
+    maybe_store_frozen_params_in_param_dtype_(model, config.precision)
 
     # For aot_fx_trace, apply_compile inside model.parallelize is a no-op
     # (returns model unchanged), so we pass the real compile_config.
     model = model.parallelize(
         parallelism_context=parallelism_context,
+        precision=config.precision,
         training=config.training,
         parallelism=parallelism,
         compile_config=compile_config,
@@ -227,7 +231,7 @@ def _precompile_aot_fx_trace(
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         positions = (
             torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
-            % config.training.max_context_length
+            % model_config.max_context_length
         )
         extra_kwargs["positions"] = positions
         extra_kwargs["padding_mask"] = torch.zeros(

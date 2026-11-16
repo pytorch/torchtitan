@@ -9,7 +9,7 @@ combine as one ordered operation.
 TorchTitan supports BF16 and asynchronous MXFP8 Dist-MoE training on NVIDIA
 SM100 or newer. The annex also provides NVFP4 inference, which TorchTitan does
 not expose yet. Dist-MoE requires
-`training.mixed_precision_param="bfloat16"` because FSDP unshards its persistent
+`precision.param_dtype="bfloat16"` because FSDP unshards its persistent
 parameters in BF16.
 
 ## Installation
@@ -165,7 +165,7 @@ parameter's declared gradient dtype, existing gradient storage, or parameter
 dtype. GraphTrainer uses the BF16 mixed-precision parameter dtype for its
 functional WGrad output because prepared MXFP8 graph operands do not expose a
 live parameter destination. Current FSDP casts the resulting local BF16 WGrad
-to `training.mixed_precision_reduce` for reduction. If FSDP later declares an
+to `precision.reduce_dtype` for reduction. If FSDP later declares an
 FP32 parameter gradient dtype, eager Dist-MoE will use it without a separate
 TorchTitan override.
 

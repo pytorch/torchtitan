@@ -7,7 +7,6 @@
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
 import asyncio
-import json
 import pickle
 import subprocess
 import sys
@@ -58,7 +57,11 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
 
 
 class _RecordingRuntime:
-    """Records the program the harness prepares and the argv it runs."""
+    """Records the program the harness prepares, how it runs it, and other commands."""
+
+    def __init__(self) -> None:
+        self.commands: list[tuple[list[str], dict[str, str]]] = []
+        self.files: dict[str, bytes] = {}
 
     async def prepare_uv_script(self, source: str, env: dict[str, str]) -> list[str]:
         self.source = source
@@ -66,15 +69,26 @@ class _RecordingRuntime:
 
     async def run_program(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
         self.argv = argv
+        self.program_env = env
         return ProgramResult(exit_code=0, stdout="", stderr="")
 
     async def run(self, argv: list[str], env: dict[str, str]) -> None:
-        pass
+        self.commands.append((argv, env))
+
+    async def write(self, path: str, data: bytes) -> None:
+        self.files[path] = data
 
 
-def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object]:
-    """Launch the harness with ``options``, run the program it prepared, and
-    return the keyword arguments the program passes to Harbor's ``Terminus2``."""
+def _run_terminus_program(
+    tmp_path, monkeypatch, system_prompt: str | None = None, **options: bool
+) -> SimpleNamespace:
+    """Launch the harness with ``options``, then run the program it prepared with a
+    recording stand-in for Harbor's ``Terminus2``.
+
+    Returns the program's argv, the keyword arguments it passes to ``Terminus2``
+    (``kwargs``), the agent it built (``terminus``), and the calls it makes on the
+    agent, in order (``calls``).
+    """
     harbor_terminus = pytest.importorskip("harbor.agents.terminus_2")
     from harbor.models.trial.paths import EnvironmentPaths
 
@@ -91,27 +105,46 @@ def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object
             "http://127.0.0.1:1/v1",
             "secret",
             {},
-            SimpleNamespace(prompt="Fix the parser in /app.", system_prompt=None),
+            SimpleNamespace(
+                prompt="Fix the parser in /app.", system_prompt=system_prompt
+            ),
         )
     )
     assert runtime.source.count('"harbor==0.22.0"') == 1
+    # Run the program on a local copy of the prompts file the harness wrote.
+    [(prompts_path, prompts)] = runtime.files.items()
+    local_prompts = tmp_path / "prompts.json"
+    local_prompts.write_bytes(prompts)
+    argv = [arg.replace(prompts_path, str(local_prompts)) for arg in runtime.argv]
 
-    recorded: dict[str, object] = {}
+    recorded = SimpleNamespace(argv=runtime.argv, kwargs={}, calls=[])
+
+    async def llm_call(*args: object, message_history: list[dict]) -> list[dict]:
+        return message_history
+
+    class RecordingSession:
+        async def send_keys(
+            self, keys: list[str], min_timeout_sec: float = 0.0
+        ) -> None:
+            recorded.calls.append(("send_keys", keys, min_timeout_sec))
 
     class RecordingTerminus2:
         def __init__(self, **kwargs: object) -> None:
-            recorded.update(kwargs)
+            recorded.kwargs.update(kwargs)
+            recorded.terminus = self
+            self._llm = SimpleNamespace(call=llm_call)
+            self._session = RecordingSession()
 
         async def setup(self, environment: object) -> None:
-            pass
+            recorded.calls.append(("setup",))
 
-        async def run(self, *args: object) -> None:
-            pass
+        async def run(self, instruction: str, *args: object) -> None:
+            recorded.calls.append(("run", instruction))
 
     monkeypatch.setattr(harbor_terminus, "Terminus2", RecordingTerminus2)
     monkeypatch.setattr(EnvironmentPaths, "agent_dir", PurePosixPath("/"))
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "tmux"))
-    monkeypatch.setattr(sys, "argv", runtime.argv)
+    monkeypatch.setattr(sys, "argv", argv)
     program: dict[str, object] = {"__name__": "terminus_harness"}
     exec(compile(runtime.source, "terminus_harness.py", "exec"), program)
     asyncio.run(program["main"]())
@@ -119,15 +152,68 @@ def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object
 
 
 def test_harness_options_reach_terminus2(tmp_path, monkeypatch) -> None:
-    defaults = _terminus_kwargs(tmp_path, monkeypatch)
+    defaults = _run_terminus_program(tmp_path, monkeypatch).kwargs
     assert defaults["interleaved_thinking"] is True
     assert defaults["enable_summarize"] is False
 
-    flipped = _terminus_kwargs(
+    flipped = _run_terminus_program(
         tmp_path, monkeypatch, interleaved_thinking=False, enable_summarize=True
-    )
+    ).kwargs
     assert flipped["interleaved_thinking"] is False
     assert flipped["enable_summarize"] is True
+
+
+def test_prompts_reach_terminus2_outside_its_argv(tmp_path, monkeypatch) -> None:
+    """The program runs next to the agent's commands, so an agent's ``pkill -f
+    parser`` must not match it."""
+    recorded = _run_terminus_program(
+        tmp_path, monkeypatch, system_prompt="Answer in JSON."
+    )
+    assert not any("parser" in arg or "JSON" in arg for arg in recorded.argv)
+    assert recorded.calls[-1] == ("run", "Fix the parser in /app.")
+    history = asyncio.run(
+        recorded.terminus._llm.call(message_history=[{"role": "user", "content": "hi"}])
+    )
+    assert history[0] == {"role": "system", "content": "Answer in JSON."}
+
+
+def test_agent_shell_runs_inside_the_login_shell(tmp_path, monkeypatch) -> None:
+    """After setup, the program types ``bash`` and ``clear``, as Harbor's terminal recording does."""
+    assert _run_terminus_program(tmp_path, monkeypatch).calls == [
+        ("setup",),
+        ("send_keys", ["bash", "Enter"], 1.0),
+        ("send_keys", ["clear", "Enter"], 0.0),
+        ("run", "Fix the parser in /app."),
+    ]
+
+
+def test_tmux_server_outlives_launch_until_cleanup() -> None:
+    """Verifiers scores between ``launch`` and ``cleanup``; the agent's tmux session
+    and the jobs started from it must still be alive then."""
+    harness = TerminalBenchTerminusHarness(TerminalBenchTerminusHarnessConfig())
+    runtime = _RecordingRuntime()
+    trace = SimpleNamespace(id="trace")
+    asyncio.run(
+        harness.launch(
+            SimpleNamespace(model="torchtitan"),
+            trace,
+            runtime,
+            "http://127.0.0.1:1/v1",
+            "secret",
+            {},
+            SimpleNamespace(prompt="Fix the parser in /app.", system_prompt=None),
+        )
+    )
+    assert runtime.commands == []
+
+    asyncio.run(harness.cleanup(trace, runtime))
+    [(argv, env)] = runtime.commands
+    assert "tmux kill-server" in argv[-1]
+    assert env == {"TMUX_TMPDIR": "/tmp/vf-terminus-2-trace"}
+    assert runtime.program_env["TMUX_TMPDIR"] == env["TMUX_TMPDIR"]
+    # The prompts file cleanup removes is the one launch wrote.
+    assert '"$TMUX_TMPDIR.prompts.json"' in argv[-1]
+    assert list(runtime.files) == ["/tmp/vf-terminus-2-trace.prompts.json"]
 
 
 def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
@@ -152,44 +238,17 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     )
 
 
-def test_worker_process_resolves_the_harness_from_a_fresh_interpreter() -> None:
-    """The env-server worker shares no ``sys.modules`` with the controller.
-
-    It imports only the local taskset module and then rebuilds the environment
-    config from JSON, so that one import must be enough to make the harness id
-    resolvable. Resolving in the test process would pass regardless, because the
-    controller side has already registered the alias there.
-    """
-    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
-    environment = json.dumps(env_config_data(config.verifiers_env_server.environment))
-    worker = f"""
-import json
-from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
-
-environment = json.loads({environment!r})
-environment["taskset"]["id"] = register_local_taskset_alias(
-    {config.verifiers_env_server.local_taskset_module!r}
-)
-env_config = resolve_env_config(environment)
-print(type(load_harness(env_config.agent.harness)).__name__)
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.strip().endswith("TerminalBenchTerminusHarness")
-
-
 def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
-    """A pool worker loads the broker's ``__main__``, the pickled ``log_setup``
-    and the taskset module. None of them may import torch, vLLM or Monarch.
+    """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
+    resolves the env config, whose taskset id is the local alias. It must find the taskset
+    and the harness without importing torch, vLLM or Monarch.
     """
     captured = {}
 
     def serve_env(**kwargs) -> None:
         captured["main"] = sys.modules["__main__"]
         captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
+        captured["config_data"] = pickle.dumps(kwargs["config_data"])
 
     monkeypatch.setattr(env_server, "serve_env", serve_env)
     # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
@@ -210,15 +269,17 @@ def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
     assert not hasattr(captured["main"], "__file__")
     worker = f"""
 import pickle, sys
-pickle.loads({captured["log_setup"]!r})
-import {taskset.__name__}
+from verifiers.v1.utils.loaders import load_harness, resolve_env_config
+pickle.loads({captured["log_setup"]!r})()
+env_config = resolve_env_config(pickle.loads({captured["config_data"]!r}))
+print(type(load_harness(env_config.agent.harness)).__name__)
 print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
 """
     result = subprocess.run(
         [sys.executable, "-c", worker], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.strip() == "[]"
+    assert result.stdout.split() == ["TerminalBenchTerminusHarness", "[]"]
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:
@@ -243,10 +304,10 @@ def test_training_recipe_uses_separate_datasets() -> None:
     assert config.async_loop.num_prompts_per_train_step == 12
     assert config.async_loop.num_samples_per_prompt == 32
     assert config.async_loop.target_offpolicy_steps == 3
-    assert config.trainer.training.max_context_length == 131072
-    assert config.trainer.training.dtype == "float32"
-    assert config.trainer.training.mixed_precision_param == "bfloat16"
-    assert config.trainer.training.mixed_precision_reduce == "float32"
+    assert config.trainer.model.max_context_length == 131072
+    assert config.precision.dtype == "float32"
+    assert config.precision.param_dtype == "bfloat16"
+    assert config.precision.reduce_dtype == "float32"
     (optimizer,) = config.trainer.optim.optimizer.optimizers
     assert optimizer.fused
     assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
@@ -288,7 +349,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     assert worker_config.model_extra is not None
     assert worker_config.model_extra["reasoning_strength"] == "low"
 
-    assert config.trainer.training.max_context_length == 16384
+    assert config.trainer.model.max_context_length == 16384
     assert config.generator.model.max_context_length == 16384
     assert config.rollouter.generation_server.max_rollout_tokens == 16384
     assert config.generator.sampling.max_tokens == 4096
@@ -382,7 +443,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     the controller keeps in flight, or the excess queues and the generators idle.
     """
     config = _terminal_bench_config(name)
-    assert config.trainer.training.dtype == "float32"
+    assert config.precision.dtype == "float32"
     assert config.async_loop.num_samples_per_prompt == 32
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
@@ -391,7 +452,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert agent.max_turns == 120
     assert (
         config.rollouter.generation_server.max_rollout_tokens
-        == config.trainer.training.max_context_length
+        == config.trainer.model.max_context_length
     )
     loop = config.async_loop
     serve = config.rollouter.verifiers_env_server.serve
