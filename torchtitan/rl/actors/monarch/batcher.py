@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from monarch.actor import Actor, endpoint
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.actors.monarch.rdma_microbatch import (
@@ -34,6 +35,7 @@ class _BatcherActorEndpoints:
         temperature: float,
         output_dir: str,
         enable_structured_logging: bool,
+        vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
         init_logger()
         sl.init_structured_logger(
@@ -54,6 +56,7 @@ class _BatcherActorEndpoints:
             pad_id=pad_id,
             temperature=temperature,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
+            vision_processor=vision_processor,
         )
 
     @endpoint

@@ -15,7 +15,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from torch.distributed.fsdp import FSDPModule
+import torch.distributed as dist
+from torch.distributed.device_mesh import init_device_mesh
 from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
@@ -951,6 +952,59 @@ def no_registered_aux_losses():
     AuxLoss._group_counts.update(saved_group_counts)
 
 
+@pytest.mark.parametrize("failure_kind", ["none", "oom", "wrapped_oom"])
+def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
+    """An OOM ending train() writes the exit memory snapshot; a normal exit does not."""
+    oom = torch.OutOfMemoryError("test OOM")
+    failure = None
+    if failure_kind == "oom":
+        failure = oom
+    elif failure_kind == "wrapped_oom":
+        # Pipeline parallelism wraps the OOM it catches in a RuntimeError.
+        failure = RuntimeError("pipeline failure")
+        failure.__cause__ = oom
+    profiler = Profiler(Profiler.Config())
+    memory_profiler = MagicMock()
+    profiler.memory_profiler = memory_profiler
+    engine = SimpleNamespace(
+        num_completed_steps=0,
+        load_checkpoint=MagicMock(),
+        start_profiler=MagicMock(),
+        profiler=profiler,
+    )
+    engine.close_profiler = partial(TrainingEngine.close_profiler, engine)
+    trainer = cast(
+        Trainer,
+        SimpleNamespace(
+            config=SimpleNamespace(),
+            engine=engine,
+            dataloader=object(),
+            microbatch_generator=MagicMock(return_value=iter(())),
+            should_continue_training=MagicMock(return_value=failure is not None),
+            train_step=MagicMock(side_effect=failure),
+        ),
+    )
+
+    if failure is None:
+        with patch("torchtitan.trainer.torch.distributed.get_rank", return_value=1):
+            Trainer.train.__wrapped__(trainer)
+        memory_profiler.step.assert_not_called()
+    else:
+        with pytest.raises(type(failure)) as excinfo:
+            Trainer.train.__wrapped__(trainer)
+        assert excinfo.value is failure
+        memory_profiler.step.assert_called_once_with(exit_ctx=True)
+
+
+@pytest.fixture
+def fake_dp_mesh():
+    """An 8-way DP mesh on a fake process group, whose collectives change nothing."""
+    dist.init_process_group("fake", rank=0, world_size=8)
+    yield init_device_mesh("cpu", (8,), mesh_dim_names=("dp",))
+    dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("fake_dp", [False, True])
 @pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
     (
@@ -960,8 +1014,9 @@ def no_registered_aux_losses():
 )
 @pytest.mark.usefixtures("no_registered_aux_losses")
 def test_trainer_accumulates_reused_accelerator_graph_losses(
-    loss_token_counts, routing_token_counts
+    loss_token_counts, routing_token_counts, fake_dp, request
 ):
+    dp_mesh = request.getfixturevalue("fake_dp_mesh") if fake_dp else None
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
 
@@ -999,14 +1054,15 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
                 step=MagicMock(return_value=torch.tensor(4.0)),
             ),
             parallelism_context=SimpleNamespace(
-                dp_enabled=False,
+                dp_enabled=fake_dp,
                 dp_replicate=1,
                 dp_shard=1,
                 pp_enabled=False,
-                dp_cp_enabled=False,
+                dp_cp_enabled=fake_dp,
                 ep_enabled=False,
                 dp_replicate_enabled=False,
-                get_optional_mesh=lambda name: None,
+                get_mesh=lambda name: dp_mesh,
+                get_optional_mesh=lambda name: dp_mesh,
             ),
             gradient_accumulation_steps=3,
             num_pp_microbatches=1,
@@ -1034,6 +1090,7 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
         6.0,
         4.0,
         extra_metrics={"n_tokens_seen": 3},
+        # A fake process group sums nothing, so the DP mean is the local value.
         num_flops=600.0,
     )
     # The first step after loading starts a new metrics window.
@@ -1309,6 +1366,20 @@ def test_compute_training_performance_metrics():
     }
 
 
+def test_compute_training_performance_metrics_without_peak_flops():
+    """An unknown device peak omits MFU but keeps TFLOPS."""
+    metrics = compute_training_performance_metrics(
+        num_tokens=20,
+        elapsed_time=2.0,
+        non_data_parallel_size=2,
+        num_flops=4000,
+        gpu_peak_flops=None,
+        has_quantization=False,
+    )
+
+    assert metrics == {"tokens_per_second": 5.0, "tflops": 1e-9}
+
+
 @pytest.mark.parametrize(
     ("device_type", "current_accelerator", "hip_version"),
     [
@@ -1430,12 +1501,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
     )
 
 
-class _RecordingFSDPPart(FSDPModule):
-    def __new__(cls) -> "_RecordingFSDPPart":
-        # FSDPModule.__new__ constructs the class that fully_shard swapped out,
-        # so construct this class directly.
-        return object.__new__(cls)
-
+class _RecordingFSDPPart:
     def __init__(self) -> None:
         self.requires_all_reduce_calls: list[bool] = []
         self.is_last_backward_calls: list[bool] = []
