@@ -10,10 +10,11 @@ import asyncio
 import itertools
 import logging
 import math
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -41,13 +42,65 @@ from torchtitan.rl.rollout.types import (
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.rl.actors.system import ActorSystem
+    from torchtitan.rl.actors.system import ActorSystem, RolloutWorkersHandle
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator.types import SamplingConfig
 
 
 logger = logging.getLogger(__name__)
+
+# TODO: let extra CPU-only hosts run rollout workers, so the workers take no CPUs from the trainer
+#   or the generators. Needs a launcher that requests such hosts, which none does yet.
+@dataclass(kw_only=True, slots=True)
+class RolloutWorkerRoles:
+    """Which hosts run the rollout workers, picked by the hosts' roles. The workers spread evenly
+    over those hosts.
+
+    Each role is set to one of three values:
+
+        True:   add the hosts that have this role
+        False:  never use a host that has this role
+        None:   no opinion
+
+    A host runs workers if at least one of its roles is True and none is False. A host with several
+    roles counts once. Example job: t0 = trainer + controller (the controller runs on trainer host 0,
+    as with `SlurmLauncher`), t1 = trainer, g0 and g1 = generators:
+
+        RolloutWorkerRoles(generator=True, controller=None)                  -> g0 g1
+        RolloutWorkerRoles(trainer=True, generator=True, controller=False)   -> t1 g0 g1
+        RolloutWorkerRoles(trainer=True, generator=True, controller=None)    -> t0 t1 g0 g1
+        RolloutWorkerRoles() (the default, controller=True)                  -> t0
+        RolloutWorkerRoles(generator=True) (controller stays True)           -> t0 g0 g1
+
+    A role you don't set keeps its default, and `controller` defaults to True. Cases:
+
+        generator=True              adds the generator hosts to the controller's host
+        controller=None             the controller's role adds no host
+        controller=False            the controller's host runs no workers, even when another True
+                                    role includes it
+        the controller's host only  leave `generator` at None: `generator=False` vetoes the
+                                    controller's host when it is also a generator host, e.g. a
+                                    one-host job from a launcher
+        no launcher                 the workers run on this host, whatever the roles
+    """
+
+    trainer: bool | None = None
+    """The trainer's hosts."""
+
+    generator: bool | None = None
+    """The generators' hosts."""
+
+    controller: bool | None = True
+    """The controller's own machine (`this_host()`). When the launcher runs the controller on
+    trainer host 0 (`MonarchLauncher.controller_on_first_trainer_host`), that host has the
+    trainer's role too."""
+
+    def __post_init__(self) -> None:
+        if True not in (self.trainer, self.generator, self.controller):
+            raise ValueError(
+                f"rollouter.worker_roles needs at least one role set to True, got {self}"
+            )
 
 
 class Rollouter(Configurable):
@@ -125,6 +178,9 @@ class Rollouter(Configurable):
         `close` stops what it still runs, e.g. its episodes' sandboxes. Past the limit, the workers
         stop anyway, and what they still ran is left behind. Not tuned."""
 
+        worker_roles: RolloutWorkerRoles = field(default_factory=RolloutWorkerRoles)
+        """Which hosts run the rollout workers. See `RolloutWorkerRoles`."""
+
         def __post_init__(self) -> None:
             if self.rollouts_per_thread < 1:
                 raise ValueError(
@@ -143,8 +199,8 @@ class Rollouter(Configurable):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
         self._training_dataloader = iter(training_dataloader)
 
-        # The worker pool's actor handle and the actor system that spawned it.
-        self._worker_actors: Any | None = None
+        # The rollout workers' handles and the actor system that spawned them.
+        self._workers: RolloutWorkersHandle | None = None
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
         self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
@@ -179,22 +235,28 @@ class Rollouter(Configurable):
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         """Spawn `num_workers` rollout workers through `actor_system` and initialize them."""
-        if self._worker_actors is not None:
+        if self._workers is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
         self._actor_system = actor_system
-        self._worker_actors = await actor_system.spawn_rollout_workers(
+        self._workers = await actor_system.spawn_rollout_workers(
             self._config.worker,
             num_workers=num_workers,
             num_threads=math.ceil(
                 self._config.rollouts_per_worker / self._config.rollouts_per_thread
             ),
+            worker_roles=self._config.worker_roles,
         )
-        await self._worker_actors.setup_async.call(
-            tokenizer_config=tokenizer_config,
-            renderer_config=renderer_config,
-            hf_assets_path=hf_assets_path,
-            vision_processor_config=vision_processor_config,
+        await asyncio.gather(
+            *(
+                host_workers.setup_async.call(
+                    tokenizer_config=tokenizer_config,
+                    renderer_config=renderer_config,
+                    hf_assets_path=hf_assets_path,
+                    vision_processor_config=vision_processor_config,
+                )
+                for host_workers in self._workers.by_host
+            )
         )
 
     async def close(self) -> None:
@@ -210,8 +272,8 @@ class Rollouter(Configurable):
         Monarch fails that actor and the finished job exits 130.
         """
         actor_system = self._actor_system
-        workers = self._worker_actors
-        self._worker_actors = None
+        workers = self._workers
+        self._workers = None
         self._actor_system = None
 
         # ======== Drain the groups ========
@@ -234,13 +296,29 @@ class Rollouter(Configurable):
 
         # ======== Close the workers, then stop them ========
         try:
-            # `workers` is None if spawning failed: there is nothing to `close`. The `finally`
-            # below still stops the pool.
+            # `workers` is None if spawning failed, even partway: there is nothing to `close`. The
+            # `finally` below still stops the worker meshes of the hosts that did start.
             if workers is not None:
-                # Each worker stops what it still runs, e.g. its episodes' sandboxes.
-                await asyncio.wait_for(
-                    workers.close.call(), timeout=self._config.worker_close_timeout_s
+                # Each worker stops what it still runs, e.g. its episodes' sandboxes. One limit
+                # for every host's workers together. A host whose `close` raises (e.g. its worker
+                # died) doesn't cut the other hosts' `close` short.
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        *(
+                            host_workers.close.call()
+                            for host_workers in workers.by_host
+                        ),
+                        return_exceptions=True,
+                    ),
+                    timeout=self._config.worker_close_timeout_s,
                 )
+                for host_index, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        logger.error(
+                            "rollout workers on host %d failed to close",
+                            host_index,
+                            exc_info=result,
+                        )
         except TimeoutError:
             logger.warning(
                 "Rollout workers still closing after %.0f s; stopping them anyway",
@@ -251,8 +329,13 @@ class Rollouter(Configurable):
 
     async def sync_log_step(self, step: int) -> None:
         """Propagate the controller log step to every rollout worker."""
-        if self._worker_actors is not None:
-            await self._worker_actors.sync_log_step.call(step)
+        if self._workers is not None:
+            await asyncio.gather(
+                *(
+                    host_workers.sync_log_step.call(step=step)
+                    for host_workers in self._workers.by_host
+                )
+            )
 
     async def run_group_rollouts(
         self,
@@ -278,13 +361,12 @@ class Rollouter(Configurable):
         Returns:
             One scored `RolloutGroup`.
         """
-        if self._worker_actors is None:
+        if self._workers is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
-        # endpoint of one worker in the pool.
+        # A worker picked uniformly at random, as Monarch's `choose` does on one mesh.
         call = asyncio.ensure_future(
-            self._worker_actors.run_group.choose(
+            random.choice(self._workers.by_worker).run_group.call_one(
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 sample=sample,

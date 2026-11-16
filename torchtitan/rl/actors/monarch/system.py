@@ -25,6 +25,7 @@ from torchtitan.rl.actors.monarch.provisioning import (
     compute_trainer_world_size,
     generator_role_names,
     HostMeshes,
+    rollout_worker_hosts,
     shutdown,
     spawn_cpu_procs,
     spawn_proc_mesh,
@@ -33,14 +34,19 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.router import InterGeneratorRouterActor
 from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
-from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
+from torchtitan.rl.actors.system import (
+    ActorSystem,
+    RolloutWorkersHandle,
+    ServiceHandle,
+    TrainerHandle,
+)
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.model_state_dict_transport import (
     ModelStateDictTransport,
     shared_rank_layouts,
 )
-from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, RolloutWorkerRoles
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
@@ -54,8 +60,9 @@ class MonarchActorSystem(ActorSystem):
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
-    ``launcher/base.py``, with the hosts of a submitted job). The router, the
-    batcher and the rollout worker pool get CPU procs on this host.
+    ``launcher/base.py``, with the hosts of a submitted job). The router and the
+    batcher get CPU procs on this host. The rollout workers spread over the hosts
+    that ``rollout_worker_hosts`` picks for the rollouter's ``worker_roles``.
 
     Example: a ``Controller`` subclass that allocated its hosts as
     ``self.host_meshes``::
@@ -66,7 +73,14 @@ class MonarchActorSystem(ActorSystem):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActorSystem.Config):
-        pass
+        # TODO: derive this default from each host's CPU count, so it fits each machine. Needs the
+        #   launcher to report each host's cores (Slurm: `SLURM_JOB_CPUS_PER_NODE`). Monarch has no
+        #   CPU query before spawning.
+        max_rollout_workers_per_host: int = 128
+        """The most rollout workers one host may run. Setup raises when `rollouter.worker_roles` would
+        put more on one host. It catches a pool sized by mistake. Example:
+        `rollouter.rollouts_per_worker=1` with 256 training rollouts in flight asks for 256 workers.
+        Each holds ~0.8 GiB of private memory after setup, so 128 on one host take ~100 GiB."""
 
     def __init__(
         self,
@@ -80,7 +94,8 @@ class MonarchActorSystem(ActorSystem):
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
         self._batcher_mesh: ProcMesh | None = None
-        self._rollout_worker_mesh: ProcMesh | None = None
+        # One proc mesh per host that runs rollout workers.
+        self._rollout_worker_meshes: list[ProcMesh] = []
         self._trainer: Any | None = None
         self._generators: list[ServiceHandle] = []
 
@@ -180,21 +195,78 @@ class MonarchActorSystem(ActorSystem):
         *,
         num_workers: int,
         num_threads: int,
-    ) -> Any:
-        self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
-        return self._rollout_worker_mesh.spawn(
-            "rollout_worker",
-            RolloutWorkerActor,
-            worker_config=config,
-            num_threads=num_threads,
-            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
+        worker_roles: RolloutWorkerRoles,
+    ) -> RolloutWorkersHandle:
+        # ======== Pick the hosts and each host's worker count ========
+        hosts = rollout_worker_hosts(
+            host_meshes=self._host_meshes, worker_roles=worker_roles
         )
+        # Split the workers evenly. The first hosts take one extra each until none are left.
+        # 5 workers on 3 hosts: 5 // 3 = 1 each, and 5 % 3 = 2 extra -> [2, 2, 1].
+        min_workers_per_host, num_extra_workers = divmod(num_workers, len(hosts))
+        most_workers_on_a_host = min_workers_per_host + (1 if num_extra_workers else 0)
+        if most_workers_on_a_host > self.config.max_rollout_workers_per_host:
+            raise ValueError(
+                f"rollouter.worker_roles ({worker_roles}) puts {most_workers_on_a_host} of the "
+                f"{num_workers} rollout workers on one of {len(hosts)} host(s), more than "
+                "actor_system.max_rollout_workers_per_host "
+                f"({self.config.max_rollout_workers_per_host}). Please raise "
+                "actor_system.max_rollout_workers_per_host or rollouter.rollouts_per_worker, or "
+                "set more roles to True in rollouter.worker_roles."
+            )
+
+        # ======== Spawn each host's workers ========
+        # Two views of the same workers:
+        #   by_host[i]   every worker on host i, one `.call()` for all of them (setup, log step)
+        #   by_worker[j] worker j alone, for `.call_one()`: the rollouter sends each group to one worker
+        by_host: list[Any] = []
+        by_worker: list[Any] = []
+        for host_index, host in enumerate(hosts):
+            num_host_workers = min_workers_per_host + (
+                1 if host_index < num_extra_workers else 0
+            )
+            if num_host_workers == 0:  # fewer workers than hosts
+                continue
+            procs = host.spawn_procs(per_host={"cpus": num_host_workers})
+            # Save the mesh right away, so `stop_rollout_workers` stops it even if a later host
+            # fails to spawn.
+            self._rollout_worker_meshes.append(procs)
+            host_workers = procs.spawn(
+                "rollout_worker",
+                RolloutWorkerActor,
+                worker_config=config,
+                num_threads=num_threads,
+                structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
+                first_worker_index=len(by_worker),
+            )
+            by_host.append(host_workers)
+            by_worker += [
+                host_workers.flatten("rank").slice(rank=rank)
+                for rank in range(num_host_workers)
+            ]
+
+        logger.info(
+            "Rollout workers per host: %s",
+            [len(host_workers) for host_workers in by_host],
+        )
+        return RolloutWorkersHandle(by_host=by_host, by_worker=by_worker)
 
     async def stop_rollout_workers(self) -> None:
-        worker_mesh = self._rollout_worker_mesh
-        self._rollout_worker_mesh = None
-        if worker_mesh is not None:
-            await worker_mesh.stop()
+        meshes, self._rollout_worker_meshes = self._rollout_worker_meshes, []
+
+        async def stop_mesh(mesh: ProcMesh) -> None:
+            await mesh.stop()
+
+        # Stop the worker meshes of all hosts at once. `stop_mesh` wraps each call in a coroutine: if one
+        # `mesh.stop()` raises right away, `gather` still runs the others.
+        results = await asyncio.gather(
+            *(stop_mesh(mesh) for mesh in meshes), return_exceptions=True
+        )
+        for mesh_index, result in enumerate(results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "rollout worker mesh %d failed to stop", mesh_index, exc_info=result
+                )
 
     async def initialize_torchstore(self) -> None:
         # StorageVolumes are spawned on the trainer mesh so they are colocated
