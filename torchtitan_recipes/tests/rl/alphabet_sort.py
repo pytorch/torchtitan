@@ -761,8 +761,8 @@ def rl_grpo_kimi_k3_debug_varlen_batch_invariant(
 def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init DeepSeek V3 GRPO whose generator caches compressed MLA latents.
 
-    Without batch invariance, the generator uses vLLM's native MLA and captures
-    decode CUDA graphs.
+    Without batch invariance, the generator decodes the compressed cache with
+    Attention Gym's latent MLA kernel and captures decode CUDA graphs.
     """
     trainer_parallelism = ParallelismConfig(data_parallel_shard_degree=2)
     generator_parallelism = InferenceParallelismConfig(
@@ -867,6 +867,10 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    # Covers validations beside training, then the validation after training.
+    config.async_loop.validation = ValidationConfig(
+        steps=20, freq=2, validate_after_training=True
+    )
     return _configure_ci(
         config,
         steps=5,

@@ -450,7 +450,7 @@ def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
 
 
 def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
-    """Local materialization gives every adapter a finite nonzero gradient."""
+    """Every adapter gets a finite nonzero gradient equal to torch.baddbmm's."""
     module = _build_lora_dist_moe()
     with torch.no_grad():
         module.w13.lora_a.weight.fill_(0.25)
@@ -471,6 +471,28 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
         w2_EDF.numel(),
         dtype=w2_EDF.dtype,
     ).reshape_as(w2_EDF)
+    adapter_names = (
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
+    )
+    adapters = [module.get_parameter(name) for name in adapter_names]
+    w13, w2 = module.w13, module.w2
+    expected_w13_EFD = torch.baddbmm(
+        w13.weight.flatten(1, 2),
+        w13.lora_b.weight.flatten(1, -2),
+        w13.lora_a.weight,
+        alpha=w13._lora_scaling,
+    )
+    expected_w2_EDF = torch.baddbmm(
+        w2.weight, w2.lora_b.weight, w2.lora_a.weight, alpha=w2._lora_scaling
+    )
+    expected_gradients = torch.autograd.grad(
+        (expected_w13_EFD, expected_w2_EDF),
+        adapters,
+        (w13_gradient_EFD, w2_gradient_EDF),
+    )
     torch.autograd.backward(
         (w13_EFD, w2_EDF),
         (w13_gradient_EFD, w2_gradient_EDF),
@@ -478,16 +500,14 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
 
     assert module.w13.weight.grad is None
     assert module.w2.weight.grad is None
-    for name in (
-        "w13.lora_a.weight",
-        "w13.lora_b.weight",
-        "w2.lora_a.weight",
-        "w2.lora_b.weight",
+    for name, adapter, expected in zip(
+        adapter_names, adapters, expected_gradients, strict=True
     ):
-        gradient = module.get_parameter(name).grad
-        assert gradient is not None
+        gradient = adapter.grad
+        assert gradient is not None, name
         assert torch.isfinite(gradient).all()
         assert torch.count_nonzero(gradient) == gradient.numel()
+        torch.testing.assert_close(gradient, expected)
 
 
 def test_dist_moe_lora_rejects_inplace_wgrad() -> None:

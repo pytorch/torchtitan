@@ -96,7 +96,7 @@ def test_graph_trainer_preserves_eager_pp_validation(monkeypatch):
     monkeypatch.setattr("torchtitan.components.validator.utils.device_type", "cpu")
 
     with torch.no_grad():
-        loss = validator._validate_body([model], [(inputs, labels, {})])
+        loss, _ = validator._validate_body([model], [(inputs, labels, {})])
 
     torch.testing.assert_close(loss, torch.tensor(2.0), rtol=0, atol=0)
     schedule.eval.assert_called_once()

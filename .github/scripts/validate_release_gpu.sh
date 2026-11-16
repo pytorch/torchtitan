@@ -124,7 +124,7 @@ if [[ "${VALIDATION_SUITE}" == rl* ]]; then
     python -m pip install "nvidia-cuda-nvcc==13.2.*"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
-    python -m pip install "flash-attn-4[cu13]>=4.0.0b34"
+    python -m pip install "flash-attn-4[cu13]>=4.0.0b38"
   fi
   if [[ "${VALIDATION_SUITE}" == "rl-b200" ]]; then
     python -m pip install "git+https://github.com/meta-pytorch/dist_moe.git@main"
@@ -379,7 +379,7 @@ run_h100_tests() {
     python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep \
+    --exclude qwen3_fsdp+deepep,fsdp+hybridep \
     --gpu_arch_type cuda \
     --gpu_arch h100 \
     --ngpu 8 \
@@ -416,7 +416,7 @@ run_h100_tests() {
   if ! python -m tests.integration_tests.run_tests \
     --test_suite h100 \
     --execution_mode real_pg \
-    --test_name deepseek_v3_fsdp+hybridep \
+    --test_name fsdp+hybridep \
     --gpu_arch_type cuda \
     --gpu_arch h100 \
     --ngpu 8 \

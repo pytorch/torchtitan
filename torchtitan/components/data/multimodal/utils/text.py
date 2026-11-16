@@ -112,3 +112,40 @@ def insert_vision_placeholders(
     if eos_token and not result.endswith(eos_token):
         result += eos_token
     return result
+
+
+def expand_image_placeholders(
+    token_ids: list[int],
+    loss_mask: list[bool],
+    num_image_tokens: list[int],
+    *,
+    image_id: int,
+    image_start_id: int,
+    image_end_id: int,
+) -> tuple[list[int], list[bool]]:
+    """Expand each rendered image token to ``start + N image tokens + end``.
+
+    Chat templates emit one image token per image. ``num_image_tokens[i]`` is the
+    encoder's output row count for image ``i``. Inserted tokens get no loss.
+
+    Raises:
+        ValueError: If the number of image tokens differs from the number of images.
+    """
+    image_positions = [i for i, token in enumerate(token_ids) if token == image_id]
+    if len(image_positions) != len(num_image_tokens):
+        raise ValueError(
+            f"Rendered tokens have {len(image_positions)} image placeholders for "
+            f"{len(num_image_tokens)} images."
+        )
+    expanded_ids: list[int] = []
+    expanded_mask: list[bool] = []
+    start = 0
+    for position, num_tokens in zip(image_positions, num_image_tokens, strict=True):
+        expanded_ids += token_ids[start:position]
+        expanded_ids += [image_start_id, *([image_id] * num_tokens), image_end_id]
+        expanded_mask += loss_mask[start:position]
+        expanded_mask += [False] * (num_tokens + 2)
+        start = position + 1
+    expanded_ids += token_ids[start:]
+    expanded_mask += loss_mask[start:]
+    return expanded_ids, expanded_mask

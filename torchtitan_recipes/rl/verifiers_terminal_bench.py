@@ -41,15 +41,13 @@ from torchtitan.rl.controller.controller import (
     Controller,
     ValidationConfig,
 )
-from torchtitan.rl.examples.verifiers.data import (
-    register_local_taskset_alias,
-    VerifiersTaskDataset,
-)
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
+    VerifiersRolloutWorker,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     register_harness_alias,
@@ -58,6 +56,7 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
+from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -145,14 +144,16 @@ def _terminal_bench_rollouter_config(
                 address="tcp://127.0.0.1:0",
             ),
         ),
-        rubric=Rubric.Config(
-            reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
-            error_reward=0.0,
+        worker=VerifiersRolloutWorker.Config(
+            rubric=Rubric.Config(
+                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
+                error_reward=0.0,
+            ),
+            generation_server=GenerationServer.Config(
+                max_rollout_tokens=max_context_length
+            ),
+            connection_timeout_sec=1800.0,
         ),
-        generation_server=GenerationServer.Config(
-            max_rollout_tokens=max_context_length
-        ),
-        connection_timeout_sec=1800.0,
     )
 
 

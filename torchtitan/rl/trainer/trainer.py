@@ -21,13 +21,18 @@ from torchstore import RankRole
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.controller.metrics import combine_microbatch_metrics
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -128,7 +133,6 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._resume_state = MirroredState()
-        maybe_apply_numa_binding(engine.device.index, engine.device.type)
 
         # Send parameters in the dtype the generator computes with, as FSDP casts
         # them for the trainer's forward. Only cast when it differs.
@@ -137,6 +141,8 @@ class Trainer(Configurable):
             if precision.param_dtype != precision.dtype
             else None
         )
+        # Set by `register_model_state_dict_source`; None pushes through TorchStore.
+        self._model_state_dict_transport: ModelStateDictTransport | None = None
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -146,7 +152,8 @@ class Trainer(Configurable):
             extra_states={"resume": self._resume_state},
         )
 
-        logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
+        if self.gpu_peak_flops is not None:
+            logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
@@ -316,11 +323,17 @@ class Trainer(Configurable):
             # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
             # The controller rejects RDMA with PP, so every group holds one microbatch.
             microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
+        else:
+            microbatch_groups = [
+                [microbatch.preprocess_images() for microbatch in group]
+                for group in microbatch_groups
+            ]
         result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
+        self._num_flops = result.num_flops
         if not engine.pp_has_last_stage:
             return None
         microbatch_metrics: list[dict[str, float]] = []
@@ -376,11 +389,18 @@ class Trainer(Configurable):
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
+        mean_num_flops = self._num_flops
+        if engine.parallelism_context.dp_enabled:
+            mean_num_flops = dist_utils.dist_mean(
+                torch.tensor(mean_num_flops, dtype=torch.float64, device=engine.device),
+                engine.parallelism_context.get_mesh("dp"),
+            )
+
         performance = compute_training_performance_metrics(
             num_tokens=self._step_num_tokens_per_dp_rank,
             elapsed_time=time.perf_counter() - self._step_compute_start,
             non_data_parallel_size=engine.parallelism_context.non_data_parallel_size,
-            num_flops_per_token=engine.num_flops_per_token,
+            num_flops=mean_num_flops,
             gpu_peak_flops=self.gpu_peak_flops,
             has_quantization=engine.has_quantization,
         )
@@ -426,8 +446,8 @@ class Trainer(Configurable):
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generators to pull.
 
-        The live GPU tensors are put directly, so the trainer keeps no CPU
-        snapshot of its own. With the colocated SharedMemory transport,
+        With TorchStore, the live GPU tensors are put directly, so the trainer
+        keeps no CPU snapshot of its own. With the colocated SharedMemory transport,
         TorchStore copies (and casts) each tensor straight into StorageVolume
         memory; other transports make a GPU cast copy of each batch first.
 
@@ -443,8 +463,31 @@ class Trainer(Configurable):
         - The controller awaits this push before the next optimizer step mutates
           the model, and awaits the generators' pull of it before the next push
           overwrites the TorchStore key.
+
+        Every push carries the trainable parameters and the buffers. Generators load the
+        frozen parameters from `generator.checkpointer`: for LoRA the base, so a push
+        carries only the adapters (`lora_a`, `lora_b`) and the buffers.
+
+        With a ``ModelStateDictTransport``, the push instead stages the tensors in
+        its pinned staging buffer, which generators read directly; the same
+        ordering applies, and the next push overwrites the staging buffer.
+        Staging issues collectives, so it runs on the push stream from this
+        thread before the first ``await``: the controller sends the push before
+        the next forward/backward, and Monarch starts concurrent endpoints from
+        one sender in send order, so every rank issues the staging collectives
+        before forward/backward's. Only the wait for staging is off the event
+        loop.
         """
-        model_state_dict = self._model_state_dict()
+        transport = self._model_state_dict_transport
+        if transport is not None:
+            stream = self._push_model_state_dict_stream
+            with stream if stream is not None else nullcontext():
+                transport.stage(self._trainable_model_state_dict())
+            # Generators read the staging buffer outside stream order.
+            if stream is not None:
+                await asyncio.to_thread(stream.synchronize)
+            return
+        model_state_dict = self._trainable_model_state_dict()
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
@@ -476,16 +519,46 @@ class Trainer(Configurable):
                 )
             )
 
-    def _model_state_dict(self) -> dict[str, torch.Tensor]:
-        """Merge the state dicts of this rank's model parts.
+    def register_model_state_dict_source(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
+    ) -> TrainerSource:
+        """Allocate and register the staging buffer generators read pushes from.
+
+        Args:
+            config: The transport config.
+            generator_rank_layouts: The layout of each rank of a generator, in
+                rank order.
+        """
+        self._model_state_dict_transport = config.build()
+        model_state_dict = self._trainable_model_state_dict()
+        return self._model_state_dict_transport.register_trainer_source(
+            model_state_dict,
+            generator_rank_layouts=generator_rank_layouts,
+            transfer_dtype=self._transfer_dtype,
+            preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
+        )
+
+    def _trainable_model_state_dict(self) -> dict[str, torch.Tensor]:
+        """Merge the state dicts of this rank's model parts, leaving out the parameters
+        that do not train.
 
         Under PP each rank holds only its own stages, so every stage publishes
-        a partial state dict into the same TorchStore key.
+        a partial state dict.
         """
+        frozen = frozenset(
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, param in model_part.named_parameters(remove_duplicate=False)
+            if not param.requires_grad
+        )
         return {
             name: tensor
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
+            if canonical_fqn(name) not in frozen
         }
 
     def _preserve_dtype_keys(

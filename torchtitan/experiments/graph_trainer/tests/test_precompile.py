@@ -80,7 +80,7 @@ class TestDiskStorageAdapter(unittest.TestCase):
 
 @dataclass
 class _StubCompileConfig:
-    passes: list = field(default_factory=list)
+    extra_passes: list = field(default_factory=list)
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
@@ -325,8 +325,8 @@ class TestConfigFingerprint(unittest.TestCase):
 
         dims = _StubParallelismContext()
 
-        cfg_a = _StubCompileConfig(passes=["pass_a"])
-        cfg_b = _StubCompileConfig(passes=["pass_a", "pass_b"])
+        cfg_a = _StubCompileConfig(extra_passes=["pass_a"])
+        cfg_b = _StubCompileConfig(extra_passes=["pass_a", "pass_b"])
         fp_a = compute_config_fingerprint(_make_stub_model(), cfg_a, dims)
         fp_b = compute_config_fingerprint(_make_stub_model(), cfg_b, dims)
         self.assertNotEqual(fp_a, fp_b)
@@ -354,8 +354,8 @@ class TestConfigFingerprint(unittest.TestCase):
 
         dims = _StubParallelismContext()
 
-        cfg_ab = _StubCompileConfig(passes=["a", "b"])
-        cfg_ba = _StubCompileConfig(passes=["b", "a"])
+        cfg_ab = _StubCompileConfig(extra_passes=["a", "b"])
+        cfg_ba = _StubCompileConfig(extra_passes=["b", "a"])
         fp_ab = compute_config_fingerprint(_make_stub_model(), cfg_ab, dims)
         fp_ba = compute_config_fingerprint(_make_stub_model(), cfg_ba, dims)
         self.assertNotEqual(fp_ab, fp_ba)

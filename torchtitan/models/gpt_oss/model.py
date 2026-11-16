@@ -29,10 +29,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.rope import RoPE
@@ -77,6 +73,19 @@ class GptOssAttention(Attention):
                 # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
                 scale *= mscale * mscale
             return scale
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import (
+                quadratic_attention_flops_per_token,
+            )
+
+            return quadratic_attention_flops_per_token(
+                num_heads=self.n_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                seq_len=seq_len,
+                sliding_window_size=self.sliding_window_size,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -229,22 +238,6 @@ class GptOssModel(Decoder):
                 ]
             )
         )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            nparams, active_nparams = get_nparams_and_active_nparams(model)
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=attention.head_dim,
-                    v_head_dim=attention.head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.sliding_window_size,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
 
     def __init__(self, config: Config):
         super().__init__(config)

@@ -35,16 +35,15 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
-from torchtitan.rl.examples.verifiers.data import (
-    register_local_taskset_alias,
-    VerifiersTaskDataset,
-)
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
+    VerifiersRolloutWorker,
 )
+from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
@@ -95,12 +94,14 @@ def _verifiers_math_rollouter_config(
                 address="tcp://127.0.0.1:0",
             ),
         ),
-        rubric=Rubric.Config(
-            reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
-            error_reward=0.0,
-        ),
-        generation_server=GenerationServer.Config(
-            max_rollout_tokens=max_rollout_tokens
+        worker=VerifiersRolloutWorker.Config(
+            rubric=Rubric.Config(
+                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
+                error_reward=0.0,
+            ),
+            generation_server=GenerationServer.Config(
+                max_rollout_tokens=max_rollout_tokens
+            ),
         ),
     )
 
@@ -138,7 +139,7 @@ def _qwen3_4b_verifiers_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(steps=num_validation_samples),
+            validation=ValidationConfig(steps=num_validation_samples, freq=25),
         ),
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),

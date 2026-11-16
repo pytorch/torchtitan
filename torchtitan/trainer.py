@@ -20,7 +20,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validator import BaseValidator, Validator
 from torchtitan.config import (
@@ -72,6 +75,11 @@ class Trainer(Configurable):
         tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
+        vision_processor: VisionProcessor.Config | None = None
+        """The model's image and video preprocessing, e.g.
+        ``VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`` with the
+        settings next to the model's special tokens. Built once and handed to
+        the dataloader, like the tokenizer. None: no image or video inputs."""
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
@@ -150,6 +158,7 @@ class Trainer(Configurable):
     engine_cls: type[TrainingEngine] = TrainingEngine
 
     tokenizer: BaseTokenizer
+    vision_processor: VisionProcessor | None
     dataloader: BaseDataLoader
     validator: BaseValidator
     metrics_processor: MetricsProcessor
@@ -193,6 +202,7 @@ class Trainer(Configurable):
             config_dict=config.to_dict(),
             has_quantization=engine.has_quantization,
         )
+        self._local_num_flops_since_last_log = 0
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
@@ -219,6 +229,11 @@ class Trainer(Configurable):
         )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        self.vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -228,6 +243,7 @@ class Trainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            vision_processor=self.vision_processor,
         )
 
         try:
@@ -248,14 +264,14 @@ class Trainer(Configurable):
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
-        self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
-        logger.info(
-            "Peak FLOPS used for computing MFU: "
-            f"{self.metrics_processor.gpu_peak_flops:.3e}"
-        )
+        if self.metrics_processor.gpu_peak_flops is not None:
+            logger.info(
+                "Peak FLOPS used for computing MFU: "
+                f"{self.metrics_processor.gpu_peak_flops:.3e}"
+            )
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
@@ -281,6 +297,7 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                vision_processor=self.vision_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
@@ -341,6 +358,7 @@ class Trainer(Configurable):
         # step_last_log on the first step, so keep this check after it.
         if self.metrics_processor.step_last_log == engine.num_completed_steps:
             self.metrics_processor.reset()
+            self._local_num_flops_since_last_log = 0
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -407,20 +425,38 @@ class Trainer(Configurable):
         # scheduler advances in engine.optim_step().
         lr_metrics = engine.optim.lr_schedulers.get_metrics() if should_log else {}
         grad_norm = engine.optim_step()
+        self._local_num_flops_since_last_log += forward_backward_result.num_flops
 
         # log metrics
         if not should_log:
             return
 
         accumulated_loss = forward_backward_result.loss
+        mean_num_flops = self._local_num_flops_since_last_log
 
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar(
                 {"global_valid_tokens": int(global_main_loss_token_count)}
             )
 
+            # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
+            # ranks without the last stage have none.
+            # TODO(#4202): migrate loss-metric collection to the distributed
+            # tensor logging framework once it lands.
+            loss_mesh = parallelism_context.get_optional_mesh("loss")
+            loss_metrics = {
+                key: float(value.item())
+                for key, value in combine_loss_metrics(
+                    (
+                        microbatch_metrics
+                        for group_metrics in forward_backward_result.loss_metrics
+                        for microbatch_metrics in group_metrics
+                    ),
+                    mesh=loss_mesh,
+                ).items()
+            }
+
             if parallelism_context.dp_cp_enabled:
-                loss_mesh = parallelism_context.get_optional_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -448,6 +484,13 @@ class Trainer(Configurable):
                         loss_mesh,
                     ),
                 )
+                if parallelism_context.dp_enabled:
+                    mean_num_flops = dist_utils.dist_mean(
+                        torch.tensor(
+                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        ),
+                        parallelism_context.get_mesh("dp"),
+                    )
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
                 global_ntokens_seen = engine.ntokens_seen
@@ -456,6 +499,7 @@ class Trainer(Configurable):
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
             **collect_aux_loss_metrics(parallelism_context),
+            **loss_metrics,
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -463,6 +507,7 @@ class Trainer(Configurable):
             global_max_loss,
             float(grad_norm.item()),
             extra_metrics=extra_metrics,
+            num_flops=mean_num_flops,
         )
 
     @record
@@ -517,10 +562,14 @@ class Trainer(Configurable):
                             ),
                             parallelism_context=engine.parallelism_context,
                         )
-        finally:
-            # The entry point also calls close() for checkpoint and graph
-            # cleanup; close the profiler here so direct train() callers get
-            # balanced lifecycle handling.
+        except BaseException as e:
+            # Pass the failure so an OOM writes the exit memory snapshot. The
+            # entry point also calls close() for checkpoint and graph cleanup;
+            # close the profiler here so direct train() callers get balanced
+            # lifecycle handling.
+            engine.close_profiler(e)
+            raise
+        else:
             engine.close_profiler()
 
         if torch.distributed.get_rank() == 0:
