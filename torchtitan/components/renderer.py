@@ -6,14 +6,22 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
-from renderers import create_renderer, Renderer
+from renderers import create_renderer, Message, Renderer
 from renderers.configs import RendererConfig as PrimeRendererConfig
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+
+
+def hash_image_file(data: bytes) -> str:
+    """The hash of an image file's bytes, which a rendered prompt carries for each image
+    (its ``mm_hashes`` entry), so a file gets the same hash from any path."""
+    return hashlib.sha256(data).hexdigest()[:32]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -25,7 +33,20 @@ class RendererConfig(Configurable.Config):
     """
 
     # pyrefly: ignore[bad-override]
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+    def build(
+        self,
+        *,
+        tokenizer: HuggingFaceTokenizer,
+        vision_processor: VisionProcessor | None = None,
+    ) -> Renderer:
+        """Build the renderer on ``tokenizer``.
+
+        Args:
+            tokenizer: The model's tokenizer.
+            vision_processor: The model's image preprocessing, for a renderer that reads
+                image parts from files (e.g. `Qwen35ImageRefRenderer`). None: the renderer
+                reads no image files.
+        """
         raise NotImplementedError
 
 
@@ -67,7 +88,12 @@ class RenderersConfigAdapter(RendererConfig):
         """Return the `renderers` config that Verifiers workers rebuild the renderer from."""
         return self.renderers_config
 
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
+    def build(
+        self,
+        *,
+        tokenizer: HuggingFaceTokenizer,
+        vision_processor: VisionProcessor | None = None,
+    ) -> Renderer:
         if self.renderers_config.name == "auto":
             raise ValueError(
                 f"AutoRendererConfig resolves by exact match of tokenizer.name_or_path ({tokenizer.tokenizer_path!r}) "
@@ -82,14 +108,56 @@ class RenderersConfigAdapter(RendererConfig):
                 "(pad_token, unk_token, ...), and would silently produce different tokens. "
                 "Pick the model's renderer, e.g. Qwen3RendererConfig(...)."
             )
+        renderers_config = self.renderers_config
+        if vision_processor is not None:
+            if renderers_config.name != "custom":
+                raise ValueError(
+                    f"The {renderers_config.name!r} renderer comes from the renderers "
+                    "library, so it cannot use TorchTitan's VisionProcessor: it either "
+                    "reads no images, or preprocesses them inside render() with the "
+                    "Hugging Face image processor. Use an in-tree renderer that takes the "
+                    "VisionProcessor, e.g. CustomRendererConfig(import_path="
+                    '"torchtitan.models.qwen3_5.renderer.Qwen35ImageRefRenderer").'
+                )
+            if (renderers_config.model_extra or {}).get("vision_processor") is not None:
+                raise ValueError(
+                    "The renderer config sets vision_processor too; pass it only to build "
+                    "(TitanRL passes Controller.Config.vision_processor)."
+                )
+            # The renderer's own config validates the field, and rejects it if the renderer
+            # takes no image processor.
+            renderers_config = renderers_config.model_copy(
+                update={"vision_processor": vision_processor.config}
+            )
         return create_renderer(
-            tokenizer=RendererTokenizerWrapper(tokenizer), config=self.renderers_config
+            tokenizer=RendererTokenizerWrapper(tokenizer), config=renderers_config
         )
 
 
 def from_renderers(config: PrimeRendererConfig) -> RendererConfig:
     """Adapt a `renderers` config to TorchTitan's renderer config interface."""
     return RenderersConfigAdapter(renderers_config=config)
+
+
+TEXT_CONTENT_TYPES = frozenset({"text", "input_text", "output_text", "thinking"})
+
+
+def require_content_types(
+    messages: list[Message], allowed_types: frozenset[str]
+) -> None:
+    """Raise if a message has a content part whose type is not in ``allowed_types``.
+
+    Renderers may render a media part as a placeholder token with no data behind
+    it, or skip an unknown part. A part with no type key counts as text.
+    """
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            kind = part.get("type", "text")
+            if kind not in allowed_types:
+                raise ValueError(f"Unsupported {kind!r} content part.")
 
 
 class RendererTokenizerWrapper:

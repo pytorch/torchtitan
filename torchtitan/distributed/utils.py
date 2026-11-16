@@ -101,6 +101,22 @@ def dist_sum(
     )
 
 
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
+    """Average a scalar over the mesh.
+
+    Divides by the number of values the all-reduce summed, not by the mesh size.
+    A fake process group's all-reduce changes nothing, so this returns the local
+    value.
+    """
+    total, count = _dist_reduce_tensor(
+        torch.stack((x, torch.ones_like(x))),
+        reduceOp=c10d.ReduceOp.SUM.name,
+        mesh=mesh,
+        extra_pg=None,
+    ).tolist()
+    return total / count
+
+
 def dist_sum_tensor(
     x: torch.Tensor,
     mesh: DeviceMesh | None = None,
@@ -611,6 +627,41 @@ def set_pg_timeouts(
         torch.distributed.set_timeout(timeout, group)
 
 
+def _local_shards_norm(
+    grads: list[torch.Tensor],
+    mesh: DeviceMesh,
+    norm_type: float,
+    error_if_nonfinite: bool,
+    foreach: bool | None,
+) -> torch.Tensor:
+    """The norm of gradients stored as plain local shards over a 1D ``mesh``.
+
+    Reduces in the order ``get_total_norm`` does for DTensor gradients sharded
+    over ``mesh``, so the result is bitwise equal: each gradient's local norm,
+    reduced over the mesh, then the norm of those norms.
+    """
+    # From flex_shard's examples/deepseek_v3/train.py.
+    if foreach is False:
+        norms = torch.stack([torch.linalg.vector_norm(g, norm_type) for g in grads])
+    else:
+        norms = torch.stack(torch._foreach_norm(grads, norm_type))
+    if math.isinf(norm_type):
+        dist.all_reduce(norms, op=dist.ReduceOp.MAX, group=mesh.get_group())
+    else:
+        norms **= norm_type
+        dist.all_reduce(norms, group=mesh.get_group())
+        norms **= 1.0 / norm_type
+    total_norm = torch.linalg.vector_norm(norms, norm_type)
+    if error_if_nonfinite and not torch.isfinite(total_norm):
+        raise RuntimeError(
+            f"The total norm of order {norm_type} for gradients from `parameters` "
+            "is non-finite, so it cannot be clipped. To disable this error and "
+            "scale the gradients by the non-finite norm anyway, set "
+            "`error_if_nonfinite=False`"
+        )
+    return total_norm
+
+
 @torch.no_grad()
 def clip_grad_norm_(
     parameters: torch.Tensor | Iterable[torch.Tensor],
@@ -662,22 +713,27 @@ def clip_grad_norm_(
     # must be on the same mesh. Meshes can differ even over the same devices:
     # FSDP over dp_shard and cp gives a (dp_shard_cp, tp) mesh, while FSDP
     # over dp_shard alone keeps (dp_shard, cp, tp). So group gradients by mesh.
-    # FlexShard grads are plain local shards; their FSDP2 DTensor views carry
-    # the mesh their norm must be reduced over.
-    from torchtitan.distributed.flex_shard_fsdp import as_fsdp2_dtensor
+    # FlexShard grads are plain local shards over their bucket's mesh.
+    from torchtitan.distributed.flex_shard_fsdp import flex_shard_grad_norm_mesh
 
     params_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
-    grads_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
     for p in parameters:
         if p.grad is not None:
-            grad = as_fsdp2_dtensor(p.grad, p)
-            mesh = grad.device_mesh if isinstance(grad, DTensor) else None
+            if isinstance(p.grad, DTensor):
+                mesh = p.grad.device_mesh
+            else:
+                mesh = flex_shard_grad_norm_mesh(p)
             params_by_mesh[mesh].append(p)
-            grads_by_mesh[mesh].append(grad)
 
     norms = []
     # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
-    for grads in grads_by_mesh.values() or [[]]:
+    for mesh, params in params_by_mesh.items() or [(None, [])]:
+        grads = [p.grad for p in params if p.grad is not None]
+        if mesh is not None and not isinstance(grads[0], DTensor):
+            norms.append(
+                _local_shards_norm(grads, mesh, norm_type, error_if_nonfinite, foreach)
+            )
+            continue
         norm = torch.nn.utils.get_total_norm(
             grads,
             norm_type,

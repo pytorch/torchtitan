@@ -18,6 +18,51 @@ from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
 
 
+@spmd.register_local_autograd_function
+class _PermuteRows(torch.autograd.Function):
+    """Reorder rows, ``out[i] = x[perm[i]]``, where ``perm`` lists every row once.
+
+    Forward and backward are both gathers.
+
+    Example, 3 rows:
+        perm     = [2, 0, 1]                        out row 0 takes x row 2, and so on
+        x        = [a, b, c]
+        out      = x[perm]        = [c, a, b]       forward
+        grad_out = [gc, ga, gb]                     gc is row c's grad
+        grad_x   = grad_out[inv]  = [ga, gb, gc]    backward, inv = [1, 2, 0]
+
+    Why not plain ``x[perm]``:
+    1. Its backward can't assume ``perm`` is a permutation, so it adds the grads into
+       a zero-filled tensor: a sort, a fill and an accumulate.
+    2. A permutation moves each row once, so gathering by ``inv`` gives the same grads.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x_RD: torch.Tensor, perm_R: torch.Tensor
+    ) -> torch.Tensor:
+        ctx.save_for_backward(perm_R)
+        return x_RD[perm_R]
+
+    @staticmethod
+    def backward(ctx, grad_RD: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (perm_R,) = ctx.saved_tensors
+        return grad_RD[_inverse_permutation(perm_R)], None
+
+
+def _inverse_permutation(perm_R: torch.Tensor) -> torch.Tensor:
+    """Return the permutation that undoes ``perm_R``: ``x[perm_R][inv_R] == x``.
+
+    Example:
+        perm_R = [2, 0, 1]     row 2 moved to position 0, so inv_R[2] = 0
+        inv_R  = [1, 2, 0]
+    """
+    positions_R = torch.arange(
+        perm_R.shape[0], device=perm_R.device, dtype=perm_R.dtype
+    )
+    return torch.empty_like(perm_R).scatter_(0, perm_R, positions_R)
+
+
 @dataclass(frozen=True, kw_only=True)
 class LocalDispatchMetadata:
     """Metadata returned by LocalTokenDispatcher.dispatch() for use in combine()."""
@@ -52,6 +97,15 @@ class LocalTokenDispatcher(Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        # Expert ids are sorted as keys on the narrowest integer type that holds
+        # [0, num_experts): the CUDA radix sort's passes scale with key width, so int64
+        # ids take 8x the passes of uint8 ids. Same order.
+        if config.num_experts <= 256:
+            self._expert_ids_sort_dtype = torch.uint8
+        elif config.num_experts <= 2**15:
+            self._expert_ids_sort_dtype = torch.int16
+        else:
+            self._expert_ids_sort_dtype = torch.int64
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -80,7 +134,7 @@ class LocalTokenDispatcher(Module):
         """
         # Reorder the token indices to match the order of the experts where N = T*K
         token_indices_experts_sorted_N = torch.argsort(
-            topk_expert_ids_TK.view(-1), stable=True
+            topk_expert_ids_TK.view(-1).to(self._expert_ids_sort_dtype), stable=True
         )
         topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
             token_indices_experts_sorted_N
@@ -561,16 +615,20 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         num_global_tokens_per_local_expert_e = t_mat.sum(0)
         return (
-            routed_input_RD[permuted_indices, :],
+            _PermuteRows.apply(routed_input_RD, permuted_indices),
             permuted_indices,
             num_global_tokens_per_local_expert_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
-        out_unpermuted_RD = routed_output_RD.new_empty(input_shape)
-        out_unpermuted_RD[permuted_indices, :] = routed_output_RD
-        return out_unpermuted_RD
+        # Undo _permute with a gather by the inverse permutation: the same rows as the
+        # scatter out[permuted_indices] = y, and faster (see _PermuteRows).
+        # input_shape is unused because the gather keeps every row; TorchAO's padded
+        # override of this method needs it.
+        return _PermuteRows.apply(
+            routed_output_RD, _inverse_permutation(permuted_indices)
+        )
 
     # pyrefly: ignore [bad-override]
     def combine(

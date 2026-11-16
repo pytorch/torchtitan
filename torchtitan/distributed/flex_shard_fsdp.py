@@ -6,219 +6,125 @@
 
 """Data parallelism with FlexShard in place of FSDP2's ``fully_shard``.
 
-``apply_flex_shard_to_decoder`` gives FlexShard (meta-pytorch/flex_shard) one
-``fsdp2_compatible`` bucket for each group that ``apply_fsdp_to_decoder`` passes
-to ``fully_shard``, with the same placements, mixed precision and reshard
-policy. The buckets' collectives then match FSDP2's byte for byte, so training
-is bitwise identical. Two differences change only memory and communication.
-FSDP2 skips the embedding's backward all-gather (``set_unshard_in_backward``),
-which FlexShard can't yet; it gathers the embedding again in backward, with the
-same values. And FlexShard has no equivalent of ``set_is_last_backward``: during
-gradient accumulation, every backward waits for its gradient reductions and
-releases its prefetch. FlexShard is imported only when
-``parallelism.fsdp_backend`` is a ``FlexShardConfig``.
+With ``parallelism.fsdp_backend=FlexShardConfig()``, ``apply_fsdp_to_decoder``
+gives FlexShard (meta-pytorch/flex_shard) one ``fsdp2_compatible`` bucket for
+each group it would pass to ``fully_shard``, with the same placements, mixed
+precision and reshard policy. The buckets' collectives then match FSDP2's byte
+for byte, so training from the same parameters is bitwise identical.
+
+FlexShard parameters and grads are plain local shards, with no DTensor.
+``init_param`` initializes each parameter as one device would, while each of
+FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm_mesh``
+gives the mesh a grad's norm is reduced over. One more difference changes only
+memory and communication: FSDP2 skips the embedding's backward all-gather
+(``set_unshard_in_backward``), which FlexShard can't yet, so it gathers the
+embedding again in backward, with the same values. FlexShard is imported only
+when it is selected.
 """
 
-import logging
 import sys
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import weakref
+from collections.abc import Callable
+from importlib.util import find_spec
+from typing import Any, TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Shard
 
 if TYPE_CHECKING:
-    from torchtitan.components.checkpointer import CheckpointManager
-    from torchtitan.components.loss import Loss
-    from torchtitan.components.optim import Optim
-    from torchtitan.config.configs import DebugConfig, TrainingConfig
-    from torchtitan.config.parallelism import ParallelismConfig
-    from torchtitan.models.common.decoder import Decoder
+    from torchtitan.models.base.model import BaseModel
+    from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
-    "FlexShardConfig",
-    "apply_flex_shard_to_decoder",
-    "as_fsdp2_dtensor",
+    "flex_shard_grad_norm_mesh",
+    "has_flex_shard_params",
+    "init_param",
+    "record_param_layouts",
     "validate_flex_shard_training",
 ]
 
-logger = logging.getLogger(__name__)
+# Where each FlexShard parameter's local shard sits in the full parameter, by
+# module and parameter name, for init_param. to_empty() replaces FlexShard's
+# parameters but keeps the modules.
+# TODO: Read each parameter's layout from flex_shard instead, once its
+# parameters keep their layouts through to_empty().
+_PARAM_LAYOUTS: weakref.WeakKeyDictionary[
+    nn.Module, dict[str, Any]
+] = weakref.WeakKeyDictionary()
 
 
-@dataclass(kw_only=True, slots=True)
-class FlexShardConfig:
-    """Shard parameters with FlexShard (meta-pytorch/flex_shard) in place of
-    FSDP2's ``fully_shard``.
-
-    Each FSDP2 group becomes an ``fsdp2_compatible`` bucket with the FSDP
-    settings in ``parallelism``, so training is bitwise identical to FSDP2.
+def record_param_layouts(model: nn.Module) -> None:
+    """Record where each of ``model``'s FlexShard parameters sits in the full
+    parameter, for ``init_param``. Call it after ``flex_shard(model)``.
     """
+    # pyrefly: ignore [missing-import]
+    from flex_shard import get_flex_shard_global_layouts
+
+    for fqn, layout in get_flex_shard_global_layouts(model).items():
+        module_fqn, _, name = fqn.rpartition(".")
+        _PARAM_LAYOUTS.setdefault(model.get_submodule(module_fqn), {})[name] = layout
 
 
-def apply_flex_shard_to_decoder(
-    model: "Decoder",
-    dp_mesh: DeviceMesh,
-    *,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    reshard_after_forward_policy: str,
+def init_param(
+    module: nn.Module,
+    name: str,
+    param: torch.Tensor,
+    init_fn: Callable[[torch.Tensor], object],
 ) -> None:
-    """Shard a decoder with FlexShard as ``apply_fsdp_to_decoder`` does with FSDP2.
+    """Initialize ``module``'s parameter ``name``, ``param``, with ``init_fn``.
 
-    Each ``fully_shard`` group becomes a bucket naming the same modules: the
-    embedding, the norm with the output projection, each transformer block, and
-    the parameters left to the root group. Gradients are summed over ``dp_mesh``
-    without division, as ``disable_fsdp_gradient_division`` makes FSDP2 do.
-
-    Args:
-        model: The decoder to shard.
-        dp_mesh: The 1D ``dp_shard`` mesh to shard over.
-        param_dtype: The dtype of the unsharded parameters.
-        reduce_dtype: The dtype of gradient reduction.
-        reshard_after_forward_policy: "default", "always" or "never", as for
-            ``apply_fsdp_to_decoder``.
+    A FlexShard parameter is a plain local shard. ``init_fn`` fills a tensor of
+    the full parameter's shape, and the shard keeps its part (flex_shard's
+    ``init_from_full``). With the same RNG state on every rank, the shards are
+    one device's initialization, whatever the sharding. Each call briefly holds
+    one full parameter.
     """
-    from torchtitan.distributed.fsdp import decoder_fsdp_groups
-    from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
-
-    # FlexShard's Shard placement all-gathers a bucket in one dtype.
-    if any(model.named_preserve_dtype_params()):
-        raise ValueError(
-            "parallelism.fsdp_backend=FlexShardConfig() does not support "
-            "preserve_dtype_params yet."
-        )
-    # FlexShard stores parameters as plain tensors, which would drop the
-    # quantized all-gather that MXFP8 and NVFP4 weights implement for FSDP2.
-    quantized = [
-        fqn
-        for fqn, param in model.named_parameters()
-        if isinstance(param, _ShardedFSDPTensor)
-    ]
-    if quantized:
-        raise ValueError(
-            "parallelism.fsdp_backend=FlexShardConfig() does not support quantized "
-            f"weights (MXFP8, NVFP4) yet; got {quantized[0]} and "
-            f"{len(quantized) - 1} more."
-        )
-
-    # flex_shard is an optional dependency, needed only for this backend.
+    layout = _PARAM_LAYOUTS.get(module, {}).get(name)
+    if layout is None:
+        init_fn(param)
+        return
     # pyrefly: ignore [missing-import]
-    from flex_shard import BucketSpec, flex_shard, MixedPrecisionPolicy
+    from flex_shard import init_from_full
 
-    # pyrefly: ignore [missing-import]
-    from flex_shard.custom_placements.shard import Shard as FlexShardShard
-
-    # validate_flex_shard_training allows only dp_shard.
-    assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    embedding, head, blocks = decoder_fsdp_groups(
-        model,
-        dp_mesh,
-        reshard_after_forward_policy=reshard_after_forward_policy,
-        # validate_flex_shard_training rejects pipeline parallelism.
-        pp_enabled=False,
-    )
-    groups = [group for group in (embedding, head) if group is not None] + blocks
-    # Shard dims other than 0, which FSDP2 gets from shard_placement_fn.
-    shard_dims = {
-        param: placement.dim
-        for group in groups
-        for param, placement in group.placements.items()
-    }
-
-    def placement_fn(named_params, mesh):
-        del mesh
-        return {
-            fqn: (FlexShardShard(shard_dims.get(param, 0)),)
-            for fqn, param in named_params
-        }
-
-    def bucket(patterns: list[str], reshard_after_forward: bool) -> BucketSpec:
-        return BucketSpec(
-            patterns,
-            placement_fn=placement_fn,
-            mesh=dp_mesh,
-            mp_policy=mp_policy,
-            gradient_divide_factor=1.0,
-            reshard_after_forward=reshard_after_forward,
-            fsdp2_compatible=True,
-        )
-
-    module_fqns = {module: fqn for fqn, module in model.named_modules()}
-    buckets = [
-        bucket(
-            [module_fqns[module] for module in group.modules],
-            group.reshard_after_forward,
-        )
-        for group in groups
-    ]
-    # fully_shard(model) puts the remaining parameters in the root group, which
-    # FSDP2 does not reshard after forward.
-    grouped_params = {
-        param
-        for group in groups
-        for module in group.modules
-        for param in module.parameters()
-    }
-    root_fqns = [
-        fqn for fqn, param in model.named_parameters() if param not in grouped_params
-    ]
-    if root_fqns:
-        buckets.append(bucket(root_fqns, reshard_after_forward=False))
-
-    flex_shard(model, buckets=buckets)
-    logger.info("Applied FlexShard to the model")
+    init_from_full(param, layout, init_fn)
 
 
-def as_fsdp2_dtensor(tensor: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
-    """View ``tensor``, laid out as ``param``'s local shard, as the DTensor
-    FSDP2 would give it if ``param`` is a FlexShard parameter.
+def has_flex_shard_params(module: nn.Module) -> bool:
+    """Whether FlexShard sharded any of ``module``'s own parameters, which only
+    ``init_param`` initializes as one device would."""
+    return module in _PARAM_LAYOUTS
 
-    FlexShard stores a parameter, and its grad, as the plain local shard. The
-    returned DTensor views that shard on its bucket's mesh with its ``Shard``
-    placement, so code written for FSDP2's DTensor parameters and grads (e.g.
-    parallelism-agnostic initialization, grad-norm clipping) behaves the same.
-    Other tensors are returned unchanged.
+
+def flex_shard_grad_norm_mesh(param: torch.Tensor) -> DeviceMesh | None:
+    """The mesh ``param`` is sharded over if it's a FlexShard parameter, else None.
+
+    A FlexShard parameter and its grad are plain local shards over the mesh of
+    their bucket.
     """
-    # TODO(<flex_shard issue link>): Use FlexShard's own DTensor view of a
-    # parameter once it has one.
     # FlexShard parameters exist only once flex_shard is imported, which
     # happens only when it is selected.
     flex_shard = sys.modules.get("flex_shard")
-    if flex_shard is None or not flex_shard.is_flex_shard_param(param):
-        return tensor
-    global_shape = flex_shard.get_global_shape(param)
-    return DTensor.from_local(
-        tensor,
-        flex_shard.get_mesh(param),
-        tuple(Shard(p.dim) for p in flex_shard.get_placements(param)),
-        run_check=False,
-        shape=global_shape,
-        stride=torch.empty(global_shape, device="meta").stride(),
-    )
+    return None if flex_shard is None else flex_shard.get_mesh(param)
 
 
 def validate_flex_shard_training(
-    *,
-    parallelism: "ParallelismConfig",
-    training: "TrainingConfig",
-    loss: "Loss.Config",
-    checkpointer: "CheckpointManager.Config | None",
-    optim: "Optim.Config",
-    debug: "DebugConfig",
+    config: "TrainingEngine.Config", model_config: "BaseModel.Config"
 ) -> None:
-    """Reject parallelisms and training features that
-    FlexShard does not support yet.
+    """Reject what FlexShard doesn't support yet, before anything is built.
 
-    These checks run from ``TrainingEngine.Config.__post_init__``, which the
-    config loader runs again after recipes assign fields, rather than from
-    ``ParallelismConfig.__post_init__``, which runs only at construction.
+    ``TrainingEngine.__init__`` calls this for every trainer, with the config
+    after recipes and overrides.
     """
     from torchtitan.components.loss import ChunkedLossWrapper
     from torchtitan.components.optim.optimizer import DistMuon
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
+    from torchtitan.models.base.module import Module
+    from torchtitan.models.common.decoder import Decoder
+    from torchtitan.quantization.utils import has_quantization
+    from torchtitan.trainer import Trainer
 
+    parallelism = config.parallelism
     unsupported = [
         f"parallelism.{name}={degree}"
         for name, degree in (
@@ -239,23 +145,78 @@ def validate_flex_shard_training(
         )
     if parallelism.fsdp_enable_cpu_offloading:
         unsupported.append("parallelism.fsdp_enable_cpu_offloading=True")
-    if not training.disable_accelerator_graphs and accelerator_graphs_supported():
+    if parallelism.fsdp_unshard_in_current_stream:
+        unsupported.append("parallelism.fsdp_unshard_in_current_stream=True")
+    if parallelism.fsdp_defer_gradient_reduction:
+        # FlexShard has no equivalent of FSDP2's set_is_last_backward.
+        unsupported.append("parallelism.fsdp_defer_gradient_reduction=True")
+
+    # Decoder._apply_fsdp is the only path that passes fsdp_backend on, so a
+    # model that overrides it would shard with FSDP2.
+    model_cls = model_config._owner
+    if getattr(model_cls, "_apply_fsdp", None) is not Decoder._apply_fsdp:
+        name = (
+            type(model_config).__qualname__ if model_cls is None else model_cls.__name__
+        )
+        unsupported.append(f"models that override Decoder._apply_fsdp ({name})")
+    if isinstance(model_config, Decoder.Config) and model_config.enable_weight_tying:
+        # TODO: Parallelization unties tok_embeddings and lm_head, and only
+        # init_states ties them again, after FlexShard has captured both.
+        # Allow tied weights once _parallelize keeps them tied.
+        unsupported.append("enable_weight_tying")
+    # FlexShard's Shard placement all-gathers a bucket in one dtype.
+    if any(
+        module_config.preserve_dtype_params
+        for _, module_config, _, _ in model_config.traverse(Module.Config, recurse=True)
+    ):
+        unsupported.append("preserve_dtype_params")
+    # FlexShard stores parameters as plain tensors, which would drop the
+    # quantized all-gather that MXFP8 and NVFP4 weights implement for FSDP2.
+    if has_quantization(model_config):
+        unsupported.append("MXFP8 and NVFP4 weights")
+
+    if (
+        not config.training.disable_accelerator_graphs
+        and accelerator_graphs_supported()
+    ):
         unsupported.append(
             "accelerator graphs (set training.disable_accelerator_graphs=True)"
         )
-    if isinstance(loss, ChunkedLossWrapper.Config):
+    if isinstance(config.loss, ChunkedLossWrapper.Config):
         unsupported.append("ChunkedLossWrapper")
-    if checkpointer is not None:
+    if config.checkpointer is not None:
         unsupported.append("checkpointing")
-    if optim.ema is not None:
+    if config.optim.ema is not None:
         unsupported.append("optim.ema")
-    if any(isinstance(o, DistMuon.Config) for o in optim.optimizer.optimizers):
+    if any(isinstance(o, DistMuon.Config) for o in config.optim.optimizer.optimizers):
         # DistMuon needs DTensor parameters.
         unsupported.append("DistMuon")
-    if debug.spmd_typechecking:
+    if config.debug.spmd_typechecking:
         unsupported.append("debug.spmd_typechecking")
+
+    # Other trainers shard, reduce or publish parameters in ways that FlexShard
+    # doesn't support yet: GraphTrainer shards with SimpleFSDP, TorchFT's
+    # cross-replica all-reduce hooks FSDP2's parameter groups, and the RL
+    # trainer publishes state_dict(), which holds local shards, as full weights.
+    trainer = type(config)._owner
+    if trainer is not Trainer:
+        name = (
+            "None"
+            if trainer is None
+            else f"{trainer.__module__}.{trainer.__qualname__}"
+        )
+        unsupported.append(f"trainers other than torchtitan.trainer.Trainer ({name})")
     if unsupported:
         raise ValueError(
             "parallelism.fsdp_backend=FlexShardConfig() does not support "
             f"{', '.join(unsupported)} yet."
+        )
+    # Checked here because flex_shard is imported only once the model is
+    # sharded, after distributed init and the model build.
+    if find_spec("flex_shard") is None:
+        raise ImportError(
+            "parallelism.fsdp_backend=FlexShardConfig() needs flex_shard "
+            "(github.com/meta-pytorch/flex_shard), which isn't installed. "
+            ".github/workflows/unit_test_gpu.yaml installs the commit torchtitan "
+            "is tested with."
         )

@@ -211,10 +211,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
             # same generator-side patch the production Generator does.
             from torchtitan.rl.generator.vllm.batch_invariance import (
-                force_logprobs_fn_for_batch_invariance,
+                force_trainer_logprobs_for_batch_invariance,
             )
 
-            force_logprobs_fn_for_batch_invariance()
+            force_trainer_logprobs_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
     _set_generator_determinism(gen_config.debug)
@@ -245,16 +245,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
-    # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
-    # (the active-buffer capacity num_group_workers, or the validation pass).
-    async_loop = config.async_loop
-    gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = async_loop.max_active_rollout_groups
-    rollout_concurrency = max(
-        num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.steps,
-    )
-    max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
+    max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
@@ -277,7 +268,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
     # As a model state dict load: fill the pinned CPU copy, then load from it.
-    vllm_sd = wrapper._prefetched_model_state_dict
+    vllm_sd = wrapper.model_state_dict_loader.prefetched_model_state_dict
 
     trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
     trainer_preserve_dtype_params = {
@@ -312,7 +303,7 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
                 tensor.copy_(vllm_sd[key])
         return list(state_dict)
 
-    wrapper.load_model_state_dict(fetch)
+    wrapper.model_state_dict_loader.load(fetch)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -555,7 +546,7 @@ _FILLER_TEXT = (
 )
 
 
-def _make_prompt_tokens(batch_size, prompt_length, tokenizer):
+def make_prompt_tokens(batch_size, prompt_length, tokenizer):
     """Create token ID sequences of the given prompt_length.
 
     For batch_size > 1, varies lengths across the batch (first seq at max,
@@ -696,7 +687,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
-        cls.prompt_ids = _make_prompt_tokens(
+        cls.prompt_ids = make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
         )
 
@@ -895,7 +886,7 @@ class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
     min_world_size = 2
 
 
-def _qwen3_5_debug_bitwise_config() -> Controller.Config:
+def qwen3_5_debug_bitwise_config() -> Controller.Config:
     """Build a two-GPU random-weight Qwen3.5 parity configuration."""
     config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -912,7 +903,7 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     """Qwen3.5 GDN parity with random weights and matched TP=2."""
 
     __test__ = True
-    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    config_fn = staticmethod(qwen3_5_debug_bitwise_config)
     attn_backend = "varlen"
     min_world_size = 2
     sync_weights_from_trainer = True
@@ -998,7 +989,7 @@ class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
         cls.model.train()
 
 
-def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+def kimi_k3_debug_bitwise_config() -> Controller.Config:
     """Build a one-GPU random-weight Kimi K3 parity configuration."""
     config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -1015,7 +1006,7 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
 
     __test__ = True
-    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    config_fn = staticmethod(kimi_k3_debug_bitwise_config)
     attn_backend = "varlen"
     sync_weights_from_trainer = True
     BATCH_SIZE = 3

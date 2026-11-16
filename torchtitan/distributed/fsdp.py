@@ -19,7 +19,9 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymmMemScope
+from torchtitan.distributed.flex_shard_fsdp import record_param_layouts
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -29,17 +31,15 @@ from torchtitan.models.common.moe import MoE
 __all__ = [
     "apply_fsdp_to_decoder",
     "apply_fsdp_to_multimodal_encoder",
-    "decoder_fsdp_groups",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
-    "FSDPGroup",
     "post_validate_fsdp_for_accelerator_graph",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
-    "set_is_last_accumulation_step",
+    "maybe_store_frozen_params_in_param_dtype_",
 ]
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ def linear_param_shard_placements(
     return placements
 
 
-class FSDPGroup(NamedTuple):
+class _FSDPGroup(NamedTuple):
     """Modules that ``apply_fsdp_to_decoder`` passes to one ``fully_shard`` call.
 
     ``placements`` holds every parameter whose placement isn't ``Shard(0)``,
@@ -136,7 +136,7 @@ class FSDPGroup(NamedTuple):
     routed_experts: nn.Module | None = None
 
 
-def decoder_fsdp_groups(
+def _decoder_fsdp_groups(
     model: "Decoder",
     dp_mesh: DeviceMesh,
     *,
@@ -144,7 +144,7 @@ def decoder_fsdp_groups(
     pp_enabled: bool,
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
-) -> tuple[FSDPGroup | None, FSDPGroup | None, list[FSDPGroup]]:
+) -> tuple[_FSDPGroup | None, _FSDPGroup | None, list[_FSDPGroup]]:
     """Return a decoder's FSDP groups as ``(embedding, head, blocks)``.
 
     The embedding group also holds the norm and output projection when weights
@@ -167,7 +167,7 @@ def decoder_fsdp_groups(
     if model.enable_weight_tying:
         # When weights are tied, tok_embeddings and output share the same parameter.
         # Group them together in one FSDP unit to avoid duplicate all-gathers.
-        embedding = FSDPGroup(
+        embedding = _FSDPGroup(
             [
                 m
                 for m in (model.tok_embeddings, model.norm, model.lm_head)
@@ -178,11 +178,11 @@ def decoder_fsdp_groups(
         )
     else:
         if model.tok_embeddings is not None:
-            embedding = FSDPGroup([model.tok_embeddings], reshard_after_forward, {})
+            embedding = _FSDPGroup([model.tok_embeddings], reshard_after_forward, {})
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
         if model.norm is not None and model.lm_head is not None:
-            head = FSDPGroup(
+            head = _FSDPGroup(
                 [model.norm, model.lm_head],
                 reshard_after_forward_policy == "always",
                 {},
@@ -221,7 +221,7 @@ def decoder_fsdp_groups(
                     )
                 )
         blocks.append(
-            FSDPGroup(
+            _FSDPGroup(
                 [transformer_block],
                 reshard_after_forward,
                 placements,
@@ -229,25 +229,6 @@ def decoder_fsdp_groups(
             )
         )
     return embedding, head, blocks
-
-
-def set_is_last_accumulation_step(
-    model_part: nn.Module, is_last_accumulation_step: bool
-) -> None:
-    """Set whether the next backward is the last of gradient accumulation.
-
-    Only the last backward reduces gradients and reshards parameters after
-    backward. Earlier ones keep the parameters unsharded, and the next backward
-    accumulates into their grads.
-    """
-    if isinstance(model_part, FSDPModule):
-        # FlexShard has no equivalent: every backward waits for its gradient
-        # reductions and releases its prefetch.
-        model_part.set_is_last_backward(is_last_accumulation_step)
-    # pyrefly: ignore [not-callable]
-    model_part.set_reshard_after_backward(is_last_accumulation_step)
-    # pyrefly: ignore [not-callable]
-    model_part.set_requires_gradient_sync(is_last_accumulation_step)
 
 
 def resolve_fsdp_mesh(
@@ -390,6 +371,33 @@ def mixed_precision_policy(
     )
 
 
+def maybe_store_frozen_params_in_param_dtype_(
+    module: Module, precision: PrecisionConfig
+) -> None:
+    """Store the frozen parameters of ``module`` in ``precision.param_dtype`` when
+    it is narrower than ``precision.dtype``.
+
+    A frozen parameter is never updated and FSDP computes it in ``param_dtype``,
+    so a wider dtype only costs memory. Parameters listed in
+    ``preserve_dtype_params`` keep their dtype. Each tensor is
+    swapped rather than assigned to ``param.data``, because setting ``.data`` would
+    leave a quantized tensor subclass's inner tensor in the old dtype. Parameter
+    identity (tied weights) and attributes (e.g. the SPMD type) are kept. Call
+    before ``fully_shard``, which records parameter dtypes.
+    """
+    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
+    if param_dtype.itemsize >= TORCH_DTYPE_MAP[precision.dtype].itemsize:
+        return
+    preserved = {param for _, param in module.named_preserve_dtype_params()}
+    for param in module.parameters():
+        if param.requires_grad or param in preserved or param.dtype == param_dtype:
+            continue
+        new_param = nn.Parameter(param.detach().to(param_dtype), requires_grad=False)
+        for name, value in param.__dict__.items():
+            new_param.__dict__.setdefault(name, value)
+        torch.utils.swap_tensors(param, new_param)
+
+
 def apply_fsdp_to_multimodal_encoder(
     encoder: Module,
     dp_mesh: DeviceMesh,
@@ -400,6 +408,7 @@ def apply_fsdp_to_multimodal_encoder(
     cpu_offload: bool = False,
     *,
     dp_mesh_dims: DataParallelMeshDims | None = None,
+    unshard_in_current_stream: bool = False,
 ) -> None:
     """Apply FSDP to a multimodal encoder as a single unit.
 
@@ -414,6 +423,13 @@ def apply_fsdp_to_multimodal_encoder(
     "attempting to assign a gradient with device type 'cuda' to a tensor with
     device type 'cpu'".
     """
+    if unshard_in_current_stream:
+        # The explicit prefetching chain in apply_fsdp_to_decoder does not
+        # cover encoders, so their all-gathers would not overlap with compute.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with multimodal encoders."
+        )
     mp_policy = mixed_precision_policy(
         encoder, param_dtype=param_dtype, reduce_dtype=reduce_dtype
     )
@@ -431,6 +447,85 @@ def apply_fsdp_to_multimodal_encoder(
     fully_shard(encoder, **fsdp_config)
 
 
+def _apply_flex_shard(
+    model: "Decoder",
+    dp_mesh: DeviceMesh,
+    groups: list[_FSDPGroup],
+    *,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+) -> None:
+    """Shard ``model`` with FlexShard (meta-pytorch/flex_shard), one
+    ``fsdp2_compatible`` bucket per FSDP group.
+
+    Each bucket names the group's modules, with its placements and reshard
+    setting, and a root bucket takes the parameters left over, as
+    ``fully_shard(model)`` does. Gradients are summed over ``dp_mesh`` without
+    division, as ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets'
+    collectives then match FSDP2's byte for byte.
+    """
+    # flex_shard is an optional dependency, needed only for this backend.
+    # pyrefly: ignore [missing-import]
+    from flex_shard import BucketSpec, flex_shard, MixedPrecisionPolicy
+
+    # pyrefly: ignore [missing-import]
+    from flex_shard.custom_placements.shard import Shard as FlexShardShard
+
+    # validate_flex_shard_training allows only dp_shard.
+    assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    # Shard dims other than 0, which FSDP2 gets from shard_placement_fn.
+    shard_dims = {
+        param: placement.dim
+        for group in groups
+        for param, placement in group.placements.items()
+    }
+
+    def placement_fn(named_params, mesh):
+        del mesh
+        return {
+            fqn: (FlexShardShard(shard_dims.get(param, 0)),)
+            for fqn, param in named_params
+        }
+
+    def bucket(patterns: list[str], reshard_after_forward: bool) -> BucketSpec:
+        return BucketSpec(
+            patterns,
+            placement_fn=placement_fn,
+            mesh=dp_mesh,
+            mp_policy=mp_policy,
+            gradient_divide_factor=1.0,
+            reshard_after_forward=reshard_after_forward,
+            fsdp2_compatible=True,
+        )
+
+    module_fqns = {module: fqn for fqn, module in model.named_modules()}
+    buckets = [
+        bucket(
+            [module_fqns[module] for module in group.modules],
+            group.reshard_after_forward,
+        )
+        for group in groups
+    ]
+    # fully_shard(model) puts the remaining parameters in the root group, which
+    # FSDP2 does not reshard after forward.
+    grouped_params = {
+        param
+        for group in groups
+        for module in group.modules
+        for param in module.parameters()
+    }
+    root_fqns = [
+        fqn for fqn, param in model.named_parameters() if param not in grouped_params
+    ]
+    if root_fqns:
+        buckets.append(bucket(root_fqns, reshard_after_forward=False))
+
+    flex_shard(model, buckets=buckets)
+    record_param_layouts(model)
+    logger.info("Applied FlexShard to the model")
+
+
 def apply_fsdp_to_decoder(
     model: "Decoder",
     dp_mesh: DeviceMesh,
@@ -444,15 +539,20 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    unshard_in_current_stream: bool = False,
+    fsdp_backend: FSDP2Config | FlexShardConfig | None = None,
 ):
     """
-    Apply data parallelism (via FSDP2) to a decoder-style transformer model.
+    Apply data parallelism (via FSDP2, or FlexShard) to a decoder-style
+    transformer model.
 
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
     case: a dense model leaves ``ep_degree=1`` / ``edp_mesh=None`` and has no
     MoE blocks, so every transformer block is sharded as a single
-    FSDP unit and the expert-parallel prefetching below is skipped.
+    FSDP unit and the explicit prefetching below is skipped unless
+    ``unshard_in_current_stream`` is set.
 
     Args:
         model (Decoder): The model to apply data parallelism to.
@@ -484,7 +584,31 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
+        unshard_in_current_stream: Whether to issue pre-forward/pre-backward
+            all-gathers on the current (compute) stream via
+            ``FSDPModule.set_unshard_in_current_stream``.
+        fsdp_backend: ``FlexShardConfig()`` shards each FSDP2 group with
+            FlexShard instead; ``validate_flex_shard_training`` rejects the
+            arguments it doesn't support. FSDP2 otherwise.
     """
+    embedding, head, blocks = _decoder_fsdp_groups(
+        model,
+        dp_mesh,
+        reshard_after_forward_policy=reshard_after_forward_policy,
+        pp_enabled=pp_enabled,
+        ep_degree=ep_degree,
+        edp_mesh=edp_mesh,
+    )
+    if isinstance(fsdp_backend, FlexShardConfig):
+        _apply_flex_shard(
+            model,
+            dp_mesh,
+            [group for group in (embedding, head) if group is not None] + blocks,
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+        )
+        return
+
     mp_policy = mixed_precision_policy(
         model,
         param_dtype=param_dtype,
@@ -497,14 +621,6 @@ def apply_fsdp_to_decoder(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    embedding, head, blocks = decoder_fsdp_groups(
-        model,
-        dp_mesh,
-        reshard_after_forward_policy=reshard_after_forward_policy,
-        pp_enabled=pp_enabled,
-        ep_degree=ep_degree,
-        edp_mesh=edp_mesh,
-    )
     if embedding is not None:
         fully_shard(
             embedding.modules,
@@ -597,11 +713,13 @@ def apply_fsdp_to_decoder(
         logger.info("Applied CPU Offloading to the model")
 
     # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP
-    if ep_degree == 1:
+    # in EP could interfere with implicit prefetching in FSDP, and when
+    # unsharding in the current stream, as all-gathers issued on the compute
+    # stream only overlap with compute if they are issued ahead of time
+    if ep_degree == 1 and not unshard_in_current_stream:
         return
 
-    # set up explicit prefetching when EP is enabled for forward
+    # set up explicit prefetching for forward
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
@@ -620,7 +738,7 @@ def apply_fsdp_to_decoder(
                 [model.norm, model.lm_head]
             )
 
-    # set up explicit prefetching when EP is enabled for backward
+    # set up explicit prefetching for backward
     # pyrefly: ignore [no-matching-overload]
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
@@ -637,3 +755,7 @@ def apply_fsdp_to_decoder(
         elif model.tok_embeddings is not None:
             # pyrefly: ignore [missing-attribute]
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+
+    if unshard_in_current_stream:
+        assert isinstance(model, FSDPModule)
+        model.set_unshard_in_current_stream(True)
