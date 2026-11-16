@@ -12,7 +12,7 @@ import sys
 
 # TODO: open a Verifiers issue, then delete this alias: Verifiers can't import a dotted module path
 # as a taskset id, because `find_spec("verifiers.v1.tasksets.<dotted id>")` raises first:
-# https://github.com/PrimeIntellect-ai/verifiers/blob/v0.4.0/verifiers/v1/utils/loaders.py#L76
+# https://github.com/PrimeIntellect-ai/verifiers/blob/v0.4.1/verifiers/v1/utils/loaders.py#L91
 def register_local_taskset_alias(taskset_id: str) -> str:
     """Register a dotted local taskset under an importable Verifiers plugin ID.
 

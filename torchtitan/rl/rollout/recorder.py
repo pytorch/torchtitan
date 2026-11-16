@@ -81,6 +81,10 @@ class KeepExtremeRewardsFilter(Configurable):
             top = ranked[len(ranked) - k :]
             kept = ranked if len(ranked) <= 2 * k else ranked[:k] + top
             picked.extend(kept)
+            # TODO: also keep rollouts that aren't trainable but aren't errors (DROPPED), so a
+            #   drop's reason in `Rollout.logs` can be read later. Today they have no reward and
+            #   aren't errors, so this filter skips them. Not done yet: `keep_errors` would then
+            #   keep rollouts that aren't errors, so the flag needs a new name.
             if self._keep_errors:
                 kept_ids = {id(rollout) for rollout in kept}
                 picked.extend(
