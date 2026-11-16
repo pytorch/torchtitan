@@ -748,13 +748,25 @@ class Controller(Configurable):
         return generate
 
     def _make_release_session_fn(self) -> ReleaseSessionFn:
-        """Build the rollouter's `ReleaseSessionFn`: tell the generator router a rollout ended."""
+        """Build the rollouter's `ReleaseSessionFn`: tell the generator router a routing session
+        makes no more model calls."""
         generator_router = self.generator_router
 
         async def release_session(*, routing_session_id: str) -> None:
-            await generator_router.release_session.call_one(
-                routing_session_id=routing_session_id
-            )
+            try:
+                await generator_router.release_session.call_one(
+                    routing_session_id=routing_session_id
+                )
+            except Exception:
+                # Don't fail the rollout that just ended: a failed release only delays cleanup.
+                # - Once the router holds more than `max_sessions`, it drops the session it used
+                #   least recently.
+                # - The group's release, after `run_group`, frees any KV cache the generator holds
+                #   for the session.
+                logger.exception(
+                    "releasing routing session %s failed", routing_session_id
+                )
+                sl.log_trace_instant("release_session_failed")
 
         return release_session
 

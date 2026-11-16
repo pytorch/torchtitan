@@ -521,7 +521,7 @@ PY
   CUDA_VISIBLE_DEVICES='' python -m pytest \
     tests/rl/unit_tests/cpu/test_verifiers.py \
     tests/rl/unit_tests/cpu/test_verifiers_example.py \
-    "tests/rl/unit_tests/cpu/test_verifiers_terminal_bench.py::test_env_server_workers_skip_the_trainer_imports" \
+    "tests/rl/unit_tests/cpu/test_verifiers_terminal_bench.py::test_a_fresh_worker_process_loads_the_terminal_bench_env" \
     "tests/rl/unit_tests/cpu/test_model_defaults.py::test_rl_recipes_get_model_defaults" \
     --strict-markers --durations=20 -vv
 }

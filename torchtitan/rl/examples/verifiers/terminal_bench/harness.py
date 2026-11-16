@@ -120,6 +120,11 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
         """Stop Terminus-2's tmux server. Verifiers calls this after scoring, so
         ``tests/test.sh`` still sees the agent's jobs (``python3 server.py &``)
         running, as under ``harbor run``."""
+        # Setup failed (e.g. the sandbox never started): Terminus-2 never ran, so there is nothing
+        # to stop. Verifiers may also have torn the runtime down already.
+        if not trace.timing.agent.start:
+            return
+
         # Harbor normally destroys its whole sandbox; this adapter borrows the
         # Verifiers runtime, so clean up Terminus-2's detached tmux server ourselves.
         # 30 s cap: Verifiers awaits cleanup with no timeout, so a hung

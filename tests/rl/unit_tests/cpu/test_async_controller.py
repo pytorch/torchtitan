@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 import pytest
 import torch
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -1241,3 +1242,21 @@ def test_validation_config_rejects_bad_sampling() -> None:
         ValidationConfig(num_samples_per_prompt=0)
     with pytest.raises(ValueError, match="greedy"):
         ValidationConfig(temperature=0.0, num_samples_per_prompt=4)
+
+
+def test_release_session_fn_logs_a_failed_release(caplog, monkeypatch) -> None:
+    controller = object.__new__(Controller)
+    controller.generator_router = SimpleNamespace(
+        release_session=SimpleNamespace(
+            call_one=AsyncMock(side_effect=RuntimeError("router down"))
+        )
+    )
+    release_session = controller._make_release_session_fn()
+    trace_events = []
+    monkeypatch.setattr(sl, "log_trace_instant", trace_events.append)
+
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(release_session(routing_session_id="group=1/rollout=0"))
+
+    assert "releasing routing session group=1/rollout=0 failed" in caplog.text
+    assert trace_events == ["release_session_failed"]
