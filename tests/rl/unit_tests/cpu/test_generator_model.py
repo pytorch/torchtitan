@@ -155,11 +155,7 @@ def test_receive_buffers_skip_frozen_params(
         fully_shard(model, mesh=init_device_mesh("cpu", (1,)))
         model.set_keep_unsharded_storage(True)
         # Pinned host memory needs a GPU; keep the receive buffers' state dict as is.
-        monkeypatch.setattr(
-            generator_model,
-            "_create_cpu_state_dict",
-            lambda state_dict, pin_memory: dict(state_dict),
-        )
+        monkeypatch.setattr(generator_model, "_pinned_cpu_buffers", dict)
         loader = _build_loader(
             model,
             loads_checkpoint=loads_checkpoint,

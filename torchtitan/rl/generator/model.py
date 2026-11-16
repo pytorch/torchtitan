@@ -17,7 +17,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp import FSDPModule
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from torch.distributed.tensor import DTensor
 
 # Registers the "loss" local-compile region. The generator shares the trainer's
@@ -503,10 +502,7 @@ class ModelStateDictLoader:
                 for key, value in model.state_dict().items()
                 if canonical_fqn(key) not in frozen_param_keys
             }
-            with torch.device("cpu"):
-                self.prefetched_model_state_dict = _create_cpu_state_dict(
-                    trainable_state_dict, pin_memory=True
-                )
+            self.prefetched_model_state_dict = _pinned_cpu_buffers(trainable_state_dict)
 
         for module in model.modules():
             if isinstance(module, FSDPModule):
@@ -577,6 +573,32 @@ class ModelStateDictLoader:
         # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
         if self._buffer_keys:
             fetch({key: self._model.get_buffer(key) for key in self._buffer_keys})
+
+
+def _pinned_cpu_buffers(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Allocate an uninitialized pinned CPU buffer for each tensor of ``state_dict``.
+
+    Each buffer has its tensor's shape and dtype; a DTensor's buffer is a DTensor with
+    the same sharding over a plain pinned local tensor. Not torch's
+    ``_create_cpu_state_dict(pin_memory=True)``: it returns unpinned zeros for a local
+    tensor whose ``data_ptr()`` is 0, as every quantized parameter's sharded wrapper
+    subclass (``_ShardedFSDPTensor``) reports, so loads would copy those weights to the
+    GPU from pageable memory.
+    """
+
+    def pinned(tensor: torch.Tensor) -> torch.Tensor:
+        return torch.empty(
+            tensor.shape, dtype=tensor.dtype, device="cpu", pin_memory=True
+        )
+
+    return {
+        key: (
+            DTensor(pinned(value._local_tensor), value._spec, requires_grad=False)
+            if isinstance(value, DTensor)
+            else pinned(value)
+        )
+        for key, value in state_dict.items()
+    }
 
 
 def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:

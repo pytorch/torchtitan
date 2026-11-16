@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor
 
 pytest.importorskip(
     "dist_moe",
@@ -173,6 +174,7 @@ def _check_inference_operands(engine) -> None:
     """Check the experts' inference operands across FULL-graph weight loads.
 
     - The engine replays FULL CUDA graphs rather than running eagerly
+    - Every prefetch buffer is pinned, the experts' quantized parameters' included
     - Every MXFP8 expert uses the Mega fused inference weights (no DGRAD
       scales) from the first unshard
     - Each weight load refills the same operand tensors at the same addresses
@@ -190,6 +192,11 @@ def _check_inference_operands(engine) -> None:
         if isinstance(module, MXFP8DistMoeRoutedExperts)
     }
     assert experts
+    # Loads copy every weight to the GPU from these buffers.
+    prefetched = wrapper.model_state_dict_loader.prefetched_model_state_dict
+    for key, buffer in prefetched.items():
+        local = buffer.to_local() if isinstance(buffer, DTensor) else buffer
+        assert local.numel() == 0 or local.is_pinned(), key
     for module in experts.values():
         assert module.mega_fused_inference
         for weight in (module.w13.weight, module.w2.weight):
