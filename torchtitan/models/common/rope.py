@@ -386,7 +386,7 @@ class _RotatePairs(torch.autograd.Function):
         return torch.stack((real, imag), dim=-1).flatten(-2)
 
 
-class ComplexVisionRoPE(ComplexRoPE):
+class ComplexVisionRoPE(RoPE):
     """2D RoPE over ``(row, column)`` coordinates, column pairs first.
 
     ``"interleaved"`` alternates column and row pairs per frequency (MoonViT);
@@ -395,7 +395,7 @@ class ComplexVisionRoPE(ComplexRoPE):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ComplexRoPE.Config):
+    class Config(RoPE.Config):
         pair_layout: Literal["interleaved", "concatenated"]
 
         def __post_init__(self) -> None:
@@ -412,16 +412,7 @@ class ComplexVisionRoPE(ComplexRoPE):
         super().__init__(config)
         self.pair_layout = config.pair_layout
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply the rotation outside the text ``"rope"`` compile region."""
-        return RoPE.forward(self, query, key, positions, inverse=inverse)
+    apply_rotary_emb = staticmethod(ComplexRoPE.apply_rotary_emb)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Complex rotation table ``(max_context_length, dim / 4)``."""

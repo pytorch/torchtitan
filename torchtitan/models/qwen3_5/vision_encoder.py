@@ -195,7 +195,7 @@ def _compute_2d_positions(
     return positions_TC
 
 
-class CosSinVisionRoPE(CosSinRoPE):
+class CosSinVisionRoPE(RoPE):
     """2D Rotary Position Embedding for Vision Transformer.
 
     Coordinates are zero-based ``(row, column)`` pairs in token order.
@@ -203,7 +203,7 @@ class CosSinVisionRoPE(CosSinRoPE):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CosSinRoPE.Config):
+    class Config(RoPE.Config):
         def __post_init__(self) -> None:
             if self.dim % 4 != 0:
                 raise ValueError(
@@ -212,16 +212,7 @@ class CosSinVisionRoPE(CosSinRoPE):
             if self.scaling != "none":
                 raise ValueError("CosSinVisionRoPE does not support frequency scaling.")
 
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply the rotation outside the text ``"rope"`` compile region."""
-        return RoPE.forward(self, query, key, positions, inverse=inverse)
+    apply_rotary_emb = staticmethod(CosSinRoPE.apply_rotary_emb)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Compute the per-coordinate angle table.

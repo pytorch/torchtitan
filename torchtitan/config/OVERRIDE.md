@@ -91,33 +91,28 @@ example); no `triton_rope.py` is shipped. It is a valid override: each attention
 module owns a `rope` submodule (a `RoPE.Config`), so swapping in a custom RoPE is
 an ordinary component override.
 
-The example targets `ComplexRoPE.Config` exactly, so subclasses that read a
-different position layout, such as the 2D vision RoPEs, keep their own
-implementation. For another RoPE layout, inherit and target that
-implementation's Config instead.
-
 ```python
 from dataclasses import dataclass
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.rope import ComplexRoPE
+from torchtitan.models.common.rope import RoPE
 
 
-class TritonRoPE(ComplexRoPE):
+class TritonRoPE(RoPE):
     """RoPE applied with a Triton kernel (illustrative)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(ComplexRoPE.Config):
+    class Config(RoPE.Config):
         block_size: int = 128
 
     def __init__(self, config: Config): ...
     def forward(self, query, key, positions=None): ...
 
 
-@override(target=ComplexRoPE.Config, exact=True,
+@override(target=RoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
-def triton_rope(cfg: ComplexRoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
-    # `derive` copies every field shared with ComplexRoPE.Config; the factory states
+def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
+    # `derive` copies every field shared with RoPE.Config; the factory states
     # only its deltas. See "Deriving the replacement config" below. `block_size`
     # defaults to 128 but can be tuned per config tree via a per-entry kwarg
     # (see "Optional per-entry kwargs" below).
@@ -142,14 +137,14 @@ This matters for version-robustness. Hand-copying couples a factory to the
 target's field set at the time it was written:
 
 ```python
-# Fragile: ComplexRoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
+# Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
 return TritonRoPE.Config(
     dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
-# Robust: every ComplexRoPE.Config field (including ones added later, inherited by the
+# Robust: every RoPE.Config field (including ones added later, inherited by the
 # subclass TritonRoPE.Config) is copied automatically; only block_size is a delta.
 return derive(cfg, TritonRoPE.Config, block_size=128)
 ```
