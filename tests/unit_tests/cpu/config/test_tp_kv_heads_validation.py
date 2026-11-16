@@ -30,9 +30,9 @@ try:
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
-        Embedding,
         Linear,
         RMSNorm,
+        VocabParallelEmbedding,
     )
     from torchtitan.models.llama3 import Llama3Model
     from torchtitan.models.llama3.model import Llama3TransformerBlock
@@ -51,7 +51,6 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
         config,
         parallelism=ParallelismConfig(tensor_parallel_degree=tp),
         training=TrainingConfig(
-            max_context_length=config.max_context_length,
             disable_accelerator_graphs=True,
         ),
         debug=DebugConfig(),
@@ -105,7 +104,9 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
         max_context_length=4096,
         dim=_DIM,
         vocab_size=_VOCAB_SIZE,
-        tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
+        tok_embeddings=VocabParallelEmbedding.Config(
+            num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM
+        ),
         norm=RMSNorm.Config(normalized_shape=_DIM),
         lm_head=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
         layers=layers,

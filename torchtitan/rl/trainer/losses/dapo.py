@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 
 from torchtitan.components.loss import compute_logprobs, Loss
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
@@ -70,9 +71,10 @@ class DAPOLoss(Loss[torch.Tensor]):
         self.ratio_clip_high = config.ratio_clip_high
         self.global_vocab_size = config.global_vocab_size
 
+    @local_compile("loss", batch_invariant=False)
     def __call__(
         self,
-        pred: torch.Tensor,
+        logits: torch.Tensor,
         labels: torch.Tensor,
         global_loss_token_counts: torch.Tensor | None = None,
         *,
@@ -84,7 +86,7 @@ class DAPOLoss(Loss[torch.Tensor]):
         """Compute the per-token clip-higher surrogate loss.
 
         Args:
-            pred: [T, V] current-policy logits.
+            logits: [T, V] current-policy logits.
             labels: [T] pre-shifted target token ids.
             generator_logprobs: [T] logprobs from the sampling policy.
             temperature: [T] temperature each token was sampled at.
@@ -97,15 +99,14 @@ class DAPOLoss(Loss[torch.Tensor]):
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
-        # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
-        # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
-        logits = pred / temperature.unsqueeze(-1)
+        # Score tokens under the distribution vLLM sampled from.
         trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             labels,
             vocab_parallel_group=spmd_mesh_group("tp"),
             return_entropy=True,
             global_vocab_size=self.global_vocab_size,
+            temperature=temperature,
         )
         # A non-finite generator logprob (notably under CUDA graph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner

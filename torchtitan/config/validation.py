@@ -45,18 +45,6 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
-    model_context_length = getattr(model, "max_context_length", None)
-    if (
-        model_context_length is not None
-        and training.max_context_length != model_context_length
-    ):
-        raise ValueError(
-            "training.max_context_length must equal model.max_context_length; "
-            f"got {training.max_context_length} and {model_context_length}. "
-            "Choose the training length when constructing the model config so "
-            "the data path, RoPE cache, and inference engine stay aligned."
-        )
-
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError(

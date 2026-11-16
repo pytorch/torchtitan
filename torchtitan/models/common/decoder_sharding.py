@@ -124,8 +124,8 @@ def colwise_sharding_config(*, input_layout: SpmdType) -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={"input": input_layout},
-        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
+        input_shardings={"input": input_layout},
+        output_shardings=dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0)),
     )
 
 
@@ -146,8 +146,8 @@ def stacked_colwise_sharding_config(*, input_layout: SpmdType) -> ShardingConfig
             "weight": weight_NFD_layout,
             "bias": bias_NF_layout,
         },
-        in_src_shardings={"input": input_layout},
-        out_src_shardings=output_TNF_layout,
+        input_shardings={"input": input_layout},
+        output_shardings=output_TNF_layout,
         # Flattening [N, F, D] sharded on F produces a strided shard, which
         # global SPMD typechecking cannot represent. Keep the local projection
         # opaque while declaring its physical input and output layouts here.
@@ -166,10 +166,10 @@ def rowwise_sharding_config(
             "weight": dense_param_placement(tp=spmd.S(1)),
             "bias": dense_param_placement(tp=spmd.I),
         },
-        in_src_shardings={
+        input_shardings={
             "input": dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
         },
-        out_src_shardings=output_layout,
+        output_shardings=output_layout,
     )
 
 
@@ -182,27 +182,8 @@ def norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     activation = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
         state_shardings=state,
-        in_src_shardings={"input": activation},
-        out_src_shardings=activation,
-    )
-
-
-def pre_lm_head_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Root decoder norm sharding before ``lm_head`` / chunked CE loss.
-
-    Decoder blocks emit sequence-sharded hidden states when sequence
-    parallelism is enabled. The root norm is the last clean module boundary to
-    all-gather the TP sequence shard back to replicated hidden states before
-    either the model forward or ``ChunkedLossWrapper`` applies ``lm_head``.
-    """
-    activation = residual_activation_placement(enable_sp=enable_sp)
-    return ShardingConfig(
-        state_shardings={
-            "weight": dense_param_placement(tp=spmd.R if enable_sp else spmd.I)
-        },
-        in_src_shardings={"input": activation},
-        out_src_shardings=activation,
-        out_dst_shardings=dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
+        input_shardings={"input": activation},
+        output_shardings=activation,
     )
 
 
@@ -241,10 +222,8 @@ def head_norm_sharding_config() -> ShardingConfig:
     head_layout = attention_activation_placement()
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"input": head_layout},
-        in_dst_shardings={"input": head_layout},
-        out_src_shardings=head_layout,
-        out_dst_shardings=head_layout,
+        input_shardings={"input": head_layout},
+        output_shardings=head_layout,
     )
 
 
@@ -256,8 +235,8 @@ def gqa_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={"x_TD": layout},
-        out_src_shardings=layout,
+        input_shardings={"x_TD": layout},
+        output_shardings=layout,
     )
 
 
@@ -265,8 +244,8 @@ def inner_attention_local_spmd_sharding_config() -> ShardingConfig:
     """Localize TNH attention inputs without changing their placements.
 
     q/k use ``(T, H, K)`` and v uses ``(T, H, V)``. DP/CP shard T and TP
-    shards H. CP collectives run inside the CP kernels; TP collectives still
-    run at module boundaries.
+    shards H. CP collectives run inside the CP kernels; the enclosing
+    attention module issues the TP collectives explicitly.
     The local SPMD boundary converts annotated tensors to local tensors before
     the kernel runs, then wraps outputs back.
 
@@ -274,17 +253,12 @@ def inner_attention_local_spmd_sharding_config() -> ShardingConfig:
     """
     placements = attention_activation_placement()
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "q_THK": placements,
             "k_THK": placements,
             "v_THV": placements,
         },
-        in_dst_shardings={
-            "q_THK": placements,
-            "k_THK": placements,
-            "v_THV": placements,
-        },
-        out_src_shardings=placements,
+        output_shardings=placements,
         local_spmd=True,
     )
 
@@ -299,9 +273,8 @@ def mla_attention_local_spmd_sharding_config() -> ShardingConfig:
         "k_shared_TR": headless_placement,
     }
     return ShardingConfig(
-        in_src_shardings=inputs,
-        in_dst_shardings=inputs,
-        out_src_shardings=head_placement,
+        input_shardings=inputs,
+        output_shardings=head_placement,
         local_spmd=True,
     )
 
@@ -319,10 +292,10 @@ def mla_kv_projection_sharding_config(
             "weight": dense_param_placement(tp=spmd.S(0)),
             "bias": dense_param_placement(tp=spmd.S(0)),
         },
-        in_src_shardings={
+        input_shardings={
             "input": dense_activation_placement(tp=spmd.R, cp=cp),
         },
-        out_src_shardings=dense_activation_placement(tp=spmd.S(-1), cp=cp),
+        output_shardings=dense_activation_placement(tp=spmd.S(-1), cp=cp),
     )
 
 
@@ -330,25 +303,21 @@ def feed_forward_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Dense FFN boundary: ``x`` in and out in the residual layout."""
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={"x": layout},
-        out_src_shardings=layout,
+        input_shardings={"x": layout},
+        output_shardings=layout,
     )
 
 
 def token_embedding_sharding_config(*, enable_sp: bool) -> ShardingConfig:
-    """Vocab-sharded token embedding whose output enters the residual layout.
+    """``VocabParallelEmbedding`` whose output enters the residual layout.
 
-    The local lookup produces a TP-Partial output that is reduced (and
-    sequence-scattered under SP) at the module boundary.
+    The module reduces its TP-partial lookup (and sequence-scatters it under
+    SP) itself.
     """
-    embed_input = token_id_placement()
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": embed_input},
-        in_dst_shardings={"input": embed_input},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=residual_activation_placement(enable_sp=enable_sp),
-        local_spmd=True,
+        input_shardings={"input": token_id_placement()},
+        output_shardings=residual_activation_placement(enable_sp=enable_sp),
     )
 
 
@@ -367,8 +336,6 @@ def lm_head_sharding_config() -> ShardingConfig:
     vocab_sharded = dense_activation_placement(tp=spmd.S(-1), cp=spmd.S(0))
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": replicated},
-        in_dst_shardings={"input": replicated},
-        out_src_shardings=vocab_sharded,
-        out_dst_shardings=vocab_sharded,
+        input_shardings={"input": replicated},
+        output_shardings=vocab_sharded,
     )

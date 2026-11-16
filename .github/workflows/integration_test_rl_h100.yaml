@@ -81,6 +81,14 @@ jobs:
 
         RL_TEST_DUMP_FOLDER="$OUTPUT_DIR" torchrun --nproc-per-node=1 -m pytest \
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
+        # TODO: the test_generator_dp_cudagraph.py tests below are unit tests, not
+        # integration tests. They run here because FULL CUDA graphs of the MoE debug
+        # models need SM90, and the GPU unit-test job (unit_test_gpu_rl.yaml) runs on
+        # A10G. Move them to an SM90 unit-test job.
+        torchrun --nproc-per-node=2 -m pytest \
+          tests/rl/unit_tests/gpu/test_generator_dp_cudagraph.py::test_vllm_dp_decode_graphs_with_prefilling_peer -v
+        torchrun --nproc-per-node=2 -m pytest \
+          tests/rl/unit_tests/gpu/test_generator_dp_cudagraph.py::test_vllm_dp_linear_attention_full_graphs -v
 
         python -m tests.integration_tests.run_tests "$OUTPUT_DIR/integration" \
           --ngpu 8 --test_suite rl_h100

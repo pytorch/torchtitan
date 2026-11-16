@@ -362,5 +362,16 @@ class TestPerLayerRoPECache(unittest.TestCase):
         )
 
 
+class TestRoPEBufferDtypeGuard(unittest.TestCase):
+    def test_cache_values_survive_rejected_cast(self):
+        for cls in (ComplexRoPE, CosSinRoPE):
+            with self.subTest(rope=cls.__name__):
+                rope = cls.Config(dim=8, max_context_length=16).build()
+                expected = rope.cache.clone()
+                with self.assertRaises(ValueError):
+                    rope.to(torch.bfloat16)
+                torch.testing.assert_close(rope.cache, expected, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

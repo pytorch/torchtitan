@@ -69,9 +69,11 @@ gradient edge FSDP2 creates internally, so it lives with SimpleFSDP rather
 than here.
 
 Two dtypes appear above and they are not the same one. S holds the parameter's
-own storage dtype, set by ``training.dtype`` -- float32 by default, so S is
-normally an fp32 master weight, not a BF16 one. ``mp_policy.param_dtype``
-(``training.mixed_precision_param``, bfloat16 by default) is only what
+own storage dtype, set by ``precision.dtype`` -- float32 by default, so S is
+normally an fp32 master weight, not a BF16 one. Frozen parameters are the
+exception: they are stored in ``precision.param_dtype`` when it is narrower
+(see ``PrecisionConfig``). ``mp_policy.param_dtype``
+(``precision.param_dtype``, bfloat16 by default) is only what
 ``fsdp_pre_all_gather`` casts *to*, so it is the dtype of the comm tensor, the
 all-gather output, and hence the logical tensor a format quantizes. Nothing
 here requires either to be BF16; MXFP8 separately rejects a non-BF16 weight in

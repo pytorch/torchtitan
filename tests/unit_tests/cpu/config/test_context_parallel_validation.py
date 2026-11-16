@@ -323,7 +323,7 @@ class TestGptOssUlysses(unittest.TestCase):
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),
-                training=None,
+                precision=None,
                 parallelism=None,
                 local_compile=LocalCompileConfig(),
                 activation_remat=None,
