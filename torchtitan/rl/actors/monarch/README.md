@@ -24,8 +24,8 @@ dependency of its own: it declares the service's methods as
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
 | `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process; supplies `MonarchRDMAMicrobatch.register`. |
 | `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/trainer/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
-| `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
-| `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
+| `rollout_worker.py` | `RolloutWorkerActor`, one rollout worker process. The workers spread evenly over the hosts that `Rollouter.Config.worker_roles` picks by role: the trainer's, the generators' and the controller's (`rollout_worker_hosts`). |
+| `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), the rollout workers' hosts (`rollout_worker_hosts`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
 | `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), `PBSLauncher` (`pbs.py`), and the submit command (`submit.py`). |
 
@@ -134,15 +134,18 @@ the abstract `ActorSystem`.
 
 What remains outside is the call convention on the handles an actor system
 returns (see `ActorSystem`): `.call()` with `.get(rank)` on its result,
-`.call_one()`, `.choose()`, `.stream()` and `.broadcast()`. The trainer comes
-back as a `TrainerHandle` with all-ranks, rank-0 and per-DP-rank handles, and
-each generator as a `ServiceHandle` the router gets, so callers never slice
-meshes themselves. Generator handles come only from the router: its `reserve`
-returns the one a generate call goes to, and every other generator call goes
-through the router's endpoints. These calls appear in the controller (and its
-`GenerateFn`), the rollouter (`.choose()` on the worker pool) and the router (on
-generator handles). The batcher and the trainer see RDMA microbatches only
-through the `RDMAMicrobatch` interface.
+`.call_one()`, `.choose()`, `.stream()` and `.broadcast()`. `.choose()` sends to one actor of
+a single mesh, picked at random. The trainer comes back as a
+`TrainerHandle` with all-ranks, rank-0 and per-DP-rank handles, each generator
+as a `ServiceHandle` the router gets, and the rollout workers as a
+`RolloutWorkersHandle` with per-host and per-worker handles, so callers never
+slice meshes themselves. Generator handles come only from the router: its
+`reserve` returns the one a generate call goes to, and every other generator
+call goes through the router's endpoints. These calls appear in the controller
+(and its `GenerateFn`), the rollouter (`.call()` on each host's workers,
+`.call_one()` on one worker) and the router (on generator handles). The batcher
+and the trainer see RDMA microbatches only through the `RDMAMicrobatch`
+interface.
 
 Another actor framework (e.g. Ray) would add its own `ActorSystem`
 implementation and adapters, wrapping its handles to provide this call

@@ -45,6 +45,11 @@ class PBSLauncher(MonarchLauncher):
     submit host and the nodes.
     """
 
+    # PBS runs the batch script on the job's first node, the first host in `PBS_NODEFILE`. `PBSJob`
+    # gives the first nodes, in that order, to the first mesh of `Layout.mesh_nodes`, the trainer's:
+    # `MonarchLauncher._layout` places it first.
+    controller_on_first_trainer_host = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(MonarchLauncher.Config):
         gpus_per_node: int = 8
