@@ -16,7 +16,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -180,11 +180,11 @@ class EngineLoop:
         # RANK 0: raised after broadcasting CLOSE so peers leave their collective first.
         self._rank0_result_drain_failure: Exception | None = None
 
-    def start(self) -> None:
+    def start(self, result_port: Any | None = None) -> None:
         """Start the loop on the engine loop thread (one-time, idempotent)."""
         if self._future is None:
             self._future = asyncio.run_coroutine_threadsafe(
-                self._run(), self._event_loop
+                self._run(result_port), self._event_loop
             )
 
     async def wait(self) -> None:
@@ -274,7 +274,7 @@ class EngineLoop:
             )
 
     @sl.log_trace_span("engine_loop")
-    async def _run(self) -> None:
+    async def _run(self, result_port: Any | None) -> None:
         """Non-stop loop running on all ranks to produce new tokens.
 
         Rank 0 decides a `LoopDecision` and broadcasts it; ALL ranks apply it in
@@ -300,7 +300,7 @@ class EngineLoop:
         pending_load_messages: list[ModelStateDictLoadMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
-            self._request_dispatcher.setup(self._rank0_result_drain_failed)
+            self._request_dispatcher.setup(result_port, self._rank0_result_drain_failed)
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (

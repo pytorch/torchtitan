@@ -219,13 +219,12 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
 
 
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
-    """A bare RequestDispatcher; broadcast_group is unused unless ``setup`` runs."""
+    """A bare RequestDispatcher for result-routing tests."""
     return RequestDispatcher(
         rank=rank,
         dp_rank=rank // tp_degree,
         tp_rank=rank % tp_degree,
         dp_degree=dp_degree,
-        broadcast_group=None,
         open_result_channel=None,
         intra_generator_router=IntraGeneratorRouter.Config(
             strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()

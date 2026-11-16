@@ -85,7 +85,6 @@ def _dispatcher(
         dp_rank=0,
         tp_rank=tp_rank,
         dp_degree=dp_size,
-        broadcast_group=None,
         open_result_channel=open_result_channel,
         intra_generator_router=IntraGeneratorRouter.Config(
             strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()
@@ -1425,10 +1424,14 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
             recv_threads.append(threading.current_thread())
             return await peer_results.get()
 
+    class ResultPort:
+        def __reduce__(self):
+            raise AssertionError("the result port must not enter an object collective")
+
     async def run() -> None:
         engine = _FakeEngine()
         dispatcher = _dispatcher(
-            dp_size=2, open_result_channel=lambda: ("port", ResultReceiver())
+            dp_size=2, open_result_channel=lambda: (ResultPort(), ResultReceiver())
         )
         # Load DP rank 0, so the request goes to the peer, DP rank 1.
         dispatcher._rank0_dp_router.reserve("busy", routing_session_id="busy")
@@ -1464,18 +1467,20 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
                     peer_results.put_nowait, results
                 )
             decision = container[0]
-            if isinstance(decision, LoopDecision):
-                broadcast_actions.append(decision.action)
-                if decision.action is LoopAction.STEP:
-                    peer_requests.extend(
-                        r.request_id for r in decision.requests_per_dp_rank[1]
-                    )
+            assert isinstance(decision, LoopDecision)
+            broadcast_actions.append(decision.action)
+            if decision.action is LoopAction.STEP:
+                peer_requests.extend(
+                    r.request_id for r in decision.requests_per_dp_rank[1]
+                )
 
         monkeypatch.setattr(
             engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
         )
         engine_loop.policy_version = 3  # rank 0 stamps it at admission
-        engine_loop.start()
+        result_port = dispatcher.open_result_channel()
+        assert dispatcher.open_result_channel() is result_port
+        engine_loop.start(result_port)
 
         if peer_result == "rejected":
             with pytest.raises(ValueError, match="r0 rejected"):

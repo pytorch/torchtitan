@@ -15,10 +15,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import cloudpickle
-import torch
-import torch.distributed as dist
-
 from torchtitan.rl.generator.types import (
     EngineRequest,
     FinishedRequest,
@@ -75,7 +71,6 @@ class RequestDispatcher:
         dp_rank: int,
         tp_rank: int,
         dp_degree: int,
-        broadcast_group: dist.ProcessGroup,
         intra_generator_router: IntraGeneratorRouter.Config,
         open_result_channel: Callable[[], tuple[Any, Any]] | None,
     ):
@@ -83,8 +78,6 @@ class RequestDispatcher:
         self._dp_degree = dp_degree
         self.dp_rank = dp_rank
         self._tp_rank = tp_rank
-        # Reused for the one-time result-port broadcast (see ``setup``).
-        self._broadcast_group = broadcast_group
 
         # RANK 0: generations taken off the queue and not yet answered, keyed by
         # request id. An entry is removed once its reply is resolved, with the
@@ -94,8 +87,8 @@ class RequestDispatcher:
         # --- Result fan-in (only when DP>1) ---
         # rank 0 opens the channel, keeps the receiving end, and its drain task
         # resolves whatever peer tp_rank=0 send. ``_result_port`` is the sending
-        # end, held only by peer tp_rank=0; it stays None on rank 0 (resolves
-        # locally) and on tp_rank!=0 (no outputs). All None for DP=1 since there
+        # end, held by rank 0 and peer tp_rank=0; it stays None on
+        # tp_rank!=0 (no outputs). All None for DP=1 since there
         # is no peer DP to send from.
         self._open_result_channel = open_result_channel
         self._result_port: Any | None = None
@@ -173,40 +166,32 @@ class RequestDispatcher:
                     request.request_id
                 ].min_policy_version = request.min_policy_version
 
-    def setup(self, on_result_drain_failure: Callable[[Exception], None]) -> None:
-        """One-time setup before the engine loop starts (DP>1): distribute rank 0's
-        result-fan-in port and start rank 0's drain task.
-
-        All ranks call this so the broadcast over the all-ranks ``_broadcast_group``
-        completes; only TP rank 0 keep the port.
-        """
+    def open_result_channel(self) -> Any | None:
+        """RANK 0: open the result channel once; return its sending port."""
+        assert self._rank == 0
         if self._dp_degree == 1:
-            return
-
-        # rank 0 opens the channel and keeps the receiving end; it broadcasts only
-        # the sending port to the peers.
-        if self._rank == 0:
+            return None
+        if self._rank0_result_receiver is None:
             if self._open_result_channel is None:
                 raise RuntimeError(
                     "data-parallel generation requires a result-channel factory"
                 )
-            port, self._rank0_result_receiver = self._open_result_channel()
-            # Monarch Port objects need cloudpickle, so we cloudpickle it into bytes
-            # first. Otherwise, broadcast_object_list will attempt to pickle the
-            # port object with stdlib pickle and result in error.
-            container = [cloudpickle.dumps(port)]
-        else:
-            container = [None]
-        dist.broadcast_object_list(
-            container, src=0, group=self._broadcast_group, device=torch.device("cpu")
-        )
-        assert container[0] is not None
-        # Only peer TP rank 0s send finished requests to global rank 0, so only
-        # they keep the port. Global rank 0 resolves locally and tp_rank!=0
-        # produce no outputs.
-        if self._rank != 0 and self._tp_rank == 0:
-            self._result_port = cloudpickle.loads(container[0])
+            self._result_port, self._rank0_result_receiver = self._open_result_channel()
+        return self._result_port
+
+    def setup(
+        self,
+        result_port: Any | None,
+        on_result_drain_failure: Callable[[Exception], None],
+    ) -> None:
+        """Install the actor-delivered result port and start rank 0's drain task."""
+        if self._dp_degree == 1:
+            return
+        assert result_port is not None, "result channel must be opened before startup"
+        if self._tp_rank == 0:
+            self._result_port = result_port
         if self._rank == 0:
+            assert self._rank0_result_receiver is not None
             self._rank0_drain_task = asyncio.create_task(
                 self._rank0_drain_results(on_result_drain_failure)
             )
