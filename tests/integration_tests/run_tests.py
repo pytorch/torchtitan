@@ -604,9 +604,7 @@ def main():
     )
     args = parser.parse_args()
     if args.gpu_arch is None:
-        args.gpu_arch = {"rocm": "mi350x", "xpu": "pvc"}.get(
-            args.gpu_arch_type, "a10g"
-        )
+        args.gpu_arch = {"rocm": "mi350x", "xpu": "pvc"}.get(args.gpu_arch_type, "a10g")
 
     try:
         test_suites = _parse_test_suites(args.test_suite)
