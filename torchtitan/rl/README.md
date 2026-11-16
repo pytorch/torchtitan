@@ -315,6 +315,11 @@ Example, a SLAKE image:
 rollout group=12/rollout=3 failed: ERROR_INFRA | FileNotFoundError: [Errno 2] No such file or directory: '/data/slake/imgs/xmlab1/source.jpg' | ... | host=gpu-7
 ```
 
+A host that misses an image file or a task's `tests/` ends each such group right away, with nothing
+to train. Its workers then have the fewest rollouts in flight. The rollouter sends each new group to the
+worker with the fewest, so that host gets most new groups, and the run makes little progress (see the
+TODO "retire a worker whose groups keep failing" in `Rollouter.run_group_rollouts`).
+
 ## Trainer/generator consistency
 
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./BITWISE_PARITY.md) for configuration, supported layouts, verification, and limitations.
