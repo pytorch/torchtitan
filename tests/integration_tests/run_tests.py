@@ -17,6 +17,8 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+import torch
+
 from torchtitan.observability.logging import init_logger
 from torchtitan.trainer import Trainer
 
@@ -436,6 +438,20 @@ def run_tests(
 
     def physical_ngpu(test_flavor: IntegrationTestDefinition) -> int:
         return 1 if execution_mode == "fake_pg" else test_flavor.ngpu
+
+    # CUDA drops a missing id and every later id from a child's visible-device
+    # mask, so every id the pool hands out or a sequential launch spawns must
+    # exist on the host. Fail before scheduling rather than with rank errors.
+    if runnable:
+        num_devices = torch.accelerator.device_count()
+        required_devices = (
+            args.ngpu if parallel else max(physical_ngpu(t) for t in runnable)
+        )
+        if num_devices < required_devices:
+            raise ValueError(
+                f"Requires {required_devices} accelerator(s), but only "
+                f"{num_devices} accelerator(s) are visible"
+            )
 
     if parallel and runnable:
         # Schedule tests concurrently, packing them onto a fixed pool of
