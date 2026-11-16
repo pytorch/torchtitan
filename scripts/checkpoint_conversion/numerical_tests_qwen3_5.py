@@ -16,7 +16,7 @@ Usage:
     python -m scripts.checkpoint_conversion.numerical_tests_qwen3_5 \
         --hf_model_path hf_assets/Qwen/Qwen3.5-2B \
         --tt_checkpoint_path outputs/Qwen/qwen3_5_2b_dcp \
-        --model_flavor 2B
+        --model_flavor 2B_mm
 """
 
 import argparse
@@ -37,13 +37,15 @@ torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.utils.image import (
-    process_image,
-    vision_to_patches,
-)
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    Qwen35MultimodalModel,
+    QWEN3_5_SPECIAL_TOKENS,
+    QWEN3_5_VISION_PROCESSOR_KWARGS,
+)
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 
@@ -95,11 +97,13 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     processor: Any = AutoProcessor.from_pretrained(hf_model_path)
 
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
+    if not isinstance(model_config, Qwen35MultimodalModel.Config):
+        raise ValueError(f"{model_flavor!r} has no vision encoder; pass an _mm flavor.")
     encoder_config = model_config.vision_encoder
-    assert encoder_config is not None
     patch_size = encoder_config.patch_size
     temporal_patch_size = encoder_config.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
+    vision_processor = VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS).build()
 
     image_token_id = processor.tokenizer.convert_tokens_to_ids(
         QWEN3_5_SPECIAL_TOKENS["image_token"]
@@ -108,12 +112,8 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         QWEN3_5_SPECIAL_TOKENS["video_token"]
     )
     special_tokens = {"image_id": image_token_id, "video_id": video_token_id}
-    # The collator reads patch_order before building ids. Training defaults it
-    # to "block", which is the layout vision_to_patches uses here.
-    mrope_builder = types.SimpleNamespace(
-        spatial_merge_size=merge_size,
-        patch_order="block",
-    )
+    # The collator reads the merge size from its vision processor.
+    mrope_builder = types.SimpleNamespace(vision_processor=vision_processor)
 
     hf_inputs, tt_inputs, pixel_comparisons = [], [], []
 
@@ -146,21 +146,13 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         hf_inputs.append(hf_in)
 
         # --- TT path ---
-        img_tensor = process_image(
-            pil_image, patch_size=patch_size, merge_size=merge_size
-        )
-        assert img_tensor is not None, f"process_image failed for sample {i}"
-        patches, grid_thw = vision_to_patches(
-            img_tensor,
-            patch_size,
-            temporal_patch_size,
-            merge_size,
-        )
-        # One document. vision_to_patches returns patches (N, P) and grid_thw
-        # (3,). The packed forward wants tokens (S,), those patches, grid
+        pixels, _ = vision_processor.resize_and_normalize(pil_image)
+        patches, grid_thw = vision_processor.patchify(pixels)
+        grid_thw_13 = grid_thw.unsqueeze(0)
+        # One document. patchify returns patches (N, P) and grid_thw (3,).
+        # The packed forward wants tokens (S,), those patches, grid
         # (num_images, 3), and MRoPE positions (S, 3).
         input_ids_S = hf_in["input_ids"].squeeze(0)
-        grid_thw_13 = grid_thw.unsqueeze(0)
         mrope_positions = MultiModalCollator._build_mrope_positions(
             mrope_builder,  # pyrefly: ignore [bad-argument-type]
             input_ids_S,
@@ -176,7 +168,7 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
         # Reshape patches back to image space for pixel-level comparison.
         # Only compare frame 0 (actual image); frame 1 is temporal padding.
         hf_pv = hf_in["pixel_values"]
-        t_p, h_p, w_p = grid_thw.tolist()
+        t_p, h_p, w_p = grid_thw_13[0].tolist()
         pattern = "(t bh bw m n) (c pt ph pw) -> (t pt) (bh m ph) (bw n pw) c"
         kwargs = dict(
             t=t_p,
@@ -332,7 +324,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             layer.attention.inner_attention = _SDPA(is_causal=True)
 
     for blk in model.vision_encoder.layers.values():
-        blk.attn.flex_attention = _SDPA(is_causal=False)
+        blk.attn.inner_attention = _SDPA(is_causal=False)
 
     model.eval()
 
@@ -408,7 +400,7 @@ def main():
     )
     parser.add_argument("--hf_model_path", type=str, required=True)
     parser.add_argument("--tt_checkpoint_path", type=str, required=True)
-    parser.add_argument("--model_flavor", type=str, default="4B")
+    parser.add_argument("--model_flavor", type=str, default="4B_mm")
     parser.add_argument("--num_samples", type=int, default=10)
     args = parser.parse_args()
 

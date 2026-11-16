@@ -123,7 +123,7 @@ def compute_training_performance_metrics(
     elapsed_time: float,
     non_data_parallel_size: int,
     num_flops: float,
-    gpu_peak_flops: float,
+    gpu_peak_flops: float | None,
     has_quantization: bool,
 ) -> dict[str, float]:
     """Compute per-device throughput, TFLOPS, and optional MFU."""
@@ -134,7 +134,7 @@ def compute_training_performance_metrics(
         "tokens_per_second": tokens_per_second,
         "tflops": tflops,
     }
-    if not has_quantization:
+    if not has_quantization and gpu_peak_flops is not None:
         metrics["mfu_percent"] = 100 * device_flops_per_second / gpu_peak_flops
     return metrics
 
@@ -203,7 +203,12 @@ class TensorBoardLogger(BaseLogger):
 
 
 class WandBLogger(BaseLogger):
-    """Logger implementation for Weights & Biases."""
+    """Logger implementation for Weights & Biases: each `log` call is one row, with `trainer/step`.
+
+    Example:
+        log({"loss": 2.1}, step=10)                       -> row _step=0, trainer/step=10
+        log({"validation_metrics/loss": 2.3}, step=10)    -> row _step=1, trainer/step=10
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLogger.Config):
@@ -245,6 +250,9 @@ class WandBLogger(BaseLogger):
             dir=log_dir,
             config=config_dict,
         )
+        # Generated charts plot `trainer/step` on the x-axis.
+        self.wandb.define_metric("trainer/step")
+        self.wandb.define_metric("*", step_metric="trainer/step")
         logger.info("WandB logging enabled")
 
     def log(self, metrics: dict[str, Any], step: int) -> None:
@@ -252,7 +260,9 @@ class WandBLogger(BaseLogger):
             (k if self.tag is None else f"{self.tag}/{k}"): v
             for k, v in metrics.items()
         }
-        self.wandb.log(wandb_metrics, step=step, commit=True)
+        # Note: we use `trainer/step` key instead of `step` arg so multiple
+        # log calls can be made to the same step (e.g. trainer and validation)
+        self.wandb.log({**wandb_metrics, "trainer/step": step})
 
     def close(self) -> None:
         if self.wandb.run is not None:
@@ -440,7 +450,7 @@ class MetricsProcessor(Configurable):
     device_memory_monitor: DeviceMemoryMonitor
     color: NoColor | Color
 
-    gpu_peak_flops: float
+    gpu_peak_flops: float | None
     ntokens_since_last_log: int
     data_loading_times: list[float]
     time_last_log: float

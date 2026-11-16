@@ -9,6 +9,7 @@
 from dataclasses import fields
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -26,6 +27,10 @@ def build_model_config(
     base = build_muse_glimmer_model_config(
         flavor, parallelism=parallelism, seq_len=seq_len, attn_backend=attn_backend
     )
+    if isinstance(base, MultimodalModel.Config):
+        raise ValueError(
+            f"GraphTrainer MuseGlimmer supports text-only flavors; got {flavor!r}."
+        )
     config = GraphTrainerMuseGlimmerModel.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
