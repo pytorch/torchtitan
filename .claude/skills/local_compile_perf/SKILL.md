@@ -60,7 +60,7 @@ Example: DSv4 q norm + RoPE went from 1497 µs eager to 1044 µs in one region, 
 Before investing in an idea: negative-results.md. If compile itself fails: compile-limits.md.
 ```
 
-0. **Plan.** Set a time budget and a stop rule: stop when the remaining gap to ideal is under ~1% of the layer, or the next candidate's estimated gain is below that. Keep a devlog: one file per effort, a timestamped entry appended right after each measurement, decision and dead end (not in batches). Check how this tree declares regions (harness.md: where regions live) and what fused kernels already exist under `torchtitan_recipes/overrides/` (e.g. `fused_mla`); benchmark them as alternatives.
+0. **Plan.** Set a time budget and a stop rule: stop when the remaining gap to ideal is under ~1% of the layer, or the next candidate's estimated gain is below that. Keep a devlog: one file per effort, a timestamped entry appended right after each measurement, decision and dead end (not in batches). Check how this tree declares regions (harness.md: where regions live) and what fused kernels already exist under `torchtitan_recipes/overrides/` (e.g. `fused_mla`); benchmark them as alternatives. Also grep for regions the model doesn't enable or a sibling class doesn't call (Qwen3.5's batch-wise aux loss skipped the existing `moe_aux_loss` region: ~190 µs of `[T, E]` sums per layer).
 1. **Baselines** (harness.md):
    - 2 layers at real dims, covering each block type; packed tokens per rank from small to large (e.g. 2k, 4k, 16k, 32k+). Torchtitan has no batch dim, so long rows are normal.
    - fwd+bwd, with the recipe's activation checkpointing mode (none, full, selective).
@@ -82,7 +82,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
    ```
    Fixes interact: before rejecting a rewrite or an option, try it with the others. DSv3 `mla_qk`: real-arithmetic RoPE alone was slower (46.95 ms), the cat option alone neutral (46.37), both together 46.34 -> 45.85 ms.
 6. **Graph budget, early:** count all shapes and call sites plus a `no_grad` pass. Levers: `mark_static`, a dynamic token dim marked in eager, fewer signatures per region, `triton.mix_order_reduction_non_strict_mode`, raising the limit (we used 16 in several models; how depends on the tree, see measurement.md). Details in measurement.md.
-7. **Screen in one process, confirm with 3 fresh processes** on a quiet GPU. Every comparison reports two rows: normal launch and CUDA-graph replay of the whole fwd+bwd (harness.md). A win that disappears under graphs was host time.
+7. **Screen in one process, confirm once in a fresh process** (twice at most, if noisy) on a quiet GPU. Every comparison reports two rows: normal launch and CUDA-graph replay of the whole fwd+bwd (harness.md). A win that disappears under graphs was host time.
 8. **Correctness and side effects:** measurement.md (correctness) and gating-and-options.md (numerics, AC, parallelism); check deceiving-quirks.md.
 9. **Commit each validated change locally** before the next. Enable new regions in the target model's config or recipe, not a shared default list. A region enabled in a model config also reaches every config that subclasses it (DSv3 -> Kimi K2.7): check subclasses or enable per recipe. List which recipes reach the change.
 10. **Package** the stack and findings doc (Output).
@@ -94,6 +94,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
 - **A findings doc** (short): what was measured, the stack with deltas, rejected ideas, not tested, skill feedback. Its top block is the stack summary in every PR.
 - **PR text:** TLDR, Problem and Solution as numbered baby steps, a diagram, numbers in code blocks; no paragraphs or tables. Template, filled example and rules: pr-template.md.
 - **Code:** minimal diff; regions enabled per model config; a test that fails before and passes after; code rules in pr-template.md.
+- **Lint before pushing:** rebase on current main, then run CI's command (`pre-commit run --files <changed files>`) with CI's torch, from a checkout outside hidden directories (pyrefly skips `.worktrees/`). Pyrefly's `--remove-unused-ignores` fails CI on an ignore your torch needs and CI's doesn't. Run the tests next to the module (`tests/unit_tests/{cpu,gpu}/models/<model>/`) in that same CI venv: dev venvs can miss newer test deps.
 - **Compute:**
   - iterate on one GPU;
   - multi-GPU only for what one GPU can't show (comm overlap, EP/TP behavior, zero-token ranks): build-check the harness at the target world size (meta tensors or a fake process group), then submit one small, short job and keep working;
@@ -115,7 +116,7 @@ Lessons from specific cases, not rules:
 - [ ] Ideal-time table; kernel diff; ranked candidates (ms, % of layer).
 - [ ] Region boundaries chosen by measurement.
 - [ ] Graph count: all shapes + `no_grad`, headroom under the limit.
-- [ ] 3 fresh processes; outputs and all grads vs eager (bf16, fp32) and fp64.
+- [ ] one fresh process (two at most); outputs and all grads vs eager (bf16, fp32) and fp64.
 - [ ] Gate chosen from eager cost (gating-and-options.md).
 - [ ] Quirks checked: TP, EP, hardware, dispatch mode, AC, compile mode.
 - [ ] Regions per model config; reaching recipes listed; each change committed.
