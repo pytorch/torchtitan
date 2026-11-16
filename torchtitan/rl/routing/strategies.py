@@ -9,16 +9,19 @@
 A ``RoutingStrategy`` chooses one ``RoutingCandidate`` from a set given a
 ``RoutingContext``. It depends only on the ``RoutingCandidate`` base class -- a
 ``reserved_load`` field plus object identity -- so the same strategy classes
-serve both routing layers in the RL generator:
+serve both routing layers in the RL generator, and the rollouter:
 
 - Layer 1: ``InterGeneratorRouter`` (router actor side) routes a call across
   generator *meshes* (replicas). See ``inter_generator_router.py``.
 - Layer 2: ``IntraGeneratorRouter`` (in-mesh, rank-0 side) routes a request
   across the *data-parallel ranks* within one generator mesh. See
   ``intra_generator_router.py``.
+- ``Rollouter`` (controller side) sends each rollout group to the rollout
+  worker with the fewest rollouts in flight. See ``rollout/rollouter.py``.
 
-Each layer supplies its own candidate type (``_GeneratorHandle`` for generators,
-``_DPRankHandle`` for DP ranks). The data types live in ``types.py``.
+Each caller supplies its own candidate type (``_GeneratorHandle`` for generators,
+``_DPRankHandle`` for DP ranks, ``_RolloutWorkerLoad`` for rollout workers). The
+data types live in ``types.py``.
 """
 
 from __future__ import annotations
@@ -96,8 +99,8 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
         del config
         self._selection_counter = itertools.count()
         # id(candidate) -> the selection number of its most recent selection.
-        # Object identity is all a strategy gets from RoutingCandidate, and both
-        # routers build their handles once and own them for their own lifetime,
+        # Object identity is all a strategy gets from RoutingCandidate, and every
+        # caller builds its candidates once and owns them for its own lifetime,
         # so ids stay valid and the map stays bounded by the candidate count.
         self._last_chosen: dict[int, int] = {}
 
