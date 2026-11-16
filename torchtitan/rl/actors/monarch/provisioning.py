@@ -5,11 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 """Monarch proc meshes for the RL roles: GPU meshes for the trainer and generators,
-CPU meshes on the controller host, and the Monarch client's shutdown."""
+CPU meshes on the controller host, the rollout workers' hosts, and the Monarch client's
+shutdown."""
 
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from monarch.actor import (
     default_bootstrap_cmd,
@@ -23,6 +25,9 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl._env import apply_env_defaults
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.tools.utils import get_visible_devices_env_var
+
+if TYPE_CHECKING:
+    from torchtitan.rl.rollout.rollouter import RolloutWorkerRoles
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,9 @@ class HostMeshes:
     trainer: HostMesh
     generators: list[HostMesh]
     gpus_per_node: int
+    controller_on_first_trainer_host: bool
+    """True when the controller runs on the trainer's first host: that host also has the
+    controller's role. False: the controller runs outside the job's hosts."""
 
 
 def generator_role_names(num_generators: int) -> list[str]:
@@ -296,6 +304,76 @@ def spawn_proc_mesh(
 def spawn_cpu_procs(num_procs: int) -> ProcMesh:
     """Spawn ``num_procs`` CPU procs on the controller host."""
     return this_host().spawn_procs(per_host={"cpus": num_procs})
+
+
+def rollout_worker_hosts(
+    *, host_meshes: HostMeshes | None, worker_roles: "RolloutWorkerRoles"
+) -> list[HostMesh]:
+    """Return the hosts that `worker_roles` picks, one single-host mesh each, in job order:
+    trainer hosts, generator hosts, then the controller's machine when it is outside the job.
+
+    Each host gets its roles, then the rule of `RolloutWorkerRoles` picks it: at least one of its
+    roles is True and none is False. Example: trainer hosts t0, t1 and generator hosts g0, g1. The
+    controller's host depends on the launcher:
+
+        the controller on t0 (`controller_on_first_trainer_host`):
+            t0: trainer + controller | t1: trainer | g0, g1: generator
+        the controller outside the job:
+            t0, t1: trainer | g0, g1: generator | this_host(): controller
+
+    The controller's host is always returned as `this_host()`, also when it is t0:
+
+        trainer=True, generator=None, controller=None, the controller on t0     -> [this_host(), t1]
+        trainer=True, generator=None, controller=False, the controller on t0    -> [t1]
+        trainer=True, generator=None, controller=False, the controller outside  -> [t0, t1]
+        trainer=None, generator=None, controller=True, the controller on t0     -> [this_host()]
+        trainer=None, generator=None, controller=True, the controller outside   -> [this_host()]
+        no launcher (`host_meshes` is None), any roles                           -> [this_host()]
+    """
+    if host_meshes is None:
+        return [this_host()]
+
+    # ======== Give each job host its roles ========
+    # Keyed by (id(mesh), host index): roles that share a host share its mesh object, and a
+    # HostMesh can't be a dict key. `flatten("hosts")` gives each mesh one "hosts" axis to slice:
+    # a launcher's mesh already has it, but a `this_host()` mesh has no axis.
+    single_hosts: dict[tuple[int, int], HostMesh] = {}
+    roles_by_host: dict[tuple[int, int], set[str]] = {}
+    role_meshes = [("trainer", host_meshes.trainer)] + [
+        ("generator", mesh) for mesh in host_meshes.generators
+    ]
+    for role, mesh in role_meshes:
+        for index in range(len(mesh)):
+            key = (id(mesh), index)
+            single_hosts.setdefault(key, mesh.flatten("hosts").slice(hosts=index))
+            roles_by_host.setdefault(key, set()).add(role)
+    if host_meshes.controller_on_first_trainer_host:
+        controller_host_key = (id(host_meshes.trainer), 0)
+        roles_by_host[controller_host_key].add("controller")
+        # Spawn through `this_host()`, the controller's own machine. On Slurm and PBS, the batch
+        # script that starts the controller typically runs on trainer host 0, so both are the same
+        # machine. If the batch script ran on another node, a service at 127.0.0.1 on the
+        # controller's machine stays reachable. The cost: trainer host 0's share of the workers then
+        # runs on the controller's machine.
+        single_hosts[controller_host_key] = this_host()
+
+    # ======== Pick the hosts ========
+    hosts: list[HostMesh] = []
+    for key, roles in roles_by_host.items():
+        values = {getattr(worker_roles, role) for role in roles}
+        if True in values and False not in values:
+            hosts.append(single_hosts[key])
+    # A controller outside the job: its machine has no other role, so no other role can veto it.
+    if not host_meshes.controller_on_first_trainer_host and worker_roles.controller:
+        hosts.append(this_host())
+    if not hosts:
+        raise ValueError(
+            f"rollouter.worker_roles ({worker_roles}) picks no host: each host with a role set to "
+            "True also has a role set to False. The job's hosts have these roles: "
+            f"{[sorted(roles) for roles in roles_by_host.values()]}. Please set each role that "
+            "should not veto a host to None."
+        )
+    return hosts
 
 
 def shutdown() -> None:

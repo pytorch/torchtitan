@@ -102,6 +102,15 @@ def test_a_group_larger_than_rollouts_per_worker_raises(
         )
 
 
+def test_no_worker_role_true_after_build_raises() -> None:
+    config = _controller_config_with_groups(num_groups=16, group_size=8)
+    roles = config.rollouter.worker_roles
+    roles.trainer = roles.generator = roles.controller = False
+    # The config loader reruns this top-level `__post_init__` after a recipe edits the config.
+    with pytest.raises(ValueError, match="needs at least one role set to True"):
+        config.__post_init__()
+
+
 def test_rollout_loop_keeps_the_metrics_a_worker_sent_with_its_group() -> None:
     """A rollout worker adds its own metrics to each training group (e.g. its event-loop lag).
     The controller adds the rollout metrics next to them."""
