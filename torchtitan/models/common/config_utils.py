@@ -176,11 +176,14 @@ def fused_qkv_param_init(
                 # avoids the "unflatten unevenly sharded" error when dp_shard*tp
                 # does not divide n_kv_heads (e.g. dp_shard=8, n_kv_heads=4); no
                 # gather, since fused is already replicated.
-                if not isinstance(t, DTensor) and (tp_size := spmd_mesh_size("tp")) > 1:
-                    # RL generator init_weights() only needs non-persistent
-                    # buffers; weights come from trainer state dict. Until it has
-                    # a DTensor static state dict path, copy this TP shard here.
+                if not isinstance(t, DTensor) and t.shape[0] != fused.shape[0]:
+                    # t is this tp rank's shard. RL generator init_weights() only
+                    # needs non-persistent buffers; weights come from trainer
+                    # state dict. Until it has a DTensor static state dict path,
+                    # copy this TP shard here. (Under TP, FlexShard's init_param
+                    # passes a full tensor.)
                     # TODO: Remove once RL can init buffers without weight init.
+                    tp_size = spmd_mesh_size("tp")
                     mesh = current_spmd_mesh()
                     assert mesh is not None
                     tp_rank = mesh.get_local_rank("tp")

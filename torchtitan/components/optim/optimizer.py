@@ -9,7 +9,6 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
-import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
@@ -28,6 +27,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
+from torchtitan.distributed.flex_shard_fsdp import declare_optimizer_state_layouts
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
@@ -414,15 +414,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                         return state_dict
 
                     optimizer.register_state_dict_post_hook(_save_host_lr)
-                # FlexShard parameters are plain local shards, so DCP needs
-                # each state to declare where it sits in the full state, as the
-                # model's state dict does. FlexShard parameters exist only once
-                # flex_shard is imported, which happens only when it is selected.
-                flex_shard = sys.modules.get("flex_shard")
-                if flex_shard is not None and any(
-                    map(flex_shard.is_flex_shard_param, param_group["params"])
-                ):
-                    flex_shard.register_optimizer_checkpoint_hook(optimizer, model)
+                # FlexShard's states are plain local shards, which need to
+                # declare their layouts to DCP, as the model's parameters do.
+                declare_optimizer_state_layouts(optimizer, model)
                 self.optimizers.append(optimizer)
                 self._log_optimizer(
                     optimizer,

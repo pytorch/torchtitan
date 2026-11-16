@@ -17,9 +17,14 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.distributed.distributed_c10d as c10d
+from safetensors.torch import save_file
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from torch.distributed.tensor import DTensor
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -31,11 +36,14 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
-from torchtitan.config.parallelism import FSDP2Config, ParallelismConfig
+from torchtitan.config.parallelism import (
+    FlexShardConfig,
+    FSDP2Config,
+    ParallelismConfig,
+)
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
-from torchtitan.distributed.fsdp import set_is_last_accumulation_step
+from torchtitan.distributed.flex_shard_fsdp import load_hf_into_local_shards
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -57,6 +65,7 @@ def _local(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.to_local() if isinstance(tensor, DTensor) else tensor
 
 
+@instantiate_parametrized_tests
 class TestFlexShardDecoder(DTensorTestBase):
     @property
     def world_size(self) -> int:
@@ -113,6 +122,50 @@ class TestFlexShardDecoder(DTensorTestBase):
                 model.init_weights(buffer_device=None)
         return model, model_config, parallelism, parallelism_context
 
+    def _assert_initialized_as_one_device(
+        self, model, model_config, parallelism, parallelism_context, context
+    ) -> None:
+        # One device's model, initialized from the same seed.
+        del parallelism
+        with parallelism_context.activate_spmd(), torch.device("meta"):
+            reference = model_config.build()
+        dist_utils.set_determinism(
+            parallelism_context,
+            torch.device(self.device_type),
+            DebugConfig(seed=0),
+            distinct_seed_mesh_axes=[],
+        )
+        with parallelism_context.activate_spmd():
+            reference.to_empty(device=self.device_type)
+            with torch.no_grad():
+                reference.init_weights(buffer_device=None)
+        full_params = dict(reference.named_parameters())
+        # Ranks are laid out (dp_shard, cp, tp), and the buckets shard over
+        # dp_shard and cp flattened.
+        tp = parallelism_context.tp
+        tp_rank, bucket_rank = self.rank % tp, self.rank // tp
+        for fqn, param in model.named_parameters():
+            (placement,) = flex_shard.get_placements(param)
+            expected = full_params[fqn]
+            if parallelism_context.ep > 1 and ".routed_experts." in fqn:
+                # EP splits the experts, and edp_shard shards each EP rank's part.
+                ep_mesh = parallelism_context.get_mesh("ep")
+                expected = expected.chunk(ep_mesh.size())[ep_mesh.get_local_rank()]
+                edp_shard = parallelism_context.get_mesh("edp_shard")
+                expected = expected.chunk(edp_shard.size(), placement.dim)
+                expected = expected[edp_shard.get_local_rank()]
+            else:
+                # TP splits a parameter in the dim where its tp rank's shape
+                # differs, and the bucket shards that shard.
+                for dim, (full, local) in enumerate(
+                    zip(expected.shape, flex_shard.get_global_shape(param))
+                ):
+                    if full != local:
+                        expected = expected.chunk(tp, dim)[tp_rank]
+                expected = expected.chunk(self.world_size // tp, placement.dim)
+                expected = expected[bucket_rank]
+            self.assertTrue(torch.equal(param, expected), msg=f"{context} init {fqn}")
+
     def _train(
         self,
         model,
@@ -123,7 +176,6 @@ class TestFlexShardDecoder(DTensorTestBase):
         chunked_loss,
         *,
         optim=None,
-        steps=range(3),
     ):
         if optim is None:
             optim = torch.optim.AdamW(model.parameters(), lr=1e-3, foreach=True)
@@ -132,25 +184,19 @@ class TestFlexShardDecoder(DTensorTestBase):
         if chunked_loss:
             # As the training engine sets it up.
             loss_fn = ChunkedLossWrapper.Config(loss_fn=loss_config).build()
-            if isinstance(parallelism.fsdp_backend, FlexShardConfig):
-                for wrong_root in (None, model.layers):
-                    with pytest.raises(ValueError, match="needs fsdp_root"):
-                        loss_fn.set_lm_head(model.lm_head, fsdp_root=wrong_root)
-            loss_fn.set_lm_head(model.lm_head, fsdp_root=model)
+            loss_fn.set_lm_head(model.lm_head)
             model._skip_lm_head = True
         else:
             loss_fn = loss_config.build()
         # One packed sequence per microbatch, as the data loader produces. CP
-        # shards it, and the ranks of a data-parallel rank share it.
+        # shards it, and the tp and cp ranks of a data-parallel rank share it.
         seq_len = _SEQ_LEN * parallelism_context.cp
         positions = torch.arange(seq_len, device=self.device_type)
         dp_rank = self.rank // (parallelism_context.cp * parallelism_context.tp)
         history = []
-        for step in steps:
+        for step in range(3):
             losses = []
             for microbatch in range(microbatches):
-                if microbatches > 1:
-                    set_is_last_accumulation_step(model, microbatch == microbatches - 1)
                 generator = torch.Generator().manual_seed(
                     1000 * step + 10 * microbatch + dp_rank
                 )
@@ -160,8 +206,8 @@ class TestFlexShardDecoder(DTensorTestBase):
                     ).to(self.device_type)
                     for _ in range(2)
                 )
-                # Preprocessed in the SPMD context, as the trainer does, so that
-                # CP shards the inputs.
+                # In the SPMD context, as the trainer does, so that CP shards
+                # the inputs.
                 with parallelism_context.activate_spmd():
                     inputs, labels, model_kwargs, _ = model.preprocess_inputs(
                         {"input": tokens, "labels": labels, "positions": positions},
@@ -176,9 +222,7 @@ class TestFlexShardDecoder(DTensorTestBase):
                     )
                     output = model(inputs, **model_kwargs)
                     loss, _ = loss_fn(
-                        output,
-                        labels,
-                        torch.tensor(_SEQ_LEN, device=self.device_type),
+                        output, labels, torch.tensor(_SEQ_LEN, device=self.device_type)
                     )
                     with spmd.no_typecheck():
                         loss.backward()
@@ -209,29 +253,18 @@ class TestFlexShardDecoder(DTensorTestBase):
                 torch.equal(expected_tensor, actual[fqn]), msg=f"{context} {fqn}"
             )
 
-    def _assert_equal_histories(
-        self, expected_history, actual_history, context, *, first_step=0
-    ):
-        for step, (expected, actual) in enumerate(
-            zip(expected_history, actual_history, strict=True), start=first_step
-        ):
-            step_context = f"{context} step {step}"
-            for expected_loss, actual_loss in zip(expected[0], actual[0], strict=True):
-                self.assertTrue(
-                    torch.equal(expected_loss, actual_loss), msg=f"{step_context} loss"
-                )
-            self.assertTrue(
-                torch.equal(expected[1], actual[1]), msg=f"{step_context} grad norm"
-            )
-            self._assert_equal_tensors(expected[2], actual[2], f"{step_context} grad")
-            self._assert_equal_tensors(expected[3], actual[3], f"{step_context} param")
-
-    def _parallelism_context(
-        self, ep: int, *, tp: int = 1, cp: int = 1, sequence_parallel: bool = False
-    ) -> ParallelismContext:
-        # One context per test, as in training: both backends shard over its
-        # meshes.
-        return ParallelismContext(
+    def _check_matches_fsdp2(
+        self,
+        *,
+        ep: int,
+        cases,
+        chunked_loss: bool = False,
+        tp: int = 1,
+        cp: int = 1,
+        sequence_parallel: bool = False,
+    ) -> None:
+        # One context, as in training: both backends shard over its meshes.
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size // (tp * cp),
             cp=cp,
@@ -241,11 +274,6 @@ class TestFlexShardDecoder(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=sequence_parallel,
         )
-
-    def _check_matches_fsdp2(
-        self, *, ep: int, cases, chunked_loss: bool = False, **parallelism
-    ) -> None:
-        parallelism_context = self._parallelism_context(ep, **parallelism)
         for (build_config, flavor), reshard_after_forward, microbatches in cases:
             context = (
                 f"{flavor} "
@@ -268,9 +296,13 @@ class TestFlexShardDecoder(DTensorTestBase):
             )
             for fqn, param in flex.named_parameters():
                 self.assertTrue(flex_shard.is_flex_shard_param(param), msg=fqn)
-            self._assert_equal_tensors(
-                self._local_params(fsdp2), self._local_params(flex), f"{context} init"
-            )
+            self._assert_initialized_as_one_device(flex, *flex_setup, context)
+            # Each of FSDP2's DTensor shards draws its own random values, so
+            # start FlexShard from FSDP2's parameters.
+            flex_params = dict(flex.named_parameters())
+            with torch.no_grad():
+                for fqn, param in fsdp2.named_parameters():
+                    flex_params[fqn].copy_(_local(param))
             histories, num_reduce_scatters = [], []
             for model, setup in ((fsdp2, fsdp2_setup), (flex, flex_setup)):
                 # FSDP2 calls dist.reduce_scatter_single, and FlexShard
@@ -285,38 +317,53 @@ class TestFlexShardDecoder(DTensorTestBase):
                     )
                 num_reduce_scatters.append(reduce_scatter.call_count)
             # Gradients are grouped into reduce-scatters as FSDP2 groups them,
-            # e.g. ChunkedLossWrapper's head grads kept from earlier
-            # microbatches go into one. Values can't tell when sums are exact.
-            # The first check makes sure the patches see the reduce-scatters.
+            # e.g. ChunkedLossWrapper's lm_head grads of all chunks go into one.
+            # Values can't tell when the sums are exact. The first check makes
+            # sure the patches see the reduce-scatters.
             self.assertGreater(num_reduce_scatters[0], 0, msg=context)
             self.assertEqual(
                 num_reduce_scatters[0], num_reduce_scatters[1], msg=context
             )
             self._assert_equal_histories(*histories, context)
 
+    def _assert_equal_histories(
+        self, expected_history, actual_history, context: str
+    ) -> None:
+        for step, (expected, actual) in enumerate(
+            zip(expected_history, actual_history, strict=True)
+        ):
+            step_context = f"{context} step {step}"
+            for expected_loss, actual_loss in zip(expected[0], actual[0], strict=True):
+                self.assertTrue(
+                    torch.equal(expected_loss, actual_loss),
+                    msg=f"{step_context} loss",
+                )
+            self.assertTrue(
+                torch.equal(expected[1], actual[1]), msg=f"{step_context} grad norm"
+            )
+            self._assert_equal_tensors(expected[2], actual[2], f"{step_context} grad")
+            self._assert_equal_tensors(expected[3], actual[3], f"{step_context} param")
+
     @with_comms
     def test_matches_fsdp2(self):
+        # Two microbatches cover one, and the reshard policy doesn't depend on
+        # the model.
         self._check_matches_fsdp2(
             ep=1,
-            cases=product(
-                (
-                    (build_llama3_config, "debugmodel"),
-                    (build_qwen3_config, "debugmodel_moe"),
-                ),
-                ("default", "always"),
-                (1, 2),
-            ),
+            cases=[
+                ((build_llama3_config, "debugmodel"), "default", 2),
+                ((build_qwen3_config, "debugmodel_moe"), "always", 2),
+            ],
         )
 
     @with_comms
     def test_matches_fsdp2_with_expert_parallelism(self):
-        # Each MoE block's routed experts shard over edp_shard (half of
-        # dp_shard), and the rest of the block over dp_shard. The loss is
-        # ChunkedLossWrapper's, as in the Qwen3 MoE recipes: it runs lm_head on
-        # its own on each chunk, with a backward each. Its bucket keeps its
-        # grads unsharded across the chunks, as FSDP2's group does, and
-        # reduce-scatters them at the last chunk, or with grads kept from
-        # earlier microbatches, in the decoder backward.
+        # Each MoE block's routed experts shard over edp_shard (dp_shard / ep
+        # ranks) within each EP rank's experts, and the rest over dp_shard. The
+        # loss is ChunkedLossWrapper's, as in the Qwen3 MoE recipes: it runs
+        # lm_head on its own on each chunk, with a backward each. lm_head's
+        # bucket keeps its grads unsharded across the chunks, as FSDP2's group
+        # does, and reduce-scatters them at the last chunk.
         self._check_matches_fsdp2(
             ep=2,
             cases=product(
@@ -327,13 +374,13 @@ class TestFlexShardDecoder(DTensorTestBase):
 
     @with_comms
     def test_matches_fsdp2_with_tensor_parallelism(self):
-        # TP splits a parameter in one dim, which FSDP shards within each tp
-        # rank's shard when it is FSDP's dim too. Under sequence parallelism,
-        # the norm weights are typed R on tp, as are Qwen3's QK norms and
-        # router: each tp rank's grad is partial, and both backends all-reduce
-        # it over tp before the reduce-scatter. ChunkedLossWrapper, as in the
-        # recipes, runs the output projection on its own, and its bucket also
-        # holds the final norm. Qwen3 MoE needs ep >= tp.
+        # TP splits a parameter in one dim, which the bucket shards within each
+        # tp rank's shard when it is the bucket's dim too. Under sequence
+        # parallelism, the norm weights are typed R on tp, as are Qwen3's QK
+        # norms and router: each tp rank's grad is partial, and both backends
+        # all-reduce it over tp before the reduce-scatter. The grad norm reduces
+        # over dp_shard, then tp. Qwen3 MoE needs ep >= tp, and the experts'
+        # norm reduces over edp_shard, then ep.
         self._check_matches_fsdp2(
             ep=2,
             tp=2,
@@ -350,21 +397,6 @@ class TestFlexShardDecoder(DTensorTestBase):
         )
 
     @with_comms
-    def test_matches_fsdp2_with_tensor_parallelism_without_sequence_parallelism(
-        self,
-    ):
-        # The norm weights are typed I on tp, so their grads are whole on each
-        # tp rank and aren't all-reduced. Qwen3's QK norms and router are still
-        # typed R.
-        self._check_matches_fsdp2(
-            ep=2,
-            tp=2,
-            cases=product(
-                [(build_qwen3_config, "debugmodel_moe")], ("default",), (1, 2)
-            ),
-        )
-
-    @with_comms
     def test_matches_fsdp2_with_context_parallelism(self):
         # Each cp rank's grads cover its own tokens. FSDP2 sums them in its
         # reduce-scatter over dp_shard and cp, flattened into one axis, and so
@@ -373,31 +405,44 @@ class TestFlexShardDecoder(DTensorTestBase):
             ep=1,
             cp=2,
             cases=product(
-                [(build_qwen3_config, "debugmodel_moe")], ("default",), (1, 2)
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default",),
+                (1, 2),
             ),
         )
 
     @with_comms
-    def test_matches_fsdp2_with_tensor_and_context_parallelism(self):
-        # Needs 4 ranks. FSDP2 lays out each parameter on the flattened
-        # dp_shard and cp axis, and tp.
-        self._check_matches_fsdp2(
-            ep=1,
-            tp=2,
-            cp=2,
-            sequence_parallel=True,
-            cases=product([(build_llama3_config, "debugmodel")], ("default",), (1, 2)),
-            chunked_loss=True,
+    @with_temp_dir
+    @parametrize("tp", [1, 2])
+    def test_checkpoints_match_fsdp2(self, tp: int):
+        # FlexShard loads FSDP2's checkpoint of the model and its AdamW states,
+        # and saves it again chunk for chunk and bit for bit, also as a bf16
+        # export. With ep=2, the routed experts are split over ep, then over
+        # edp_shard. With tp=2, TP splits the dense parameters in dim 0 or 1,
+        # and the buckets shard each tp rank's part. Under sequence
+        # parallelism, the norm weights are replicated over tp, so both
+        # backends save each of their chunks once.
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size // tp,
+            cp=1,
+            tp=tp,
+            pp=1,
+            ep=2,
+            world_size=self.world_size,
+            enable_sequence_parallel=tp > 1,
         )
 
-    def _check_checkpoints_across_backends(
-        self, build_config, flavor, *, ep: int, **parallelism
-    ):
-        parallelism_context = self._parallelism_context(ep, **parallelism)
-
-        def build(fsdp_backend):
+        def build(fsdp_backend, folder, **config):
             model, *setup = self._build(
-                build_config, flavor, fsdp_backend, "default", parallelism_context
+                build_qwen3_config,
+                "debugmodel_moe",
+                fsdp_backend,
+                "default",
+                parallelism_context,
             )
             optimizers = OptimizersContainer(
                 OptimizersContainer.Config(
@@ -405,25 +450,12 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 model_parts=[model],
             )
-            # As the training engine does. Qwen3 MoE's hooks reset its
-            # load-balancing loss's per-step state, which isn't checkpointed.
-            type(model)._register_optimizer_hooks(
-                optimizers, [model], parallelism_context
-            )
-
-            def train(steps):
-                return self._train(
-                    model, *setup, 1, False, optim=optimizers, steps=steps
-                )
-
-            return model, optimizers, train
-
-        def checkpointer(model, optimizers, folder, **config):
-            return CheckpointManager(
+            checkpointer = CheckpointManager(
                 CheckpointManager.Config(
-                    folder=os.path.join(self.temp_dir, folder),
+                    folder=folder,
                     interval=1,
                     keep_latest_k=0,
+                    export_dtype="bfloat16",
                     **config,
                 ),
                 model_parts=[model],
@@ -431,96 +463,165 @@ class TestFlexShardDecoder(DTensorTestBase):
                 lr_schedulers=cast(Any, None),
                 ema=None,
                 extra_states={},
-                sd_adapter=type(model).state_dict_adapter_cls(model.config, None),
+                sd_adapter=None,
+                base_folder=self.temp_dir,
             )
+            return model, setup, optimizers, checkpointer
 
-        def path(folder):
-            return os.path.join(self.temp_dir, folder)
+        model, setup, optimizers, checkpointer = build(FSDP2Config(), "fsdp2")
+        self._train(model, *setup, 1, False, optim=optimizers)
+        checkpointer.save(3)
+        checkpointer.save(3, last_step=True)
+        checkpointer.close()
 
-        # FSDP2's uninterrupted run, which saves after steps 3 and 6, and
-        # exports in bf16 and as a Hugging Face checkpoint after step 3.
-        model, optimizers, train = build(FSDP2Config())
-        reference = train(range(3))
-        fsdp2 = checkpointer(model, optimizers, "fsdp2")
-        fsdp2.save(3)
-        export = checkpointer(model, optimizers, "fsdp2", export_dtype="bfloat16")
-        export.save(3, last_step=True)
-        export.close()
-        export = checkpointer(model, optimizers, "fsdp2_hf", last_save_in_hf=True)
-        export.save(3, last_step=True)
-        export.close()
-        reference += train(range(3, 6))
-        fsdp2.save(6)
-        fsdp2.close()
-
-        # FlexShard's checkpoints after the same 3 steps are FSDP2's, saved in
-        # sync and threaded async mode, and exported in bf16.
-        model, optimizers, train = build(FlexShardConfig())
-        train(range(3))
-        for folder, config in (
-            ("flex", {}),
-            ("flex_async", {"async_mode": "async"}),
-            ("flex", {"export_dtype": "bfloat16"}),
-        ):
-            flex = checkpointer(model, optimizers, folder, **config)
-            flex.save(3, last_step="export_dtype" in config)
-            flex.close()
-        self._assert_equal_checkpoints(path("fsdp2/step-3"), path("flex/step-3"))
-        self._assert_equal_checkpoints(path("fsdp2/step-3"), path("flex_async/step-3"))
-        self._assert_equal_checkpoints(
-            path("fsdp2/exports/step-3"), path("flex/exports/step-3")
+        # FlexShard's own initialization differs from FSDP2's, so only a load
+        # gives it FSDP2's values.
+        flex, _, flex_optimizers, checkpointer = build(
+            FlexShardConfig(),
+            "flex",
+            initial_load_path=os.path.join(self.temp_dir, "fsdp2", "step-3"),
+            initial_load_model_only=False,
         )
-
-        # FlexShard loads the Hugging Face export into FSDP2's step-3
-        # parameters, and its next step's losses, grad norm and grads, which
-        # don't depend on the optimizer state, are FSDP2's.
-        model, optimizers, train = build(FlexShardConfig())
-        hf_load = checkpointer(
-            model,
-            optimizers,
-            "flex_hf",
-            initial_load_path=path("fsdp2_hf/exports/step-3"),
-            initial_load_in_hf=True,
-        )
-        self.assertTrue(hf_load.load())
-        hf_load.close()
+        self.assertTrue(checkpointer.load())
+        # Saving again gives the same checkpoint even if ranks swapped their
+        # shards, so check that each rank loaded FSDP2's.
         self._assert_equal_tensors(
-            reference[2][3], self._local_params(model), "HF load"
+            self._local_params(model), self._local_params(flex), "loaded param"
         )
-        ((losses, grad_norm, grads, _),) = train(range(3, 4))
-        for expected_loss, loss in zip(reference[3][0], losses, strict=True):
-            self.assertTrue(torch.equal(expected_loss, loss), msg="HF load loss")
-        self.assertTrue(torch.equal(reference[3][1], grad_norm), msg="HF load norm")
-        self._assert_equal_tensors(reference[3][2], grads, "HF load grad")
-
-        # Each backend resumes from the other's step-3 checkpoint, and its next
-        # 3 steps are FSDP2's uninterrupted ones.
-        for fsdp_backend, source, target in (
-            (FlexShardConfig(), "fsdp2", "flex"),
-            (FSDP2Config(), "flex", "fsdp2"),
-        ):
-            model, optimizers, train = build(fsdp_backend)
-            resumed = checkpointer(
-                model,
-                optimizers,
-                f"{source}_to_{target}",
-                initial_load_path=path(f"{source}/step-3"),
-                initial_load_model_only=False,
-            )
-            self.assertTrue(resumed.load())
-            self._assert_equal_histories(
-                reference[3:],
-                train(range(3, 6)),
-                f"{source} to {target}",
-                first_step=3,
-            )
-            # The load replaced the state dicts' tensors, whose replacements
-            # declare their layouts too.
-            resumed.save(6)
-            resumed.close()
+        self._assert_equal_tensors(
+            self._optimizer_states(model, optimizers),
+            self._optimizer_states(flex, flex_optimizers),
+            "loaded AdamW state",
+        )
+        checkpointer.save(3)
+        checkpointer.save(3, last_step=True)
+        checkpointer.close()
+        for checkpoint in ("step-3", os.path.join("exports", "step-3")):
             self._assert_equal_checkpoints(
-                path("fsdp2/step-6"), path(f"{source}_to_{target}/step-6")
+                os.path.join(self.temp_dir, "fsdp2", checkpoint),
+                os.path.join(self.temp_dir, "flex", checkpoint),
             )
+
+    def _optimizer_states(self, model, optimizers) -> dict[str, torch.Tensor]:
+        states = {p: s for o in optimizers.optimizers for p, s in o.state.items()}
+        return {
+            f"{fqn} {name}": _local(value)
+            for fqn, param in model.named_parameters()
+            for name, value in states[param].items()
+        }
+
+    def _check_hf_loads_match_fsdp2(
+        self, build_config, flavor: str, *, ep: int, tp: int = 1
+    ):
+        # FSDP2 trains three steps and exports a Hugging Face checkpoint. A
+        # fresh FSDP2 model and a fresh FlexShard model, each from its own
+        # initialization, load it: FSDP2 gets the exported parameters,
+        # FlexShard's shards are their slices, and both train alike from them.
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size // tp,
+            cp=1,
+            tp=tp,
+            pp=1,
+            ep=ep,
+            world_size=self.world_size,
+            enable_sequence_parallel=tp > 1,
+        )
+
+        def build(fsdp_backend, folder, **config):
+            model, *setup = self._build(
+                build_config, flavor, fsdp_backend, "default", parallelism_context
+            )
+            checkpointer = CheckpointManager(
+                CheckpointManager.Config(folder=folder, **config),
+                model_parts=[model],
+                optimizers=cast(Any, None),
+                lr_schedulers=cast(Any, None),
+                ema=None,
+                extra_states={},
+                sd_adapter=type(model).state_dict_adapter_cls(model.config, None),
+                base_folder=self.temp_dir,
+            )
+            return model, setup, checkpointer
+
+        model, setup, export = build(FSDP2Config(), "fsdp2", last_save_in_hf=True)
+        self._train(model, *setup, 1, False)
+        export.save(3, last_step=True)
+        export.close()
+        exported = {
+            fqn: cast(DTensor, param).full_tensor()
+            for fqn, param in model.named_parameters()
+        }
+
+        loaded = []
+        for fsdp_backend, folder in (
+            (FSDP2Config(), "fsdp2"),
+            (FlexShardConfig(), "flex"),
+        ):
+            model, setup, checkpointer = build(
+                fsdp_backend,
+                folder,
+                initial_load_path=os.path.join(
+                    self.temp_dir, "fsdp2", "exports", "step-3"
+                ),
+                initial_load_in_hf=True,
+            )
+            self.assertTrue(checkpointer.load())
+            checkpointer.close()
+            loaded.append((model, setup))
+        (fsdp2, _), (flex, _) = loaded
+        for fqn, param in fsdp2.named_parameters():
+            self.assertTrue(
+                torch.equal(cast(DTensor, param).full_tensor(), exported[fqn]),
+                msg=f"FSDP2 {fqn}",
+            )
+        layouts = flex_shard.get_flex_shard_global_layouts(flex)
+        mismatches = [
+            fqn
+            for fqn, param in flex.named_parameters()
+            if not all(
+                torch.equal(
+                    param[_box(local_offset, size)],
+                    exported[fqn][_box(global_offset, size)],
+                )
+                for global_offset, local_offset, size in zip(
+                    layouts[fqn].global_offsets,
+                    layouts[fqn].local_offsets,
+                    layouts[fqn].local_sizes,
+                    strict=True,
+                )
+            )
+        ]
+        # Fail on every rank together. Otherwise a rank whose shards match,
+        # e.g. a tp rank whose columns start at 0, would wait in the training's
+        # collectives for one that failed.
+        all_mismatches: list[Any] = [None] * self.world_size
+        dist.all_gather_object(all_mismatches, mismatches)
+        self.assertFalse(
+            any(all_mismatches), msg=f"FlexShard shards, by rank: {all_mismatches}"
+        )
+        self._assert_equal_histories(
+            *(self._train(model, *setup, 1, False) for model, setup in loaded),
+            f"{flavor} after the Hugging Face load",
+        )
+
+    @with_comms
+    @with_temp_dir
+    @parametrize("tp", [1, 2])
+    def test_hf_loads_match_fsdp2(self, tp: int):
+        # Llama 3 splits the packed QKV and the stacked w13, and permutes the
+        # query and key rows for rotary embeddings. TP splits wo and w2 in
+        # their last dim, so each shard holds columns of its rows of o_proj and
+        # down_proj, and the other weights in a leading dim. The buckets then
+        # shard each tp rank's part.
+        self._check_hf_loads_match_fsdp2(build_llama3_config, "debugmodel", ep=1, tp=tp)
+
+    @with_comms
+    @with_temp_dir
+    def test_hf_loads_match_fsdp2_with_expert_parallelism(self):
+        # Qwen3 splits the routed experts into one tensor per expert, which
+        # ep=2 splits over EP ranks, then edp_shard.
+        self._check_hf_loads_match_fsdp2(build_qwen3_config, "debugmodel_moe", ep=2)
 
     def _assert_equal_checkpoints(self, expected_dir: str, actual_dir: str) -> None:
         """Assert that two DCP checkpoints hold the same keys, the same chunks
@@ -565,34 +666,77 @@ class TestFlexShardDecoder(DTensorTestBase):
         if error[0] is not None:
             raise error[0]
 
-    @with_comms
-    @with_temp_dir
-    def test_checkpoints_across_backends(self):
-        # FlexShard's checkpoints hold the same chunks of the same full tensors
-        # as FSDP2's, so either backend resumes from the other's checkpoints,
-        # bit for bit. Llama 3 shards its stacked linears on dim 1, which the
-        # Hugging Face conversion splits.
-        self._check_checkpoints_across_backends(build_llama3_config, "debugmodel", ep=1)
 
-    @with_comms
-    @with_temp_dir
-    def test_checkpoints_across_backends_with_tensor_parallelism(self):
-        # The parameters TP splits declare where each tp rank's shard sits,
-        # and the Hugging Face load converts their DTensor views, sharded on tp.
-        self._check_checkpoints_across_backends(
-            build_llama3_config, "debugmodel", ep=1, tp=2, sequence_parallel=True
+@pytest.mark.parametrize("dp_shard, tp", [(5, 1), (5, 2)])
+def test_hf_load_into_uneven_shards(tmp_path, dp_shard: int, tp: int) -> None:
+    # Each simulated rank of (tp, dp_shard) holds the box torch.chunk gives it
+    # of each parameter: its chunk of the bucket's dim (1 for w13, else 0) and,
+    # with tp > 1, of the last dim, as tensor parallelism splits row-wise
+    # parallel weights. At dp_shard=5, shards end inside attention heads, so
+    # some Hugging Face tensors load in several chunks into a buffer. The
+    # parity tests' shards end on head boundaries. Each rank loads only its
+    # own shards, without a process group.
+    model_config = build_llama3_config(
+        "debugmodel",
+        parallelism=ParallelismConfig(),
+        seq_len=_SEQ_LEN,
+        attn_backend="flex",
+    )
+    with torch.device("meta"):
+        model = model_config.build()
+    sd_adapter = type(model).state_dict_adapter_cls(model_config, None)
+    generator = torch.Generator().manual_seed(0)
+    full = {
+        key: torch.randn(value.shape, generator=generator)
+        for key, value in model.state_dict().items()
+    }
+    hf_state_dict = sd_adapter.to_hf(
+        {key: value.clone() for key, value in full.items()}
+    )
+    save_file(
+        {key: value.contiguous() for key, value in hf_state_dict.items()},
+        str(tmp_path / "model.safetensors"),
+    )
+    for tp_rank, dp_rank in product(range(tp), range(dp_shard)):
+        state_dict, boxes = {}, {}
+        for key, value in full.items():
+            splits = {1 if key.endswith("w13.weight") else 0: (dp_shard, dp_rank)}
+            if value.ndim > 1:
+                splits[value.ndim - 1] = (tp, tp_rank)
+            offsets, sizes = [], []
+            for dim, length in enumerate(value.shape):
+                num_chunks, rank = splits.get(dim, (1, 0))
+                chunk = -(-length // num_chunks)
+                offsets.append(min(rank * chunk, length))
+                sizes.append(min(chunk, length - offsets[-1]))
+            state_dict[key] = torch.zeros(sizes)
+            flex_shard.set_global_layout(
+                state_dict[key],
+                flex_shard.GlobalLayout(
+                    global_shape=tuple(value.shape),
+                    global_offsets=(tuple(offsets),),
+                    local_offsets=((0,) * value.ndim,),
+                    local_sizes=(tuple(sizes),),
+                ),
+            )
+            boxes[key] = _box(offsets, sizes)
+        load_hf_into_local_shards(
+            sd_adapter, state_dict, sd_adapter.get_hf_storage_reader(str(tmp_path))
         )
-
-    @with_comms
-    @with_temp_dir
-    def test_checkpoints_across_backends_with_expert_parallelism(self):
-        # The routed experts' chunks cover every ep rank's experts.
-        self._check_checkpoints_across_backends(
-            build_qwen3_config, "debugmodel_moe", ep=2
-        )
+        for key, local in state_dict.items():
+            assert torch.equal(local, full[key][boxes[key]]), (tp_rank, dp_rank, key)
 
 
-def _chunks(metadata: TensorStorageMetadata) -> list[tuple[tuple[int, ...], ...]]:
+def _box(offsets, sizes) -> tuple[slice, ...]:
+    return tuple(
+        slice(offset, offset + size)
+        for offset, size in zip(offsets, sizes, strict=True)
+    )
+
+
+def _chunks(
+    metadata: TensorStorageMetadata,
+) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
     """A checkpointed tensor's non-empty chunks as (offsets, sizes) pairs.
 
     FSDP2 also saves an empty chunk for each rank without data.

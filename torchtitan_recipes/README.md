@@ -12,6 +12,7 @@ not recommendations for real training.
 The package is organized by ownership:
 
 - `models/` contains verified recipes for core models.
+- `sft/` contains supervised fine-tuning recipes, one module per dataset.
 - `graph_trainer/`, `torchft/`, and `rl/` mirror their owning experimental or
   training subsystem.
 - `overrides/` contains opt-in component implementations.
@@ -25,6 +26,7 @@ The package is organized by ownership:
 | `torchtitan_recipes.models.qwen3` | Qwen3 pretraining and SFT | `torchtitan/models/qwen3/README.md` |
 | `torchtitan_recipes.models.flux` | Flux pretraining | `torchtitan/models/flux/README.md` |
 | `torchtitan_recipes.models.muse_glimmer` | Muse Glimmer pretraining | `torchtitan/models/muse_glimmer/README.md` |
+| `torchtitan_recipes.models.muse_spark` | Muse Spark pretraining | `torchtitan/models/muse_spark/README.md` |
 | `torchtitan_recipes.graph_trainer.llama3` | GraphTrainer Llama 3 | `torchtitan/experiments/graph_trainer/README.md` |
 | `torchtitan_recipes.graph_trainer.qwen3` | GraphTrainer Qwen3 | `torchtitan/experiments/graph_trainer/README.md` |
 | `torchtitan_recipes.graph_trainer.deepseek_v3` | GraphTrainer DeepSeek V3 | `torchtitan/experiments/graph_trainer/README.md` |
@@ -33,6 +35,7 @@ The package is organized by ownership:
 | `torchtitan_recipes.rl.search_r1` | RL Search-R1 | `torchtitan/rl/examples/search_r1/` |
 | `torchtitan_recipes.rl.verifiers_dapo_math` | RL verifiers DAPO math | `torchtitan/rl/examples/verifiers/dapo_math/` |
 | `torchtitan_recipes.rl.verifiers_terminal_bench` | RL verifiers terminal bench | `torchtitan/rl/examples/verifiers/terminal_bench/` |
+| `torchtitan_recipes.sft.slake` | SLAKE medical VQA LoRA SFT (Muse Spark, Muse Glimmer) | `torchtitan_recipes/sft/slake.py` |
 | `torchtitan_recipes.decision.qwen3` | Typed-decision (Jev-style) fine-tuning | `torchtitan_recipes/decision/README.md` |
 | `torchtitan_recipes.torchft.llama3` | TorchFT replicated training | `torchtitan/experiments/torchft/README.md` |
 

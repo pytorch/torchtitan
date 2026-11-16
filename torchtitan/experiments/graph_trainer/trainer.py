@@ -14,13 +14,11 @@ import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
-from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graphs_supported,
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_accelerator_graph,
 )
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -218,8 +216,6 @@ class GraphTrainingEngine(TrainingEngine):
                 num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
                 annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
             )
-
-        maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
@@ -431,13 +427,6 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
-            if isinstance(self.parallelism.fsdp_backend, FlexShardConfig):
-                # GraphTrainerModel.parallelize shards with SimpleFSDP, not
-                # through _apply_fsdp.
-                raise ValueError(
-                    "GraphTrainer does not support "
-                    f"parallelism.fsdp_backend={self.parallelism.fsdp_backend!r}."
-                )
             if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."

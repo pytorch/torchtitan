@@ -146,7 +146,7 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
     # Keep the version in sync with the attn-gym pin in .ci/docker/requirements.txt.
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
-        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.18'.",
+        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.20'.",
         name="attn_gym",
     )
 

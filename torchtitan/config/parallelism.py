@@ -12,7 +12,6 @@ from typing import get_args, Literal, TypeAlias
 import torch
 
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 
 
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
@@ -26,6 +25,17 @@ class FSDP2Config:
 
     It lives here rather than in ``torchtitan.distributed.fsdp``, which imports
     this module.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class FlexShardConfig:
+    """Shard parameters with FlexShard (meta-pytorch/flex_shard) in place of
+    FSDP2's ``fully_shard``.
+
+    Each FSDP2 group becomes an ``fsdp2_compatible`` bucket with the FSDP
+    settings in ``parallelism``, so training from the same parameters is
+    bitwise identical to FSDP2.
     """
 
 
@@ -85,15 +95,31 @@ class ParallelismConfig:
     experts.
     """
 
+    fsdp_unshard_in_current_stream: bool = False
+    """
+    Issue FSDP pre-forward/pre-backward all-gathers on the current (compute)
+    stream instead of on separate all-gather streams, via
+    ``FSDPModule.set_unshard_in_current_stream``. All-gather
+    buffers are then allocated in the compute stream's memory pool, avoiding
+    inter-stream fragmentation. All-gathers still overlap with compute via
+    explicit forward/backward prefetching, but the pre-all-gather copy-in and
+    dtype cast no longer overlap with compute.
+
+    Supported for decoders whose FSDP units run in the order
+    ``tok_embeddings -> layers -> norm/lm_head``, which is the chain the
+    explicit prefetching follows. Raises for models with MTP layers or
+    multimodal encoders, and for Flux.
+    """
+
     fsdp_backend: FSDP2Config | FlexShardConfig = field(default_factory=FSDP2Config)
     """
     How parameters are sharded over ``dp_shard``. ``FSDP2Config()``, the default,
     applies PyTorch's FSDP2 ``fully_shard``. ``FlexShardConfig()`` applies
     FlexShard (meta-pytorch/flex_shard), with one ``fsdp2_compatible`` bucket per
-    FSDP2 group, so training is bitwise identical to FSDP2. FlexShard does not
-    support HSDP or pipeline parallelism, symmetric-memory communication or CPU
-    offloading yet. With expert parallelism, it supports only routed experts
-    that use ``AllToAllTokenDispatcher`` and have no ``output_postprocess``.
+    FSDP2 group, so training from the same parameters is bitwise identical to
+    FSDP2. ``validate_flex_shard_training`` in
+    ``torchtitan/distributed/flex_shard_fsdp.py`` rejects what FlexShard doesn't
+    support yet.
     """
 
     tensor_parallel_degree: int = 1

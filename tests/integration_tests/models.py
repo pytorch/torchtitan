@@ -225,7 +225,7 @@ def deepseek_v3_debugmodel_hsdp2x2_ep2() -> Trainer.Config:
     return config
 
 
-def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
     from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 
     config = deepseek_v4_debugmodel(
@@ -238,7 +238,12 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 1
-    config.parallelism.pipeline_parallel_degree = 1
+    config.parallelism.pipeline_parallel_degree = 2
+    # Interleaved1F1B gives four virtual stages over the four debug layers:
+    # one stage holds hash layer 1 without tok_embeddings, and the last holds
+    # only hc_head, norm and lm_head.
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 512
     config.training.steps = 10
     config.training.disable_accelerator_graphs = True
@@ -719,19 +724,17 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[deepseek_v4_debugmodel_fsdp2_tp2_ep2],
-            test_descr="DeepSeek V4 AdamW FSDP+TP+EP",
-            test_name="deepseek_v4_fsdp+tp+ep",
-            ngpu=4,
+            configs=[deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2],
+            test_descr="DeepSeek V4 AdamW FSDP+TP+EP+PP",
+            test_name="deepseek_v4_fsdp+tp+ep+pp",
+            ngpu=8,
             # Sparse attention / indexer kernels are CUDA-only and unvalidated
             # on ROCm.
             skip_rocm_test=True,
-            # Runs on a real PG. Under Fake PG this config's sequence-parallel
-            # collectives return activations that alias their inputs, which
-            # corrupts a saved-for-backward tensor and blows up grad_norm at
-            # step 1. The same config trains cleanly on a real 4-GPU PG
-            # (grad_norm ~3.8), so keep it on a real PG until the Fake PG
-            # collective aliasing under spmd_types is fixed.
+            # Runs on a real PG: PP needs real send/recv, and under Fake PG
+            # this config's sequence-parallel collectives return activations
+            # that alias their inputs, which corrupts a saved-for-backward
+            # tensor and blows up grad_norm at step 1.
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
