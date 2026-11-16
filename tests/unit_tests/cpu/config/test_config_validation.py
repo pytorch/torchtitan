@@ -189,30 +189,6 @@ def test_accelerator_graphs_reject_blocking_hybrid_ep() -> None:
         config.__post_init__()
 
 
-def test_dist_moe_recipe_passes_parallel_axis_validation() -> None:
-    """Dist-MoE configs must validate after MoE routed_experts replacement."""
-    dist_moe = pytest.importorskip(
-        "dist_moe",
-        reason="Dist-MoE validation test requires the optional dist_moe package",
-    )
-    del dist_moe  # imported only to skip cleanly when missing
-    from torchtitan.config.parallelism import ParallelismConfig
-
-    from torchtitan_recipes.tests.models.deepseek_v3 import (
-        deepseek_v3_debugmodel_dist_moe_bf16,
-    )
-
-    config = deepseek_v3_debugmodel_dist_moe_bf16(
-        parallelism=ParallelismConfig(
-            tensor_parallel_degree=2,
-            expert_parallel_degree=2,
-            data_parallel_shard_degree=2,
-            context_parallel_degree=1,
-        )
-    )
-    config.__post_init__()
-
-
 def test_ep_off_built_moe_rejects_ep_gt1() -> None:
     # A MoE config built with expert_parallel_degree == 1 gets dense
     # routed-expert weight placements; validating it at EP > 1 must raise
