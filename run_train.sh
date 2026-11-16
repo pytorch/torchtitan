@@ -44,7 +44,11 @@ if [ "$COMM_BACKEND" = "fake" ]; then
     NGPU="${NGPU}" LOCAL_RANK=0 python3 -m ${ENTRYPOINT} --module ${MODULE} --config ${CONFIG} --comm-backend fake "$@"
 else
     # Normal training with torchrun
-    PYTORCH_ALLOC_CONF="expandable_segments:True" \
+    # Overridable: XPU's caching allocator doesn't support expandable_segments
+    # yet and SIGSEGVs if asked to use it.
+    # TODO(intel/torch-xpu-ops#4427): drop this override once XPU supports
+    # expandable_segments.
+    PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF-expandable_segments:True}" \
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
     torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \

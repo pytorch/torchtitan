@@ -236,6 +236,7 @@ def run_single_test(
         visible = ",".join(map(str, gpu_ids))
         base_env["CUDA_VISIBLE_DEVICES"] = visible
         base_env["HIP_VISIBLE_DEVICES"] = visible
+        base_env["ZE_AFFINITY_MASK"] = visible
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
     base_env.pop("COMM_BACKEND", None)
@@ -532,13 +533,13 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda", "rocm", "xpu"],
+        help="GPU architecture type: 'cuda', 'rocm' or 'xpu'.",
     )
     parser.add_argument(
         "--gpu_arch",
         default=None,
-        choices=["a10g", "h100", "b200", "mi350x"],
+        choices=["a10g", "h100", "b200", "mi350x", "pvc"],
         help=(
             "Specific GPU model, used to select the matching golden numerics "
             "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
@@ -603,7 +604,9 @@ def main():
     )
     args = parser.parse_args()
     if args.gpu_arch is None:
-        args.gpu_arch = "mi350x" if args.gpu_arch_type == "rocm" else "a10g"
+        args.gpu_arch = {"rocm": "mi350x", "xpu": "pvc"}.get(
+            args.gpu_arch_type, "a10g"
+        )
 
     try:
         test_suites = _parse_test_suites(args.test_suite)

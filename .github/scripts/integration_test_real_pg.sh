@@ -7,7 +7,7 @@
 # ECR, which the ROCm runners cannot authenticate to.
 #
 # Inputs (environment):
-#   GPU_ARCH_TYPE   cuda | rocm
+#   GPU_ARCH_TYPE   cuda | rocm | xpu
 #   TORCH_VERSION   pinned torch version, or empty for the channel default
 #   INDEX_URL       pip index to install torch/torchvision/torchao from
 #   TEST_SUITE      features | models
@@ -44,6 +44,14 @@ if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
   if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
     export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
   fi
+elif [[ "${GPU_ARCH_TYPE}" == "xpu" ]]; then
+  GPU_ARCH="pvc"
+  # expandable_segments is unsupported by the XPU allocator and SIGSEGVs at
+  # startup; empty keeps run_train.sh from setting it.
+  export PYTORCH_ALLOC_CONF=""
+  # The image's sccache (/opt/cache/bin) has no backend configured and breaks
+  # triton's JIT builds; point triton at the plain compilers (same as torchao).
+  export CC=/usr/bin/gcc CXX=/usr/bin/g++ SCCACHE_DISABLE=1
 fi
 
 sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
