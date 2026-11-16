@@ -17,7 +17,7 @@ dependency of its own: it declares the service's methods as
 
 | Module | Purpose |
 | --- | --- |
-| `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client, and stops the meshes. |
+| `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client (or the `ModelStateDictTransport`), and stops the meshes. |
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
@@ -110,10 +110,12 @@ returns (see `ActorSystem`): `.call()` with `.get(rank)` on its result,
 `.call_one()`, `.choose()`, `.stream()` and `.broadcast()`. The trainer comes
 back as a `TrainerHandle` with all-ranks, rank-0 and per-DP-rank handles, and
 each generator as a `ServiceHandle` the router gets, so callers never slice
-meshes themselves. The controller reaches the generators only through the
-router. These calls appear in the controller, the rollouter (`.choose()` on the
-worker pool) and the router (on generator handles). The batcher and the trainer
-see RDMA microbatches only through the `RDMAMicrobatch` interface.
+meshes themselves. Generator handles come only from the router: its `reserve`
+returns the one a generate call goes to, and every other generator call goes
+through the router's endpoints. These calls appear in the controller (and its
+`GenerateFn`), the rollouter (`.choose()` on the worker pool) and the router (on
+generator handles). The batcher and the trainer see RDMA microbatches only
+through the `RDMAMicrobatch` interface.
 
 Another actor framework (e.g. Ray) would add its own `ActorSystem`
 implementation and adapters, wrapping its handles to provide this call

@@ -61,7 +61,8 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         grad_accumulators: list[Any] | None,
         indices: tuple[int, ...],
         initial_grad_accumulators: tuple[torch.Tensor, ...],
-    ) -> list[Any]: ...
+    ) -> list[Any]:
+        ...
 
     def _forward_args(
         self,
@@ -74,7 +75,8 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         buffer_values: list[Any],
         activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
-    ) -> list[Any]: ...
+    ) -> list[Any]:
+        ...
 
     def _backward_args(
         self,
@@ -82,17 +84,20 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         output_grads_from_next: tuple[Any, ...],
         *,
         runtime_validate: bool = False,
-    ) -> list[Any]: ...
+    ) -> list[Any]:
+        ...
 
     def _split_forward_outputs(
         self,
         fw_outputs: tuple[Any, ...],
-    ) -> tuple[Any, tuple[Any, ...]]: ...
+    ) -> tuple[Any, tuple[Any, ...]]:
+        ...
 
     def _split_full_backward_outputs(
         self,
         bw_outputs: tuple[Any, ...],
-    ) -> tuple[list[Any], list[Any]]: ...
+    ) -> tuple[list[Any], list[Any]]:
+        ...
 
 
 @dataclasses.dataclass(slots=True)

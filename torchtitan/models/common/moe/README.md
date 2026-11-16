@@ -13,7 +13,7 @@ checkpoint parameter names stay in TorchTitan.
 | Quantized grouped GEMMs with the reference dispatcher | `TorchAOTokenDispatcher` | Adds per-expert padding to all-to-all. Also supports EP=1. |
 | NVIDIA training or inference with a separate grouped-GEMM implementation | `DeepEPTokenDispatcher` | Requires DeepEP v2. Training uses compact dispatch with a CPU sync; disable training accelerator graphs. Inference under `no_grad` can use `cuda_graph_compatible=True` for the static expand layout. |
 | NVIDIA training with graph-captured EP communication, including graph trainer | `HybridEPTokenDispatcher` | Requires the HybridEP branch and a supported NVLink/network topology. Set `non_blocking_capacity_factor` for CPU-free dispatch. |
-| Blackwell BF16 or MXFP8 training with integrated communication and compute | Dist-MoE | Requires SM100 or newer and `training.mixed_precision_param="bfloat16"`. Start with the [Dist-MoE recipes and runtime guide](../dist_moe/README.md). |
+| Blackwell BF16 or MXFP8 training with integrated communication and compute | Dist-MoE | Requires SM100 or newer and `precision.param_dtype="bfloat16"`. Start with the [Dist-MoE recipes and runtime guide](../dist_moe/README.md). |
 
 Without expert parallelism, `LocalTokenDispatcher` only reorders local tokens.
 DeepEP and HybridEP require EP>1. TorchTitan does not expose a separate DeepEP
@@ -35,6 +35,9 @@ measure training step time and peak memory on the actual routing distribution.
 Dispatch/combine microbenchmarks alone do not measure overlap with expert GEMMs
 or the cost of activation rematerialization. Run at least 10 training steps so
 startup does not dominate the comparison.
+
+See [router-score absorption](ROUTER_SCORE_ABSORPTION.md) for diagrams of DeepEP
+score placement, biased experts, postprocessing, and checkpoint dependencies.
 
 ## Configure a dispatcher
 
@@ -102,12 +105,13 @@ config.activation_remat = ActivationRematConfig(
 )
 ```
 
-DeepEP and HybridEP save or replay dispatch and combine together under
-`ep_communication`; selecting just its `.dispatch` or `.combine` suffix does
-not control the pair. Full remat replays both. DeepEP then enables deterministic
-receive ordering, adding a sort; HybridEP derives token positions from prefix
-scans. The all-to-all dispatcher instead has independent `dispatch` and
-`combine` regions that include local reordering and collectives.
+DeepEP uses `ep_communication` to control dispatch replay and always saves the
+complete combine region, including unpermute. Full remat replays dispatch with
+deterministic receive ordering, adding a sort. HybridEP saves or replays
+dispatch and combine together under `ep_communication`; selecting just its
+`.dispatch` or `.combine` suffix does not control the pair. It derives token
+positions from prefix scans. The all-to-all dispatcher instead has independent
+`dispatch` and `combine` regions that include local reordering and collectives.
 
 Dist-MoE always retains its outer region and owns its internal activation
 save/recompute decisions. See [REMAT.md](../../../distributed/REMAT.md) for

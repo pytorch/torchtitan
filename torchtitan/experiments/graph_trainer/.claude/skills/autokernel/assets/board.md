@@ -43,8 +43,8 @@ independent verdict to the coordinator and records it here.
 ## Verifications
 
 One newly spawned verifier per claimed win. For substitute-kernels problems, the
-coordinator replaces `<kernel_name>` only after a pass with a measurable
+coordinator replaces `<l2>.py` only after a pass with a measurable
 speedup, and records the replaced file's backup path, if any.
 
-| Time | Problem / trial + hash | Claimed by | Verifier | Exactness / contract | Median us vs current | Verdict | Replaced kernel_name (backup path) |
+| Time | Problem / trial + hash | Claimed by | Verifier | Exactness / contract | Median us vs current | Verdict | Replaced <l2>.py (backup path) |
 | --- | --- | --- | --- | --- | ---: | --- | --- |

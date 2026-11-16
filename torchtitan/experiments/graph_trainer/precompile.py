@@ -99,7 +99,7 @@ def compute_config_fingerprint(
                 f"parallel:{f.name}:{getattr(parallelism_context, f.name)}\n".encode()
             )
 
-    h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
+    h.update(f"compile:extra_passes:{list(compile_config.extra_passes)}\n".encode())
     h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
     h.update(
         "compile:full_recompute_save_ops:"
@@ -113,6 +113,9 @@ def compute_config_fingerprint(
     )
     h.update(
         f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
+    )
+    h.update(
+        f"compile:programmable_fusion:{compile_config.programmable_fusion!r}\n".encode()
     )
     h.update(f"torch_version:{torch.__version__}\n".encode())
 

@@ -17,7 +17,7 @@ import torch
 import torch.distributed as dist
 import torch_remat as remat
 
-from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_dense_sp_enabled
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 from torchtitan.models.common.linear.inplace_wgrad_accum import (
     reject_inplace_wgrad_accum,
@@ -306,6 +306,10 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
         if tp_group is None:
             _warn_once_no_tp_overlap()
             return super().forward(input)
+        if not spmd_dense_sp_enabled():
+            # Without sequence parallelism (e.g. inside a vision encoder, see
+            # disable_dense_sp) there is no sequence collective to overlap.
+            return super().forward(input)
 
         weight, bias = self.weight, self.bias
         weight_NK, bias_N = self._flatten_weight_and_bias(weight, bias)
@@ -345,6 +349,10 @@ class AsyncRowParallelLinear(RowParallelLinear):
         tp_group = _tp_group_from_context()
         if tp_group is None:
             _warn_once_no_tp_overlap()
+            return super().forward(input)
+        if not spmd_dense_sp_enabled():
+            # Without sequence parallelism (e.g. inside a vision encoder, see
+            # disable_dense_sp) there is no sequence collective to overlap.
             return super().forward(input)
 
         weight, bias = self.weight, self.bias

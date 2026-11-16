@@ -1,9 +1,9 @@
 # Muse Glimmer
 
 This is a Torchtitan implementation of Muse Glimmer.
-It ports both the **text** decoder and an optional
- **vision/multimodal** path (a vision encoder + adapter that
-`MuseGlimmerModel` owns and runs inside `forward`).
+It ports both the **text** decoder (`MuseGlimmerModel`) and the
+**vision/multimodal** model (`MuseGlimmerMultimodalModel`, which owns a vision
+encoder + adapter and runs them inside `forward`).
 
 ## Quick start
 
@@ -46,8 +46,8 @@ built in [`__init__.py`](./__init__.py).
 
 ## Multimodal (vision)
 
-The `*_mm` flavors make `MuseGlimmerModel` own a vision encoder + adapter
-([shared Spark implementation](../muse_spark/vision_encoder.py)) and run them inside `forward`,
+The `*_mm` flavors build `MuseGlimmerMultimodalModel`, which owns a vision encoder + adapter
+([shared Spark implementation](../muse_spark/vision_encoder.py)) and runs them inside `forward`,
 building packed vision features and gathering them into token embeddings using
 bank indices prepared before token sharding. Multimodal fusion is TP-replicated;
 the first decoder layer restores the standard decoder layout (sequence-parallel

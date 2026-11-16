@@ -10,7 +10,7 @@ from typing import Any
 
 import torch
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -33,6 +33,7 @@ class GraphTrainerModel:
         self,
         *,
         parallelism_context: ParallelismContext,
+        precision: PrecisionConfig,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: GraphTrainerCompileConfig,
@@ -40,6 +41,12 @@ class GraphTrainerModel:
         dump_folder: str,
     ):
         del activation_remat
+        # TODO: pass preserve_dtype_params to SimpleFSDP's mixed precision.
+        if any(self.named_preserve_dtype_params()):
+            raise ValueError(
+                "GraphTrainer's SimpleFSDP casts every parameter to "
+                "precision.param_dtype and does not support preserve_dtype_params."
+            )
         if (
             training.num_tokens_per_microbatch_per_dp_rank
             % parallelism_context.seq_len_divisor
@@ -57,7 +64,7 @@ class GraphTrainerModel:
         model = apply_simple_fsdp(
             self,
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
         )
         maybe_apply_ep_overlap_eager_chunking(model, compile_config)
         return apply_compile(
