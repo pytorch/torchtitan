@@ -13,8 +13,6 @@ Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 The Muse Glimmer example is capped at its model's 16K context length.
 """
 
-import math
-
 import verifiers.v1 as vf
 
 from renderers import CustomRendererConfig, Qwen35RendererConfig
@@ -42,11 +40,9 @@ from torchtitan.rl.controller.controller import (
     ValidationConfig,
 )
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
-    VerifiersRollouter,
     VerifiersRolloutWorker,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
@@ -68,6 +64,7 @@ from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
+from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
@@ -81,8 +78,6 @@ from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
-_ENV_SERVER_WORKERS = 16
-
 
 def _terminal_bench_rollouter_config(
     train_dataset: str,
@@ -90,15 +85,12 @@ def _terminal_bench_rollouter_config(
     *,
     max_context_length: int,
     max_turns: int,
-    max_concurrent_rollouts: int,
-) -> VerifiersRollouter.Config:
+) -> Rollouter.Config:
     """Select Harbor datasets by id.
 
-    ``max_context_length`` is the generator's sequence length; the generation
-    server caps each rollout at it. ``max_turns`` is the agent turn limit,
-    which Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server;
-    set it to the number of rollouts the controller keeps in flight, or the
-    excess queues in the env server and the generators idle.
+    `max_context_length` is the generator's sequence length; the generation
+    server caps each rollout at it. `max_turns` is the agent turn limit,
+    which Verifiers enforces.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
@@ -106,12 +98,11 @@ def _terminal_bench_rollouter_config(
         )
 
     taskset_id = register_local_taskset_alias(TerminalTasksetConfig.__module__)
-    return VerifiersRollouter.Config(
+    training_taskset = TerminalTasksetConfig(id=taskset_id, dataset=train_dataset)
+    return Rollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=VerifiersTaskDataset.Config(
-                verifiers_taskset=TerminalTasksetConfig(
-                    id=taskset_id, dataset=train_dataset
-                ),
+                verifiers_taskset=training_taskset,
                 seed=42,
                 shuffle=True,
             ),
@@ -123,12 +114,20 @@ def _terminal_bench_rollouter_config(
             seed=99,
             shuffle=False,
         ),
-        verifiers_env_server=VerifiersEnvServer.Config(
+        worker=VerifiersRolloutWorker.Config(
+            rubric=Rubric.Config(
+                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
+                error_reward=0.0,
+            ),
             environment=HarborEnvConfig(
+                taskset=training_taskset,
                 agent=vf.AgentConfig(
                     harness=TerminalBenchTerminusHarnessConfig(
                         id=register_harness_alias(), version="0.22.0"
                     ),
+                    # TODO: measure how long the rollout workers' close takes with Docker, and set
+                    #   `Rollouter.Config.worker_close_timeout_s` from it. Each worker removes its
+                    #   containers on its threads. Not measured yet.
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
                     timeout=AgentTimeoutConfig(
@@ -138,21 +137,9 @@ def _terminal_bench_rollouter_config(
                     ),
                 ),
             ),
-            serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
-                max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
-                address="tcp://127.0.0.1:0",
-            ),
-        ),
-        worker=VerifiersRolloutWorker.Config(
-            rubric=Rubric.Config(
-                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
-                error_reward=0.0,
-            ),
             generation_server=GenerationServer.Config(
                 max_rollout_tokens=max_context_length
             ),
-            connection_timeout_sec=1800.0,
         ),
     )
 
@@ -202,8 +189,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -345,8 +330,6 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -465,8 +448,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=8,
-            max_concurrent_rollouts=async_loop.max_active_rollout_groups
-            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             CustomRendererConfig(

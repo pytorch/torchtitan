@@ -54,6 +54,9 @@ class Configurable:
             def _convert(val):
                 if hasattr(val, "to_dict"):
                     return val.to_dict()
+                elif hasattr(val, "model_dump"):
+                    # A pydantic model: dump its fields as JSON data.
+                    return val.model_dump(mode="json")
                 elif dataclasses.is_dataclass(val):
                     return {f.name: _convert(getattr(val, f.name)) for f in fields(val)}
                 elif isinstance(val, (list, tuple)):
