@@ -12,6 +12,7 @@ from torchtitan.rl.examples.dapo_math.data import (
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.math_verify_pool import (
     MathVerifyPool,
+    MathVerifyResult,
     score_math_response,
 )
 from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
@@ -22,6 +23,7 @@ __all__ = [
     "DapoMathEnv",
     "DapoMathSample",
     "MathVerifyPool",
+    "MathVerifyResult",
     "RewardMathVerify",
     "score_math_response",
 ]

@@ -15,9 +15,11 @@ maintained; it has to earn its cost.
 - Bug fixes: add a regression test only if the bug could silently come back and
   existing tests didn't catch it; otherwise say why none is needed.
 - Don't add tests that only re-read a config they just set, assert constants,
-  grep docs or READMEs, or duplicate an existing test for one more model.
+  grep docs or READMEs, snapshot private layouts, repeat mock calls, or duplicate
+  an existing test for one more model.
 
 ## Prefer Extending Existing Coverage
+- Delete a redundant test only after naming the retained test that covers it.
 - Enable a new feature in an existing integration configuration (e.g. change an
   existing "FSDP 4" entry to "FSDP 2 + CP 2") instead of adding a new entry.
 - Cover the harder configuration: interleaved PP schedules over 1F1B, EP x SP

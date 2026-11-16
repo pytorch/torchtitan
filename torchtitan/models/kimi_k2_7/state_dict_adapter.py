@@ -28,23 +28,32 @@ import torch
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
 if TYPE_CHECKING:
-    from .model import KimiK25Model
+    from .model import KimiK2Model
 
 
 class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):
     def __init__(
         self,
-        model_config: KimiK25Model.Config,
+        model_config: KimiK2Model.Config,
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
 
-        self.vision_encoder = model_config.vision_encoder
-        if self.vision_encoder is None:
+        # Imported here because .model imports this module.
+        from .model import KimiK25Model
+
+        # KimiK2Model (text-only, e.g. Moonlight) uses only the DeepSeek-V3 mapping.
+        vision_encoder = (
+            model_config.vision_encoder
+            if isinstance(model_config, KimiK25Model.Config)
+            else None
+        )
+        self.vision_encoder = vision_encoder
+        if vision_encoder is None:
             return
 
-        self.patch_size = self.vision_encoder.patch_size
-        self.in_channels = self.vision_encoder.in_channels
+        self.patch_size = vision_encoder.patch_size
+        self.in_channels = vision_encoder.in_channels
 
         # Vision tower: HF name -> torchtitan name (fused qkv handled separately).
         self.vision_from_hf_map = {

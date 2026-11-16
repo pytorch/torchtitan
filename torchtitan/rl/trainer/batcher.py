@@ -21,13 +21,16 @@ from typing import Any
 import numpy as np
 import torch
 
+from torchtitan.components.data.multimodal.mrope import get_mrope_positions
+
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import RolloutGroup
+from torchtitan.rl.rollout.types import PromptImage, RolloutGroup
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch, RegisterRDMAMicrobatch
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -45,12 +48,62 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     Each training_sample's raw tokens (length N) are split into
     ``token_ids = raw[:-1]`` and ``labels = raw[1:]`` (both length
     N-1), matching the pre-training dataloader convention.
+
+    With images, ``model_kwargs`` holds each distinct image of the microbatch once
+    (`Batcher._pack_image_inputs`, whose example draws the dedup):
+
+        from the batcher         image_files, image_file_sizes   the files, concatenated
+                                 grid_thw                        one row per distinct image
+                                 image_vision_bank_indices_T     each token's row in the image
+                                                                 embeddings, -1 for text
+                                 mrope_positions                 with build_mrope_positions
+        after preprocess_images  pixel_values replaces image_files and image_file_sizes
     """
 
     generator_logprobs: torch.Tensor  # [T]
     temperature: torch.Tensor  # [T]
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
+    vision_processor: VisionProcessor.Config | None = None
+    """How `preprocess_images` turns ``model_kwargs["image_files"]`` into
+    ``pixel_values``. None without images."""
+
+    def preprocess_images(self) -> "TrainingMicrobatch":
+        """This microbatch with its image files turned into pixel values, as the generator's
+        `_preprocess_images` does for a request; unchanged without images.
+
+        The batcher ships each distinct image file once, concatenated into one uint8 tensor
+        (``image_files``, split by ``image_file_sizes``): a Geometry3K file is ~15 KB, its
+        float32 pixel values ~2.4 MB. The trainer calls this on each microbatch it receives
+        (on the read-ahead thread with RDMA), and each file becomes pixel values on the CPU,
+        as in the SFT dataloader (`VisionProcessor.resize_and_normalize`, then
+        `patchify_all`).
+        """
+        if "image_files" not in self.model_kwargs:
+            return self
+        assert self.vision_processor is not None
+        processor = self.vision_processor.build()
+        model_kwargs = dict(self.model_kwargs)
+        image_files = model_kwargs.pop("image_files")
+        file_sizes = model_kwargs.pop("image_file_sizes")
+        pixel_values, grid_thw = processor.patchify_all(
+            [
+                processor.resize_and_normalize(file.numpy().tobytes())[0]
+                for file in image_files.split(file_sizes.tolist())
+            ]
+        )
+        # Placeholders and M-RoPE positions follow the prompts' grids (from the file
+        # headers), the pixel values the decoded images.
+        prompt_grid_thw = model_kwargs["grid_thw"]
+        if not torch.equal(grid_thw, prompt_grid_thw):
+            index = int((grid_thw != prompt_grid_thw).any(-1).nonzero()[0])
+            raise ValueError(
+                f"Image file {index} resizes to grid {grid_thw[index].tolist()}, but its "
+                f"prompt has {prompt_grid_thw[index].tolist()}; the renderer and the "
+                "trainer must use the same vision processor."
+            )
+        model_kwargs["pixel_values"] = pixel_values
+        return replace(self, model_kwargs=model_kwargs)
 
     def as_input_dict(self) -> dict[str, Any]:
         """Return the model inputs plus the per-token RL loss arguments.
@@ -192,6 +245,10 @@ class Batcher(Configurable):
     With `rdma_min_tensor_bytes` set, it returns `RDMAMicrobatch`es registered with
     `register_rdma_microbatch`, the actor system's RDMA registration (e.g.
     `MonarchRDMAMicrobatch.register`), which is then required.
+
+    With `vision_processor` (`Controller.Config.vision_processor`, the one the renderer and
+    the generator use), it packs the samples' images as model inputs: each image token's row
+    in the image embeddings, and with `build_mrope_positions` M-RoPE positions.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -216,6 +273,12 @@ class Batcher(Configurable):
         The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable
         ibverbs devices fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync
         included."""
+        build_mrope_positions: bool = False
+        """Give microbatches with images 3D M-RoPE positions (``mrope_positions``), as SFT's
+        ``MultiModalCollator.Config.build_mrope_positions`` does: True for models whose image
+        tokens take M-RoPE positions (``MRoPE.Config`` attention, e.g. Qwen3.5); other models'
+        image tokens take the 1D ``positions``. `Controller.Config` checks it against the
+        trainer model."""
         training_sample_builder: TrainingSampleBuilder.Config = field(
             default_factory=TrainingSampleBuilder.Config
         )
@@ -246,6 +309,7 @@ class Batcher(Configurable):
         pad_id: int,
         temperature: float,
         register_rdma_microbatch: RegisterRDMAMicrobatch | None = None,
+        vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
         if (
             config.rdma_min_tensor_bytes is not None
@@ -272,6 +336,7 @@ class Batcher(Configurable):
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
+        self._build_mrope_positions = config.build_mrope_positions
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         # Trainer PP runs this many consecutive microbatches per pipeline step.
@@ -283,6 +348,9 @@ class Batcher(Configurable):
         # Batches that trainer ranks may still read, oldest first; each buffer keeps its tensor alive until drop().
         self._batches_being_read: deque[list[list[list[RDMAMicrobatch]]]] = deque()
         self._num_batches_registered = 0
+        self._vision_processor = (
+            None if vision_processor is None else vision_processor.build()
+        )
 
     def _record_untrainable_groups(self, *, group_is_trainable: bool) -> None:
         """Fail when consecutive groups cannot contribute one training sample.
@@ -560,11 +628,13 @@ class Batcher(Configurable):
         of PP microbatches per scheduling step. First-fit decreasing (FFD)
         determines B bins subject to T and max_num_documents. Each step has
         M * D slots, so G = ceil(B / (M * D)) steps form a ``[G][M][D]`` grid.
-        Try longest-processing-time (LPT) packing: place longest samples first in
-        the feasible bin with the highest padding-aware attention work,
-        breaking ties by fewer packed tokens. If any
+        Try longest-processing-time (LPT) packing: place longest samples first,
+        preferring a feasible bin that already holds one of the sample's images,
+        then the one with the highest padding-aware attention work, breaking
+        ties by fewer packed tokens. If any
         sample cannot fit, discard the partial LPT assignment and reuse FFD,
-        splitting its bins to fill the extra slots where possible. Both paths
+        splitting its bins to fill the extra slots where possible (the FFD
+        fallback ignores image affinity). Both paths
         have the same grid size and therefore the same total padding fraction.
 
         Sort the bins by padding-aware attention cost (see
@@ -651,7 +721,8 @@ class Batcher(Configurable):
         This models the existing padding segments without increasing their
         number or changing fixed-size varlen metadata.
         """
-        # TODO(rl): Account for hybrid sliding-window or linear-attention layers.
+        # TODO(rl): Account for hybrid sliding-window or linear-attention layers, and for
+        #   vision encoder work (distinct images per bin), which image affinity concentrates.
         sample_lengths = [
             self.num_tokens_to_pack(sample) for sample in training_samples
         ]
@@ -671,8 +742,11 @@ class Batcher(Configurable):
         *,
         target_num_bins: int,
     ) -> list[list[TrainingSample]] | None:
-        """Put longest samples in the highest-workload feasible fixed bin.
+        """Put longest samples first into a feasible bin that already holds one of their
+        images, else into the highest-workload feasible bin.
 
+        Image affinity lets the trainer encode the images of a GRPO group in fewer
+        microbatches (step 1 in `_pack_image_inputs`'s example).
         Adding a sample cannot increase padding-aware attention work. Break
         workload ties by fewer packed tokens to spread full-length documents
         whose work exactly replaces one padding segment.
@@ -683,9 +757,11 @@ class Batcher(Configurable):
         bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
         bin_num_tokens = [0] * target_num_bins
         bin_workloads = [self._attention_workload([])] * target_num_bins
+        bin_image_hashes: list[set[str]] = [set() for _ in range(target_num_bins)]
 
         for sample in ordered_samples:
             num_tokens = self.num_tokens_to_pack(sample)
+            image_hashes = {image.hash_value for image in sample.images}
             destination = max(
                 (
                     index
@@ -696,7 +772,13 @@ class Batcher(Configurable):
                         or len(bin_) < self._max_num_documents
                     )
                 ),
-                key=lambda index: (bin_workloads[index], -bin_num_tokens[index]),
+                # False for every bin when a sample has no images, so text samples pick
+                # the same bin as before.
+                key=lambda index: (
+                    not image_hashes.isdisjoint(bin_image_hashes[index]),
+                    bin_workloads[index],
+                    -bin_num_tokens[index],
+                ),
                 default=None,
             )
             if destination is None:
@@ -705,6 +787,7 @@ class Batcher(Configurable):
             bins[destination].append(sample)
             bin_num_tokens[destination] += num_tokens
             bin_workloads[destination] = self._attention_workload(bins[destination])
+            bin_image_hashes[destination] |= image_hashes
 
         return bins
 
@@ -820,7 +903,8 @@ class Batcher(Configurable):
         return num_tokens
 
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
-    #   so callers swap logic per modality (images, ...).
+    #   so callers swap logic per modality, and move the image path (`_pack_image_inputs`, the
+    #   `images` branches) into an image packer.
     def _pack_training_samples(
         self, training_samples: list[TrainingSample]
     ) -> TrainingMicrobatch:
@@ -869,7 +953,8 @@ class Batcher(Configurable):
             padding_mask.append(np.arange(sample_len) >= unpadded_len)
 
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
-        pad_len = num_tokens_per_rank - sum(map(len, positions))
+        sample_lens = [len(sample_positions) for sample_positions in positions]
+        pad_len = num_tokens_per_rank - sum(sample_lens)
         assert pad_len >= 0
         if pad_len > 0:
             for key in keys:
@@ -893,6 +978,18 @@ class Batcher(Configurable):
             padding_mask=padding_mask_tensor,
             num_mtp_layers=self._num_mtp_layers,
         )
+        model_kwargs = {}
+        vision_processor = None
+        if any(sample.images for sample in training_samples):
+            # The controller gives the batcher the renderer's vision processor.
+            assert self._vision_processor is not None
+            model_kwargs = self._pack_image_inputs(
+                training_samples,
+                processor=self._vision_processor,
+                sample_lens=sample_lens,
+                positions=positions_tensor,
+            )
+            vision_processor = self._vision_processor.config
         return TrainingMicrobatch(
             input=packed["input_ids"],
             labels=packed["labels"],
@@ -906,7 +1003,130 @@ class Batcher(Configurable):
             padding_mask=padding_mask_tensor,
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
+            model_kwargs=model_kwargs,
+            vision_processor=vision_processor,
         )
+
+    def _pack_image_inputs(
+        self,
+        training_samples: list[TrainingSample],
+        *,
+        processor: VisionProcessor,
+        sample_lens: list[int],
+        positions: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Build a packed microbatch's image model inputs: each distinct image file once, its
+        grid, each placeholder token's row in the image embeddings (-1 for text), and with
+        `build_mrope_positions` 3D M-RoPE positions.
+
+        The samples of a GRPO group show the same images. The batcher dedups them in two
+        steps: it packs a group's samples into the same microbatch (step 1), then ships and
+        encodes each distinct image of a microbatch once (step 2, here). Example: one step of
+        2 groups x 2 samples on 2 DP ranks, image k in group g0 and image m in group g1, each
+        placeholder token drawn as its image's letter:
+
+            samples       a0: t k k k t t     a1: t k k k t t t      (group g0)
+                          b0: t m m t t       b1: t m m t t t        (group g1)
+
+            1. `_pack_with_lpt` picks each sample's microbatch, preferring one that already
+               holds the sample's image:
+                          rank 0: [a0 a1]  rank 1: [b0 b1]     k and m each encoded once
+               instead of rank 0: [a0 b0]  rank 1: [a1 b1]     k and m each encoded on both ranks
+
+            2. This method builds rank 0's image inputs. The image embeddings (the model's
+               "vision bank") are the vision encoder's output for the microbatch's distinct
+               images, stacked in order, one row per image token; each token gets its row:
+                          tokens       t  k k k  t  t | t  k k k  t  t  t | pad
+                          rows        -1  0 1 2 -1 -1 |-1  0 1 2 -1 -1 -1 |  -1   image_vision_bank_indices_T
+                          image_files  [file k]    each distinct image (by hash) once, ~15 KB
+                          grid_thw     [grid of k]
+
+            3. `TrainingMicrobatch.preprocess_images`, on the trainer: file k ->
+               resize_and_normalize -> patchify_all -> pixel_values (~2.4 MB of float32),
+               once per distinct image.
+
+            4. The model encodes k once into embedding rows [e0 e1 e2], and each placeholder
+               token takes its row: tokens 1 and 7 both take e0 (`gather_vision_embeds`).
+
+        Placement follows the renderer's placeholder ranges, not the token ids: the policy can
+        sample the placeholder id in a completion, where it is text. ``mrope_positions`` (with
+        `build_mrope_positions`) restart per sample, like ``positions``; text and padding repeat
+        the 1D position on all three axes. Without images the model uses ``positions`` (the
+        same values) and runs its dummy vision forward, so every DP rank still runs the encoder.
+
+        Args:
+            training_samples: The packed samples, in packing order.
+            processor: The vision processor the renderer computed the grids with.
+            sample_lens: Packed length of each sample (input tokens + alignment padding).
+            positions: The microbatch's packed 1D positions, padding included.
+        """
+        merge = processor.config.spatial_merge_size
+        bank_rows = np.full(len(positions), -1, dtype=np.int64)
+        bank_start_by_hash: dict[str, int] = {}
+        # Each distinct image of the microbatch once, in the order of their embedding rows:
+        # the trainer encodes these, and every placeholder token takes its row.
+        distinct_images: list[PromptImage] = []
+        num_bank_rows = 0
+        mrope_positions = (
+            positions.unsqueeze(1).repeat(1, 3) if self._build_mrope_positions else None
+        )
+        start = 0
+        for training_sample, sample_len in zip(
+            training_samples, sample_lens, strict=True
+        ):
+            for image, placeholder in zip(
+                training_sample.images, training_sample.image_placeholders, strict=True
+            ):
+                # A run's embedding rows follow its placeholder count, the vision encoder's
+                # embeddings the grid, and the gather does not check that they agree.
+                num_tokens = processor.num_placeholder_tokens(image.grid_thw)
+                if placeholder.length != num_tokens:
+                    raise ValueError(
+                        f"Image {image.hash_value} ({image.source_path}): grid {image.grid_thw} "
+                        f"gives {num_tokens} tokens, but the prompt has "
+                        f"{placeholder.length} placeholders; the renderer and the trainer "
+                        "must use the same vision processor."
+                    )
+                if image.hash_value not in bank_start_by_hash:
+                    bank_start_by_hash[image.hash_value] = num_bank_rows
+                    distinct_images.append(image)
+                    num_bank_rows += num_tokens
+                bank_start = bank_start_by_hash[image.hash_value]
+                token = start + placeholder.offset
+                bank_rows[token : token + num_tokens] = np.arange(
+                    bank_start, bank_start + num_tokens
+                )
+            if training_sample.images and mrope_positions is not None:
+                mrope_positions[start : start + sample_len] = get_mrope_positions(
+                    sample_len,
+                    [
+                        (placeholder.offset, (t, h // merge, w // merge))
+                        for (t, h, w), placeholder in zip(
+                            (image.grid_thw for image in training_sample.images),
+                            training_sample.image_placeholders,
+                            strict=True,
+                        )
+                    ],
+                )
+            start += sample_len
+        image_inputs = {
+            # The image files, concatenated; `TrainingMicrobatch.preprocess_images` turns
+            # them into pixel values on the trainer.
+            "image_files": torch.frombuffer(
+                bytearray(b"".join(image.data for image in distinct_images)),
+                dtype=torch.uint8,
+            ),
+            "image_file_sizes": torch.tensor(
+                [len(image.data) for image in distinct_images], dtype=torch.int64
+            ),
+            "grid_thw": torch.tensor(
+                [image.grid_thw for image in distinct_images], dtype=torch.int64
+            ),
+            "image_vision_bank_indices_T": torch.from_numpy(bank_rows),
+        }
+        if mrope_positions is not None:
+            image_inputs["mrope_positions"] = mrope_positions
+        return image_inputs
 
     def _padding_fraction(
         self,
@@ -931,7 +1151,28 @@ class Batcher(Configurable):
             num_microbatches=len(assignments),
             training_samples=training_samples,
         )
+        image_metrics = []
+        if self._vision_processor is not None:
+            # Images the trainer encodes (once per microbatch) vs images the samples show.
+            num_encoded_images = sum(
+                len({image.hash_value for sample in bin_ for image in sample.images})
+                for row in assignments
+                for bin_ in row
+            )
+            image_metrics = [
+                m.Metric(
+                    "train_batch/num_sample_images",
+                    m.NoReduce(
+                        float(sum(len(sample.images) for sample in training_samples))
+                    ),
+                ),
+                m.Metric(
+                    "train_batch/num_encoded_images",
+                    m.NoReduce(float(num_encoded_images)),
+                ),
+            ]
         return [
+            *image_metrics,
             m.Metric(
                 "train_batch/padding_frac",
                 m.NoReduce(padding_frac),

@@ -66,8 +66,10 @@ def make_train_step(model, loss_fn, *, fwd_kwargs=None):
 def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
     # make_fx traces the backward, which cannot add into weight.grad in place.
     disable_inplace_wgrad_accum(model_config)
-    model = config_cls(model_config)
-    model.to(device=device, dtype=dtype)
+    with torch.device("meta"):
+        model = config_cls(model_config)
+    model.to(dtype=dtype)
+    model.to_empty(device=device)
     with torch.no_grad():
         model.init_states(buffer_device=torch.device(device))
     return model
@@ -257,7 +259,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             compile=SimpleNamespace(),
             parallelism="PARALLELISM",
             training=SimpleNamespace(
-                max_context_length=8,
                 num_tokens_per_microbatch_per_dp_rank=1,
             ),
         )
@@ -271,6 +272,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.max_num_documents = None
         engine.preprocess_inputs_kwargs = {}
         engine.ntokens_seen = 0
+        engine._forward_backward_num_flops = 0
+        engine.flops_estimator = lambda inputs: inputs["input"].numel()
         microbatches = [
             TokenizedTrainingMicrobatch(
                 input=torch.tensor([index]),
@@ -289,15 +292,16 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine._pp_forward_backward_microbatch_group = MagicMock(
             return_value=(torch.tensor(3.0), [{}, {}])
         )
-        result = engine._forward_backward_body(
+        loss, loss_metrics = engine._forward_backward_body(
             prepared_groups,
             torch.tensor(2),
             defer_fsdp_gradient_reduction=False,
         )
 
         assert engine.ntokens_seen == 2
-        torch.testing.assert_close(result.loss, torch.tensor(3.0))
-        assert result.loss_metrics == [[{}, {}]]
+        assert engine._forward_backward_num_flops == 2
+        torch.testing.assert_close(loss, torch.tensor(3.0))
+        assert loss_metrics == [[{}, {}]]
         call = engine._pp_forward_backward_microbatch_group.call_args
         assert len(call.kwargs["inputs"]) == 2
         assert len(call.kwargs["model_kwargs"]) == 2
@@ -308,6 +312,16 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 mb_loss_kwargs["global_loss_token_counts"], torch.tensor(2)
             )
         assert call.kwargs["finalize_gradients"]
+
+        engine.parallelism_context.pp_enabled = True
+        engine.pp_has_first_stage = True
+        engine.pp_has_last_stage = True
+        engine._forward_backward_num_flops = 0
+        pp_prepared_groups = engine._preprocess_microbatch_groups(
+            [microbatches], global_routing_token_counts=torch.tensor([2])
+        )
+        torch.testing.assert_close(pp_prepared_groups, prepared_groups)
+        assert engine._forward_backward_num_flops == 2
 
     def test_graph_runtime_receives_shared_loss_kwargs(self):
         from types import SimpleNamespace
@@ -363,7 +377,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.config = SimpleNamespace(
             parallelism="PARALLELISM",
             training=SimpleNamespace(
-                max_context_length=8,
                 num_tokens_per_microbatch_per_dp_rank=2,
             ),
         )
@@ -377,6 +390,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.max_num_documents = None
         engine.preprocess_inputs_kwargs = {}
         engine.ntokens_seen = 0
+        engine._forward_backward_num_flops = 0
+        engine.flops_estimator = lambda inputs: inputs["input"].numel()
         microbatch = TokenizedTrainingMicrobatch(
             input=main_tokens,
             labels=main_labels,
@@ -402,6 +417,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         (prepared_valid_mask,) = kwarg_mbs[0]["mtp_input_valid_masks"]
         torch.testing.assert_close(prepared_valid_mask, torch.tensor([True, False]))
         assert engine.ntokens_seen == 2
+        assert engine._forward_backward_num_flops == 2
 
     def test_accumulate_param_grads_clones_param_grad_when_requested(self):
         param = nn.Parameter(torch.zeros(2))
@@ -1945,16 +1961,21 @@ class TestTraceModels(unittest.TestCase):
                 self.proj = nn.Linear(dim, vocab_size)
 
             def init_states(self, buffer_device=None):
-                self.attn.rope._init_self_buffers(
+                self.embed.reset_parameters()
+                self.attn.init_states(
                     buffer_device=buffer_device or torch.device("cuda")
                 )
+                self.proj.reset_parameters()
 
             def forward(self, tokens, block_mask):
                 x = self.embed(tokens)
                 x = self.attn(x, block_mask)
                 return self.proj(x)
 
-        model = TinyFlexMLA().to(device=self.DEVICE, dtype=self.DTYPE)
+        with torch.device("meta"):
+            model = TinyFlexMLA()
+        model.to(dtype=self.DTYPE)
+        model.to_empty(device=self.DEVICE)
         with torch.no_grad():
             model.init_states(buffer_device=torch.device(self.DEVICE))
 
@@ -2314,9 +2335,8 @@ class TestTraceContextParallel(FSDPTest):
         trainer = None
         try:
             with tempfile.TemporaryDirectory() as dump_folder:
-                config = graph_trainer_llama3_debugmodel_varlen()
+                config = graph_trainer_llama3_debugmodel_varlen(seq_len=128)
                 config.dump_folder = dump_folder
-                config.training.max_context_length = 128
                 config.training.num_tokens_per_microbatch_per_dp_rank = 2 * 128
                 config.training.steps = 1
                 config.parallelism.data_parallel_replicate_degree = 1
@@ -2350,7 +2370,7 @@ class TestTraceContextParallel(FSDPTest):
                         device=trainer.engine.device,
                         dtype=torch.int32,
                     )
-                    % config.training.max_context_length
+                    % config.model.max_context_length
                 )
                 trainer.engine.forward_backward_microbatch(
                     microbatch_group=[

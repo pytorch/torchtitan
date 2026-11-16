@@ -154,7 +154,7 @@ class HuggingFaceStorageReaderTest(unittest.TestCase):
                 self.assertEqual(reader.thread_count, 3)
 
 
-def _small_kimi_k3_config() -> KimiK3Model.Config:
+def _small_kimi_k3_config(*, has_vision_encoder: bool = True) -> KimiK3Model.Config:
     dim = 64
     return _kimi_k3_config(
         max_context_length=128,
@@ -178,18 +178,22 @@ def _small_kimi_k3_config() -> KimiK3Model.Config:
         num_experts=2,
         top_k=1,
         num_shared_experts=1,
-        vision_encoder=_vision_encoder_config(
-            text_dim=dim,
-            dim=48,
-            qkv_dim=48,
-            hidden_dim=96,
-            num_layers=1,
-            num_heads=3,
-            patch_size=2,
-            merge_kernel_size=(2, 2),
-            init_pos_emb_height=2,
-            init_pos_emb_width=2,
-            max_num_frames=1,
+        vision_encoder=(
+            _vision_encoder_config(
+                text_dim=dim,
+                dim=48,
+                qkv_dim=48,
+                hidden_dim=96,
+                num_layers=1,
+                num_heads=3,
+                patch_size=2,
+                merge_kernel_size=(2, 2),
+                init_pos_emb_height=2,
+                init_pos_emb_width=2,
+                max_num_frames=1,
+            )
+            if has_vision_encoder
+            else None
         ),
         attn_backend="flex",
     )
@@ -291,7 +295,7 @@ class UnsupportedQuantizedKeysTest(unittest.TestCase):
     def test_adapters_without_quantized_loads_reject_quantized_layout(self) -> None:
         adapters = [
             FluxStateDictAdapter(
-                FLUX_MODEL_FLAVORS["flux-debug"](), hf_assets_path=None
+                FLUX_MODEL_FLAVORS["flux-debug"][0](seq_len=512), hf_assets_path=None
             )
         ]
         for flavors, adapter_cls in (
@@ -639,8 +643,7 @@ class KimiK3StateDictAdapterTest(unittest.TestCase):
         )
 
     def test_text_only_export_consolidates_without_vision_entries(self) -> None:
-        config = _small_kimi_k3_config()
-        config.vision_encoder = None
+        config = _small_kimi_k3_config(has_vision_encoder=False)
         hf_key = "language_model.model.norm.weight"
         weight_map = {
             hf_key: "model-00001-of-00002.safetensors",
