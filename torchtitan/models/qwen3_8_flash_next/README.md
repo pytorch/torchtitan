@@ -64,8 +64,24 @@ depthwise convolution, and are added to the residual streams.
 
 The weight is a `Shard(0)` DTensor on the FSDP storage mesh, excluded from FSDP
 all-gathers. Each DP owner keeps contiguous rows. Preprocessing deduplicates
-hash IDs and prepares the all-to-all request plan; forward exchanges only
-selected vectors, and backward returns their gradients to the owners.
+hash IDs into fixed per-owner request slots; forward exchanges the requested
+vectors, and backward returns their gradients to the owners. Each of the 16
+hash heads owns a contiguous row range, so an owner receives at most
+`min(T, overlap)` distinct IDs from each head, where `overlap` is how many of
+the head's rows it owns. The bound `C` depends only on the table layout and
+`T`. Each rank exchanges `P*C` slots per direction, where `P` is the DP
+degree. A rank requests at most `16*T` distinct IDs, one per head per token,
+so `P*C / (16*T)` is the traffic relative to that worst case:
+
+| DP | `C` at `T=4096` | `P*C / (16*T)` | `C` at `T=16384` | `P*C / (16*T)` |
+| --- | ---: | ---: | ---: | ---: |
+| 8 | 8,604 | 1.05 | 33,180 | 1.01 |
+| 16 | 4,508 | 1.10 | 16,796 | 1.03 |
+| 64 | 4,508 | 4.40 | 16,796 | 4.10 |
+
+Each head covers about 1/16 of the table. Beyond DP16, several owners split
+one head, and each still reserves a slot for every token, so the slots grow
+with `P` while the requests do not.
 
 PLE needs fixed row ownership and individual vector lookups. All-to-all routing
 and local `F.embedding` meet these needs while reusing TorchTitan's DTensor,
