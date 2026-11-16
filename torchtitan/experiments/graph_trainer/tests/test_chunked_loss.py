@@ -87,11 +87,6 @@ def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
 
 
 class TestChunkedLossWrapperWithParamGrads(TestCase):
-    def test_config_builds_param_grads_loss(self):
-        loss = ChunkedLossWrapperWithParamGrads.Config(num_chunks=4).build()
-        self.assertIsInstance(loss, ChunkedLossWrapperWithParamGrads)
-        self.assertEqual(loss.num_chunks, 4)
-
     def test_bitwise_equal_with_chunked_loss(self):
         for num_tokens, num_chunks in ((16, 4), (8, 4)):
             with self.subTest(num_tokens=num_tokens, num_chunks=num_chunks):

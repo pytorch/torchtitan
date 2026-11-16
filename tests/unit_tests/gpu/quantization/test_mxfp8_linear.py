@@ -346,6 +346,8 @@ def test_mxfp8_linear_runs_outside_plain_eager(
     )
 
     if execution_mode == "compile":
+        # Compiled autograd requires the non-in-place WGRAD path.
+        linear.inplace_wgrad_accum = False
         output = torch.compile(linear, fullgraph=True)(x)
     else:
         output = checkpoint(linear, x, use_reentrant=False)

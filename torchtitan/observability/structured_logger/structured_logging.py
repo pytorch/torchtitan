@@ -40,7 +40,7 @@ _structured_logger.propagate = False
 # Used to check if handler has been already initialized. If so, re-initializing
 # is a no-op
 _is_initialized: bool = False
-_structured_logger_subprocess_init_fn: Callable[[], None] | None = None
+_structured_logger_subprocess_init_fn: functools.partial[None] | None = None
 
 # Set by ``init_structured_logger(enable=False)`` to make all trace calls no-ops.
 _disabled: bool = False
@@ -148,7 +148,11 @@ def _ensure_root_forwarder() -> None:
         root_logger.addHandler(_StructuredRecordForwarder())
 
 
-def get_structured_logger_subprocess_init_fn() -> Callable[[], None] | None:
+def get_structured_logger_subprocess_init_fn() -> functools.partial[None] | None:
+    """Return ``init_structured_logger`` bound to this process's settings, or None when off.
+
+    A subprocess calls it as is, or overrides keyword arguments: ``fn(source="worker", rank=2)``.
+    """
     if _disabled or not _is_initialized or not _structured_logger.handlers:
         return None
     if _structured_logger_subprocess_init_fn is None:

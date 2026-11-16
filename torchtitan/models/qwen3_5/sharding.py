@@ -36,22 +36,12 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 
-def transformer_block_sharding_config(
-    *, enable_sp: bool, after_vision_scatter: bool
-) -> ShardingConfig:
-    """Transformer block boundary in the residual layout.
-
-    The first block after the vision scatter takes a Replicate input and
-    restores the decoder layout.
-    """
+def transformer_block_sharding_config(*, enable_sp: bool) -> ShardingConfig:
+    """Transformer block boundary in the residual layout."""
     layer_layout = residual_activation_placement(enable_sp=enable_sp)
-    input_layout = (
-        replicated_activation_placement() if after_vision_scatter else layer_layout
-    )
     return ShardingConfig(
-        in_src_shardings={"x_TD": input_layout},
-        in_dst_shardings={"x_TD": layer_layout},
-        out_src_shardings=layer_layout,
+        input_shardings={"x_TD": layer_layout},
+        output_shardings=layer_layout,
     )
 
 
@@ -60,8 +50,8 @@ def decoder_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     activation_layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"input": activation_layout},
-        out_src_shardings=activation_layout,
+        input_shardings={"input": activation_layout},
+        output_shardings=activation_layout,
     )
 
 
@@ -69,8 +59,8 @@ def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Full-attention boundary: ``x_TD`` in and out in the residual layout."""
     layout = residual_activation_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={"x_TD": layout},
-        out_src_shardings=layout,
+        input_shardings={"x_TD": layout},
+        output_shardings=layout,
     )
 
 
@@ -86,16 +76,11 @@ def gated_rms_norm_sharding_config() -> ShardingConfig:
     head_placement = attention_activation_placement()
     return ShardingConfig(
         state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={
+        input_shardings={
             "input": head_placement,
             "gate": head_placement,
         },
-        in_dst_shardings={
-            "input": head_placement,
-            "gate": head_placement,
-        },
-        out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
+        output_shardings=head_placement,
     )
 
 
@@ -120,10 +105,8 @@ def inner_gated_delta_net_sharding_config() -> ShardingConfig:
         "dt_bias_H": parameter_placement,
     }
     return ShardingConfig(
-        in_src_shardings=input_shardings,
-        in_dst_shardings=dict(input_shardings),
-        out_src_shardings=head_placement,
-        out_dst_shardings=head_placement,
+        input_shardings=input_shardings,
+        output_shardings=head_placement,
         local_spmd=True,
     )
 
@@ -137,8 +120,8 @@ def gated_delta_net_sharding_config(*, enable_sp: bool) -> ShardingConfig:
             "A_log": parameter_placement,
             "dt_bias": parameter_placement,
         },
-        in_src_shardings={"x_TD": layout},
-        out_src_shardings=layout,
+        input_shardings={"x_TD": layout},
+        output_shardings=layout,
     )
 
 
@@ -157,35 +140,34 @@ def sigmoid_gate_sharding_config() -> ShardingConfig:
             "weight": dense_param_placement(tp=spmd.R),
             "bias": dense_param_placement(tp=spmd.R),
         },
-        in_src_shardings={"input": replicated},
-        out_src_shardings=replicated,
+        input_shardings={"input": replicated},
+        output_shardings=replicated,
     )
 
 
 def vision_encoder_sharding_config() -> ShardingConfig:
-    """Vision encoder root: invariant ``pos_embed``, replicated output.
+    """Vision encoder root: invariant ``pos_embed`` and output.
 
-    All activations flow without SP in the vision encoder.
+    All activations flow without SP in the vision encoder. The model converts
+    the output to TP- and CP-``Replicate`` where the decoder consumes it.
     """
     return ShardingConfig(
         state_shardings={"pos_embed": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
+        output_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
     )
 
 
 def vision_merger_sharding_config() -> ShardingConfig:
-    """The merger owns the TP boundary; the encoder output owns the CP boundary."""
+    """Merger output: TP- and CP-invariant."""
     return ShardingConfig(
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
+        output_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
     )
 
 
 def vision_rotary_embedding_sharding_config() -> ShardingConfig:
-    """Vision rotary embedding with a TP-invariant ``inv_freq``."""
-    state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
+    """Vision rotary embedding; TP-replicated like the decoder RoPE cache."""
+    state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.R})
     return ShardingConfig(
         state_shardings={"inv_freq": state_placement},
-        out_src_shardings=state_placement,
+        output_shardings=state_placement,
     )

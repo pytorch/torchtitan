@@ -99,7 +99,7 @@ class FluxTrainer(Trainer):
         # the dtype for encoders is torch.float32 (default dtype for Flux Model).
         # Otherwise, we use the same dtype as mixed precision training process.
         self._dtype = (
-            TORCH_DTYPE_MAP[config.training.mixed_precision_param]
+            TORCH_DTYPE_MAP[config.precision.param_dtype]
             if self.engine.parallelism_context.dp_shard_enabled
             else torch.float32
         )
@@ -145,7 +145,8 @@ class FluxTrainer(Trainer):
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
             parallelism_context=self.engine.parallelism_context,
-            training=config.training,
+            precision=config.precision,
+            cpu_offload=config.parallelism.fsdp_enable_cpu_offloading,
             symm_mem_scope=config.parallelism.fsdp_symm_mem_scope,
         )
         self.engine.preprocess_inputs_kwargs = {
@@ -167,17 +168,24 @@ class FluxTrainer(Trainer):
             )
 
     def _parallelize_encoders(
-        self, *, t5_model, clip_model, parallelism_context, training, symm_mem_scope
+        self,
+        *,
+        t5_model,
+        clip_model,
+        parallelism_context,
+        precision,
+        cpu_offload,
+        symm_mem_scope,
     ):
         mp_policy = MixedPrecisionPolicy(
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
         )
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
         if dp_mesh_dims is not None:
             fsdp_config["dp_mesh_dims"] = dp_mesh_dims
-        if training.enable_cpu_offload:
+        if cpu_offload:
             fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
         hf_module = t5_model.hf_module
