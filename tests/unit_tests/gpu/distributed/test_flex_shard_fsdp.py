@@ -20,9 +20,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
-from torchtitan.config.parallelism import FSDP2Config, ParallelismConfig
+from torchtitan.config.parallelism import (
+    FlexShardConfig,
+    FSDP2Config,
+    ParallelismConfig,
+)
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.llama3 import build_model_config as build_llama3_config

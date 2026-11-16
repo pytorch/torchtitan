@@ -12,12 +12,9 @@ import pytest
 from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
-from torchtitan.config import DebugConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.flex_shard_fsdp import (
-    FlexShardConfig,
-    validate_flex_shard_training,
-)
+from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.distributed.flex_shard_fsdp import validate_flex_shard_training
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -49,6 +46,11 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_microbatch_per_dp_rank=0)
     with pytest.raises(ValueError, match="must be -1 or greater than 0"):
         TrainingConfig(num_tokens_per_train_step=0)
+
+
+def test_precision_rejects_bf16_storage_with_fp32_compute() -> None:
+    with pytest.raises(ValueError, match="fp32 compute needs fp32 parameters"):
+        PrecisionConfig(dtype="bfloat16", param_dtype="float32")
 
 
 def test_per_group_accelerator_graph_config_restrictions() -> None:
@@ -227,6 +229,7 @@ def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
     def validate(config):
         config.parallelism.fsdp_backend = FlexShardConfig()
         config.loss = CrossEntropyLoss.Config()
+        config.training.disable_accelerator_graphs = True
         validate_flex_shard_training(config, config.model)
 
     validate(llama3_debugmodel())

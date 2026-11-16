@@ -25,7 +25,6 @@ when it is selected.
 import sys
 import weakref
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 import torch
@@ -37,7 +36,6 @@ if TYPE_CHECKING:
     from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
-    "FlexShardConfig",
     "flex_shard_mesh",
     "init_param",
     "record_param_layouts",
@@ -47,20 +45,11 @@ __all__ = [
 # Where each FlexShard parameter's local shard sits in the full parameter, by
 # module and parameter name, for init_param. to_empty() replaces FlexShard's
 # parameters but keeps the modules.
+# TODO: Read each parameter's layout from flex_shard instead, once its
+# parameters keep their layouts through to_empty().
 _PARAM_LAYOUTS: weakref.WeakKeyDictionary[
     nn.Module, dict[str, Any]
 ] = weakref.WeakKeyDictionary()
-
-
-@dataclass(kw_only=True, slots=True)
-class FlexShardConfig:
-    """Shard parameters with FlexShard (meta-pytorch/flex_shard) in place of
-    FSDP2's ``fully_shard``.
-
-    Each FSDP2 group becomes an ``fsdp2_compatible`` bucket with the FSDP
-    settings in ``parallelism``, so training from the same parameters is
-    bitwise identical to FSDP2.
-    """
 
 
 def record_param_layouts(model: nn.Module) -> None:
@@ -148,6 +137,8 @@ def validate_flex_shard_training(
         )
     if parallelism.fsdp_enable_cpu_offloading:
         unsupported.append("parallelism.fsdp_enable_cpu_offloading=True")
+    if parallelism.fsdp_unshard_in_current_stream:
+        unsupported.append("parallelism.fsdp_unshard_in_current_stream=True")
     if parallelism.fsdp_defer_gradient_reduction:
         # FlexShard has no equivalent of FSDP2's set_is_last_backward.
         unsupported.append("parallelism.fsdp_defer_gradient_reduction=True")
