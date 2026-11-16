@@ -10,11 +10,14 @@ from unittest import mock
 import pytest
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
+from torchtitan.distributed.flex_shard_fsdp import (
+    FlexShardConfig,
+    validate_flex_shard_training,
+)
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
@@ -222,18 +225,14 @@ def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
     # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
     # than silently shard with FSDP2.
     def validate(config):
-        validate_model_training_config(
-            config.model,
-            parallelism=ParallelismConfig(fsdp_backend=FlexShardConfig()),
-            training=config.training,
-            debug=config.debug,
-            activation_remat=config.activation_remat,
-            max_num_documents=config.dataloader.max_num_documents,
-        )
+        config.parallelism.fsdp_backend = FlexShardConfig()
+        config.loss = CrossEntropyLoss.Config()
+        validate_flex_shard_training(config, config.model)
 
     validate(llama3_debugmodel())
     with pytest.raises(
-        ValueError, match="DeepSeekV4Model does not support parallelism.fsdp_backend"
+        ValueError,
+        match=r"models that override Decoder._apply_fsdp \(DeepSeekV4Model\)",
     ):
         validate(deepseek_v4_debugmodel())
 

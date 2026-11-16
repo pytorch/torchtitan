@@ -19,7 +19,8 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config.parallelism import FSDPSymmMemScope
+from torchtitan.config.parallelism import FSDP2Config, FSDPSymmMemScope
+from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig, record_param_layouts
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -39,7 +40,6 @@ __all__ = [
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
-    "set_is_last_accumulation_step",
 ]
 
 logger = logging.getLogger(__name__)
@@ -231,25 +231,6 @@ def decoder_fsdp_groups(
     return embedding, head, blocks
 
 
-def set_is_last_accumulation_step(
-    model_part: nn.Module, is_last_accumulation_step: bool
-) -> None:
-    """Set whether the next backward is the last of gradient accumulation.
-
-    Only the last backward reduces gradients and reshards parameters after
-    backward. Earlier ones keep the parameters unsharded, and the next backward
-    accumulates into their grads.
-    """
-    if isinstance(model_part, FSDPModule):
-        # FlexShard has no equivalent: every backward waits for its gradient
-        # reductions and releases its prefetch.
-        model_part.set_is_last_backward(is_last_accumulation_step)
-    # pyrefly: ignore [not-callable]
-    model_part.set_reshard_after_backward(is_last_accumulation_step)
-    # pyrefly: ignore [not-callable]
-    model_part.set_requires_gradient_sync(is_last_accumulation_step)
-
-
 def resolve_fsdp_mesh(
     parallelism_context: ParallelismContext,
     *,
@@ -431,6 +412,85 @@ def apply_fsdp_to_multimodal_encoder(
     fully_shard(encoder, **fsdp_config)
 
 
+def _apply_flex_shard(
+    model: "Decoder",
+    dp_mesh: DeviceMesh,
+    groups: list[FSDPGroup],
+    *,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+) -> None:
+    """Shard ``model`` with FlexShard (meta-pytorch/flex_shard), one
+    ``fsdp2_compatible`` bucket per FSDP group.
+
+    Each bucket names the group's modules, with its placements and reshard
+    setting, and a root bucket takes the parameters left over, as
+    ``fully_shard(model)`` does. Gradients are summed over ``dp_mesh`` without
+    division, as ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets'
+    collectives then match FSDP2's byte for byte.
+    """
+    # flex_shard is an optional dependency, needed only for this backend.
+    # pyrefly: ignore [missing-import]
+    from flex_shard import BucketSpec, flex_shard, MixedPrecisionPolicy
+
+    # pyrefly: ignore [missing-import]
+    from flex_shard.custom_placements.shard import Shard as FlexShardShard
+
+    # validate_flex_shard_training allows only dp_shard.
+    assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
+    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
+    # Shard dims other than 0, which FSDP2 gets from shard_placement_fn.
+    shard_dims = {
+        param: placement.dim
+        for group in groups
+        for param, placement in group.placements.items()
+    }
+
+    def placement_fn(named_params, mesh):
+        del mesh
+        return {
+            fqn: (FlexShardShard(shard_dims.get(param, 0)),)
+            for fqn, param in named_params
+        }
+
+    def bucket(patterns: list[str], reshard_after_forward: bool) -> BucketSpec:
+        return BucketSpec(
+            patterns,
+            placement_fn=placement_fn,
+            mesh=dp_mesh,
+            mp_policy=mp_policy,
+            gradient_divide_factor=1.0,
+            reshard_after_forward=reshard_after_forward,
+            fsdp2_compatible=True,
+        )
+
+    module_fqns = {module: fqn for fqn, module in model.named_modules()}
+    buckets = [
+        bucket(
+            [module_fqns[module] for module in group.modules],
+            group.reshard_after_forward,
+        )
+        for group in groups
+    ]
+    # fully_shard(model) puts the remaining parameters in the root group, which
+    # FSDP2 does not reshard after forward.
+    grouped_params = {
+        param
+        for group in groups
+        for module in group.modules
+        for param in module.parameters()
+    }
+    root_fqns = [
+        fqn for fqn, param in model.named_parameters() if param not in grouped_params
+    ]
+    if root_fqns:
+        buckets.append(bucket(root_fqns, reshard_after_forward=False))
+
+    flex_shard(model, buckets=buckets)
+    record_param_layouts(model)
+    logger.info("Applied FlexShard to the model")
+
+
 def apply_fsdp_to_decoder(
     model: "Decoder",
     dp_mesh: DeviceMesh,
@@ -444,9 +504,11 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    fsdp_backend: FSDP2Config | FlexShardConfig | None = None,
 ):
     """
-    Apply data parallelism (via FSDP2) to a decoder-style transformer model.
+    Apply data parallelism (via FSDP2, or FlexShard) to a decoder-style
+    transformer model.
 
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
@@ -484,7 +546,28 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
+        fsdp_backend: ``FlexShardConfig()`` shards each FSDP2 group with
+            FlexShard instead; ``validate_flex_shard_training`` rejects the
+            arguments it doesn't support. FSDP2 otherwise.
     """
+    embedding, head, blocks = decoder_fsdp_groups(
+        model,
+        dp_mesh,
+        reshard_after_forward_policy=reshard_after_forward_policy,
+        pp_enabled=pp_enabled,
+        ep_degree=ep_degree,
+        edp_mesh=edp_mesh,
+    )
+    if isinstance(fsdp_backend, FlexShardConfig):
+        _apply_flex_shard(
+            model,
+            dp_mesh,
+            [group for group in (embedding, head) if group is not None] + blocks,
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+        )
+        return
+
     mp_policy = mixed_precision_policy(
         model,
         param_dtype=param_dtype,
@@ -497,14 +580,6 @@ def apply_fsdp_to_decoder(
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
 
-    embedding, head, blocks = decoder_fsdp_groups(
-        model,
-        dp_mesh,
-        reshard_after_forward_policy=reshard_after_forward_policy,
-        pp_enabled=pp_enabled,
-        ep_degree=ep_degree,
-        edp_mesh=edp_mesh,
-    )
     if embedding is not None:
         fully_shard(
             embedding.modules,

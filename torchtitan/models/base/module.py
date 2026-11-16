@@ -285,12 +285,9 @@ class Module(nn.Module, Configurable):
                 f"{type(self).__name__}. "
                 f"Available: {list(self._param_init.keys())}"
             )
-        from torchtitan.distributed.flex_shard_fsdp import as_fsdp2_dtensor
+        from torchtitan.distributed.flex_shard_fsdp import init_param
 
-        # FlexShard stores parameters as local shards; initialize each through
-        # the DTensor view FSDP2 would give it, so that initialization stays
-        # parallelism-agnostic and matches FSDP2's.
-        self._param_init[name](as_fsdp2_dtensor(param, param))
+        init_param(self, name, param, self._param_init[name])
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Initialize this module's own buffers.

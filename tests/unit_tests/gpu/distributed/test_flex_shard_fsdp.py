@@ -23,7 +23,6 @@ from torchtitan.config.configs import DebugConfig
 from torchtitan.config.parallelism import FSDP2Config, ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
-from torchtitan.distributed.fsdp import set_is_last_accumulation_step
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
@@ -87,6 +86,31 @@ class TestFlexShardDecoder(DTensorTestBase):
                 model.init_weights(buffer_device=None)
         return model, model_config, parallelism, parallelism_context
 
+    def _assert_initialized_as_one_device(
+        self, model, model_config, parallelism, parallelism_context, context
+    ) -> None:
+        # One device's model, initialized from the same seed.
+        del parallelism
+        with parallelism_context.activate_spmd(), torch.device("meta"):
+            reference = model_config.build()
+        dist_utils.set_determinism(
+            parallelism_context,
+            torch.device(self.device_type),
+            DebugConfig(seed=0),
+            distinct_seed_mesh_axes=[],
+        )
+        with parallelism_context.activate_spmd():
+            reference.to_empty(device=self.device_type)
+            with torch.no_grad():
+                reference.init_weights(buffer_device=None)
+        full_params = dict(reference.named_parameters())
+        for fqn, param in model.named_parameters():
+            (placement,) = flex_shard.get_placements(param)
+            expected = full_params[fqn].chunk(self.world_size, placement.dim)
+            self.assertTrue(
+                torch.equal(param, expected[self.rank]), msg=f"{context} init {fqn}"
+            )
+
     def _train(
         self, model, model_config, parallelism, parallelism_context, microbatches
     ):
@@ -97,8 +121,6 @@ class TestFlexShardDecoder(DTensorTestBase):
         for step in range(3):
             losses = []
             for microbatch in range(microbatches):
-                if microbatches > 1:
-                    set_is_last_accumulation_step(model, microbatch == microbatches - 1)
                 generator = torch.Generator().manual_seed(
                     1000 * step + 10 * microbatch + self.rank
                 )
@@ -192,9 +214,13 @@ class TestFlexShardDecoder(DTensorTestBase):
             )
             for fqn, param in flex.named_parameters():
                 self.assertTrue(flex_shard.is_flex_shard_param(param), msg=fqn)
-            self._assert_equal_tensors(
-                self._local_params(fsdp2), self._local_params(flex), f"{context} init"
-            )
+            self._assert_initialized_as_one_device(flex, *flex_setup, context)
+            # Each of FSDP2's DTensor shards draws its own random values, so
+            # start FlexShard from FSDP2's parameters.
+            flex_params = dict(flex.named_parameters())
+            with torch.no_grad():
+                for fqn, param in fsdp2.named_parameters():
+                    flex_params[fqn].copy_(_local(param))
             expected_history = self._train(fsdp2, *fsdp2_setup, microbatches)
             actual_history = self._train(flex, *flex_setup, microbatches)
             for step, (expected, actual) in enumerate(
