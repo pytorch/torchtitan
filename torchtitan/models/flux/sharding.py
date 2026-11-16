@@ -48,12 +48,12 @@ def flux_inner_attention_sharding_config() -> ShardingConfig:
         partition_spec=spmd.PartitionSpec(DP, None, None),
     )
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "q_THK": q_layout,
             "k_THK": kv_layout,
             "v_THV": kv_layout,
         },
-        out_src_shardings=q_layout,
+        output_shardings=q_layout,
         local_spmd=True,
     )
 

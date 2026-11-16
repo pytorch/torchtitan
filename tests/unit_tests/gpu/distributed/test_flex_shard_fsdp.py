@@ -24,10 +24,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
-from torchtitan.config.parallelism import FSDP2Config, ParallelismConfig
+from torchtitan.config.parallelism import (
+    FlexShardConfig,
+    FSDP2Config,
+    ParallelismConfig,
+)
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
-from torchtitan.distributed.fsdp import set_is_last_accumulation_step
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
@@ -92,6 +94,39 @@ class TestFlexShardDecoder(DTensorTestBase):
                 model.init_weights(buffer_device=None)
         return model, model_config, parallelism, parallelism_context
 
+    def _assert_initialized_as_one_device(
+        self, model, model_config, parallelism, parallelism_context, context
+    ) -> None:
+        # One device's model, initialized from the same seed.
+        del parallelism
+        with parallelism_context.activate_spmd(), torch.device("meta"):
+            reference = model_config.build()
+        dist_utils.set_determinism(
+            parallelism_context,
+            torch.device(self.device_type),
+            DebugConfig(seed=0),
+            distinct_seed_mesh_axes=[],
+        )
+        with parallelism_context.activate_spmd():
+            reference.to_empty(device=self.device_type)
+            with torch.no_grad():
+                reference.init_weights(buffer_device=None)
+        full_params = dict(reference.named_parameters())
+        for fqn, param in model.named_parameters():
+            (placement,) = flex_shard.get_placements(param)
+            expected = full_params[fqn]
+            mesh = parallelism_context.get_mesh("dp_shard")
+            if parallelism_context.ep > 1 and ".routed_experts." in fqn:
+                # EP splits the experts, and edp_shard shards each EP rank's part.
+                ep_mesh = parallelism_context.get_mesh("ep")
+                expected = expected.chunk(ep_mesh.size())[ep_mesh.get_local_rank()]
+                mesh = parallelism_context.get_mesh("edp_shard")
+            expected = expected.chunk(mesh.size(), placement.dim)
+            self.assertTrue(
+                torch.equal(param, expected[mesh.get_local_rank()]),
+                msg=f"{context} init {fqn}",
+            )
+
     def _train(
         self,
         model,
@@ -105,11 +140,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         if chunked_loss:
             # As the training engine sets it up.
             loss_fn = ChunkedLossWrapper.Config().build()
-            if isinstance(parallelism.fsdp_backend, FlexShardConfig):
-                for wrong_root in (None, model.layers):
-                    with pytest.raises(ValueError, match="needs fsdp_root"):
-                        loss_fn.set_lm_head(model.lm_head, fsdp_root=wrong_root)
-            loss_fn.set_lm_head(model.lm_head, fsdp_root=model)
+            loss_fn.set_lm_head(model.lm_head)
             model._skip_lm_head = True
         # One packed sequence per microbatch, as the data loader produces.
         positions = torch.arange(_SEQ_LEN, device=self.device_type)
@@ -117,8 +148,6 @@ class TestFlexShardDecoder(DTensorTestBase):
         for step in range(3):
             losses = []
             for microbatch in range(microbatches):
-                if microbatches > 1:
-                    set_is_last_accumulation_step(model, microbatch == microbatches - 1)
                 generator = torch.Generator().manual_seed(
                     1000 * step + 10 * microbatch + self.rank
                 )
@@ -213,9 +242,13 @@ class TestFlexShardDecoder(DTensorTestBase):
             )
             for fqn, param in flex.named_parameters():
                 self.assertTrue(flex_shard.is_flex_shard_param(param), msg=fqn)
-            self._assert_equal_tensors(
-                self._local_params(fsdp2), self._local_params(flex), f"{context} init"
-            )
+            self._assert_initialized_as_one_device(flex, *flex_setup, context)
+            # Each of FSDP2's DTensor shards draws its own random values, so
+            # start FlexShard from FSDP2's parameters.
+            flex_params = dict(flex.named_parameters())
+            with torch.no_grad():
+                for fqn, param in fsdp2.named_parameters():
+                    flex_params[fqn].copy_(_local(param))
             histories, num_reduce_scatters = [], []
             for model, setup in ((fsdp2, fsdp2_setup), (flex, flex_setup)):
                 # FSDP2 calls dist.reduce_scatter_single, and FlexShard
@@ -230,9 +263,9 @@ class TestFlexShardDecoder(DTensorTestBase):
                     )
                 num_reduce_scatters.append(reduce_scatter.call_count)
             # Gradients are grouped into reduce-scatters as FSDP2 groups them,
-            # e.g. ChunkedLossWrapper's head grads kept from earlier
-            # microbatches go into one. Values can't tell when sums are exact.
-            # The first check makes sure the patches see the reduce-scatters.
+            # e.g. ChunkedLossWrapper's lm_head grads of all chunks go into one.
+            # Values can't tell when the sums are exact. The first check makes
+            # sure the patches see the reduce-scatters.
             self.assertGreater(num_reduce_scatters[0], 0, msg=context)
             self.assertEqual(
                 num_reduce_scatters[0], num_reduce_scatters[1], msg=context
@@ -261,27 +294,24 @@ class TestFlexShardDecoder(DTensorTestBase):
 
     @with_comms
     def test_matches_fsdp2(self):
+        # Two microbatches cover one, and the reshard policy doesn't depend on
+        # the model.
         self._check_matches_fsdp2(
             ep=1,
-            cases=product(
-                (
-                    (build_llama3_config, "debugmodel"),
-                    (build_qwen3_config, "debugmodel_moe"),
-                ),
-                ("default", "always"),
-                (1, 2),
-            ),
+            cases=[
+                ((build_llama3_config, "debugmodel"), "default", 2),
+                ((build_qwen3_config, "debugmodel_moe"), "always", 2),
+            ],
         )
 
     @with_comms
     def test_matches_fsdp2_with_expert_parallelism(self):
-        # Each MoE block's routed experts shard over edp_shard (half of
-        # dp_shard), and the rest of the block over dp_shard. The loss is
-        # ChunkedLossWrapper's, as in the Qwen3 MoE recipes: it runs lm_head on
-        # its own on each chunk, with a backward each. Its bucket keeps its
-        # grads unsharded across the chunks, as FSDP2's group does, and
-        # reduce-scatters them at the last chunk, or with grads kept from
-        # earlier microbatches, in the decoder backward.
+        # Each MoE block's routed experts shard over edp_shard (dp_shard / ep
+        # ranks) within each EP rank's experts, and the rest over dp_shard. The
+        # loss is ChunkedLossWrapper's, as in the Qwen3 MoE recipes: it runs
+        # lm_head on its own on each chunk, with a backward each. lm_head's
+        # bucket keeps its grads unsharded across the chunks, as FSDP2's group
+        # does, and reduce-scatters them at the last chunk.
         self._check_matches_fsdp2(
             ep=2,
             cases=product(

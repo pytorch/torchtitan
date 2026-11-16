@@ -170,7 +170,7 @@ class TorchTitanMLAImpl(MLACommonImpl[TorchTitanMLAMetadata]):
             decode.seq_lens,
             max_seqlen_q=decode.max_query_len,
             scale=self.scale,
-            autotune=True,
+            kernel_options={"autotune": True},
         )
         return out_THL, None
 

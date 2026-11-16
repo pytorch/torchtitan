@@ -7,7 +7,7 @@
 """Runtime FSDP lifecycle helpers that isolate private upstream state."""
 
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import contextmanager
 from typing import Any, cast, NamedTuple
 
 import spmd_types as spmd
@@ -18,7 +18,7 @@ from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 
 from torchtitan.distributed.flex_shard_fsdp import (
     flex_shard_partial_backwards,
-    is_flex_shard_module,
+    has_flex_shard_bucket,
 )
 
 
@@ -46,13 +46,10 @@ def complete_fsdp_grouped_forward(module: FSDPModule, output: Any) -> Any:
     return output
 
 
+@contextmanager
 def fsdp_partial_backwards(
-    module: nn.Module,
-    *,
-    fsdp_root: nn.Module | None,
-    run_backward: bool,
-    outer_backward_follows: bool,
-) -> AbstractContextManager[_PartialBackwardHooks]:
+    module: nn.Module, *, run_backward: bool, outer_backward_follows: bool
+) -> Iterator[_PartialBackwardHooks]:
     """Keep one module unsharded across partial backwards, preserving policy.
 
     Only ``module`` runs in the inner forwards and backwards. Call
@@ -66,47 +63,17 @@ def fsdp_partial_backwards(
     Manual finalization owns all reductions, including the first inner pass,
     and leaves parameter residency to the schedule.
     Forward-only calls complete the same scope without running backward.
-
-    ``fsdp_root`` is the module that FSDP sharded and that holds ``module``.
-    FSDP2 finds ``module``'s group from ``module``; FlexShard finds its bucket
-    from ``fsdp_root`` (see ``flex_shard_partial_backwards``).
+    A module with a FlexShard bucket goes to ``flex_shard_partial_backwards``.
     """
-    if is_flex_shard_module(fsdp_root):
-        return _flex_shard_partial_backwards(
+    if has_flex_shard_bucket(module):
+        with flex_shard_partial_backwards(
             module,
-            flex_shard_module=fsdp_root,
             run_backward=run_backward,
             outer_backward_follows=outer_backward_follows,
-        )
-    return _fsdp2_partial_backwards(
-        module, run_backward=run_backward, outer_backward_follows=outer_backward_follows
-    )
-
-
-@contextmanager
-def _flex_shard_partial_backwards(
-    module: nn.Module,
-    *,
-    flex_shard_module: nn.Module,
-    run_backward: bool,
-    outer_backward_follows: bool,
-) -> Iterator[_PartialBackwardHooks]:
-    """``fsdp_partial_backwards`` for FlexShard."""
-    with flex_shard_partial_backwards(
-        module,
-        flex_shard_module=flex_shard_module,
-        run_backward=run_backward,
-        outer_backward_follows=outer_backward_follows,
-    ) as before_last_forward:
-        # Nothing to do after each call: the bucket's forward stays open.
-        yield _PartialBackwardHooks(before_last_forward, lambda output: output)
-
-
-@contextmanager
-def _fsdp2_partial_backwards(
-    module: nn.Module, *, run_backward: bool, outer_backward_follows: bool
-) -> Iterator[_PartialBackwardHooks]:
-    """``fsdp_partial_backwards`` for FSDP2."""
+        ) as before_last_forward:
+            # The bucket's forward stays open, so outputs need no hooks.
+            yield _PartialBackwardHooks(before_last_forward, lambda output: output)
+        return
     if not isinstance(module, FSDPModule):
         yield _PartialBackwardHooks(lambda: None, lambda output: output)
         return

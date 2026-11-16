@@ -59,9 +59,9 @@ class HcSplitSinkhorn(Module):
             *([1] * (comb.ndim - 2)), hc_mult, hc_mult
         )
 
-        row_max = comb.max(dim=-1, keepdim=True).values
-        comb = torch.exp(comb - row_max)
-        comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)
+        # Same as the reference kernel: eps goes after the softmax, not in its denominator.
+        # https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/60d8d70770c6776ff598c94bb586a859a38244f1/inference/kernel.py#L401
+        comb = torch.softmax(comb, dim=-1) + self.eps
         comb = comb / (comb.sum(dim=-2, keepdim=True) + self.eps)
         for _ in range(self.sinkhorn_iters - 1):
             comb = comb / (comb.sum(dim=-1, keepdim=True) + self.eps)

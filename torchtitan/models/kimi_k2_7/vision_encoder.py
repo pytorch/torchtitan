@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_types import disable_dense_sp
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common import Linear
@@ -401,6 +402,8 @@ class MoonViTEncoder(Module):
         )
         return learned_pos, rope_cache
 
+    # Vision activations are never sequence-sharded, so they stay TP-invariant.
+    @disable_dense_sp()
     def forward(
         self,
         pixel_values: torch.Tensor,
