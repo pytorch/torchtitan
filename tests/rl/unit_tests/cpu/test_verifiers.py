@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
@@ -266,10 +267,12 @@ def test_setup_async_builds_the_train_client_and_bypasses_the_proxy(
 
 
 def test_trainable_token_spans() -> None:
-    assert _trainable_token_spans([False, True, True, False, True]) == [
+    assert _trainable_token_spans(np.array([False, True, True, False, True])) == [
         (1, 3),
         (4, 5),
     ]
+    assert _trainable_token_spans(np.array([True, True])) == [(0, 2)]
+    assert _trainable_token_spans(np.array([False])) == []
 
 
 def test_verifiers_trace_preserves_generation_metadata() -> None:
@@ -278,6 +281,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
     node = SimpleNamespace(
         token_ids=[10, 11, 12, 13],
         mask=[False, False, True, True],
+        logprobs=[-0.2, -0.3],
         sampled=True,
         message=VerifiersAssistantMessage(content="Answer: $42$"),
     )
@@ -286,8 +290,9 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
         branches=[
             SimpleNamespace(
                 nodes=[node],
-                token_ids=[10, 11, 12, 13],
-                logprobs=[0.0, 0.0, -0.2, -0.3],
+                token_ids=np.array([10, 11, 12, 13]),
+                logprobs=np.array([0.0, 0.0, -0.2, -0.3]),
+                trainable=True,
             )
         ],
     )
@@ -321,12 +326,14 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     first_node = SimpleNamespace(
         token_ids=[10, 11],
         mask=[False, True],
+        logprobs=[-0.1],
         sampled=True,
         message=VerifiersAssistantMessage(content="first"),
     )
     second_node = SimpleNamespace(
         token_ids=[12, 13],
         mask=[False, True],
+        logprobs=[-0.2],
         sampled=True,
         message=VerifiersAssistantMessage(content="second"),
     )
@@ -335,8 +342,9 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
         branches=[
             SimpleNamespace(
                 nodes=[first_node, second_node],
-                token_ids=[10, 11, 12, 13],
-                logprobs=[0.0, -0.1, 0.0, -0.2],
+                token_ids=np.array([10, 11, 12, 13]),
+                logprobs=np.array([0.0, -0.1, 0.0, -0.2]),
+                trainable=True,
             )
         ],
     )
@@ -371,7 +379,11 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
     def node(token_ids: list[int], content: str) -> SimpleNamespace:
         message = VerifiersAssistantMessage(content=content)
         return SimpleNamespace(
-            token_ids=token_ids, mask=[False, True], sampled=True, message=message
+            token_ids=token_ids,
+            mask=[False, True],
+            logprobs=[-0.1],
+            sampled=True,
+            message=message,
         )
 
     shared = node([10, 11], "a")
@@ -382,13 +394,15 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
         branches=[
             SimpleNamespace(
                 nodes=[shared, first_leaf],
-                token_ids=[10, 11, 12, 13],
-                logprobs=[0.0, -0.1, 0.0, -0.2],
+                token_ids=np.array([10, 11, 12, 13]),
+                logprobs=np.array([0.0, -0.1, 0.0, -0.2]),
+                trainable=True,
             ),
             SimpleNamespace(
                 nodes=[shared, second_leaf],
-                token_ids=[10, 11, 14, 15],
-                logprobs=[0.0, -0.1, 0.0, -0.3],
+                token_ids=np.array([10, 11, 14, 15]),
+                logprobs=np.array([0.0, -0.1, 0.0, -0.3]),
+                trainable=True,
             ),
         ],
     )
@@ -410,6 +424,129 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
     assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13], [15]]
 
 
+def test_trace_to_rollout_turns_skips_a_branch_verifiers_marks_untrainable() -> None:
+    """A compaction attempt the harness rejected is a branch with trainable=False: no turn."""
+    from verifiers.v1.graph import MessageNode
+    from verifiers.v1.trace import Branch
+
+    def node(role: str, token_ids: list[int], logprobs: list[float] | None = None):
+        sampled = logprobs is not None
+        fields = (
+            {} if logprobs is None else {"logprobs": np.array(logprobs, np.float32)}
+        )
+        return MessageNode(
+            message={"role": role, "content": role},
+            token_ids=np.array(token_ids, np.int32),
+            mask=np.array([sampled] * len(token_ids)),
+            sampled=sampled,
+            **fields,
+        )
+
+    user = node("user", [1, 2])
+    kept = node("assistant", [3, 4], [-0.1, -0.2])
+    rejected = node("assistant", [9], [-0.5])
+    trace = SimpleNamespace(
+        id="trace-1",
+        nodes=[user, kept, rejected],
+        branches=[
+            Branch(index=0, nodes=[user, kept]),
+            Branch(index=1, nodes=[user, rejected], trainable=False),
+        ],
+    )
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
+        trace=trace,
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=1, max_policy_version=1, metrics=[]
+        ),
+        group_id=0,
+        rollout_id=0,
+    )
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[3, 4]]
+
+
+def test_trace_to_rollout_turns_reads_verifiers_arrays() -> None:
+    """Verifiers' own `Branch` returns its token ids and logprobs as numpy arrays."""
+    from verifiers.v1.graph import MessageNode
+    from verifiers.v1.trace import Branch
+
+    def node(role: str, token_ids: list[int], logprobs: list[float] | None = None):
+        sampled = logprobs is not None
+        fields = (
+            {} if logprobs is None else {"logprobs": np.array(logprobs, np.float32)}
+        )
+        return MessageNode(
+            message={"role": role, "content": role},
+            token_ids=np.array(token_ids, np.int32),
+            mask=np.array([sampled] * len(token_ids)),
+            sampled=sampled,
+            **fields,
+        )
+
+    nodes = [
+        node("user", [1, 2]),
+        node("assistant", [3, 4], [-0.1, -0.2]),
+        node("user", [5, 6]),
+        node("assistant", [7, 8], [-0.3, -0.4]),
+    ]
+    trace = SimpleNamespace(nodes=nodes, branches=[Branch(index=0, nodes=nodes)])
+
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
+        trace=trace,
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=1, max_policy_version=1, metrics=[]
+        ),
+        group_id=0,
+        rollout_id=0,
+    )
+
+    assert [
+        (
+            turn.prompt_prefix_len,
+            list(turn.prompt_delta_token_ids),
+            turn.completion_token_ids.tolist(),
+        )
+        for turn in turns
+    ] == [(0, [1, 2], [3, 4]), (4, [5, 6], [7, 8])]
+    assert turns[1].completion_logprobs.tolist() == (
+        np.asarray([-0.3, -0.4], dtype=np.float32).tolist()
+    )
+
+
+@pytest.mark.parametrize(
+    "mask, logprobs",
+    [
+        # 3 sampled tokens, 2 logprobs: `branch.logprobs` would pad a 0.0 and hide it.
+        pytest.param([True, True, True], [-0.1, -0.2], id="missing_logprob"),
+        pytest.param([True, True], [-0.1, -0.2], id="mask_shorter_than_tokens"),
+    ],
+)
+def test_trace_to_rollout_turns_refuses_a_node_whose_logprobs_dont_match_its_tokens(
+    mask: list[bool], logprobs: list[float]
+) -> None:
+    from verifiers.v1.graph import MessageNode
+    from verifiers.v1.trace import Branch
+
+    node = MessageNode(
+        message={"role": "assistant", "content": "answer"},
+        token_ids=np.array([3, 4, 5], np.int32),
+        mask=np.array(mask),
+        logprobs=np.array(logprobs, np.float32),
+        sampled=True,
+    )
+    trace = SimpleNamespace(
+        id="trace-1", nodes=[node], branches=[Branch(index=0, nodes=[node])]
+    )
+    with pytest.raises(ValueError, match="trace-1 branch 0 node 0: 3 tokens"):
+        VerifiersRolloutWorker.trace_to_rollout_turns(
+            trace=trace,
+            generation_metadata=VerifiersGenerationMetadata(
+                min_policy_version=1, max_policy_version=1, metrics=[]
+            ),
+            group_id=0,
+            rollout_id=0,
+        )
+
+
 def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
     from verifiers.v1.types import (
         AssistantMessage as VerifiersAssistantMessage,
@@ -423,7 +560,11 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
             else VerifiersUserMessage(content=content)
         )
         return SimpleNamespace(
-            token_ids=[0], mask=[sampled], sampled=sampled, message=message
+            token_ids=[0],
+            mask=[sampled],
+            logprobs=[0.0] if sampled else [],
+            sampled=sampled,
+            message=message,
         )
 
     # Two branches share the prompt and the first command, then diverge.
@@ -440,8 +581,9 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
         branches=[
             SimpleNamespace(
                 nodes=branch_nodes,
-                token_ids=[0] * len(branch_nodes),
-                logprobs=[0.0] * len(branch_nodes),
+                token_ids=np.zeros(len(branch_nodes), dtype=np.int64),
+                logprobs=np.zeros(len(branch_nodes)),
+                trainable=True,
             )
             for branch_nodes in (
                 [task, first, out, second],
@@ -483,6 +625,7 @@ def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
         id="trace-1",
         task=SimpleNamespace(key="task-1"),
         stop_condition="error",
+        dropped=None,
         errors=[
             Error(
                 type="HarnessError",
@@ -551,6 +694,8 @@ _LONG_PROMPT = [151644] * 160_000
 
 def test_generation_server_forwards_token_request() -> None:
     """Two calls of one session; the second prompt is over 1 MiB of JSON."""
+    # Private to renderers, pinned at 0.2.0: the decoder Verifiers' train client uses.
+    from renderers.client import _parse_completion_logprobs
 
     async def run_test() -> None:
         received = []
@@ -641,24 +786,13 @@ def test_generation_server_forwards_token_request() -> None:
             request["routing_session_id"] == "group=1/rollout=2" for request in received
         )
         assert all(request["sampling_config"].seed == 4 for request in received)
-        assert payload == {
-            "request_id": "group=1/rollout=2/request=1",
-            "choices": [
-                {
-                    "index": 0,
-                    "token_ids": [31, 32],
-                    "logprobs": {
-                        "content": [
-                            {"token": "token_id:31", "logprob": -0.1},
-                            {"token": "token_id:32", "logprob": -0.2},
-                        ]
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "prompt_logprobs": None,
-            "kv_transfer_params": None,
-        }
+        (choice,) = payload["choices"]
+        # renderers' own parser reads the packed float32 logprobs back.
+        assert _parse_completion_logprobs(choice, [31, 32]).tolist() == (
+            np.asarray([-0.1, -0.2], dtype=np.float32).tolist()
+        )
+        assert payload["request_id"] == "group=1/rollout=2/request=1"
+        assert (choice["token_ids"], choice["finish_reason"]) == ([31, 32], "stop")
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
@@ -1058,6 +1192,7 @@ def _trace(*, trace_id="trace", trainable=True, calls=(), **fields) -> SimpleNam
         metrics={},
         errors=[],
         last_error=None,
+        dropped=None,
         timing=SimpleNamespace(
             setup=span,
             agent=SimpleNamespace(duration=0.0, model=span, harness=span),
@@ -1113,16 +1248,22 @@ _HARNESS_ERROR = VerifiersError(type="HarnessError", message="exited with no out
 def _one_turn_fields(*, trainable: bool = True) -> dict:
     """Trace fields for one policy turn: prompt token 10, sampled token 11 (trainable unless
     `trainable=False`)."""
-    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+    from verifiers.v1.graph import MessageNode
+    from verifiers.v1.trace import Branch
 
-    node = SimpleNamespace(
-        token_ids=[10, 11],
-        mask=[False, trainable],
+    node = MessageNode(
+        message={"role": "assistant", "content": "ls"},
+        token_ids=np.array([10, 11], np.int32),
+        mask=np.array([False, trainable]),
         sampled=True,
-        message=VerifiersAssistantMessage(content="ls"),
+        # One logprob per trainable token.
+        logprobs=np.array([-0.1] if trainable else [], np.float32),
     )
-    branch = SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
-    return {"nodes": [node], "branches": [branch], "num_turns": 1}
+    return {
+        "nodes": [node],
+        "branches": [Branch(index=0, nodes=[node])],
+        "num_turns": 1,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1344,7 +1485,7 @@ _REFUSED_CALL = SimpleNamespace(error=_error("ProviderError", 400))
             RolloutStatus.TRUNCATED_LENGTH,
             id="length",
         ),
-        # Verifiers' token budgets for the whole rollout.
+        # Verifiers' token limits: per rollout, or per response (max_turn_tokens).
         *(
             pytest.param(
                 {"is_truncated": True, "stop_condition": budget},
@@ -1352,7 +1493,12 @@ _REFUSED_CALL = SimpleNamespace(error=_error("ProviderError", 400))
                 RolloutStatus.TRUNCATED_LENGTH,
                 id=budget,
             )
-            for budget in ("max_input_tokens", "max_output_tokens", "max_total_tokens")
+            for budget in (
+                "max_input_tokens",
+                "max_output_tokens",
+                "max_total_tokens",
+                "max_turn_tokens",
+            )
         ),
         # A truncation this mapping doesn't know doesn't train.
         pytest.param(
@@ -1367,6 +1513,16 @@ _REFUSED_CALL = SimpleNamespace(error=_error("ProviderError", 400))
             {},
             RolloutStatus.COMPLETED,
             id="ok_after_a_retry",
+        ),
+        # The env's judge declined to grade it; an empty reason still means dropped.
+        pytest.param(
+            {"dropped": "the reference answer is wrong"},
+            {},
+            RolloutStatus.DROPPED,
+            id="dropped",
+        ),
+        pytest.param(
+            {"dropped": ""}, {}, RolloutStatus.DROPPED, id="dropped_no_reason"
         ),
     ],
 )
@@ -1390,6 +1546,7 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     node = SimpleNamespace(
         token_ids=[10, 11],
         mask=[False, True],
+        logprobs=[-0.1],
         sampled=True,
         message=VerifiersAssistantMessage(content="answer"),
     )
@@ -1400,7 +1557,12 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         num_turns=1,
         nodes=[node],
         branches=[
-            SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
+            SimpleNamespace(
+                nodes=[node],
+                token_ids=np.array([10, 11]),
+                logprobs=np.array([0.0, -0.1]),
+                trainable=True,
+            )
         ],
     )
     generation_server = SimpleNamespace(
@@ -1421,6 +1583,50 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
     assert rollout.status is RolloutStatus.ERROR_TIMEOUT
     assert "rollout group=1/rollout=2 failed: ERROR_TIMEOUT" in caplog.text
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
+
+
+@pytest.mark.parametrize("with_turn", [True, False])
+def test_a_dropped_verifiers_trace_is_never_scored(with_turn: bool) -> None:
+    """A judge's drop keeps OK status and a tempting reward; it stays DROPPED, unscored."""
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    node = SimpleNamespace(
+        token_ids=[10, 11],
+        mask=[False, True],
+        logprobs=[-0.1],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="answer"),
+    )
+    branch = SimpleNamespace(
+        nodes=[node],
+        token_ids=np.array([10, 11], np.int32),
+        logprobs=np.array([0.0, -0.1], np.float32),
+        trainable=True,
+    )
+    trace = _trace(
+        dropped="the reference answer is wrong",
+        reward=1.0,
+        nodes=[node] if with_turn else [],
+        branches=[branch] if with_turn else [],
+    )
+    metadata = VerifiersGenerationMetadata(
+        min_policy_version=0, max_policy_version=0, metrics=[]
+    )
+    worker = _worker_with_env(
+        run_slot=_run_slot_minting(trace),
+        generation_server=SimpleNamespace(
+            model_id="model",
+            start_session=lambda *, session_id, group_id: None,
+            end_session=lambda session_id: metadata if with_turn else None,
+        ),
+    )
+
+    rollout = _run_single_rollout(worker)
+
+    assert rollout.status is RolloutStatus.DROPPED
+    assert len(rollout.turns) == int(with_turn)
+    assert all(VERIFIERS_REWARD_KEY not in turn.env_rewards for turn in rollout.turns)
+    assert rollout.logs["dropped"] == "the reference answer is wrong"
 
 
 def test_rollout_releases_every_session_verifiers_minted() -> None:
