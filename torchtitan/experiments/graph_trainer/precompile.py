@@ -114,6 +114,9 @@ def compute_config_fingerprint(
     h.update(
         f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
     )
+    h.update(
+        f"compile:programmable_fusion:{compile_config.programmable_fusion!r}\n".encode()
+    )
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
     if torch.cuda.is_available():
