@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Verifiers' Harbor taskset, declared locally so the env-server worker imports us.
+"""Verifiers' Harbor taskset, declared locally so each rollout worker imports us.
 
-Nothing is overridden. The env-server worker is a spawned process, and it only
+Nothing is overridden. A rollout worker is a spawned process, and it only
 imports the module behind a locally registered taskset alias (see
 ``_local_taskset_module`` in ``torchtitan/rl/examples/verifiers/rollouter.py``).
 Importing this module registers the harness alias in that process too, which
