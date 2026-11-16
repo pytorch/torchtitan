@@ -4,28 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Setup that the Verifiers env server and each of its pool workers run first.
-
-Torch-free on purpose: every pool worker imports this module to unpickle
-`setup_env_server_worker` (`test_env_server_workers_skip_the_trainer_imports` checks it).
-"""
+"""Make a local taskset module importable under a Verifiers taskset id."""
 
 import importlib
 import sys
-
-from verifiers.v1.utils.logging import setup_logging
-
-
-def setup_env_server_worker(level: str, local_taskset_module: str | None) -> None:
-    """Route Verifiers logs to stderr at `level`, and make the local taskset importable.
-
-    Verifiers runs it in the env server and in each pool worker it spawns:
-        pool worker without it:  import_taskset(alias) -> ModuleNotFoundError, worker exits
-        pool worker with it:     import_taskset(alias) -> the local taskset module
-    """
-    setup_logging(level)
-    if local_taskset_module is not None:
-        register_local_taskset_alias(local_taskset_module)
 
 
 # TODO: open a Verifiers issue, then delete this alias: Verifiers can't import a dotted module path

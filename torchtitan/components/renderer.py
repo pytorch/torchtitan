@@ -81,11 +81,8 @@ class RenderersConfigAdapter(RendererConfig):
     Renderers and their options:
     https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/docs/renderer-config.md"""
 
-    def to_dict(self) -> dict[str, Any]:
-        return {"renderers_config": self.renderers_config.model_dump(mode="json")}
-
     def get_renderers_config(self) -> PrimeRendererConfig:
-        """Return the `renderers` config that Verifiers workers rebuild the renderer from."""
+        """Return the `renderers` config. Verifiers' train client builds the same renderer from it."""
         return self.renderers_config
 
     def build(

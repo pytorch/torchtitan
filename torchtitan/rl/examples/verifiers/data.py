@@ -20,7 +20,7 @@ from torchtitan.rl.rollout.data import RLDataset
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class VerifiersTaskSample:
-    """Serialized task data dispatched to a stateless Verifiers EnvServer."""
+    """One task's data; the rollout worker builds the Verifiers task from it."""
 
     # TODO: Consider sending the task's fields as one lazily deserialized object, decoded
     # only where the task runs. The hops before it (the controller, a checkpoint of pending
@@ -51,14 +51,6 @@ class VerifiersTaskDataset(RLDataset):
         def __post_init__(self) -> None:
             if self.num_tasks is not None and self.num_tasks <= 0:
                 raise ValueError("num_tasks must be positive")
-
-        def to_dict(self) -> dict[str, Any]:
-            return {
-                "verifiers_taskset": self.verifiers_taskset.model_dump(mode="json"),
-                "num_tasks": self.num_tasks,
-                "seed": self.seed,
-                "shuffle": self.shuffle,
-            }
 
     def __init__(self, config: Config) -> None:
         verifiers_taskset_config = config.verifiers_taskset.model_copy(

@@ -23,6 +23,9 @@ from torchtitan.rl.examples.dapo_math import (
     MathVerifyPool,
 )
 
+# TODO: share one Math-Verify pool per host. Each process that scores starts its own 4
+# processes, e.g. 5 rollout workers start 20. Sharing needs a pool process that lives outside the
+# rollout workers.
 # Threads and Math-Verify processes start on the first score, not at import.
 _MATH_VERIFY_POOL = MathVerifyPool(num_processes=4, timeout_seconds=60.0)
 
@@ -54,7 +57,7 @@ class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetCon
     config: VerifiersMathTasksetConfig
 
     def load(self) -> list[VerifiersMathTask]:
-        """Build the tasks consumed by both the dataset and environment server."""
+        """Build the tasks for training and validation."""
         dataset, num_tasks = _load_math_dataset(self.config.dataset)
         return [
             VerifiersMathTask(
