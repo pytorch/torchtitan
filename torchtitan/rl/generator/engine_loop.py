@@ -9,27 +9,33 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import enum
 import gc
+import json
 import logging
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, TypeVar
 
 import torch
 import torch.distributed as dist
+from renderers import PlaceholderRange
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
 from torchtitan.rl.generator.engine import GenerationEngine
-from torchtitan.rl.generator.types import EngineRequest
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.rollout.types import Completion, Prompt, PromptImage
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# Bound peer-controlled allocation, including base64-encoded image files.
+_MAX_DECISION_BYTES = 256 * 1024 * 1024
 
 
 class EngineLoopThread:
@@ -86,7 +92,7 @@ class EngineLoop:
         generate(prompt_1): enqueue prompt_1, await reply_1   ┘ (other ranks are no-op)
 
         # meanwhile, the engine loop, which is its own coroutine, is continuously running.
-        rank 0   _decide_next_action -> LoopDecision(STEP, [prompt_0, prompt_1])─┐  broadcast_object_list (gloo)
+        rank 0   _decide_next_action -> LoopDecision(STEP, [prompt_0, prompt_1])─┐  JSON byte broadcast (gloo)
         rank 1   (blocked inside the broadcast) ─────────────────────────────────┘  decision from rank0 is broadcast
 
         # The loop now executes the decision. In this example: STEP.
@@ -311,24 +317,8 @@ class EngineLoop:
                     else None
                 )
 
-                # Barrier(gloo, CPU): Ship rank 0's decision (incl. prompts) to every TP rank via gloo/CPU, off the
-                # NCCL stream. broadcast_object_list mutates a list in place; `to_thread` runs the
-                # blocking call in a worker so the event loop can still serve generate/load/close.
-                # TODO(perf): overlap this broadcast with the step burst (pipeline the next decision) so
-                # gloo transfer hides behind GPU compute.
-                # TODO(perf): swap broadcast_object_list (double serialization of pickle+broadcast) for a byte
-                # broadcast, to cut pickle overhead. i.e. serialize the decision to bytes on rank 0, then broadcast.
-                # TODO: Revisit when enabling DP>1
-                decision_broadcast_container = [decision] if self._rank == 0 else [None]
-                await asyncio.to_thread(
-                    dist.broadcast_object_list,
-                    decision_broadcast_container,
-                    src=0,
-                    group=self._broadcast_group,
-                    device=torch.device("cpu"),
-                )
-                # get rank 0's broadcasted decision
-                decision = decision_broadcast_container[0]  # [num_ranks]
+                # Keep blocking CPU/Gloo collectives off the engine event loop.
+                decision = await asyncio.to_thread(self._broadcast_decision, decision)
 
                 if decision.action is LoopAction.CLOSE:
                     if self._rank == 0:
@@ -396,6 +386,39 @@ class EngineLoop:
             raise
         finally:
             await self._release_resources()
+
+    def _broadcast_decision(self, decision: LoopDecision | None) -> LoopDecision:
+        # Announce encoding failures too, so followers leave the same collective.
+        payload = None
+        error = None
+        size = torch.zeros(1, dtype=torch.int64, device="cpu")
+        if self._rank == 0:
+            try:
+                data = decision.to_bytes()
+                if not 0 < len(data) <= _MAX_DECISION_BYTES:
+                    raise ValueError("engine-loop decision exceeds the wire limit")
+                payload = torch.frombuffer(bytearray(data), dtype=torch.uint8)
+                size[0] = len(data)
+            except Exception as exc:
+                error = exc
+        dist.broadcast(size, src=0, group=self._broadcast_group)
+        if not 0 < int(size.item()) <= _MAX_DECISION_BYTES:
+            raise ValueError("invalid engine-loop decision size") from error
+        if payload is None:
+            payload = torch.empty(int(size.item()), dtype=torch.uint8, device="cpu")
+        dist.broadcast(payload, src=0, group=self._broadcast_group)
+        # No rank may enter engine collectives if a peer rejected the decision.
+        valid = torch.ones(1, dtype=torch.int64, device="cpu")
+        decoded = None
+        try:
+            decoded = LoopDecision.from_bytes(payload.numpy().tobytes())
+        except Exception as exc:
+            error = exc
+            valid.zero_()
+        dist.all_reduce(valid, op=dist.ReduceOp.MIN, group=self._broadcast_group)
+        if not valid.item():
+            raise ValueError("invalid engine-loop decision payload") from error
+        return decision if self._rank == 0 else decoded
 
     async def _rank0_close_and_fail_queue(self, exc: Exception) -> None:
         """RANK 0: after the loop crashed, close the queue so later calls raise, and fail the
@@ -700,8 +723,7 @@ class LoopAction(enum.Enum):
 
 @dataclass(kw_only=True, slots=True)
 class LoopDecision:
-    """The per-iteration decision rank 0 broadcasts so every rank acts identically.
-    This is broadcasted (pickled) in the engine loop"""
+    """The data-only decision rank 0 broadcasts so every rank acts identically."""
 
     action: LoopAction
 
@@ -716,3 +738,63 @@ class LoopDecision:
     released_session_ids: list[str] = field(default_factory=list)
     released_group_ids: list[int] = field(default_factory=list)
     # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)
+
+    def to_bytes(self) -> bytes:
+        """Encode only data; image-file bytes use JSON's base64 representation."""
+
+        def encode(value):
+            if isinstance(value, LoopAction):
+                return value.value
+            if isinstance(value, bytes):
+                return base64.b64encode(value).decode("ascii")
+            if isinstance(
+                value,
+                (
+                    LoopDecision,
+                    EngineRequest,
+                    SamplingConfig,
+                    Prompt,
+                    PromptImage,
+                    PlaceholderRange,
+                ),
+            ):
+                return {
+                    entry.name: getattr(value, entry.name) for entry in fields(value)
+                }
+            raise TypeError(f"unsupported decision value: {type(value).__name__}")
+
+        return json.dumps(
+            self,
+            default=encode,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> LoopDecision:
+        """Rebuild only the fixed request types, never wire-selected Python objects."""
+        fields = json.loads(data)
+        fields["action"] = LoopAction(fields["action"])
+        for requests in fields["requests_per_dp_rank"] or ():
+            for index, request in enumerate(requests):
+                prompt = request.pop("prompt")
+                prompt["images"] = tuple(
+                    PromptImage(
+                        **{
+                            **image,
+                            "grid_thw": tuple(image["grid_thw"]),
+                            "data": base64.b64decode(image["data"], validate=True),
+                        }
+                    )
+                    for image in prompt["images"]
+                )
+                prompt["image_placeholders"] = tuple(
+                    PlaceholderRange(**value) for value in prompt["image_placeholders"]
+                )
+                version = request.pop("min_policy_version")
+                request["sampling"] = SamplingConfig(**request["sampling"])
+                request["prompt"] = Prompt(**prompt)
+                decoded = EngineRequest(**request)
+                decoded.min_policy_version = version
+                requests[index] = decoded
+        return cls(**fields)
