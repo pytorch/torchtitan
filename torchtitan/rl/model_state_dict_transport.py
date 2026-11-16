@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Moves the trainer's model state dict into the generators' prefetch buffers with
-one-sided reads over a ``torch.distributed._transport`` backend.
+"""Moves the trainer's model state dict into the generators with one-sided reads over
+a ``torch.distributed._transport`` backend.
 
 See ``MODEL_STATE_DICT_TRANSPORT.md``.
 """
@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 import weakref
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Literal, NamedTuple
 
 import torch
@@ -308,17 +310,19 @@ def _plan_reads(
 
 
 class ModelStateDictTransport(Configurable):
-    """Moves the model state dict from the trainer into the generators' prefetched
-    model state dicts.
+    """Moves the model state dict from the trainer into the generators.
 
     The trainer and every generator rank each build one. The trainer stages its
     shards, cast to the generators' dtypes, in one registered pinned CPU buffer laid
     out per generator rank; each generator rank reads its pieces from every trainer
-    rank directly into its own registered prefetch buffers.
+    rank, either into its own registered prefetch buffers ("cpu_prefetch") or, during
+    the load, into a registered device buffer it copies into the model ("gpu_fetch").
 
     Trainer: ``register_trainer_source`` once, then ``stage`` per push.
-    Generator: ``connect_generator`` once, then ``read`` per prefetch and
-    ``copy_prefetched_`` per load.
+    "cpu_prefetch" generator: ``connect_generator`` once, then ``read`` per prefetch
+    and ``copy_prefetched_`` per load.
+    "gpu_fetch" generator: ``connect_fetching_generator`` once, then ``fetch_`` per
+    load group.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -346,6 +350,16 @@ class ModelStateDictTransport(Configurable):
         self._reads: list[tuple[Any, Any]] | None = None
         self._prefetched: dict[str, torch.Tensor] = {}
         self._packed: dict[str, list[tuple[tuple[slice, ...], torch.Tensor]]] = {}
+        # gpu_fetch generator: per key, its load group, its reads into the fetch
+        # buffer and (shard index, fetch buffer view) per copy into the shard.
+        self._fetch_plan: dict[
+            str,
+            tuple[
+                int,
+                list[tuple[Any, Any]],
+                list[tuple[tuple[slice, ...], torch.Tensor]],
+            ],
+        ] = {}
 
     def register_trainer_source(
         self,
@@ -480,6 +494,74 @@ class ModelStateDictTransport(Configurable):
             for key, pieces in packed.items()
         }
 
+    def connect_fetching_generator(
+        self,
+        load_groups: list[dict[str, torch.Tensor]],
+        *,
+        sources: list[TrainerSource],
+        rank: int,
+        generator_index: int,
+    ) -> None:
+        """Allocate and register this generator rank's fetch buffer, connect to every
+        trainer rank and plan the reads of each load group.
+
+        The fetch buffer is on the model's device and holds one load group at a time,
+        so it is sized to the largest group.
+
+        Args:
+            load_groups: The tensors each ``fetch_`` call fills, in load order; only
+                their layout is used, so their storage may be freed. The trainer
+                staged for the ``shard_layout`` of their union.
+            sources: Every trainer rank's ``register_trainer_source`` result.
+            rank: This rank within its generator.
+            generator_index: Index of this rank's generator.
+        """
+        layout = {}
+        for group in load_groups:
+            layout.update(shard_layout(group))
+        reads, packed = _plan_reads(
+            sources, layout, rank=rank, generator_index=generator_index
+        )
+        # Byte offset of each key in the fetch buffer: a group's keys back to back.
+        key_offsets = {}
+        nbytes = 0
+        for group in load_groups:
+            offset = 0
+            for key in group:
+                key_offsets[key] = offset
+                shard = layout[key]
+                size = math.prod(shard.shape) * shard.dtype.itemsize
+                offset += -(-size // _ALIGNMENT) * _ALIGNMENT
+            nbytes = max(nbytes, offset)
+        device = _local(next(iter(load_groups[0].values()))).device
+        buffer = torch.empty(max(nbytes, 1), dtype=torch.uint8, device=device)
+        memory = self._transport.register_memory(buffer)
+        for source in sources:
+            self._transport.connect(source.url)
+
+        def view(key: str, offset: int, shape: tuple[int, ...]) -> torch.Tensor:
+            start = key_offsets[key] + offset * layout[key].dtype.itemsize
+            end = start + math.prod(shape) * layout[key].dtype.itemsize
+            return buffer[start:end].view(layout[key].dtype).view(shape)
+
+        self._fetch_plan = {}
+        for group_index, group in enumerate(load_groups):
+            for key in group:
+                shard = layout[key]
+                copies = [
+                    (p.index, view(key, p.offset, p.shape)) for p in packed.get(key, ())
+                ] or [((), view(key, 0, shard.shape))]
+                self._fetch_plan[key] = (group_index, [], copies)
+        for r in reads:
+            self._fetch_plan[r.key][1].append(
+                (
+                    memory.to_mutable_view(
+                        key_offsets[r.key] + r.local_byte_offset, r.nbytes
+                    ),
+                    sources[r.source].remote_buffer.slice(r.byte_offset, r.nbytes),
+                )
+            )
+
     async def read(self) -> None:
         """Fill the prefetch buffers from the trainer's staging buffers.
 
@@ -514,5 +596,43 @@ class ModelStateDictTransport(Configurable):
         # Packed copies are async; finish them before the next read reuses
         # the prefetch buffers.
         if unpacked and torch.accelerator.is_available():
+            torch.accelerator.current_stream().synchronize()
+        return state_dict.keys()
+
+    def fetch_(self, state_dict: dict[str, torch.Tensor]) -> Iterable[str]:
+        """Fill ``state_dict``, one of ``connect_fetching_generator``'s load groups,
+        in place from the trainer's staging buffers. Returns its keys.
+
+        Raises:
+            TimeoutError: if this group's reads take longer than
+                ``read_timeout_s``; they stay in flight and the job must restart.
+        """
+        assert self._fetch_plan, "connect_fetching_generator must be called first"
+        plans = [self._fetch_plan[key] for key in state_dict]
+        assert len({group for group, _, _ in plans}) <= 1, "keys of several groups"
+        # TODO: groups are read one at a time; double-buffer the fetch buffer to
+        # read the next group while this one is copied and unsharded.
+        works = [
+            self._transport.read(local, remote, async_op=True)
+            for _, reads, _ in plans
+            for local, remote in reads
+        ]
+        deadline = time.monotonic() + self._read_timeout_s
+        for work in works:
+            remaining = deadline - time.monotonic()
+            # A zero timeout selects the backend default.
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"model state dict reads exceeded {self._read_timeout_s} s"
+                )
+            # timedelta rounds below 1 us to zero.
+            work.wait(timedelta(seconds=max(remaining, 1e-6)))
+        with torch.no_grad():
+            for (_, _, copies), tensor in zip(plans, state_dict.values()):
+                local = _local(tensor)
+                for index, view in copies:
+                    local[index].copy_(view)
+        # The next group's reads overwrite the fetch buffer.
+        if torch.accelerator.is_available():
             torch.accelerator.current_stream().synchronize()
         return state_dict.keys()

@@ -459,6 +459,10 @@ class SGLangEngine(GenerationEngine):
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         return self._get_model().model_state_dict_loader.prefetched_model_state_dict
 
+    @property
+    def model_state_dict_load_groups(self) -> list[dict[str, torch.Tensor]]:
+        return self._get_model().model_state_dict_loader.load_groups
+
     def add_requests(
         self, requests: list[EngineRequest]
     ) -> list[tuple[str, Exception]]:
