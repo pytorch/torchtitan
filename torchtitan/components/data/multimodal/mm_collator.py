@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import torch
 
-from torchtitan.components.data.collators import Collator
+from torchtitan.components.data.collators import Collator, HAS_PIN_MEMORY
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     TokenizedTrainingMicrobatch,
@@ -352,6 +352,17 @@ class MultiModalCollator(Collator):
         )
         if self._num_mtp_layers == 0:
             loss_token_counts = loss_token_counts[0]
+        if HAS_PIN_MEMORY:
+            input_ids = input_ids.pin_memory()
+            labels = labels.pin_memory()
+            positions = positions.pin_memory()
+            padding_mask = padding_mask.pin_memory()
+            loss_token_counts = loss_token_counts.pin_memory()
+            routing_token_counts = routing_token_counts.pin_memory()
+            model_kwargs = {
+                key: value.pin_memory() if isinstance(value, torch.Tensor) else value
+                for key, value in model_kwargs.items()
+            }
         return TokenizedTrainingMicrobatch(
             input=input_ids,
             labels=labels,

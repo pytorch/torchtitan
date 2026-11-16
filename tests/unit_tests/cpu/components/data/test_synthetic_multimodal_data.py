@@ -336,3 +336,111 @@ def test_audio_collator_omits_audio_kwargs_without_waveforms(audio_tokenizer):
         }
         & batch.model_kwargs.keys()
     )
+
+
+def test_multimodal_collator_pinning_preserves_microbatch(audio_tokenizer, monkeypatch):
+    context = DatasetBuildContext(
+        tokenizer=audio_tokenizer,
+        max_context_length=16,
+        num_tokens_per_microbatch=16,
+        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+        vision_processor=VisionProcessor.Config(
+            patch_size=16,
+            temporal_patch_size=2,
+            spatial_merge_size=2,
+            image_mean=(0.0, 0.0, 0.0),
+            image_std=(1.0, 1.0, 1.0),
+            resize=PixelBudgetResize.Config(min_pixels=1024, max_pixels=1024),
+            patch_order="block",
+        ).build(),
+    )
+    collator = MultiModalCollator.Config(
+        build_mrope_positions=True,
+        waveform_pad_multiple=4,
+        audio_input_channels=1,
+    ).build(context=context)
+    tokens = torch.tensor(
+        [
+            audio_tokenizer.image_id,
+            audio_tokenizer.audio_id,
+            audio_tokenizer.video_id,
+        ]
+    )
+    row = {
+        "input_ids": tokens,
+        "labels": tokens.clone(),
+        "positions": torch.arange(len(tokens)),
+        "pixel_values": [torch.zeros(1, 32, 32, 3)],
+        "pixel_values_videos": [torch.ones(2, 32, 32, 3)],
+        "waveforms": [torch.tensor([[0.1], [0.2], [0.3]])],
+    }
+
+    def microbatch_tensors(batch):
+        tensors = {
+            name: getattr(batch, name)
+            for name in (
+                "input",
+                "labels",
+                "positions",
+                "padding_mask",
+                "loss_token_counts",
+                "routing_token_counts",
+            )
+        }
+        tensors.update(
+            {
+                f"model_kwargs.{key}": value
+                for key, value in batch.model_kwargs.items()
+                if isinstance(value, torch.Tensor)
+            }
+        )
+        return tensors
+
+    monkeypatch.setattr(
+        "torchtitan.components.data.multimodal.mm_collator.HAS_PIN_MEMORY", False
+    )
+    expected = collator([row])
+    assert all(
+        not tensor.is_pinned() for tensor in microbatch_tensors(expected).values()
+    )
+
+    pinned_tensors = []
+
+    def clone_as_pinned(tensor):
+        pinned = tensor.clone()
+        pinned_tensors.append(pinned)
+        return pinned
+
+    monkeypatch.setattr(
+        "torchtitan.components.data.multimodal.mm_collator.HAS_PIN_MEMORY", True
+    )
+    monkeypatch.setattr(torch.Tensor, "pin_memory", clone_as_pinned)
+    actual = collator([row])
+
+    expected_tensors = microbatch_tensors(expected)
+    actual_tensors = microbatch_tensors(actual)
+    assert set(actual_tensors) == {
+        "input",
+        "labels",
+        "positions",
+        "padding_mask",
+        "loss_token_counts",
+        "routing_token_counts",
+        "model_kwargs.pixel_values",
+        "model_kwargs.grid_thw",
+        "model_kwargs.pixel_values_videos",
+        "model_kwargs.grid_thw_videos",
+        "model_kwargs.mrope_positions",
+        "model_kwargs.waveforms",
+        "model_kwargs.waveform_lengths",
+        "model_kwargs.waveform_padded_lengths",
+    }
+    assert (
+        actual.model_kwargs["special_tokens"] == expected.model_kwargs["special_tokens"]
+    )
+    assert len(pinned_tensors) == len(actual_tensors)
+    for name, actual_tensor in actual_tensors.items():
+        assert any(actual_tensor is tensor for tensor in pinned_tensors), name
+        torch.testing.assert_close(
+            actual_tensor, expected_tensors[name], rtol=0, atol=0
+        )
