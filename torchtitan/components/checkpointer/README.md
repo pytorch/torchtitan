@@ -74,13 +74,45 @@ warning).
 ```python
 checkpointer=CheckpointManager.Config(
     interval=10,
-    load_step=5,
     last_save_model_only=True,
     export_dtype="bfloat16",
 ),
 ```
 
 A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). DCP-specific `async_mode` is on `CheckpointManager.Config` in `torchtitan/components/checkpointer/dcp.py`.
+
+## Resuming or rolling back training
+
+By default, `load_step=-1` resumes the newest completed `step-N` in
+`checkpointer.folder`. `--resume-step K` sets `checkpointer.load_step=K` for
+that launch; it does not retire newer checkpoints or change future resume
+selection. Remove an explicit step from the job command after that launch.
+With saves enabled (`load_only=False`), loading an older step is rejected if
+the folder already contains newer resumable checkpoints. This applies to both
+checkpoint backends: an in-place rollback could overwrite checkpoints, and an
+automatic restart could resume the abandoned run instead. For evaluation
+without saving, `load_only=True` permits loading an older completed step.
+
+To roll back training from step 5, keep the old checkpoints and start in a
+fresh output checkpoint folder. `initial_load_path` must be an absolute local
+path (or, with DCP, a supported remote URI):
+
+```python
+checkpointer=CheckpointManager.Config(
+    folder="rollback_checkpoint",
+    initial_load_path="/absolute/path/to/old-run/checkpoint/step-5",
+    initial_load_model_only=False,
+    interval=10,
+),
+```
+
+The resolved `checkpointer.folder` (relative to the trainer's output directory)
+must have no resumable `step-N` checkpoints. Do not pass `--resume-step` or
+hardcode `load_step` in this recipe: leave it at `-1`. The first launch restores
+model, optimizer and training state from the old step; subsequent launches
+resume the newest checkpoint in the new folder and ignore `initial_load_path`.
+The same recipe works with `TorchCheckpointingManager.Config` when the source
+checkpoint is in that backend's native format.
 
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.

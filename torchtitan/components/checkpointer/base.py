@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import queue
 import re
@@ -290,6 +291,7 @@ class BaseCheckpointManager(Configurable, ABC):
             from_hf = False
             from_quantized = False
 
+            explicit_step = step != -1
             has_checkpoint_folder = self._storage.isdir(self.folder)
             load_step = -1
             if has_checkpoint_folder:
@@ -380,6 +382,27 @@ class BaseCheckpointManager(Configurable, ABC):
                     "finished, or it is a Hugging Face checkpoint. Load a full "
                     "checkpoint instead, or set checkpointer.initial_load_in_hf "
                     "to load Hugging Face weights."
+                )
+
+            if (
+                explicit_step
+                and not self.load_only
+                and (newest_step := self._find_load_step()) > step
+            ):
+                initial_load_path = (
+                    checkpoint_id
+                    if filesystem.is_remote(checkpoint_id)
+                    else os.path.abspath(checkpoint_id)
+                )
+                raise ValueError(
+                    f"Cannot load checkpointer.load_step={step} with saves enabled: "
+                    f"checkpointer.folder {self.folder} already contains a newer "
+                    f"resumable checkpoint, step-{newest_step}. Resuming an older "
+                    "step here could overwrite checkpoints and a restart could "
+                    "resume the abandoned run. Use a fresh checkpointer.folder, "
+                    f"checkpointer.initial_load_path={initial_load_path}, and "
+                    "checkpointer.initial_load_model_only=False, leaving "
+                    "checkpointer.load_step=-1."
                 )
 
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
@@ -660,8 +683,15 @@ class BaseCheckpointManager(Configurable, ABC):
         """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1
-        """Load the checkpoint at the specified step. If -1, load the latest
-        checkpointer."""
+        """Load this step for each launch, or the latest checkpoint when -1.
+
+        With saves enabled, an older step is rejected when the folder contains
+        newer resumable checkpoints. To roll back training, use a fresh folder
+        with initial_load_path=/absolute/old-folder/step-K (or a remote URI) and
+        initial_load_model_only=False,
+        leaving load_step=-1 so later restarts resume the new run. Explicit steps
+        may be loaded for evaluation with load_only=True.
+        """
 
         exclude_from_loading: list[str] = field(default_factory=list)
         """Non-model state keys excluded from loading."""

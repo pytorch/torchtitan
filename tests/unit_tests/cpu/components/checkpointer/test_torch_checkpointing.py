@@ -12,7 +12,7 @@ import queue
 import tempfile
 import unittest
 from concurrent.futures import Future
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -1365,3 +1365,214 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 backend_manager.load_calls[0][0],
             )
             manager.close()
+
+
+class CheckpointRollbackTest(unittest.TestCase):
+    @contextmanager
+    def _manager(self, manager_type, folder, **kwargs):
+        config = manager_type.Config(
+            folder=str(folder),
+            interval=1,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+            last_save_model_only=False,
+            **kwargs,
+        )
+        backend_kwargs = (
+            {"storage_config": LocalFileSystemStorageConfig(use_direct_io=False)}
+            if manager_type is TorchCheckpointingManager
+            else {}
+        )
+        manager = config.build(
+            model_parts=[nn.Linear(2, 2, bias=False)],
+            optimizers=_Stateful(-1),
+            lr_schedulers=_Stateful(-1),
+            ema=None,
+            extra_states={"train_state": _Stateful(-1)},
+            sd_adapter=None,
+            **backend_kwargs,
+        )
+        try:
+            yield manager
+        finally:
+            manager.close()
+
+    def _save_at(self, manager, step):
+        model = manager.states[MODEL].model[0]
+        with torch.no_grad():
+            model.weight.fill_(step)
+        for key in (OPTIMIZER, "lr_scheduler", "train_state"):
+            manager.states[key].value = step
+        if isinstance(manager, CheckpointManager):
+            self.assertTrue(manager.save(step))
+        else:
+            # Synchronous CPU preparation avoids the async manager's pinned staging.
+            writer = _default_backend_config(
+                SyncCheckpointSaverConfig(writer_config=CheckpointWriterConfig()),
+                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
+            ).build()
+            try:
+                writer.save(
+                    str(Path(manager.folder) / f"step-{step}"),
+                    # Plain CPU payloads exercise selection, not distributed resharding.
+                    {key: value.state_dict() for key, value in manager.states.items()},
+                )
+            finally:
+                writer.close()
+
+    def _assert_loaded_step(self, manager, step):
+        for key in (OPTIMIZER, "lr_scheduler", "train_state"):
+            self.assertEqual(step, manager.states[key].value, msg=key)
+        torch.testing.assert_close(
+            manager.states[MODEL].model[0].weight,
+            torch.full((2, 2), float(step)),
+            rtol=0,
+            atol=0,
+        )
+
+    def _snapshot(self, folder):
+        # These are only the tiny checkpoint directories this test created.
+        return {
+            str(path.relative_to(folder)): path.read_bytes()
+            for path in folder.rglob("*")
+            if path.is_file()
+        }
+
+    def test_rollback_rejected_before_state_or_checkpoint_mutation(self):
+        for backend in (CheckpointManager, TorchCheckpointingManager):
+            with self.subTest(
+                backend=backend.__name__
+            ), tempfile.TemporaryDirectory() as root:
+                folder = Path(os.path.relpath(Path(root) / "checkpoint"))
+                with self._manager(backend, folder) as manager:
+                    for step in (0, 2, 6):
+                        self._save_at(manager, step)
+                    before = self._snapshot(folder)
+                    for step in (0, 2):
+                        with self.assertRaisesRegex(
+                            ValueError, "newer.*step-6"
+                        ) as error:
+                            manager.load(step)
+                        for option in (
+                            "fresh checkpointer.folder",
+                            "initial_load_path=",
+                            "initial_load_model_only=False",
+                            "load_step=-1",
+                        ):
+                            self.assertIn(option, str(error.exception))
+                        suggested_path = (
+                            str(error.exception)
+                            .split("checkpointer.initial_load_path=", 1)[1]
+                            .split(", and ", 1)[0]
+                        )
+                        self.assertEqual(
+                            suggested_path, os.path.abspath(folder / f"step-{step}")
+                        )
+                        recovery_config = backend.Config(
+                            initial_load_path=suggested_path,
+                            initial_load_model_only=False,
+                        )
+                        self.assertTrue(
+                            manager._storage.isdir(recovery_config.initial_load_path)
+                        )
+                        self._assert_loaded_step(manager, 6)
+                        self.assertEqual(before, self._snapshot(folder))
+
+    def test_latest_explicit_and_automatic_resume_still_load(self):
+        for backend in (CheckpointManager, TorchCheckpointingManager):
+            with self.subTest(
+                backend=backend.__name__
+            ), tempfile.TemporaryDirectory() as root:
+                with self._manager(backend, Path(root) / "checkpoint") as manager:
+                    for step in (2, 6):
+                        self._save_at(manager, step)
+                    for step in (6, -1):
+                        for key in (OPTIMIZER, "lr_scheduler", "train_state"):
+                            manager.states[key].value = -1
+                        self.assertTrue(manager.load(step))
+                        self._assert_loaded_step(manager, 6)
+
+    def test_load_only_allows_old_step_without_saving(self):
+        for backend in (CheckpointManager, TorchCheckpointingManager):
+            with self.subTest(
+                backend=backend.__name__
+            ), tempfile.TemporaryDirectory() as root:
+                folder = Path(root) / "checkpoint"
+                with self._manager(backend, folder) as writer:
+                    for step in (2, 6):
+                        self._save_at(writer, step)
+                before = self._snapshot(folder)
+                with self._manager(backend, folder, load_only=True) as reader:
+                    self.assertTrue(reader.load(2))
+                    self._assert_loaded_step(reader, 2)
+                    self.assertFalse(reader.save(3))
+                self.assertEqual(before, self._snapshot(folder))
+
+    def test_incomplete_exports_and_noncanonical_steps_do_not_block_load(self):
+        for backend in (CheckpointManager, TorchCheckpointingManager):
+            with self.subTest(
+                backend=backend.__name__
+            ), tempfile.TemporaryDirectory() as root:
+                folder = Path(root) / "checkpoint"
+                with self._manager(backend, folder) as manager:
+                    self._save_at(manager, 2)
+                    (folder / "step-8").mkdir()
+                    (folder / "step-9").mkdir()
+                    (folder / "step-9" / "model.safetensors.index.json").write_text(
+                        "{}"
+                    )
+                    # Native metadata under exports/ and temporary names is not resumable.
+                    for name in ("exports/step-10", "tmp_step-11", "step-12.partial"):
+                        target = folder / name
+                        target.mkdir(parents=True)
+                        for path in (folder / "step-2").iterdir():
+                            if path.is_file():
+                                (target / path.name).write_bytes(path.read_bytes())
+                    self.assertTrue(manager.load(2))
+                    self._assert_loaded_step(manager, 2)
+
+    def test_missing_and_incomplete_explicit_steps_keep_their_errors(self):
+        for backend in (CheckpointManager, TorchCheckpointingManager):
+            with self.subTest(
+                backend=backend.__name__
+            ), tempfile.TemporaryDirectory() as root:
+                folder = Path(root) / "checkpoint"
+                with self._manager(backend, folder) as manager:
+                    with self.assertRaisesRegex(FileNotFoundError, "does not exist"):
+                        manager.load(2)
+                    self._save_at(manager, 6)
+                    with self.assertRaisesRegex(
+                        FileNotFoundError, "load_step=2 not found"
+                    ):
+                        manager.load(2)
+                    (folder / "step-2").mkdir()
+                    with self.assertRaisesRegex(
+                        ValueError, "not a complete checkpoint"
+                    ):
+                        manager.load(2)
+                    self._assert_loaded_step(manager, 6)
+
+    def test_fresh_folder_initial_load_then_restart_uses_new_run(self):
+        for backend in (CheckpointManager, TorchCheckpointingManager):
+            with self.subTest(
+                backend=backend.__name__
+            ), tempfile.TemporaryDirectory() as root:
+                old_folder = Path(root) / "old"
+                new_folder = Path(root) / "new"
+                with self._manager(backend, old_folder) as writer:
+                    for step in (2, 6):
+                        self._save_at(writer, step)
+                before = self._snapshot(old_folder)
+                initial = str(old_folder / "step-2")
+                with self._manager(
+                    backend, new_folder, initial_load_path=initial
+                ) as manager:
+                    self.assertTrue(manager.load())
+                    self._assert_loaded_step(manager, 2)
+                    self._save_at(manager, 4)
+                with self._manager(
+                    backend, new_folder, initial_load_path=initial
+                ) as restarted:
+                    self.assertTrue(restarted.load())
+                    self._assert_loaded_step(restarted, 4)
+                self.assertEqual(before, self._snapshot(old_folder))
