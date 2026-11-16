@@ -202,7 +202,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
 
         get_state_dict = AsyncMock(side_effect=fill_state_dict)
         with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
-            await generator.prefetch_model_state_dict()
+            await generator.prefetch_model_state_dict(())
         weights = {"weight": torch.zeros(2)}
         assert generator._copy_prefetched_model_state_dict(weights) == weights.keys()
 
@@ -214,6 +214,22 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             direct_rdma=False,
         )
         assert torch.equal(weights["weight"], torch.ones(2))
+
+    asyncio.run(main())
+
+
+def test_generator_requests_one_full_transport_read():
+    async def main():
+        generator = Generator.__new__(Generator)
+        generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
+        generator._model_state_dict_transport = SimpleNamespace(read=AsyncMock())
+        generator._model_state_dict_transport_needs_full_read = True
+
+        await generator.prefetch_model_state_dict(())
+        await generator.prefetch_model_state_dict(())
+
+        calls = generator._model_state_dict_transport.read.await_args_list
+        assert [call.kwargs["full"] for call in calls] == [True, False]
 
     asyncio.run(main())
 

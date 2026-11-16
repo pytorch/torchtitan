@@ -10,12 +10,63 @@ one-sided RDMA reads over a `torch.distributed._transport` backend
 config.model_state_dict_transport = ModelStateDictTransport.Config(backend="mooncake")
 ```
 
+This preserves full synchronization. Set `sync_mode="delta"` to transfer only
+the words changed since the preceding push after the first pull.
+
 It is a separate path rather than a TorchStore transport: the trainer and
 generator shardings are known at init, so it plans every read once and stages
-straight into registered memory, with no StorageVolume, key lookup or per-step
-metadata exchange. The trainer stages a pinned CPU copy already resharded per
-generator rank, so the optimizer can step while generators read and the
-trainer keeps no persistent GPU copy.
+straight into registered memory, with no StorageVolume or key lookup. The
+optimizer can step while generators read, and the trainer keeps no persistent
+GPU copy.
+
+## Delta sync
+
+At RL learning rates an optimizer step changes few bf16 values (about 2%), but
+they are spread over every tensor. Delta sync sends only the changed 2-byte
+words, as NeMo RL's sparse refit does: the gap before each changed word and the
+word XOR its old value, compressed with zstd. A 1-ulp change leaves the high
+bits of the XOR zero, so it compresses better than the new value. Gaps restart
+at each staged piece, so each change is addressed in the tensor that receives it,
+as other systems address changes per tensor.
+
+```text
+Trainer rank, per 64 MiB window of the staging buffer
+
+ staging buffer (last push)            this push (GPU)
++------------+---------------+   +------------+---------------+
+| k1: 7 3 9  | k2: 4 8 1     |   | k1: 7 5 9  | k2: 4 2 1     |
++------------+---------------+   +------------+---------------+
+                  |  compare (GPU)
+                  v
+  k1: gaps [1]  XORs [3^5]     k2: gaps [1]  XORs [8^2]
+                  |
+                  v  zstd (CPU threads), one record per window
+  delta buffer: [window 0 | window 1 | ...]
+                  |
+                  v
+  Controller forwards per window (offset, size, gap width, changes per piece)
+                  |
+                  v
+Generator
+  prefetch: RDMA the windows covering its pieces -> unzstd (CPU threads)
+            -> each FSDP group's changes packed into one pinned buffer
+                  |
+                  v
+  load, per FSDP group:
+    prefetch buffer (last push) -- copy to GPU, as for full sync --> weights
+    group's changes -> GPU; positions = running sum of (gap + 1), per piece
+    weights[positions] ^= XORs  -> k1: 7 5 9   k2: 4 2 1
+                  |
+                  v  after the load, in the background (CPU threads)
+  prefetch buffer[positions] ^= XORs
+```
+
+The load applies the changes on the GPU to the weights it copies anyway, so a
+pull moves only the compressed changes and the load's own copy; the prefetch
+buffer catches up off the critical path, before the next read.
+
+Unchanged windows are not sent. The first push, a generator that missed a push,
+and a push with more than 1/16 of a window's words changed are read whole.
 
 `None` uses TorchStore instead, which is still needed for
 `model_state_dict_load_mode="gpu_fetch"`. TODO: delete the TorchStore path once
@@ -81,17 +132,34 @@ does not cover every element of a generator shard, or on `Partial` and uneven
 
 1. Init (`ActorSystem.initialize_model_state_dict_transport`): every generator
    reports its ranks' `shard_layout`s, which must match
-   (`shared_rank_layouts`); each trainer rank allocates and registers its
-   staging buffer (`register_trainer_source`); every generator rank registers
-   its prefetch buffers, connects to every trainer rank and plans its reads
+   (`shared_rank_layouts`); each trainer rank allocates and registers one staging
+   tensor, plus for delta sync a pinned buffer of changed words and a registered
+   delta tensor (`register_trainer_source`); every generator rank registers its
+   persistent prefetch buffers (and for delta sync a buffer the compressed
+   changes are received in), connects to every trainer rank and plans its reads
    (`connect_generator`).
-2. Push: the trainer casts its shards and copies them into the staging buffer
-   (`stage`), with no collectives.
-3. Pull: each generator rank issues its reads (`read`) and waits for them,
-   raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
+2. Push: every push overwrites the staging tensor. For delta sync, later pushes
+   first compare each window with it on the GPU and stage the changed words'
+   gaps (restarting at each staged piece) and XORs, which `finish_stage`
+   compresses on CPU threads. Staging has no collectives. The trainer push
+   endpoint returns each window's (offset, size, gap width, changes per piece) as
+   ordinary control-plane metadata.
+3. Pull: full sync reads every piece on every pull. Delta sync reads the staging
+   tensor in full on its first pull, then reads the changes of the windows
+   covering its pieces (one read per run of adjacent windows), decompresses them
+   on CPU threads, and packs each FSDP group's changes into one pinned buffer.
+   Each generator rank waits for its reads and raises after
+   `read_timeout_s` (600 s). A timeout leaves reads and prefetch buffers undefined;
    restart the job.
 4. Load: the generator copies its weights from the prefetch buffers, unpacking
-   packed keys (`copy_prefetched_`).
+   packed keys (`copy_prefetched_`). After a delta pull it copies each FSDP
+   group's changes to the GPU, computes their positions there, and XORs them into
+   the copies; then CPU threads XOR them into the prefetch buffers in the
+   background, which the next pull waits for.
 
-The controller finishes pull N before push N+1, so a single staging buffer is
-enough.
+The controller remains the only weight-sync coordinator and policy-version
+authority. It forwards the window table without interpreting it and finishes
+pull N before push N+1, so the trainer can compare against and overwrite one
+staging tensor and reuse its delta tensor.
+Delta transfer does not add a recovery path: transfer or load failures restart
+the job, as for full transfer.

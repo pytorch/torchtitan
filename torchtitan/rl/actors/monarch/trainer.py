@@ -14,6 +14,7 @@ import torch
 from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransferMetadata,
     ModelStateDictTransport,
     TensorShard,
     TrainerSource,
@@ -82,8 +83,8 @@ class _TrainerActorEndpoints:
         return await super().optim_step(resume_state=resume_state, last_step=last_step)
 
     @concurrent_endpoint
-    async def push_model_state_dict(self) -> None:
-        await super().push_model_state_dict()
+    async def push_model_state_dict(self) -> ModelStateDictTransferMetadata:
+        return await super().push_model_state_dict()
 
 
 class TrainerActor(Actor, _TrainerActorEndpoints, Trainer):
