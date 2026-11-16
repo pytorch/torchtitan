@@ -215,7 +215,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for (activation_remat, num_w2_replays), (
+        for (activation_remat, num_configured_w2_replays), (
             grouped_linear_cls,
             activation_fn,
             output_postprocess,
@@ -370,7 +370,12 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     {
                         "dispatch": 2 + num_dispatch_replays,
                         "combine": 2 + num_combine_replays,
-                        "w2": 1 + num_w2_replays,
+                        "w2": 1
+                        + (
+                            num_configured_w2_replays
+                            if output_postprocess is not None
+                            else 0
+                        ),
                     },
                     msg=f"unexpected EP and W2 calls: {num_calls}",
                 )

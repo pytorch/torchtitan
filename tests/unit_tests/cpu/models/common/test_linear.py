@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from copy import deepcopy
 from functools import partial
 from unittest.mock import patch
 
@@ -12,18 +13,21 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 import torchtitan.models.common.linear.linear as linear_module
 import torchtitan.models.common.vision_encoder as vision_encoder_module
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
+from torch.testing._internal.common_utils import DeterministicGuard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.base.module import Module
+from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -31,6 +35,7 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 
 class TestLinear(unittest.TestCase):
@@ -149,6 +154,113 @@ class TestLinear(unittest.TestCase):
 
 
 class TestGroupedLinear(unittest.TestCase):
+    def test_full_remat_skips_absorbed_projection_without_retaining_output(self):
+        """Skip native W2 replay without changing gradients or subclass policies."""
+
+        class SquaredGroupedLinear(GroupedLinear):
+            def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
+                # This intermediate models the extra saves of specialized kernels.
+                return (
+                    super()
+                    ._grouped_mm(
+                        input_RI=input_RI, weight_EOI=weight_EOI, offsets_E=offsets_E
+                    )
+                    .square()
+                )
+
+        class Block(Module):
+            def __init__(self, linear_cls, *, absorb, output_needed):
+                super().__init__()
+                self.w2 = linear_cls(
+                    linear_cls.Config(group_size=2, in_features=3, out_features=5)
+                )
+                self.absorb = absorb
+                self.output_needed = output_needed
+                for parameter in self.parameters():
+                    nn.init.normal_(parameter, std=0.1)
+
+            def forward(self, input_RI, scores_R):
+                output_RO = self.w2(
+                    input_RI,
+                    torch.tensor([2, 7], dtype=torch.int32),
+                    scores_R=scores_R if self.absorb else None,
+                    output_needed_for_recompute=self.output_needed,
+                )
+                if self.output_needed or not self.absorb:
+                    remat.recompute_needs_tensor(output_RO)
+                if self.output_needed:
+                    output_RO = output_RO.tanh()
+                if not self.absorb:
+                    output_RO = (output_RO * scores_R[:, None]).to(input_RI.dtype)
+                return remat.region(torch.clone, "combine", recompute=False)(output_RO)
+
+        def cpu_grouped_mm(input_RI, weight_EIO, *, offs):
+            output_parts = []
+            start = 0
+            for expert, end in enumerate(offs.tolist()):
+                output_parts.append(input_RI[start:end] @ weight_EIO[expert])
+                start = end
+            return torch.cat(output_parts)
+
+        for linear_cls in (GroupedLinear, GptOssGroupedLinear, SquaredGroupedLinear):
+            for absorb, output_needed in ((True, False), (True, True), (False, False)):
+                with (
+                    self.subTest(
+                        linear=linear_cls.__name__,
+                        absorb=absorb,
+                        output_needed=output_needed,
+                    ),
+                    DeterministicGuard(True),
+                ):
+                    torch.manual_seed(42)
+                    block = Block(
+                        linear_cls, absorb=absorb, output_needed=output_needed
+                    )
+                    model = Module()
+                    model.layers = ModuleDict({"0": deepcopy(block)})
+                    packed_shapes = []
+
+                    def pack(tensor):
+                        packed_shapes.append(tuple(tensor.shape))
+                        return tensor
+
+                    FullActivationRematConfig().apply(
+                        model,
+                        saved_tensors_hooks=lambda _module, _name: (pack, lambda t: t),
+                    )
+                    input_RI = torch.randn(7, 3, dtype=torch.bfloat16)
+                    scores_R = torch.rand(7)
+                    results = []
+                    for projection in (block, model.layers["0"]):
+                        actual_RI = input_RI.clone().requires_grad_()
+                        actual_scores_R = scores_R.clone().requires_grad_()
+                        with patch.object(
+                            torch, "_grouped_mm", side_effect=cpu_grouped_mm
+                        ) as grouped_mm:
+                            loss = (
+                                projection(actual_RI, actual_scores_R)
+                                .float()
+                                .square()
+                                .sum()
+                            )
+                            loss.backward()
+                        results.append(
+                            [loss, actual_RI.grad, actual_scores_R.grad]
+                            + [parameter.grad for parameter in projection.parameters()]
+                        )
+                    expected_calls = (
+                        1
+                        if absorb
+                        and not output_needed
+                        and linear_cls is not SquaredGroupedLinear
+                        else 2
+                    )
+                    self.assertEqual(grouped_mm.call_count, expected_calls)
+                    # R x O differs from every input shape, including R x I.
+                    self.assertNotIn((7, 5), packed_shapes)
+                    for actual, expected in zip(results[1], results[0]):
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_scores_use_fp32_without_saving_fp32_input(self):
         """Keep score precision without doubling the saved activation storage."""
         torch.manual_seed(42)

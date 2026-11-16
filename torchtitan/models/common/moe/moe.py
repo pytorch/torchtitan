@@ -174,7 +174,14 @@ class RoutedExperts(Module):
                 and self.output_postprocess is None
             ):
                 routed_output_RD = self.w2(
-                    hidden_RF, offsets_E, scores_R=metadata.scores_R
+                    hidden_RF,
+                    offsets_E,
+                    scores_R=metadata.scores_R,
+                    # BF16 output goes directly to saved combine. No replayed
+                    # consumer needs it, including under full remat.
+                    output_needed_for_recompute=(
+                        routed_input_RD.dtype != torch.bfloat16
+                    ),
                 )
             else:
                 routed_output_RD = self.w2(hidden_RF, offsets_E)

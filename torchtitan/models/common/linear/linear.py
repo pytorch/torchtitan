@@ -431,6 +431,7 @@ class GroupedLinear(Module):
         offsets_E: torch.Tensor,
         *,
         scores_R: torch.Tensor | None = None,
+        output_needed_for_recompute: bool = True,
     ) -> torch.Tensor:
         """Apply each grouped linear to rows selected by cumulative offsets.
 
@@ -440,6 +441,9 @@ class GroupedLinear(Module):
             scores_R: Optional per-row scores absorbed into the input before
                 projection. MoE typically uses this on W2 to reduce activation
                 retention by scoring the input instead of the routed output.
+            output_needed_for_recompute: Whether replayed consumers need the
+                output. False allows an absorbed native projection to skip
+                replay when there is no output postprocess or real dtype cast.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
@@ -459,9 +463,28 @@ class GroupedLinear(Module):
         output_RO = remat.region(
             self._grouped_mm,
             self.remat_region_name("grouped_mm"),
-            recompute=self.remat_should_recompute("grouped_mm"),
+            recompute=self.remat_should_recompute_grouped_mm(
+                scores_R=scores_R,
+                output_needed_for_recompute=output_needed_for_recompute,
+            ),
         )(input_RI=input_RI, weight_EOI=weight_EOI, offsets_E=offsets_E)
         return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
+
+    def remat_should_recompute_grouped_mm(
+        self,
+        *,
+        scores_R: torch.Tensor | None,
+        output_needed_for_recompute: bool,
+    ) -> bool:
+        # Native backward needs only input and weights. Quantized and LoRA
+        # projections can save internal activations, so preserve their policy.
+        if (
+            scores_R is not None
+            and not output_needed_for_recompute
+            and type(self)._grouped_mm is GroupedLinear._grouped_mm
+        ):
+            return False
+        return self.remat_should_recompute("grouped_mm")
 
     def _grouped_mm(
         self,

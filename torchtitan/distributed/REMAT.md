@@ -301,8 +301,10 @@ communication regions:
   positions from integer prefix scans, preserving alignment with the forward
   dispatch handle used by saved combine. `FullActivationRematConfig` replays
   dispatch for both backends, but never their combine regions. With router-score
-  absorption, saving `w2.grouped_mm` can skip its forward replay without keeping
-  the routed output for the score gradient; full remat still replays W2.
+  absorption, native BF16 W2 and its bias addition are always saved when no
+  output postprocess or real output dtype cast needs their output. Full remat
+  then skips W2's forward replay without keeping that routed output. Quantized
+  and LoRA projections retain their configured policy.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.

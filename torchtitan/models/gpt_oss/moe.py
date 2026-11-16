@@ -36,8 +36,14 @@ class GptOssGroupedLinear(GroupedLinear):
         offsets_E: torch.Tensor,
         *,
         scores_R: torch.Tensor | None = None,
+        output_needed_for_recompute: bool = True,
     ) -> torch.Tensor:
-        output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
+        output_RO = super().forward(
+            input_RI,
+            offsets_E,
+            scores_R=scores_R,
+            output_needed_for_recompute=output_needed_for_recompute,
+        )
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         )
@@ -50,7 +56,10 @@ class GptOssGroupedLinear(GroupedLinear):
         return remat.region(
             self._add_grouped_bias,
             self.remat_region_name("bias_add"),
-            recompute=self.remat_should_recompute("grouped_mm"),
+            recompute=self.remat_should_recompute_grouped_mm(
+                scores_R=scores_R,
+                output_needed_for_recompute=output_needed_for_recompute,
+            ),
         )(output_RO, bias_RO.reshape_as(output_RO))
 
     @staticmethod
