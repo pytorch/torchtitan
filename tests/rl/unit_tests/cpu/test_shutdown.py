@@ -134,8 +134,11 @@ def _make_stub_rl_trainer(tmp_path):
         tokenizer = SimpleNamespace(
             build=lambda *, tokenizer_path: SimpleNamespace(eos_id=0)
         )
+        vision_processor = None
         renderer = SimpleNamespace(
-            build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
+            build=lambda *, tokenizer, vision_processor: SimpleNamespace(
+                get_stop_token_ids=lambda: []
+            )
         )
         # __init__ reads generator.sampling (a dataclass, for replace) and
         # generator.debug.seed; resolve_overrides is stubbed below.

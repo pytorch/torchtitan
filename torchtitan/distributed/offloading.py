@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,8 @@ def maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
     if device_type != "cuda":
         return
 
+    # TODO: switch to a public torch.numa entry point once one exists; this
+    # is the private function torchrun --numa-binding uses.
     from torch.numa.binding import (
         _maybe_apply_numa_binding_to_current_process,
         AffinityMode,
@@ -31,4 +34,14 @@ def maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
             should_fall_back_if_binding_fails=True,
         ),
     )
-    logger.info("NUMA binding applied for GPU %d", device_index)
+    # NODE mode intersects the node's CPUs with the current affinity, so it
+    # never widens a narrower launcher binding; on failure (e.g. the launcher
+    # bound to another node) torch.numa warns and leaves the affinity as is.
+    cpus = os.sched_getaffinity(0)
+    logger.info(
+        "CPU affinity for GPU %d: %d CPUs in %d-%d",
+        device_index,
+        len(cpus),
+        min(cpus),
+        max(cpus),
+    )

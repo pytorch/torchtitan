@@ -17,7 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
+from torchtitan.rl.observability import metrics as m
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -84,10 +85,13 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            validation=ValidationConfig(),
         )
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
+    controller._validation_tasks = []
+    controller._has_pending_validation = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
@@ -143,6 +147,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
 
 
 def _run(controller: Controller, *, num_training_steps: int) -> None:
+    controller.config.async_loop.num_training_steps = num_training_steps
     asyncio.run(
         controller._trainer_loop(
             _batch_queue(num_training_steps), num_training_steps=num_training_steps
@@ -226,3 +231,16 @@ def test_push_failure_fails_the_loop() -> None:
     controller = _controller([], on_push=failing_push)
     with pytest.raises(RuntimeError, match="push failed"):
         _run(controller, num_training_steps=2)
+
+
+def test_failed_validation_fails_training() -> None:
+    """freq=1: the validation started at step 1 fails, and step 2's check raises its error."""
+
+    async def validate(*, step: int) -> list[m.Metric]:
+        raise RuntimeError("validation failed")
+
+    controller = _controller([])
+    controller.config.async_loop.validation = ValidationConfig(freq=1)
+    controller.validate = validate
+    with pytest.raises(RuntimeError, match="validation failed"):
+        _run(controller, num_training_steps=3)

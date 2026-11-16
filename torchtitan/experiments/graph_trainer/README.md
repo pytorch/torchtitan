@@ -309,7 +309,7 @@ text-only flavors without a vision encoder.
 | Llama 3 | |
 | DeepSeek V3 | |
 | Qwen3 (dense and MoE) | |
-| Muse Glimmer | Text-only flavors; no CP |
+| Muse Glimmer | Text-only flavors; FSDP, TP, and PP; no CP |
 | GPT-OSS | FSDP, TP, EP, and PP; no CP |
 
 ### Citation

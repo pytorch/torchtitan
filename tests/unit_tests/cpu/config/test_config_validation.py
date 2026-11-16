@@ -10,15 +10,13 @@ from unittest import mock
 import pytest
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
-from torchtitan.config import DebugConfig, TrainingConfig
-from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed.flex_shard_fsdp import FlexShardConfig
+from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.distributed.flex_shard_fsdp import validate_flex_shard_training
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
-from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -30,7 +28,6 @@ from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
 )
-from torchtitan_recipes.tests.models.qwen3 import qwen3_moe_debug
 
 
 @contextlib.contextmanager
@@ -49,6 +46,11 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_microbatch_per_dp_rank=0)
     with pytest.raises(ValueError, match="must be -1 or greater than 0"):
         TrainingConfig(num_tokens_per_train_step=0)
+
+
+def test_precision_rejects_bf16_storage_with_fp32_compute() -> None:
+    with pytest.raises(ValueError, match="fp32 compute needs fp32 parameters"):
+        PrecisionConfig(dtype="bfloat16", param_dtype="float32")
 
 
 def test_per_group_accelerator_graph_config_restrictions() -> None:
@@ -221,38 +223,24 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
     config.__post_init__()
 
 
-def test_flex_shard_rejects_unsupported_models() -> None:
+# CPU CI doesn't install flex_shard, which validate_flex_shard_training
+# requires last.
+@mock.patch("torchtitan.distributed.flex_shard_fsdp.find_spec", mock.Mock())
+def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
     # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
-    # than silently shard with FSDP2. Under EP, a routed-expert output_postprocess
-    # would silently train wrong: EP replicates its parameters, but FlexShard's
-    # expert bucket treats them as sharded over ep.
-    def validate(config, **parallelism):
-        validate_model_training_config(
-            config.model,
-            parallelism=ParallelismConfig(
-                fsdp_backend=FlexShardConfig(), **parallelism
-            ),
-            training=config.training,
-            debug=config.debug,
-            activation_remat=config.activation_remat,
-            max_num_documents=config.dataloader.max_num_documents,
-        )
+    # than silently shard with FSDP2.
+    def validate(config):
+        config.parallelism.fsdp_backend = FlexShardConfig()
+        config.loss = CrossEntropyLoss.Config()
+        config.training.disable_accelerator_graphs = True
+        validate_flex_shard_training(config, config.model)
 
     validate(llama3_debugmodel())
     with pytest.raises(
-        ValueError, match="DeepSeekV4Model does not support parallelism.fsdp_backend"
+        ValueError,
+        match=r"models that override Decoder._apply_fsdp \(DeepSeekV4Model\)",
     ):
         validate(deepseek_v4_debugmodel())
-    config = qwen3_moe_debug(parallelism=ParallelismConfig(expert_parallel_degree=2))
-    validate(config, expert_parallel_degree=2)
-    _, moe, _, _ = next(config.model.traverse(MoE.Config))
-    moe.routed_experts.output_postprocess = RMSNorm.Config(
-        normalized_shape=moe.routed_experts.w13.in_features
-    )
-    with pytest.raises(
-        ValueError, match=r"output_postprocess yet, not layers\.0\.feed_forward\."
-    ):
-        validate(config, expert_parallel_degree=2)
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:

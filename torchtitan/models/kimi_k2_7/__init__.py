@@ -7,8 +7,10 @@
 from .flavors import (
     build_model_config,
     KIMI_K2_5_SPECIAL_TOKENS,
+    KIMI_K2_5_VISION_PROCESSOR_KWARGS,
     KimiK25Model,
     KimiK25VisionEncoder,
+    KimiK2Model,
     MODEL_FLAVORS,
     VisionProjector,
     VisionRotaryEmbedding2D,
@@ -16,8 +18,10 @@ from .flavors import (
 
 __all__ = [
     "KIMI_K2_5_SPECIAL_TOKENS",
+    "KIMI_K2_5_VISION_PROCESSOR_KWARGS",
     "KimiK25Model",
     "KimiK25VisionEncoder",
+    "KimiK2Model",
     "MODEL_FLAVORS",
     "VisionProjector",
     "VisionRotaryEmbedding2D",

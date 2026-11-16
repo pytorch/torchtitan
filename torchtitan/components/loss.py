@@ -499,8 +499,11 @@ def compute_logprobs(
     vocab_parallel_group: dist.ProcessGroup | None,
     return_entropy: bool = False,
     global_vocab_size: int | None = None,
+    temperature: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
+
+    With ``temperature[T]``, logprobs and entropy use ``softmax(logits / temperature)``.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
@@ -516,6 +519,15 @@ def compute_logprobs(
     Returns ``logprobs`` when ``return_entropy`` is False, else
     ``(logprobs, entropy)``.
     """
+    if temperature is not None:
+        # Divide, never multiply by the reciprocal: batch-invariant runs need logprobs bitwise
+        # equal to vLLM's, which divides.
+        # expand_as skips Inductor's div-softmax rewrite, whose isfinite guard writes two fp32
+        # [T, V] buffers for a [T, 1] divisor: 1529 us with a [T, 1] divisor vs 806 us expanded,
+        # per [1280, 151936] chunk, fwd+bwd, GB300.
+        # TODO: drop expand_as once Inductor's div-softmax rewrite stops writing its isfinite
+        # buffers for a broadcast tensor divisor (guard added in pytorch/pytorch#184046).
+        logits = logits / temperature.unsqueeze(-1).expand_as(logits)
     if vocab_parallel_group is not None:
         if global_vocab_size is None:
             raise ValueError(
@@ -769,8 +781,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
         root callback reduce the head instead, keeping each group's gradients
         together. Inner backwards preserve the decoder's prefetch and
         finalization state. Frozen decoders finish through the head backward
-        or the caller's manual finalization. FlexShard gives lm_head's bucket
-        the same treatment, but doesn't support frozen decoders yet.
+        or the caller's manual finalization.
 
     TP / SP composability:
         The root decoder norm emits hidden states that are replicated on the
@@ -798,31 +809,10 @@ class ChunkedLossWrapper(Loss[LossInput]):
         self.num_chunks = config.num_chunks
         self.loss_fn: Callable[..., LossResult] = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
-        self.fsdp_root: nn.Module | None = None
 
-    def set_lm_head(
-        self, lm_head: nn.Module, *, fsdp_root: nn.Module | None = None
-    ) -> None:
-        """Set the lm_head module. Must be called before the first __call__.
-
-        ``fsdp_root`` is the module that FSDP sharded and that holds
-        ``lm_head``, e.g. the model. FlexShard needs it to find lm_head's bucket.
-        """
-        from torchtitan.distributed.flex_shard_fsdp import (
-            holds_flex_shard_params,
-            is_flex_shard_module,
-        )
-
-        # Without its bucket, FlexShard would reduce-scatter and reshard
-        # lm_head's grads at every chunk.
-        if holds_flex_shard_params(lm_head) and not is_flex_shard_module(fsdp_root):
-            raise ValueError(
-                "lm_head is sharded with FlexShard, so set_lm_head needs fsdp_root, "
-                "the FlexShard module that holds it, to find its bucket. Got "
-                f"{type(fsdp_root).__name__}."
-            )
+    def set_lm_head(self, lm_head: nn.Module) -> None:
+        """Set the lm_head module. Must be called before the first __call__."""
         self.lm_head = lm_head
-        self.fsdp_root = fsdp_root
 
     def __call__(
         self,
@@ -934,7 +924,6 @@ class ChunkedLossWrapper(Loss[LossInput]):
 
             with fsdp_partial_backwards(
                 lm_head,
-                fsdp_root=self.fsdp_root,
                 run_backward=run_backward,
                 outer_backward_follows=decoder_requires_grad,
             ) as fsdp:
