@@ -542,6 +542,8 @@ MODEL_FLAVORS = {
     "debugmodel": (partial(_config, debug=True, multimodal=False), 4096),
     "debugmodel_mm": (partial(_config, debug=True, multimodal=True), 4096),
     "125B-A6B": (partial(_config, debug=False, multimodal=True), 262144),
+    # The released decoder without the vision encoder, for text-only training.
+    "125B-A6B-text": (partial(_config, debug=False, multimodal=False), 262144),
 }
 
 
