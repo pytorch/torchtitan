@@ -156,8 +156,7 @@ def test_push_model_state_dict_stages_before_first_await() -> None:
         sync_thread_ids = []
 
         def stage(model_state_dict) -> None:
-            # Staging issues collectives: it runs on the push stream from the
-            # actor thread.
+            # Staging runs on the push stream from the actor thread.
             stream.__enter__.assert_called_once()
             stream.__exit__.assert_not_called()
             assert threading.get_ident() == main_thread_id
@@ -168,8 +167,7 @@ def test_push_model_state_dict_stages_before_first_await() -> None:
         )
         trainer._model_state_dict_transport = SimpleNamespace(stage=stage)
 
-        # Staging must finish before the push's first await: Monarch starts the
-        # next forward/backward on this rank once the push yields.
+        # Staging is enqueued before the push's first await.
         asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
         push = asyncio.create_task(trainer.push_model_state_dict())
         assert len(staged) == 1
