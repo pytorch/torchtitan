@@ -153,7 +153,7 @@ class QKClipTest(unittest.TestCase):
         ).build(model_parts=[model])
         reduction_mesh = cast(
             DeviceMesh,
-            SimpleNamespace(size=lambda: 1),
+            SimpleNamespace(size=lambda: 1, mesh=torch.tensor([0])),
         )
 
         def get_mesh(mesh_name: str) -> DeviceMesh:
@@ -172,6 +172,7 @@ class QKClipTest(unittest.TestCase):
         mock_qk_clip.assert_called_once_with(
             [model],
             reduction_mesh=reduction_mesh,
+            reduction_ranks=frozenset({0}),
         )
 
 
@@ -240,6 +241,7 @@ class QKClipDistributedTest(DTensorTestBase):
         qk_clip(
             [model],
             reduction_mesh=mesh,
+            reduction_ranks=frozenset(mesh.mesh.tolist()),
         )
 
         local_scale = 0.5 if self.rank == 0 else 0.25
@@ -341,7 +343,11 @@ class QKClipDistributedTest(DTensorTestBase):
             model.add_module(f"layer_{layer_id}", attention)
 
         with CommDebugMode() as comm_mode:
-            qk_clip([model], reduction_mesh=mesh)
+            qk_clip(
+                [model],
+                reduction_mesh=mesh,
+                reduction_ranks=frozenset(mesh.mesh.tolist()),
+            )
 
         collectives = {
             str(op): count for op, count in comm_mode.get_comm_counts().items() if count
@@ -394,6 +400,8 @@ class QKClipTensorParallelTest(DTensorTestBase):
         )
         scales_H = torch.tensor([0.04, 0.16, 0.36, 0.64, 0.81, 1.0], device=device)
         local_scales_H = scales_H.chunk(mesh["tp"].size())[mesh["tp"].get_local_rank()]
+        # The MAX all-reduce covers dp_shard only; tp splits heads.
+        reduction_ranks = frozenset(mesh["dp_shard"].mesh.tolist())
         # Three TP-local heads have twelve rows; FSDP's six-row shard splits
         # a head. Scale logical rows rather than reshaping the local weight.
         for remaining_exponent in (0.0, 1.0):
@@ -403,6 +411,7 @@ class QKClipTensorParallelTest(DTensorTestBase):
             _scale_mla_heads(
                 weight,
                 local_scales_H,
+                reduction_ranks=reduction_ranks,
                 rows_per_head=4,
                 nope_rows_per_head=2,
                 nope_scale_exponent=0.5,
@@ -439,8 +448,22 @@ class QKClipTensorParallelTest(DTensorTestBase):
                     _scale_mla_heads(
                         invalid_weight,
                         head_scales,
+                        reduction_ranks=reduction_ranks,
                         rows_per_head=4,
                         nope_rows_per_head=2,
                         nope_scale_exponent=0.5,
                         remaining_scale_exponent=1.0,
                     )
+
+        # A reduction group that misses the FSDP axis would leave different
+        # scales on ranks declared replicated, so the mismatch raises.
+        with self.assertRaisesRegex(ValueError, "QK clip scales cannot follow"):
+            _scale_mla_heads(
+                weight,
+                local_scales_H,
+                reduction_ranks=frozenset({self.rank}),
+                rows_per_head=4,
+                nope_rows_per_head=2,
+                nope_scale_exponent=0.5,
+                remaining_scale_exponent=1.0,
+            )

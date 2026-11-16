@@ -12,12 +12,11 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.attention import FlexInnerAttention, MLAAttention
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
@@ -49,29 +48,35 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
             self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
-def _distributed_row_scales(row_scales_R1: torch.Tensor, weight: DTensor) -> DTensor:
+def _distributed_row_scales(
+    row_scales_R1: torch.Tensor, weight: DTensor, reduction_ranks: frozenset[int]
+) -> DTensor:
     """Represent per-row scales on the same distributed mesh as ``weight``.
 
-    The MAX all-reduce leaves identical scales across DP and CP, but TP
-    records only its local heads. Preserve the TP row shard and replicate
-    over the reduction axes; DTensor aligns these rows with FSDP's storage
-    shards without broadcasting or gathering the head scales.
+    Scales are identical across the MAX all-reduce group, so they are
+    replicated on every mesh axis whose ranks all belong to it. On any other
+    axis a rank holds only its forward-local heads, i.e. a row shard of
+    ``weight``. DTensor aligns these rows with FSDP's storage shards without
+    broadcasting or gathering the head scales.
     """
-    mesh_dim_names = weight.device_mesh.mesh_dim_names
-    return DTensor.from_local(
-        row_scales_R1,
-        weight.device_mesh,
-        # DP/CP scales stay replicated after MAX, even if FSDP shards weight rows.
-        tuple(
-            placement
-            if mesh_dim_names is not None
-            and mesh_dim_names[axis] == MeshAxisName.TP.value
-            and placement.is_shard(dim=0)
-            else Replicate()
-            for axis, placement in enumerate(weight.placements)
-        ),
-        run_check=False,
-    )
+    mesh = weight.device_mesh
+    coordinate = mesh.get_coordinate()
+    assert coordinate is not None
+    placements = []
+    for axis, placement in enumerate(weight.placements):
+        index: list[int | slice] = list(coordinate)
+        index[axis] = slice(None)
+        if set(mesh.mesh[tuple(index)].tolist()) <= reduction_ranks:
+            placements.append(Replicate())
+        elif type(placement) is Shard and placement.dim == 0:
+            placements.append(placement)
+        else:
+            raise ValueError(
+                f"QK clip scales cannot follow {placement} on mesh axis {axis}: "
+                "the axis is outside the MAX all-reduce group and does not "
+                "shard heads"
+            )
+    return DTensor.from_local(row_scales_R1, mesh, tuple(placements), run_check=False)
 
 
 @torch.no_grad()
@@ -79,6 +84,7 @@ def _scale_mla_heads(
     weight: DTensor,
     scales_H: torch.Tensor,
     *,
+    reduction_ranks: frozenset[int],
     rows_per_head: int,
     nope_rows_per_head: int,
     nope_scale_exponent: float,
@@ -87,9 +93,12 @@ def _scale_mla_heads(
     """Scale the NoPE and remaining rows of every MLA head in place.
 
     Rows ``[h * rows_per_head, (h + 1) * rows_per_head)`` of ``weight`` belong to
-    head ``h``, and ``scales_H`` contains one scale per TP-local head. A
-    zero ``remaining_scale_exponent`` leaves the remaining rows unchanged.
+    head ``h``, and ``scales_H`` contains one scale per forward-local head,
+    identical across ``reduction_ranks``. A zero ``remaining_scale_exponent``
+    leaves the remaining rows unchanged.
     """
+    if weight.ndim != 2:
+        raise ValueError("QK clip scales do not match the MLA weight shape.")
     # One scale per row: Shard(0) can split a head across ranks when num_heads
     # is not a multiple of the shard count.
     row_scales_R1 = torch.cat(
@@ -101,8 +110,10 @@ def _scale_mla_heads(
         ],
         dim=1,
     ).view(-1, 1)
-    distributed_scales_R1 = _distributed_row_scales(row_scales_R1, weight)
-    if weight.ndim != 2 or distributed_scales_R1.shape[0] != weight.shape[0]:
+    distributed_scales_R1 = _distributed_row_scales(
+        row_scales_R1, weight, reduction_ranks
+    )
+    if distributed_scales_R1.shape[0] != weight.shape[0]:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
     weight.mul_(distributed_scales_R1)
 
@@ -113,12 +124,14 @@ def _clip_mla_weights(
     scales_H: torch.Tensor,
     *,
     alpha: float,
+    reduction_ranks: frozenset[int],
 ) -> None:
     q_projection = attention.wq if attention.q_lora_rank == 0 else attention.wq_b
     # Query: NoPE rows take ``scale ** alpha``, RoPE rows take the full scale.
     _scale_mla_heads(
         cast(DTensor, q_projection.weight),
         scales_H,
+        reduction_ranks=reduction_ranks,
         rows_per_head=attention.qk_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
         nope_scale_exponent=alpha,
@@ -129,6 +142,7 @@ def _clip_mla_weights(
     _scale_mla_heads(
         cast(DTensor, cast(Any, attention.inner_attention.wkv_b).weight),
         scales_H,
+        reduction_ranks=reduction_ranks,
         rows_per_head=attention.qk_nope_head_dim + attention.v_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
         nope_scale_exponent=1.0 - alpha,
@@ -141,8 +155,13 @@ def qk_clip(
     model_parts: list[nn.Module],
     *,
     reduction_mesh: DeviceMesh,
+    reduction_ranks: frozenset[int],
 ) -> None:
-    """Apply the Kimi K2 QK clipping update with the report defaults."""
+    """Apply the Kimi K2 QK clipping update with the report defaults.
+
+    ``reduction_ranks`` are the ranks of ``reduction_mesh``; scales are
+    replicated on every weight mesh axis inside this MAX all-reduce group.
+    """
     threshold = 100.0
     alpha = 0.5
     attention_layers = [
@@ -180,7 +199,9 @@ def qk_clip(
         scales_H.split(num_heads_per_layer),
         strict=True,
     ):
-        _clip_mla_weights(attention, layer_scales_H, alpha=alpha)
+        _clip_mla_weights(
+            attention, layer_scales_H, alpha=alpha, reduction_ranks=reduction_ranks
+        )
         cast(
             QKClipFlexInnerAttention, attention.inner_attention.inner_attention
         ).max_attention_logits_H.clear()
@@ -193,6 +214,7 @@ def register_qk_clip_hook(
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
     reduction_mesh = parallelism_context.get_mesh("loss")
+    reduction_ranks = frozenset(reduction_mesh.mesh.flatten().tolist())
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,
@@ -202,6 +224,7 @@ def register_qk_clip_hook(
         qk_clip(
             model_parts,
             reduction_mesh=reduction_mesh,
+            reduction_ranks=reduction_ranks,
         )
 
     optimizers.register_step_post_hook(_qk_clip_hook)

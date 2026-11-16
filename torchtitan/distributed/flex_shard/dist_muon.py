@@ -1370,6 +1370,11 @@ def _validate_shard_order_compute_targets(
             )
 
 
+def _is_shard_on_dim(placement: object, dim: int, ndim: int) -> bool:
+    """Exact ``Shard`` (not ``_StridedShard``) on normalized tensor dimension."""
+    return type(placement) is Shard and placement.dim % ndim == dim
+
+
 def _resolve_storage_to_compute_transition(
     fqn: str,
     param: DTensor,
@@ -1535,32 +1540,36 @@ def _resolve_storage_to_compute_transition(
         sorted(set(changed_storage_mesh_axes).union(active_owned_storage_mesh_axes))
     )
     if len(transport_mesh_axes) == 1 and block_shard is None:
-        transport_mesh_axis = transport_mesh_axes[0]
-        source_placement = param.placements[transport_mesh_axis]
-        transport_target_sharding = normalized_target_sharding_by_storage_mesh_axis.get(
-            transport_mesh_axis
+        (transport_mesh_axis,) = transport_mesh_axes
+        # The transport turns each rank's matrix rows into whole matrices of
+        # the batch.
+        rows_become_whole_matrices = _is_shard_on_dim(
+            param.placements[transport_mesh_axis], param.ndim - 2, param.ndim
+        ) and _is_shard_on_dim(
+            normalized_target_sharding_by_storage_mesh_axis.get(transport_mesh_axis),
+            0,
+            param.ndim,
         )
-        for preserved_mesh_axis, preserved_placement in enumerate(param.placements):
-            if preserved_mesh_axis == transport_mesh_axis:
-                continue
-            if (
-                type(source_placement) is Shard
-                and source_placement.dim % param.ndim == param.ndim - 2
-                and type(transport_target_sharding) is Shard
-                and transport_target_sharding.dim == 0
-                and type(preserved_placement) is Shard
-                and preserved_placement.dim % param.ndim == 0
-                and transport_mesh_axis < preserved_mesh_axis
-            ):
-                preserved_axis_name = mesh_axis_names[preserved_mesh_axis]
-                transport_axis_name = mesh_axis_names[transport_mesh_axis]
-                raise ValueError(
-                    f"Muon parameter {fqn!r} must declare "
-                    "shard_order_by_tensor_dim={0: "
-                    f"({preserved_axis_name!r}, {transport_axis_name!r})}} "
-                    f"when preserving Shard(0) on mesh axis "
-                    f"{preserved_axis_name!r}"
-                )
+        # A later mesh axis that keeps Shard(0) storage owns the outer batch
+        # chunks (e.g. ep). Undeclared, Shard(0) nests in mesh order, putting
+        # the transport axis outside it and contradicting the storage layout.
+        preserved_batch_shard_axis = next(
+            (
+                axis
+                for axis in range(transport_mesh_axis + 1, len(param.placements))
+                if _is_shard_on_dim(param.placements[axis], 0, param.ndim)
+            ),
+            None,
+        )
+        if rows_become_whole_matrices and preserved_batch_shard_axis is not None:
+            preserved_axis_name = mesh_axis_names[preserved_batch_shard_axis]
+            transport_axis_name = mesh_axis_names[transport_mesh_axis]
+            raise ValueError(
+                f"Muon parameter {fqn!r} must declare "
+                "shard_order_by_tensor_dim={0: "
+                f"({preserved_axis_name!r}, {transport_axis_name!r})}} "
+                f"when preserving Shard(0) on mesh axis {preserved_axis_name!r}"
+            )
 
     transport_axis_set = set(transport_mesh_axes)
     for storage_mesh_axis, placement in enumerate(param.placements):

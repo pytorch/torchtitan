@@ -266,12 +266,12 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     if ep_size <= 0:
         raise ValueError("expert_parallel_degree must be positive")
     if ep_size == 1:
-        # FSDP flattens dp_shard and cp into one storage axis under CP.
+        # FSDP flattens dp_shard and cp into one storage axis under CP. MoE
+        # requires EP >= TP, so experts never use TP here.
         return ComputeLayout(
             shardings_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
-                MeshAxisName.TP.value: Shard(0),
             },
             compute_dtype=torch.bfloat16,
         )
@@ -301,11 +301,12 @@ def _dist_muon_optimizer(
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
     attention = cast(DeepSeekMLAAttention.Config, model_config.first_full_attention)
+    # Dense storage axes; tp is declared only when TP is enabled.
+    dense_axes = (MeshAxisName.DP_SHARD.value,) + (
+        (MeshAxisName.TP.value,) if parallelism.tensor_parallel_degree > 1 else ()
+    )
     owned = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: Owned(),
-            MeshAxisName.TP.value: Owned(),
-        },
+        shardings_by_mesh_axis={axis: Owned() for axis in dense_axes},
         compute_dtype=torch.bfloat16,
     )
 
@@ -313,8 +314,7 @@ def _dist_muon_optimizer(
         """A repeating BlockShard pattern with one Muon matrix per entry."""
         return ComputeLayout(
             shardings_by_mesh_axis={
-                axis_name: BlockShard(dim=0, block_sizes=num_rows)
-                for axis_name in (MeshAxisName.DP_SHARD.value, MeshAxisName.TP.value)
+                axis: BlockShard(dim=0, block_sizes=num_rows) for axis in dense_axes
             },
             compute_dtype=torch.bfloat16,
         )
@@ -343,10 +343,7 @@ def _dist_muon_optimizer(
     }
     feed_forward_shardings = {
         "w13": ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-                MeshAxisName.TP.value: Shard(0),
-            },
+            shardings_by_mesh_axis={axis: Shard(0) for axis in dense_axes},
             compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
