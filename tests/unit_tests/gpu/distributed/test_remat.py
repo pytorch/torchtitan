@@ -324,7 +324,7 @@ class _CountingVisionAttention(VisionAttention):
         self.wk = _CountingLinear(_linear_config(4, 4))
         self.wv = _CountingLinear(_linear_config(4, 4))
         self.proj = _CountingLinear(_linear_config(4, 4))
-        self.flex_attention = _CountingOp(_vision_inner_attention)
+        self.inner_attention = _CountingOp(_vision_inner_attention)
 
 
 class _CountingVisionBlock(VisionTransformerBlock):
@@ -1098,7 +1098,7 @@ class TestRematRegions(unittest.TestCase):
                         block.attn.wq.num_forwards,
                         block.attn.wk.num_forwards,
                         block.attn.wv.num_forwards,
-                        block.attn.flex_attention.num_forwards,
+                        block.attn.inner_attention.num_forwards,
                         block.attn.proj.num_forwards,
                         block.mlp.linear_fc1.num_forwards,
                         block.mlp.linear_fc2.num_forwards,

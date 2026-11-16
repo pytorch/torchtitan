@@ -6,14 +6,11 @@
 
 """Qwen3.6 model configurations used by tests."""
 
-from dataclasses import replace
 
-from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
-    VisionProcessor,
-)
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -32,22 +29,13 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.qwen3_6 import build_model_config, QWEN3_6_SPECIAL_TOKENS
+from torchtitan.models.qwen3_6 import (
+    build_model_config,
+    QWEN3_6_SPECIAL_TOKENS,
+    QWEN3_6_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
-
-
-def _multimodal_collator_config(
-    dataset_config: SingleDatasetConfig,
-) -> MultiModalCollator.Config:
-    processor_config = dataset_config.processor
-    assert isinstance(processor_config, VisionProcessor.Config)
-    return replace(
-        MultiModalCollator.Config(build_mrope_positions=True),
-        patch_size=processor_config.patch_size,
-        temporal_patch_size=processor_config.temporal_patch_size,
-        spatial_merge_size=processor_config.spatial_merge_size,
-    )
 
 
 def qwen36_debugmodel(
@@ -65,12 +53,13 @@ def qwen36_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_6_SPECIAL_TOKENS),
+        vision_processor=VisionProcessor.Config(**QWEN3_6_VISION_PROCESSOR_KWARGS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -128,11 +117,12 @@ def qwen36_debugmodel_moe(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_6_SPECIAL_TOKENS),
+        vision_processor=VisionProcessor.Config(**QWEN3_6_VISION_PROCESSOR_KWARGS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -168,10 +158,11 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3.6-27B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_6_SPECIAL_TOKENS),
+        vision_processor=VisionProcessor.Config(**QWEN3_6_VISION_PROCESSOR_KWARGS),
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -207,10 +198,11 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3.6-35B-A3B",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_6_SPECIAL_TOKENS),
+        vision_processor=VisionProcessor.Config(**QWEN3_6_VISION_PROCESSOR_KWARGS),
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(

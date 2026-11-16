@@ -34,6 +34,11 @@ until they have been validated end to end. User-owned recipes can use the
 corresponding `assets/hf/Qwen3.5-<variant>` directory; for example, flavor
 `35B-A3B` conventionally uses `assets/hf/Qwen3.5-35B-A3B`.
 
+Each flavor name above is text-only: it builds `Qwen35Model`, the decoder
+without the vision encoder, and reads the language model from a multimodal
+checkpoint. Append `_mm` (e.g. `9B_mm`, `35B-A3B_mm`) for
+`Qwen35MultimodalModel`, which adds the vision encoder.
+
 ### Dense
 
 | Variant | LLM dim | Layers | Heads | KV Heads | Head Dim | ViT dim | ViT layers |

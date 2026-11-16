@@ -25,7 +25,7 @@ from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
 from torchtitan.models.common.attention.cp_linear_attention import (
     ContextParallelLinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import GDN, InnerGDN
+from torchtitan.models.common.attention.gdn import GDN, GDNKernel, InnerGDN
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -296,7 +296,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+            build_config, max_context_length = MODEL_FLAVORS["debugmodel_mm"]
             model = build_config(
                 "flex",
                 seq_len=max_context_length,
@@ -324,7 +324,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             ) from exc
 
         with torch.device("meta"):
-            build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+            build_config, max_context_length = MODEL_FLAVORS["debugmodel_mm"]
             model = build_config(
                 "flex",
                 seq_len=max_context_length,
@@ -593,7 +593,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         flex_model = build_model_config(
-            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+            "debugmodel_mm", attn_backend="flex", parallelism=ParallelismConfig()
         ).build()
         masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
@@ -625,7 +625,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             )
 
         varlen_model = build_model_config(
-            "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+            "debugmodel_mm", attn_backend="varlen", parallelism=ParallelismConfig()
         ).build()
         varlen_masks = varlen_model._get_attention_metadata(positions)
         varlen_backend = next(
@@ -646,7 +646,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         deltanet_only_config = build_model_config(
-            "debugmodel", parallelism=ParallelismConfig()
+            "debugmodel_mm", parallelism=ParallelismConfig()
         )
         deltanet_only_config.layers = [
             layer
@@ -760,6 +760,79 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             self.assertIsNotNone(parameter.grad)
             self.assertTrue(torch.isfinite(parameter.grad).all())
 
+    def test_deterministic_backward_bypasses_normalization_autotuner(self):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA is unavailable")
+
+        from attn_gym._backends.triton import tune as triton_tune
+
+        torch.manual_seed(42)
+        kernel = GDNKernel.Config().build()
+        cu_seqlens = torch.tensor([0, 64, 128], device="cuda", dtype=torch.int32)
+        was_deterministic = torch.are_deterministic_algorithms_enabled()
+        try:
+            torch.use_deterministic_algorithms(True)
+            for batch_invariant in (False, True):
+                with self.subTest(batch_invariant=batch_invariant):
+                    q_LHK = torch.randn(
+                        128,
+                        1,
+                        128,
+                        device="cuda",
+                        dtype=torch.bfloat16,
+                        requires_grad=True,
+                    )
+                    k_LHK = torch.randn_like(q_LHK, requires_grad=True)
+                    v_LHV = torch.randn_like(q_LHK, requires_grad=True)
+                    decay_LH = torch.full(
+                        (128, 1), -0.1, device="cuda", requires_grad=True
+                    )
+                    update_gate_LH = torch.full(
+                        (128, 1),
+                        0.5,
+                        device="cuda",
+                        dtype=torch.bfloat16,
+                        requires_grad=True,
+                    )
+                    with (
+                        mock.patch(
+                            "torchtitan.models.common.attention.gdn."
+                            "is_in_batch_invariant_mode",
+                            return_value=batch_invariant,
+                        ),
+                        # Deterministic mode pins every tuned Attention Gym kernel. A
+                        # tuned Triton launch calls run_tunable before any winner-cache
+                        # lookup, so a warm cache cannot hide one.
+                        mock.patch.object(
+                            triton_tune,
+                            "run_tunable",
+                            side_effect=RuntimeError("An autotuner ran"),
+                        ) as autotuner,
+                    ):
+                        output_LHV = kernel(
+                            q_LHK,
+                            k_LHK,
+                            v_LHV,
+                            decay_LH,
+                            update_gate_LH,
+                            cu_seqlens=cu_seqlens,
+                        )
+                        loss = output_LHV.float().square().mean()
+                        loss.backward()
+                        autotuner.assert_not_called()
+                        for input_tensor in (
+                            q_LHK,
+                            k_LHK,
+                            v_LHV,
+                            decay_LH,
+                            update_gate_LH,
+                        ):
+                            self.assertIsNotNone(input_tensor.grad)
+                            self.assertTrue(torch.isfinite(input_tensor.grad).all())
+                            self.assertGreater(input_tensor.grad.abs().max().item(), 0)
+        finally:
+            torch.use_deterministic_algorithms(was_deterministic)
+
     def test_fused_varlen_matches_independent_document_forwards(self):
         # BF16 tolerance absorbs differing packed and per-document chunk boundaries.
         self._assert_fused_varlen_matches_per_document(atol=2e-2, rtol=2e-2)
@@ -768,7 +841,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("CUDA is unavailable")
 
-        from torchtitan.models.common.attention.gdn import _recurrent_gdn_fwd
+        from torchtitan.models.common.attention.gdn import (
+            _batch_invariant_recurrent_gdn_fwd,
+        )
 
         torch.manual_seed(42)
         num_tokens, num_key_heads, num_value_heads, key_dim, value_dim = (
@@ -813,7 +888,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             tensor.requires_grad_()
         cu_seqlens = torch.tensor([0, 5, 12], device="cuda", dtype=torch.int32)
 
-        actual = torch.compile(_recurrent_gdn_fwd, fullgraph=True)(
+        actual = torch.compile(_batch_invariant_recurrent_gdn_fwd, fullgraph=True)(
             q,
             k,
             v,
@@ -848,6 +923,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 scale=key_dim**-0.5,
                 state_indices=torch.tensor([3], device="cuda", dtype=torch.int32),
                 has_initial_state=torch.tensor([False], device="cuda"),
+                kernel_options={"batch_invariant": True, "autotune": False},
             )
 
         state_indices = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
@@ -869,6 +945,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 scale=key_dim**-0.5,
                 state_indices=state_indices,
                 has_initial_state=has_initial_state,
+                kernel_options={"batch_invariant": True, "autotune": False},
             )
         expected = torch.cat(
             (prefix_output, remaining_output),

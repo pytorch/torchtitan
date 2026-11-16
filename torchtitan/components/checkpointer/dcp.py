@@ -16,9 +16,14 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from typing import Any, cast, Literal, TYPE_CHECKING
 
+import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
+from torch.distributed.checkpoint import (
+    CheckpointableTensor,
+    HuggingFaceStorageWriter,
+    Metadata,
+)
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
@@ -28,10 +33,7 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.flex_shard_fsdp import (
-    as_fsdp2_state_dict,
-    from_fsdp2_state_dict,
-)
+from torchtitan.distributed.flex_shard_fsdp import load_hf_into_local_shards
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
@@ -200,6 +202,7 @@ class CheckpointManager(BaseCheckpointManager):
             raise ValueError(
                 "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
+        self._validate_hf_export(model_parts, last_save_in_hf=self.last_save_in_hf)
 
         # Async & Distributed Infrastructure
         try:
@@ -395,15 +398,19 @@ class CheckpointManager(BaseCheckpointManager):
                 "trying to load checkpoint in HF safetensors format, "
                 "but sd_adapter is not provided."
             )
+            # FlexShard's local shards declare their layouts, and the adapters
+            # would take each for the whole tensor.
+            if any(isinstance(v, CheckpointableTensor) for v in state_dict.values()):
+                load_hf_into_local_shards(
+                    self.sd_adapter,
+                    state_dict,
+                    self.sd_adapter.get_hf_storage_reader(checkpoint_id),
+                )
+                states[MODEL].load_state_dict(state_dict)
+                return
 
-            # The adapters convert FSDP2's DTensor parameters and full tensors.
-            # FlexShard's parameters are plain local shards, so the adapters
-            # get them as the DTensors FSDP2 would give them, and the model
-            # loads the local shards of from_hf's DTensors.
-            model_parts = states[MODEL].model
             hf_state_dict = self.sd_adapter.to_hf(
-                as_fsdp2_state_dict(model_parts, state_dict),
-                to_quantized_layout=from_quantized,
+                state_dict, to_quantized_layout=from_quantized
             )
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
                 checkpoint_id, from_quantized
@@ -414,9 +421,7 @@ class CheckpointManager(BaseCheckpointManager):
             state_dict = self.sd_adapter.from_hf(
                 hf_state_dict, is_quantized_layout=from_quantized
             )
-            states[MODEL].load_state_dict(
-                from_fsdp2_state_dict(model_parts, state_dict)
-            )
+            states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
@@ -480,6 +485,12 @@ class CheckpointManager(BaseCheckpointManager):
                         use_non_blocking_copy=True,
                     )
                 )
+            # DefaultStager copies on its own stream, which does not wait for the
+            # current stream. Without this wait, it can copy weights and optimizer
+            # state before the optimizer step finishes writing them.
+            staging_stream = self.stager._staging_stream
+            assert staging_stream is not None
+            staging_stream.wait_stream(torch.accelerator.current_stream())
 
             async_save_started_at = time.monotonic()
             result = self.dcp_save(

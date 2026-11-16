@@ -36,7 +36,7 @@ def test_dapo_loss_matches_vllm_tempered_logprobs_bitwise() -> None:
     )
 
     _, metrics = DAPOLoss.Config().build()(
-        pred=logits,
+        logits=logits,
         labels=labels,
         global_loss_token_counts=torch.tensor(64),
         generator_logprobs=generator_logprobs,
