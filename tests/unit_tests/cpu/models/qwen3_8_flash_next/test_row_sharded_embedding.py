@@ -123,8 +123,14 @@ class TestRowShardedEmbedding(DTensorTestBase):
                                 dtype=torch.int64,
                                 device=self.device_type,
                             )
+                        # Each owner holds two rows, the tightest valid bound.
+                        # Requests fill one owner's slots and leave the other
+                        # owner an unused slot.
                         metadata = prepare_row_sharded_embedding(
-                            ids, num_embeddings=num_rows, row_mesh=row_mesh
+                            ids,
+                            num_embeddings=num_rows,
+                            row_mesh=row_mesh,
+                            max_ids_per_owner=2,
                         )
                         if case == "recompute":
                             # All owners replay the response collective, even if
@@ -190,17 +196,23 @@ class TestRowShardedEmbedding(DTensorTestBase):
                         )
 
     @with_comms
-    def test_invalid_ids_fail_on_entire_row_group(self):
+    def test_invalid_routing_fails_on_entire_row_group(self):
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size // 2, 2),
             mesh_dim_names=("replica", "row"),
         )
         row_mesh = mesh["row"]
-        for invalid_id in (-1, 4):
+        # Out-of-range IDs, then two distinct IDs for one owner with one slot.
+        for bad_ids, max_ids_per_owner in (([-1], 1), ([4], 1), ([0, 1], 1)):
             ids = torch.tensor(
-                [invalid_id if row_mesh.get_local_rank() == 0 else 0],
+                bad_ids if row_mesh.get_local_rank() == 0 else [0],
                 device=self.device_type,
             )
-            with self.assertRaisesRegex(ValueError, "on every owner"):
-                prepare_row_sharded_embedding(ids, num_embeddings=4, row_mesh=row_mesh)
+            with self.assertRaisesRegex(RuntimeError, "on every requester"):
+                prepare_row_sharded_embedding(
+                    ids,
+                    num_embeddings=4,
+                    row_mesh=row_mesh,
+                    max_ids_per_owner=max_ids_per_owner,
+                )

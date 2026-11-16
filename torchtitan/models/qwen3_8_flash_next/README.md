@@ -62,9 +62,36 @@ produce gates `[T,4]`. The gated values form `[T,4,2560]`, receive a dilated
 depthwise convolution, and are added to the residual streams.
 
 The weight is a `Shard(0)` DTensor on the dense SPMD mesh (`dp`, `cp`, `tp`),
-excluded from FSDP all-gathers. Each DP owner keeps contiguous rows. Preprocessing deduplicates
-hash IDs and prepares the all-to-all request plan; forward exchanges only
-selected vectors, and backward returns their gradients to the owners.
+excluded from FSDP all-gathers. Each DP owner keeps contiguous rows.
+Preprocessing deduplicates hash IDs and packs them into one fixed-size slot of
+`C` IDs per owner; forward exchanges the requested vectors, and backward
+returns their gradients to the owners. Fixed slots keep the all-to-all shapes
+static, so `C` must cover the worst case for any data.
+
+Each token reads one row from each of the 16 hash heads, so a rank requests at
+most `16*T` IDs in total. That total is the ideal: one rank may need all
+`16*T`, so no fixed-size scheme can send less.
+
+The simple choice, a `16*T` slot per owner, is always safe but sends
+`P*16*T`, `P` times the ideal (`P` = DP degree). We use a tighter slot size `C`
+instead. Each head owns a contiguous row range, so an owner receives at most
+`min(T, rows of the head it owns)` IDs from each head. `C` is that sum over
+heads, maximized over owners. It depends only on `T` and the table layout, so
+every rank computes the same `C` without communication.
+
+Overhead is `P*C / (16*T)`, traffic relative to the ideal: 1.0 is ideal, and
+the simple `16*T` slot would give `P`.
+
+| DP | `C` at `T=4096` | Overhead | `C` at `T=16384` | Overhead |
+| --- | ---: | ---: | ---: | ---: |
+| 8 | 8,604 | 1.05 | 33,180 | 1.01 |
+| 16 | 4,508 | 1.10 | 16,796 | 1.03 |
+| 64 | 4,508 | 4.40 | 16,796 | 4.10 |
+
+Each head covers about 1/16 of the table. Up to DP16 an owner holds one or two
+heads, so slots stay within 10% of the ideal. Beyond DP16 several owners
+split one head and each still reserves `T` slots for it, so the overhead grows
+with `P`.
 
 PLE needs fixed row ownership and individual vector lookups. All-to-all routing
 and local `F.embedding` meet these needs while reusing TorchTitan's DTensor,
