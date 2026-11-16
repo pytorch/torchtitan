@@ -79,7 +79,7 @@ class RenderersConfigAdapter(RendererConfig):
     renderers_config: PrimeRendererConfig
     """The library's typed config for the model, e.g. `Qwen3RendererConfig(enable_thinking=False)`.
     Renderers and their options:
-    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/docs/renderer-config.md"""
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.2.0/docs/renderer-config.md"""
 
     def get_renderers_config(self) -> PrimeRendererConfig:
         """Return the `renderers` config. Verifiers' train client builds the same renderer from it."""
@@ -161,8 +161,8 @@ class RendererTokenizerWrapper:
     """Adapt TorchTitan's loaded tokenizer to `renderers.OffsetTokenizer`.
 
     Protocol and bring-your-own-tokenizer guide:
-    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/renderers/base.py#L680-L711
-    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.12/README.md#install
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.2.0/renderers/base.py#L680-L711
+    https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.2.0/README.md#install
 
     `renderers` needs Hugging Face-style special-token attributes, raw encoding
     without automatic BOS/EOS, token-to-id lookup, and character offsets. The

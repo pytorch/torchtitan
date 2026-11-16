@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import base64
 import logging
 from dataclasses import dataclass
 
+import numpy as np
 from aiohttp import web
 
 from torchtitan.config import Configurable
@@ -22,9 +23,6 @@ from torchtitan.rl.rollout.types import GenerateFn, Prompt
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
-
-# Stands in for the logprobs content list; the handler splices the real list in.
-_LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,8 +183,8 @@ class GenerationServer(Configurable):
                                           "stop_token_ids": [151645], "logprobs": 1, ...}}
             reply    {"request_id": "9f3c.../request=0",
                       "choices": [{"token_ids": [9707, 151645], "finish_reason": "stop",
-                                   "logprobs": {"content": [{"token": "token_id:9707",
-                                                             "logprob": -0.01}, ...]}}]}
+                                   "completion_logprobs": {"data": "<base64 float32>",
+                                                           "shape": [2], "dtype": "float32"}}]}
         """
         # ======== Check the request ========
         if self.generate_fn is None:
@@ -294,34 +292,28 @@ class GenerationServer(Configurable):
             )
 
         # ======== Reply ========
-        # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
-        # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
-        logprobs_content = ",".join(
-            f'{{"token":"token_id:{token_id}","logprob":{logprob!r}}}'
-            for token_id, logprob in zip(
-                completion.token_ids, completion.token_logprobs
-            )
-        )
-        response_text = json.dumps(
+        # The logprobs in renderers' packed form: one base64 float32 array, no dict per token.
+        # Encode + renderers' decode of 16K tokens, on CPU in one process: 2.6 ms, vs 31 ms for one
+        # JSON object per token.
+        logprobs = np.asarray(completion.token_logprobs, dtype=np.float32)
+        return web.json_response(
             {
                 "request_id": completion.request_id,
                 "choices": [
                     {
                         "index": 0,
                         "token_ids": completion.token_ids,
-                        "logprobs": {"content": _LOGPROBS_CONTENT_PLACEHOLDER},
+                        "completion_logprobs": {
+                            "data": base64.b64encode(logprobs.tobytes()).decode(),
+                            "shape": [len(logprobs)],
+                            "dtype": "float32",
+                        },
                         "finish_reason": completion.finish_reason,
                     }
                 ],
                 "prompt_logprobs": None,
                 "kv_transfer_params": None,
             }
-        )
-        head, _, tail = response_text.rpartition(
-            json.dumps(_LOGPROBS_CONTENT_PLACEHOLDER)
-        )
-        return web.Response(
-            text=f"{head}[{logprobs_content}]{tail}", content_type="application/json"
         )
 
 

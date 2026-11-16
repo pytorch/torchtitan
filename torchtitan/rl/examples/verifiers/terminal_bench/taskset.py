@@ -14,12 +14,7 @@ Verifiers needs to resolve the harness id.
 """
 
 import verifiers.v1 as vf
-from verifiers.v1.tasksets.harbor import (
-    HarborConfig,
-    HarborEnv,
-    HarborTask,
-    HarborTaskset,
-)
+from verifiers.v1.tasksets.harbor import HarborConfig, HarborTask, HarborTaskset
 
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     register_harness_alias,
@@ -38,5 +33,4 @@ class TerminalTaskset(HarborTaskset, vf.Taskset[HarborTask, TerminalTasksetConfi
     config: TerminalTasksetConfig
 
 
-# Verifiers discovers the Harbor environment from this taskset plugin.
-__all__ = ["TerminalTaskset", "HarborEnv"]
+__all__ = ["TerminalTaskset"]
