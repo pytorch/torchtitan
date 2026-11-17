@@ -62,6 +62,10 @@ class SlakeDataset(RLDataset):
 
         seed: int = 0
 
+        @property
+        def paths_on_every_host(self) -> list[str]:
+            return [self.data_dir]
+
     def __init__(self, config: Config) -> None:
         with open(os.path.join(config.data_dir, f"{config.split}.json")) as f:
             rows = json.load(f)

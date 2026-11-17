@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -56,3 +58,19 @@ def test_apply_env_defaults_rejects_legacy_or_conflicting_allocator(canonical) -
         with pytest.raises(ValueError, match="Use PYTORCH_ALLOC_CONF"):
             apply_env_defaults()
         assert dict(os.environ) == explicit
+
+
+def test_the_env_module_does_not_import_torch() -> None:
+    """`apply_rollout_worker_env_defaults` sets `OMP_NUM_THREADS` before torch loads only if its
+    module doesn't import torch."""
+    imports_torch = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys, torchtitan.rl._env; print('torch' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert imports_torch == "False"
