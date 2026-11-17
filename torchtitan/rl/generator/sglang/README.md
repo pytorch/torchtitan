@@ -144,6 +144,13 @@ attention-TP groups:         [0 1] [2 3] <- heads sharded over these
 DP rank 0 = ranks 0, 1       DP rank 1 = ranks 2, 3
 ```
 
+NOTE: SGLang names its groups after the whole instance. SGLang's "TP" (`tp_size`,
+`tp_group`, `tensor_model_parallel_all_reduce`) spans all DP x TP ranks, while its
+"attention TP" (`attn_tp_size`, `attn_tp_group`, `attn_tp_all_reduce`) is one DP
+rank's TP ranks: torchtitan's `tensor_parallel_degree`. So the engine's TP code
+(attention head sharding, the model's routed TP all-reduce) uses the attention-TP
+names. The two coincide at DP = 1.
+
 The EP collectives span the DP ranks, so every DP rank steps together: SGLang runs
 a DP rank without requests on an empty batch, which the model pads to one row per
 TP rank, and `has_unfinished_requests` is True on every rank while any DP rank has

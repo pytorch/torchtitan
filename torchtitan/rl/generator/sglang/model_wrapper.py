@@ -383,8 +383,11 @@ class SGLangModelWrapper(Module):
             hf_assets_path=hf_assets_path,
         )
         # SGLang's TP all-reduce picks its algorithm by message size, which breaks
-        # batch invariance. It sends every sum all-reduce to the attention TP group
-        # (the TP group without attention DP), so it comes after the initial load.
+        # batch invariance. It sends every sum all-reduce to the attention TP group,
+        # so it comes after the initial load.
+        # NOTE: attn_tp_all_reduce sums over SGLang's attention TP group, which is
+        # torchtitan's TP. Under attention DP, SGLang's TP group (what
+        # tensor_model_parallel_all_reduce sums over) spans all DP x TP ranks instead.
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             route_tp_all_reduce(attn_tp_all_reduce)
         self.model = _DecoderBody(

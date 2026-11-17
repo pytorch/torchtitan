@@ -627,6 +627,9 @@ class SGLangEngine(GenerationEngine):
         )
         if self._dp_size == 1:
             return unfinished
+        # NOTE: a CPU (gloo) all-reduce on every call, i.e. every step, over the DP x
+        # TP world: SGLang's attention DP has no DP-only group. VLLMEngine (vLLM's
+        # has_unfinished_requests) does the same over vLLM's DP group.
         flag = torch.tensor([unfinished], dtype=torch.int32)
         dist.all_reduce(
             flag, op=dist.ReduceOp.MAX, group=get_parallel().tp_group.cpu_group

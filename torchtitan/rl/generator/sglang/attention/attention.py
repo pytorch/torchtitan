@@ -185,6 +185,8 @@ class SGLangInnerAttention(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
+        # SGLang's attention TP is torchtitan's TP; under attention DP, SGLang's
+        # tp_size is DP x TP.
         tp_size = get_parallel().attn_tp_size
         for name in ("num_heads", "num_kv_heads"):
             if getattr(config, name) % tp_size != 0:
