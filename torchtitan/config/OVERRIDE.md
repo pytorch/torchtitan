@@ -144,7 +144,7 @@ This matters for version-robustness. Hand-copying couples a factory to the
 target's field set at the time it was written:
 
 ```python
-# Fragile: ComplexRoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
+# Fragile: ComplexRoPE.Config has many fields (theta, scaling, sharding_config,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
 return TritonRoPE.Config(

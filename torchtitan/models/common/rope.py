@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Shape suffixes: P = cached positions, F = rotary frequencies per coordinate,
-# T = tokens, R = row and column pairs together.
+# Shape suffixes: P = cached positions, F = rotary frequency pairs,
+# D = rotary width, T = tokens, R = row and column pairs together;
+# query/key use the existing public argument names.
 
 import math
 from dataclasses import dataclass
@@ -21,8 +22,35 @@ __all__ = [
     "ComplexRoPE",
     "ComplexVisionRoPE",
     "CosSinRoPE",
+    "Llama3ScalingConfig",
     "RoPE",
+    "RoPEScalingConfig",
+    "YaRNScalingConfig",
 ]
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Llama3ScalingConfig:
+    """Wavelength-dependent frequency scaling used by Llama 3."""
+
+    factor: float = 8.0
+    low_freq_factor: float = 1.0
+    high_freq_factor: float = 4.0
+    original_max_position_embeddings: int = 8192
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class YaRNScalingConfig:
+    """YaRN frequency scaling and its original context length."""
+
+    factor: float = 1.0
+    beta_fast: float = 32.0
+    beta_slow: float = 1.0
+    original_seq_len: int = 4096
+    truncate: bool = True
+
+
+RoPEScalingConfig = Llama3ScalingConfig | YaRNScalingConfig
 
 
 @spmd.no_typecheck()
@@ -83,6 +111,54 @@ def _yarn_inv_freq(
     return inv_freq / rope_factor * ramp + inv_freq * (1 - ramp)
 
 
+def _compute_inv_freq(
+    dim: int, theta: float, scaling: RoPEScalingConfig | None
+) -> torch.Tensor:
+    """Compute FP32 inverse frequencies; F denotes rotary frequency pairs."""
+    if isinstance(scaling, YaRNScalingConfig) and scaling.factor > 1.0:
+        # YaRN (DeepSeek V3 style)
+        return _yarn_inv_freq(
+            dim,
+            theta,
+            scaling.factor,
+            scaling.beta_fast,
+            scaling.beta_slow,
+            scaling.original_seq_len,
+            scaling.truncate,
+        )
+    inv_freq_F = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    if isinstance(scaling, Llama3ScalingConfig):
+        wavelength_F = 2 * math.pi / inv_freq_F
+        high_freq_wavelength = (
+            scaling.original_max_position_embeddings / scaling.high_freq_factor
+        )
+        low_freq_wavelength = (
+            scaling.original_max_position_embeddings / scaling.low_freq_factor
+        )
+        inv_freq_F = torch.where(
+            wavelength_F > low_freq_wavelength,
+            inv_freq_F / scaling.factor,
+            inv_freq_F,
+        )
+        smooth_F = (
+            scaling.original_max_position_embeddings / wavelength_F
+            - scaling.low_freq_factor
+        ) / (scaling.high_freq_factor - scaling.low_freq_factor)
+        scaled_F = (1 - smooth_F) * inv_freq_F / scaling.factor + smooth_F * inv_freq_F
+        medium_F = ~(wavelength_F < high_freq_wavelength) * ~(
+            wavelength_F > low_freq_wavelength
+        )
+        inv_freq_F = torch.where(medium_F, scaled_F, inv_freq_F)
+    return inv_freq_F
+
+
+def _qk_amplitude(scaling: RoPEScalingConfig | None, *, mscale: float = 1.0) -> float:
+    """Return the per-Q/K magnitude factor applied by attention, not RoPE."""
+    if isinstance(scaling, YaRNScalingConfig) and scaling.factor > 1.0:
+        return 0.1 * mscale * math.log(scaling.factor) + 1.0
+    return 1.0
+
+
 class RoPE(Module):
     """Shared Rotary Position Embedding module.
 
@@ -96,18 +172,11 @@ class RoPE(Module):
         dim: int
         max_context_length: int
         theta: float = 10000.0
-        scaling: Literal["none", "llama", "yarn"] = "none"
-        # llama scaling params
-        scaling_factor: float = 8.0
-        low_freq_factor: float = 1.0
-        high_freq_factor: float = 4.0
-        original_max_position_embeddings: int = 8192
-        # yarn scaling params
-        rope_factor: float = 1.0
-        beta_fast: float = 32.0
-        beta_slow: float = 1.0
-        original_seq_len: int = 4096
-        truncate: bool = True
+        scaling: RoPEScalingConfig | None = None
+
+        def qk_amplitude(self, *, mscale: float = 1.0) -> float:
+            """Return the magnitude factor used to scale attention scores."""
+            return _qk_amplitude(self.scaling, mscale=mscale)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -225,49 +294,10 @@ class ComplexRoPE(RoPE):
             Cache of shape ``(max_context_length, dim / 2)``.
         """
         cfg = self.config
-        dim = cfg.dim
-        end = cfg.max_context_length
-        theta = cfg.theta
-
-        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-
-        if cfg.scaling == "llama":
-            scaling_factor = cfg.scaling_factor
-            low_freq_factor = cfg.low_freq_factor
-            high_freq_factor = cfg.high_freq_factor
-            original_max_position_embeddings = cfg.original_max_position_embeddings
-            wavelen = 2 * math.pi / freqs
-            high_freq_wavelen = original_max_position_embeddings / high_freq_factor
-            low_freq_wavelen = original_max_position_embeddings / low_freq_factor
-            freqs = torch.where(
-                wavelen > low_freq_wavelen, freqs / scaling_factor, freqs
-            )
-            smooth_factor = (
-                original_max_position_embeddings / wavelen - low_freq_factor
-            ) / (high_freq_factor - low_freq_factor)
-            smoothed_freqs = (
-                1 - smooth_factor
-            ) * freqs / scaling_factor + smooth_factor * freqs
-            is_medium_freqs = ~(wavelen < high_freq_wavelen) * ~(
-                wavelen > low_freq_wavelen
-            )
-            freqs = torch.where(is_medium_freqs, smoothed_freqs, freqs)
-        elif cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
-            # YaRN (DeepSeek V3 style)
-            freqs = _yarn_inv_freq(
-                dim,
-                theta,
-                cfg.rope_factor,
-                cfg.beta_fast,
-                cfg.beta_slow,
-                cfg.original_seq_len,
-                cfg.truncate,
-            )
-
-        t = torch.arange(end, device=freqs.device)
-        freqs = torch.outer(t, freqs).float()
-        freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-        return freqs_cis
+        inv_freq_F = _compute_inv_freq(cfg.dim, cfg.theta, cfg.scaling)
+        positions_P = torch.arange(cfg.max_context_length, device=inv_freq_F.device)
+        angles_PF = torch.outer(positions_P, inv_freq_F).float()
+        return torch.polar(torch.ones_like(angles_PF), angles_PF)  # complex64
 
     def _reshape_cache(
         self,
@@ -403,7 +433,7 @@ class ComplexVisionRoPE(RoPE):
                 raise ValueError(
                     f"2D RoPE requires head_dim divisible by 4, got {self.dim}."
                 )
-            if self.scaling != "none":
+            if self.scaling is not None:
                 raise ValueError(
                     "ComplexVisionRoPE does not support frequency scaling."
                 )
@@ -469,37 +499,15 @@ class CosSinRoPE(RoPE):
             Cache of shape ``(max_context_length, dim * 2)``.
         """
         cfg = self.config
-        dim = cfg.dim
-        max_context_length = cfg.max_context_length
-        base = cfg.theta
-
-        if cfg.scaling == "llama":
+        if isinstance(cfg.scaling, Llama3ScalingConfig):
             raise NotImplementedError("Cos/sin RoPE does not support Llama scaling.")
-
-        if cfg.scaling == "yarn" and cfg.rope_factor > 1.0:
-            inv_freq = _yarn_inv_freq(
-                dim,
-                base,
-                cfg.rope_factor,
-                cfg.beta_fast,
-                cfg.beta_slow,
-                cfg.original_seq_len,
-                cfg.truncate,
-            )
-        else:
-            inv_freq = 1.0 / (
-                base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
-            )
-
-        t = torch.arange(
-            max_context_length, dtype=inv_freq.dtype, device=inv_freq.device
+        inv_freq_F = _compute_inv_freq(cfg.dim, cfg.theta, cfg.scaling)
+        positions_P = torch.arange(
+            cfg.max_context_length, dtype=inv_freq_F.dtype, device=inv_freq_F.device
         )
-        freqs = torch.outer(t, inv_freq).float()
-        theta = torch.cat([freqs, freqs], dim=-1)
-
-        cos = theta.cos()
-        sin = theta.sin()
-        return torch.cat([cos, sin], dim=-1)
+        angles_PF = torch.outer(positions_P, inv_freq_F).float()
+        angles_PD = torch.cat([angles_PF, angles_PF], dim=-1)
+        return torch.cat([angles_PD.cos(), angles_PD.sin()], dim=-1)
 
     def _reshape_cache(
         self,

@@ -209,7 +209,7 @@ class CosSinVisionRoPE(RoPE):
                 raise ValueError(
                     f"2D RoPE requires head_dim divisible by 4, got {self.dim}."
                 )
-            if self.scaling != "none":
+            if self.scaling is not None:
                 raise ValueError("CosSinVisionRoPE does not support frequency scaling.")
 
     apply_rotary_emb = staticmethod(CosSinRoPE.apply_rotary_emb)
