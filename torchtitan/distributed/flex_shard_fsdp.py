@@ -13,23 +13,23 @@ precision and reshard policy. The buckets' collectives then match FSDP2's byte
 for byte, so training from the same parameters is bitwise identical.
 
 FlexShard parameters and grads are plain local shards, with no DTensor.
-``init_param`` initializes each parameter as one device would, while each of
-FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm_mesh``
-gives the mesh a grad's norm is reduced over. One more difference changes only
+``apply_fsdp_to_decoder`` wraps each FlexShard parameter's ``param_init``
+function with flex_shard's ``init_from_full``: it fills the full parameter and
+the shard keeps its part, as one device would initialize it, while each of
+FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm``
+reduces a bucket's grad norm as DTensor does. One more difference changes only
 memory and communication: FSDP2 skips the embedding's backward all-gather
 (``set_unshard_in_backward``), which FlexShard can't yet, so it gathers the
 embedding again in backward, with the same values. FlexShard is imported only
 when it is selected.
 """
 
-import sys
-import weakref
-from collections.abc import Callable
+import math
 from importlib.util import find_spec
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
-import torch.nn as nn
+import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 if TYPE_CHECKING:
@@ -37,75 +37,47 @@ if TYPE_CHECKING:
     from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
-    "flex_shard_grad_norm_mesh",
-    "has_flex_shard_params",
-    "init_param",
-    "record_param_layouts",
+    "flex_shard_grad_norm",
     "validate_flex_shard_training",
 ]
 
-# Where each FlexShard parameter's local shard sits in the full parameter, by
-# module and parameter name, for init_param. to_empty() replaces FlexShard's
-# parameters but keeps the modules.
-# TODO: Read each parameter's layout from flex_shard instead, once its
-# parameters keep their layouts through to_empty().
-_PARAM_LAYOUTS: weakref.WeakKeyDictionary[
-    nn.Module, dict[str, Any]
-] = weakref.WeakKeyDictionary()
 
+def flex_shard_grad_norm(
+    params: list[torch.Tensor],
+    mesh: DeviceMesh,
+    norm_type: float,
+    error_if_nonfinite: bool,
+    foreach: bool | None,
+) -> torch.Tensor:
+    """The norm of the grads of FlexShard parameters ``params``, whose buckets
+    are on the 1D ``mesh`` (``flex_shard.get_mesh``).
 
-def record_param_layouts(model: nn.Module) -> None:
-    """Record where each of ``model``'s FlexShard parameters sits in the full
-    parameter, for ``init_param``. Call it after ``flex_shard(model)``.
+    The grads are plain local shards over ``mesh``. This reduces them in the
+    order ``get_total_norm`` does for DTensor grads sharded over ``mesh``, so the
+    result is bitwise equal: each grad's local norm, reduced over the mesh, then
+    the norm of those norms.
     """
-    # pyrefly: ignore [missing-import]
-    from flex_shard import get_flex_shard_global_layouts
-
-    for fqn, layout in get_flex_shard_global_layouts(model).items():
-        module_fqn, _, name = fqn.rpartition(".")
-        _PARAM_LAYOUTS.setdefault(model.get_submodule(module_fqn), {})[name] = layout
-
-
-def init_param(
-    module: nn.Module,
-    name: str,
-    param: torch.Tensor,
-    init_fn: Callable[[torch.Tensor], object],
-) -> None:
-    """Initialize ``module``'s parameter ``name``, ``param``, with ``init_fn``.
-
-    A FlexShard parameter is a plain local shard. ``init_fn`` fills a tensor of
-    the full parameter's shape, and the shard keeps its part (flex_shard's
-    ``init_from_full``). With the same RNG state on every rank, the shards are
-    one device's initialization, whatever the sharding. Each call briefly holds
-    one full parameter.
-    """
-    layout = _PARAM_LAYOUTS.get(module, {}).get(name)
-    if layout is None:
-        init_fn(param)
-        return
-    # pyrefly: ignore [missing-import]
-    from flex_shard import init_from_full
-
-    init_from_full(param, layout, init_fn)
-
-
-def has_flex_shard_params(module: nn.Module) -> bool:
-    """Whether FlexShard sharded any of ``module``'s own parameters, which only
-    ``init_param`` initializes as one device would."""
-    return module in _PARAM_LAYOUTS
-
-
-def flex_shard_grad_norm_mesh(param: torch.Tensor) -> DeviceMesh | None:
-    """The mesh ``param`` is sharded over if it's a FlexShard parameter, else None.
-
-    A FlexShard parameter and its grad are plain local shards over the mesh of
-    their bucket.
-    """
-    # FlexShard parameters exist only once flex_shard is imported, which
-    # happens only when it is selected.
-    flex_shard = sys.modules.get("flex_shard")
-    return None if flex_shard is None else flex_shard.get_mesh(param)
+    grads = [p.grad for p in params if p.grad is not None]
+    # From flex_shard's examples/deepseek_v3/train.py.
+    if foreach is False:
+        norms = torch.stack([torch.linalg.vector_norm(g, norm_type) for g in grads])
+    else:
+        norms = torch.stack(torch._foreach_norm(grads, norm_type))
+    if math.isinf(norm_type):
+        dist.all_reduce(norms, op=dist.ReduceOp.MAX, group=mesh.get_group())
+    else:
+        norms **= norm_type
+        dist.all_reduce(norms, group=mesh.get_group())
+        norms **= 1.0 / norm_type
+    total_norm = torch.linalg.vector_norm(norms, norm_type)
+    if error_if_nonfinite and not torch.isfinite(total_norm):
+        raise RuntimeError(
+            f"The total norm of order {norm_type} for gradients from `parameters` "
+            "is non-finite, so it cannot be clipped. To disable this error and "
+            "scale the gradients by the non-finite norm anyway, set "
+            "`error_if_nonfinite=False`"
+        )
+    return total_norm
 
 
 def validate_flex_shard_training(
@@ -170,6 +142,16 @@ def validate_flex_shard_training(
         for _, module_config, _, _ in model_config.traverse(Module.Config, recurse=True)
     ):
         unsupported.append("preserve_dtype_params")
+    # FlexShard parameters are plain local shards, and only param_init
+    # initializes them as one device would: apply_fsdp_to_decoder wraps it with
+    # init_from_full. reset_parameters() would draw every rank's shard as the
+    # whole parameter, with the same values.
+    if any(
+        module_config.param_init is None
+        and callable(getattr(module_config._owner, "reset_parameters", None))
+        for _, module_config, _, _ in model_config.traverse(Module.Config, recurse=True)
+    ):
+        unsupported.append("modules initialized by reset_parameters() (set param_init)")
     # FlexShard stores parameters as plain tensors, which would drop the
     # quantized all-gather that MXFP8 and NVFP4 weights implement for FSDP2.
     if has_quantization(model_config):
