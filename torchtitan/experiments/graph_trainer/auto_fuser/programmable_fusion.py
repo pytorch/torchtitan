@@ -71,8 +71,8 @@ class FusionRegion:
 @dataclass(frozen=True, kw_only=True, slots=True)
 class ProgrammableFusionConfig:
     regions: tuple[FusionRegion, ...]
-    kernel_cache_dir: str | None = None
-    """Local cache_dir of ``substitute_with_kernels_pass``; None uses its default."""
+    kernel_cache_dir: str
+    """Local cache_dir of ``substitute_with_kernels_pass``."""
 
 
 class FusionPlan:
@@ -88,7 +88,7 @@ class FusionPlan:
             FusionRegion(name=name, targets=tuple(targets), exclude=tuple(exclude))
         )
 
-    def build(self, *, kernel_cache_dir: str | None = None) -> ProgrammableFusionConfig:
+    def build(self, *, kernel_cache_dir: str) -> ProgrammableFusionConfig:
         return ProgrammableFusionConfig(
             regions=tuple(self.regions), kernel_cache_dir=kernel_cache_dir
         )

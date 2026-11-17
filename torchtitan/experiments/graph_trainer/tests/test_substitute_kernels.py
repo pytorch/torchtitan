@@ -258,65 +258,6 @@ class TestSubstituteWithKernelsPass(TestCase):
         module = _load_module(pattern / f"{l2}.py")
         self.assertIs(module.run, module.reference)
         self.assertEqual(module.reference(*args), _swiglu(*args))
-        self.assertExpectedInline(
-            (pattern / f"{l2}.py").read_text().strip(),
-            """\
-\"\"\"One specialization of a substitute_kernels pattern.
-
-SPEC and reference are generated: do not edit them. Write the kernel in
-impl, then set ``run = impl``.
-\"\"\"
-
-import json
-import torch
-
-SPEC = json.loads(r\"\"\"
-{
-  "signature": "def run(in0, in1, in2)",
-  "inputs": [
-    {
-      "shape": [8, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    }
-  ],
-  "outputs": {
-    "shape": [8, 16],
-    "stride": [16, 1],
-    "dtype": "float32",
-    "device": "cpu"
-  }
-}
-\"\"\")
-
-
-def reference(in0, in1, in2):
-    v3 = torch.ops.aten.mm.default(in0, in1);  in1 = None
-    v4 = torch.ops.aten.silu.default(v3);  v3 = None
-    v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
-    v6 = torch.ops.aten.mul.Tensor(v4, v5);  v4 = v5 = None
-    return v6
-
-
-def impl(in0, in1, in2):
-    raise NotImplementedError
-
-
-run = reference""",
-        )
 
     def test_reference_imports_only_fx_builtins_it_uses(self):
         def fn(x, w1, w2):
@@ -371,101 +312,27 @@ def reference(in0, in1, in2):
         self.assertEqual(len(targets), 1)
 
     def test_shape_and_dtype_change_specialization_not_pattern(self):
+        layer = _layer()
         keys = []
         for args in (_inputs(m=8), _inputs(m=32), _inputs(dtype=torch.float64)):
-            gm = _parent([_layer()], args)
-            keys += _keys(gm)
-            substitute_with_kernels_pass(gm, cache_dir=self.cache)
-        self.assertEqual(len({l1 for l1, _ in keys}), 1)
-        self.assertEqual(len({l2 for _, l2 in keys}), 3)
-        self.assertExpectedInline(
-            self._spec_text(*keys[2]),
-            """\
-{
-  "signature": "def run(in0, in1, in2)",
-  "inputs": [
-    {
-      "shape": [8, 16],
-      "stride": [16, 1],
-      "dtype": "float64",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float64",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float64",
-      "device": "cpu"
-    }
-  ],
-  "outputs": {
-    "shape": [8, 16],
-    "stride": [16, 1],
-    "dtype": "float64",
-    "device": "cpu"
-  }
-}""",
-        )
-
-    def test_same_submodule_different_shapes_writes_one_specialization_each(self):
-        layer = _layer()
-        specs = []
-        for m in (8, 32):
-            args = _inputs(m=m)
             gm = _parent([layer], args)
             expected = gm(*args)
-            ((l1, l2),) = _keys(gm)
+            keys += _keys(gm)
             gm = substitute_with_kernels_pass(gm, cache_dir=self.cache)
             self.assertEqual(gm(*args), expected)
-            specs.append((l1, l2))
 
-        # One pattern folder, one specialization per input shape.
-        ((l1_a, l2_a), (l1_b, l2_b)) = specs
-        self.assertEqual(l1_a, l1_b)
-        self.assertNotEqual(l2_a, l2_b)
         (pattern,) = self._patterns()
+        self.assertEqual({l1 for l1, _ in keys}, {pattern.name})
         self.assertEqual(
             sorted(p.name for p in pattern.iterdir()),
-            sorted([f"{l2_a}.py", f"{l2_b}.py"]),
+            sorted(f"{l2}.py" for _, l2 in keys),
         )
-        self.assertExpectedInline(
-            self._spec_text(l1_b, l2_b),
-            """\
-{
-  "signature": "def run(in0, in1, in2)",
-  "inputs": [
-    {
-      "shape": [32, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    }
-  ],
-  "outputs": {
-    "shape": [32, 16],
-    "stride": [16, 1],
-    "dtype": "float32",
-    "device": "cpu"
-  }
-}""",
-        )
+        self.assertEqual(len({l2 for _, l2 in keys}), 3)
+        m32, f64 = (json.loads(self._spec_text(*k)) for k in keys[1:])
+        self.assertEqual(m32["inputs"][0]["shape"], [32, 16])
+        self.assertEqual(m32["outputs"]["shape"], [32, 16])
+        self.assertEqual(f64["inputs"][0]["dtype"], "float64")
+        self.assertEqual(f64["outputs"]["dtype"], "float64")
 
     def test_scalar_constant_changes_specialization_not_pattern(self):
         args = _inputs()
@@ -518,51 +385,15 @@ def reference(in0, in1, in2):
         self.assertEqual(
             sorted(p.name for p in (self.cache / l1).iterdir()), [f"{l2}.py"]
         )
-        self.assertExpectedInline(
-            self._spec_text(l1, l2),
-            """\
-{
-  "signature": "def run(in0, in1, in2, in3)",
-  "inputs": [
-    {
-      "shape": [8, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16, 16],
-      "stride": [16, 1],
-      "dtype": "float32",
-      "device": "cpu"
-    },
-    {
-      "shape": [16],
-      "stride": [1],
-      "dtype": "float32",
-      "device": "cpu"
-    }
-  ],
-  "outputs": {
-    "shape": [8, 16],
-    "stride": [16, 1],
-    "dtype": "float32",
-    "device": "cpu"
-  }
-}""",
-        )
+        spec = json.loads(self._spec_text(l1, l2))
+        self.assertEqual(spec["signature"], "def run(in0, in1, in2, in3)")
+        self.assertEqual(spec["inputs"][3]["shape"], [16])
         run = _load_module(self.cache / l1 / f"{l2}.py").reference
         for value in (2.0, 3.0):
             c = torch.full((16,), value)
             self.assertEqual(run(*args, c), _swiglu(*args) * value)
 
-    def test_specialization_describes_tuple_outputs_and_strides(self):
+    def test_specialization_file_describes_tuple_outputs_and_strides(self):
         def fn(x, w1, w2):
             return torch.nn.functional.silu(x @ w1), (x @ w2).t()
 
@@ -571,8 +402,18 @@ def reference(in0, in1, in2):
         substitute_with_kernels_pass(gm, cache_dir=self.cache)
         ((l1, l2),) = _keys(gm)
         self.assertExpectedInline(
-            self._spec_text(l1, l2),
+            (self.cache / l1 / f"{l2}.py").read_text().strip(),
             """\
+\"\"\"One specialization of a substitute_kernels pattern.
+
+SPEC and reference are generated: do not edit them. Write the kernel in
+impl, then set ``run = impl``.
+\"\"\"
+
+import json
+import torch
+
+SPEC = json.loads(r\"\"\"
 {
   "signature": "def run(in0, in1, in2)",
   "inputs": [
@@ -609,7 +450,23 @@ def reference(in0, in1, in2):
       "device": "cpu"
     }
   ]
-}""",
+}
+\"\"\")
+
+
+def reference(in0, in1, in2):
+    v3 = torch.ops.aten.mm.default(in0, in1);  in1 = None
+    v4 = torch.ops.aten.silu.default(v3);  v3 = None
+    v5 = torch.ops.aten.mm.default(in0, in2);  in0 = in2 = None
+    v6 = torch.ops.aten.t.default(v5);  v5 = None
+    return (v4, v6)
+
+
+def impl(in0, in1, in2):
+    raise NotImplementedError
+
+
+run = reference""",
         )
 
     def test_submodule_with_higher_order_op_subgraph_is_skipped(self):
