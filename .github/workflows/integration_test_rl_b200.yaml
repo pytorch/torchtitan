@@ -130,7 +130,7 @@ jobs:
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")
           done
-          for test_class in MoEDPEP DistMoEDPEP; do
+          for test_class in MoEDPEP KDADPEP DistMoEDPEP; do
             torchrun --nproc-per-node=4 -m pytest \
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")

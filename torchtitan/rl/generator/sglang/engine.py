@@ -211,13 +211,6 @@ class SGLangEngine(GenerationEngine):
             isinstance(layer.attention, LinearAttention.Config)
             for layer in model.layers
         )
-        if has_linear_attention and parallelism.data_parallel_degree > 1:
-            # TODO: an idle attention-DP rank has no linear attention metadata; skip
-            # the kernel there, as SGLangInnerAttention does, and test it.
-            raise ValueError(
-                "SGLangEngine does not support data_parallel_degree > 1 for linear "
-                "attention (GDN, KDA) models yet"
-            )
         if has_linear_attention and config.cuda_graph == "full":
             # TODO(https://github.com/sgl-project/sglang/issues/48593): SGLang's
             # hybrid linear attention backend fails to capture full prefill graphs.

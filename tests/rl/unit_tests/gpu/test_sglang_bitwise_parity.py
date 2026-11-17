@@ -37,8 +37,9 @@ same in-place model state dict load.
 
 Runs in the B200 RL CI job.
 Run each class in its own launch, with as many processes as its DP x TP degree (one
-for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP and
-TestSGLangBitwiseParityDistMoEDPEP, else two), with the SGLang environment (see
+for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
+TestSGLangBitwiseParityKDADPEP and TestSGLangBitwiseParityDistMoEDPEP, else two),
+with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
 package):
     torchrun --nproc_per_node=2 -m pytest \
@@ -68,6 +69,7 @@ from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
+from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -81,6 +83,7 @@ from torchtitan_recipes.rl.alphabet_sort import (
 )
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 
@@ -564,11 +567,9 @@ class TestSGLangBitwiseParityMLA(SGLangBitwiseParityTestBase):
 class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     """Kimi K3 debug model with random weights: KDA state slots, with Attention Gym's
     replay state of each slot's unfinished 64-token chunk, and MLA. One GPU, as
-    test_bitwise_parity's vLLM Kimi K3 class.
-
-    TODO: also run at TP 2 / EP 2, which covers the TP-sharded replay state. TP 2
-    needs EP, whose all-to-all dispatcher rules out CUDA graphs, and this class covers
-    KDA decode with replay state in CUDA graphs.
+    test_bitwise_parity's vLLM Kimi K3 class. This class covers KDA decode with replay
+    state in CUDA graphs; TestSGLangBitwiseParityKDADPEP covers the TP-sharded replay
+    state, without CUDA graphs.
     """
 
     __test__ = True
@@ -585,6 +586,50 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
         # KimiK3BitwiseParityTestBase); for the MoE, it only adds load-balancing
         # statistics.
         cls.model.train()
+
+
+def _kimi_k3_debug_dp2_tp2_ep4_config() -> Controller.Config:
+    """The batch-invariant Kimi K3 debug recipe (KDA, MLA and MoE layers) at
+    DP 2 x TP 2, EP 4, on both sides."""
+    config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
+    trainer_parallelism = dataclasses.replace(
+        config.trainer.parallelism,
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2, tensor_parallel_degree=2, expert_parallel_degree=4
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_kimi_k3_model_config,
+        "debugmodel",
+        seq_len=config.trainer.model.max_context_length,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile.regions = []
+    config.trainer = dataclasses.replace(
+        config.trainer, model=trainer_model, parallelism=trainer_parallelism
+    )
+    config.generator = dataclasses.replace(
+        config.generator, model=generator_model, parallelism=generator_parallelism
+    )
+    return config
+
+
+class TestSGLangBitwiseParityKDADPEP(
+    TestSGLangBitwiseParityKDA, TestSGLangBitwiseParityMoEDPEP
+):
+    """The Kimi K3 debug model at DP 2 x TP 2, EP 4 across the DP ranks, on 4 GPUs:
+    KDA's TP-sharded replay state, and an idle DP rank's linear attention steps."""
+
+    config_fn = staticmethod(_kimi_k3_debug_dp2_tp2_ep4_config)
+    # The all-to-all token dispatcher syncs the host for its split sizes.
+    cuda_graph = "none"
 
 
 def _with_dist_moe(config: Controller.Config) -> Controller.Config:

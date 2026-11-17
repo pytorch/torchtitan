@@ -77,7 +77,7 @@ scripts/install_rl_env.sh --sglang
 | CPU KV offload (SGLang HiCache) | Supported through `extra_server_args`; see below |
 | Batch-invariant mode | Supported; see below |
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
-| Data parallelism within a generator | Supported with expert parallelism, as SGLang's attention DP, except for linear attention (GDN, KDA) models; see below |
+| Data parallelism within a generator | Supported with expert parallelism, as SGLang's attention DP; see below |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
 | GDN linear attention (Qwen3.5) | Supported; see below |
 | KDA linear attention (Kimi K3) | Supported; see below |
@@ -147,8 +147,7 @@ DP rank 0 = ranks 0, 1       DP rank 1 = ranks 2, 3
 The EP collectives span the DP ranks, so every DP rank steps together: SGLang runs
 a DP rank without requests on an empty batch, which the model pads to one row per
 TP rank, and `has_unfinished_requests` is True on every rank while any DP rank has
-requests. `max_num_seqs` and `max_num_batched_tokens` are per DP rank. Linear
-attention (GDN, KDA) models raise with DP > 1.
+requests. `max_num_seqs` and `max_num_batched_tokens` are per DP rank.
 
 ## GDN and KDA
 
