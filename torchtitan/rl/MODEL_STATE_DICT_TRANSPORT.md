@@ -1,10 +1,10 @@
 # Model state dict transport
 
 `ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
-model state dict into the generators' prefetched model state dicts with
-one-sided RDMA reads over a `torch.distributed._transport` backend
-(`backend="nixl"`, the default, or `"mooncake"`). It is the default
-`Controller.Config.model_state_dict_transport`; select Mooncake with:
+model state dict into the generators with one-sided RDMA reads over a
+`torch.distributed._transport` backend (`backend="nixl"`, the default, or
+`"mooncake"`). It is the default `Controller.Config.model_state_dict_transport`;
+select Mooncake with:
 
 ```python
 config.model_state_dict_transport = ModelStateDictTransport.Config(backend="mooncake")
@@ -17,9 +17,15 @@ metadata exchange. The trainer stages a pinned CPU copy already resharded per
 generator rank, so the optimizer can step while generators read and the
 trainer keeps no persistent GPU copy.
 
-`None` uses TorchStore instead, which is still needed for
-`model_state_dict_load_mode="gpu_fetch"`. TODO: delete the TorchStore path once
-this one covers `gpu_fetch`.
+With `model_state_dict_load_mode="cpu_prefetch"`, generator ranks read into
+pinned CPU prefetch buffers while generation continues, and the load copies them
+to the GPU. With `"gpu_fetch"`, the load reads one FSDP group at a time into a
+registered GPU fetch buffer sized to the largest group and copies it into the
+weights, with no generator CPU copy. The fetch buffer is allocated after the
+inference engine sizes its KV cache and stays allocated, so leave that much GPU
+memory free (lower `Generator.Config.gpu_memory_limit`).
+
+`None` uses TorchStore instead. TODO: delete the TorchStore path.
 
 Mooncake needs `mooncake-transfer-engine-cuda13==0.3.14` (installed by
 `scripts/install_rl_env.sh`) and a PyTorch nightly from 2026-11-10 or later
@@ -45,7 +51,7 @@ Every generator has the same sharding, so each trainer rank stages one copy of
 its shards, laid out per generator rank (g0, g1). A piece is the intersection
 of a trainer rank's box of a tensor with a generator rank's box, cast to the
 generator's dtype. Generator ranks read their pieces from every trainer rank
-straight into their registered prefetch buffers.
+straight into their registered prefetch (or fetch) buffers.
 
 Example: one tensor of shape (8, 6), trainer FSDP 4 on dim 0, generator TP 2
 on dim 1.
@@ -84,14 +90,17 @@ does not cover every element of a generator shard, or on `Partial` and uneven
    (`shared_rank_layouts`); each trainer rank allocates and registers its
    staging buffer (`register_trainer_source`); every generator rank registers
    its prefetch buffers, connects to every trainer rank and plans its reads
-   (`connect_generator`).
+   (`connect_generator`; with `gpu_fetch`, `connect_fetching_generator`
+   registers the fetch buffer and plans the reads of each load group).
 2. Push: the trainer casts its shards and copies them into the staging buffer
    (`stage`), with no collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
    raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
    restart the job.
 4. Load: the generator copies its weights from the prefetch buffers, unpacking
-   packed keys (`copy_prefetched_`).
+   packed keys (`copy_prefetched_`). With `gpu_fetch`, there are no prefetch
+   reads; the load issues each group's reads, waits up to `read_timeout_s` per
+   group and copies the fetch buffer into the weights (`fetch_`).
 
-The controller finishes pull N before push N+1, so a single staging buffer is
+The controller finishes pull and load N before push N+1, so a single staging buffer is
 enough.

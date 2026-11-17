@@ -82,6 +82,12 @@ class GenerationEngine(Configurable, abc.ABC):
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
 
+    @property
+    @abc.abstractmethod
+    def model_state_dict_load_groups(self) -> list[dict[str, torch.Tensor]]:
+        """The model state dict tensors each fetch of a model state dict load fills, in
+        load order. Their storage is freed outside loads: use only their layout."""
+
     @abc.abstractmethod
     def add_requests(
         self, requests: list[EngineRequest]
