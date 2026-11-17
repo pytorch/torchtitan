@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -262,6 +263,46 @@ def set_determinism(
         torch.distributed.tensor._random.manual_seed(
             seed, parallelism_context.world_mesh
         )
+
+
+@contextlib.contextmanager
+def dtensor_rng_off_for_cpu_shards(module: torch.nn.Module) -> Iterator[None]:
+    """Draw random init of CPU shards on an accelerator mesh from the CPU generator.
+
+    Under FSDP CPU offload the parameters are DTensors on an accelerator mesh
+    whose local shards live on CPU. DTensor runs random ops on them inside its
+    RNG tracker's ``fork_rng``, which restores the CPU generator after each op,
+    so every draw repeats the previous one and rejection loops such as
+    ``trunc_normal_`` with +-3 std bounds never return. With the tracker off,
+    the ops advance the CPU generator, which ``set_determinism`` seeds per FSDP
+    shard because CPU offload requires ``dp_shard`` in
+    ``debug.distinct_seed_mesh_axes``.
+    """
+    mesh = next(
+        (
+            p.device_mesh
+            for p in module.parameters()
+            if isinstance(p, DTensor)
+            and p.device_mesh.device_type != "cpu"
+            and p.to_local().device.type == "cpu"
+        ),
+        None,
+    )
+    if mesh is None:
+        yield
+        return
+    dtensor_random = torch.distributed.tensor._random
+    saved = dtensor_random._rng_tracker
+    # DTensor creates an enabled tracker on the first random op if none exists.
+    tracker = saved or dtensor_random.OffsetBasedRNGTracker(mesh, run_state_sync=False)
+    enabled = tracker.distribute_region_enabled
+    dtensor_random._rng_tracker = tracker
+    tracker.distribute_region_enabled = False
+    try:
+        yield
+    finally:
+        tracker.distribute_region_enabled = enabled
+        dtensor_random._rng_tracker = saved
 
 
 def init_fake_mode(
