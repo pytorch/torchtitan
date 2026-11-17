@@ -17,8 +17,8 @@ import torch
 import torch.fx as fx
 from torch._inductor.codecache import PyCodeCache
 from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx._graph_pickler import GraphPickler, Options
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_utils import run_tests, TestCase
 
