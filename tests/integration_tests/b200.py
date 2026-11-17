@@ -23,6 +23,7 @@ from torchtitan_recipes.tests.models.multimodal import (
 )
 
 from tests.integration_tests import IntegrationTestDefinition
+from tests.integration_tests.h100 import qwen35_debugmodel_mm_allgather_kv_cp2
 
 
 def kimi_k3_debugmodel_mm() -> Trainer.Config:
@@ -136,6 +137,12 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
+        IntegrationTestDefinition(
+            configs=[qwen35_debugmodel_mm_allgather_kv_cp2],
+            test_descr="Qwen3.5 context parallelism with native GDN summaries",
+            test_name="qwen35_mm_native_gdn_cp",
+            ngpu=2,
+        ),
         IntegrationTestDefinition(
             configs=[kimi_k3_debugmodel_mm],
             test_descr="Kimi K3 multimodal SPMD-typed FSDP, TP and EP",

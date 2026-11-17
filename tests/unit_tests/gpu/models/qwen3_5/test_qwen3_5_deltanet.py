@@ -10,6 +10,7 @@ from typing import cast
 from unittest import mock
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from attn_gym.linear import l2norm, recurrent_gdn
 from attn_gym.linear.context_parallel import ContextParallelRouting
@@ -177,6 +178,76 @@ class ReferenceGatedDeltaKernel(nn.Module):
 
 
 class TestGatedDeltaNetContextParallel(unittest.TestCase):
+    def test_native_cp_matches_reference_without_expanding_scalar_gates(self):
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability() not in (
+            (10, 0),
+            (10, 3),
+        ):
+            raise unittest.SkipTest("Native GDN CP requires SM100/SM103")
+
+        from attn_gym.linear.gdn import stages
+
+        was_deterministic = torch.are_deterministic_algorithms_enabled()
+        torch.use_deterministic_algorithms(False)
+        self.addCleanup(torch.use_deterministic_algorithms, was_deterministic)
+        dist.init_process_group("nccl", store=dist.HashStore(), rank=0, world_size=1)
+        self.addCleanup(dist.destroy_process_group)
+        torch.manual_seed(42)
+        tokens, key_heads, value_heads, head_dim = 129, 2, 4, 128
+        inputs = (
+            torch.randn(
+                tokens, key_heads, head_dim, device="cuda", dtype=torch.bfloat16
+            ),
+            torch.randn(
+                tokens, key_heads, head_dim, device="cuda", dtype=torch.bfloat16
+            ),
+            torch.randn(
+                tokens, value_heads, head_dim, device="cuda", dtype=torch.bfloat16
+            ),
+            -torch.rand(tokens, value_heads, device="cuda"),
+            torch.rand(tokens, value_heads, device="cuda"),
+        )
+        inputs = tuple(tensor.requires_grad_() for tensor in inputs)
+        reference_inputs = tuple(
+            tensor.detach().clone().requires_grad_() for tensor in inputs
+        )
+        routing = ContextParallelRouting.from_fragments(
+            cu_seqlens_global=[0, 65, tokens],
+            fragments=[[(0, tokens)]],
+            cp_rank=0,
+            device=torch.device("cuda"),
+        )
+        inner_gdn = ContextParallelInnerGDN.Config(
+            conv_kernel_size=4, kernel=GDNKernel.Config()
+        ).build()
+        # Exercise real forward/backward kernels. Reverting CP to the fused default
+        # must fail even when its numerics remain close to the native backend.
+        with (
+            mock.patch(
+                "torchtitan.models.common.attention.cp_gdn.spmd_mesh_group",
+                return_value=dist.group.WORLD,
+            ),
+            mock.patch.object(
+                stages,
+                "_vector_gate",
+                side_effect=AssertionError("GDN CP expanded scalar gates"),
+            ),
+        ):
+            actual = inner_gdn.gdn_core(*inputs, cu_seqlens=None, routing=routing)
+            cotangent = torch.randn_like(actual)
+            actual_grads = torch.autograd.grad(actual, inputs, cotangent)
+
+        expected = ReferenceGatedDeltaKernel()(
+            *reference_inputs, cu_seqlens=routing.cu_seqlens
+        )
+        expected_grads = torch.autograd.grad(expected, reference_inputs, cotangent)
+        for result, reference in zip(
+            (actual, *actual_grads), (expected, *expected_grads), strict=True
+        ):
+            # BF16 operands round normalization and chunk factors, unlike the
+            # independent FP32 token recurrence.
+            torch.testing.assert_close(result, reference, rtol=2e-2, atol=2e-3)
+
     def test_backend_builds_routing_from_varlen_metadata(self):
         varlen = create_varlen_metadata_for_document(
             torch.tensor([0, 1, 0, 1], dtype=torch.int32)

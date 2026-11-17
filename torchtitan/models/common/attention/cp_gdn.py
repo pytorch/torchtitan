@@ -29,7 +29,7 @@ from .cp_linear_attention import (
     UlyssesLinearAttentionMetadata,
 )
 from .gdn import InnerGDN
-from .linear_attention import LinearAttentionMetadata
+from .linear_attention import chunk_kernel_options, LinearAttentionMetadata
 
 # Shape suffixes: T = tokens, C = channels, H = heads, K/V = head dimensions,
 # F = packed features per head, W = convolution kernel width.
@@ -284,5 +284,6 @@ class ContextParallelInnerGDN(
             routing=routing,
             group=cp_group,
             scale=xq_THK.shape[-1] ** -0.5,
+            kernel_options=chunk_kernel_options(normalized_q_1THK),
         )
         return output_1THV.squeeze(0)

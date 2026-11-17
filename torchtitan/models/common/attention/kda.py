@@ -22,7 +22,7 @@ from torchtitan.models.common.attn_gym import (
     bound_gate,
     causal_conv1d,
     chunk_kda,
-    ChunkKdaCudnn,
+    ChunkKdaWarpdrive,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -51,7 +51,7 @@ from .linear_attention import (
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
-for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
+for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaWarpdrive, _MaskRows):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
