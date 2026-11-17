@@ -6,15 +6,10 @@
 
 """Flux model configurations used by tests."""
 
+import os
 from dataclasses import replace
 
-from torchtitan.components.checkpointer import (
-    CheckpointManager,
-    DATALOADER,
-    LR_SCHEDULER,
-    OPTIMIZER,
-    TRAIN_STATE,
-)
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
 from torchtitan.components.optim import (
@@ -106,7 +101,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         parallelism=parallelism,
         activation_remat=FullActivationRematConfig(),
-        checkpointer=None,
+        checkpointer=CheckpointManager.Config(),
         validator=None,
         inference=Inference(
             save_img_folder="inference_results",
@@ -116,10 +111,27 @@ def flux_debugmodel() -> FluxTrainer.Config:
     )
 
 
+def _final_export_checkpointer(
+    dump_folder: str, *, steps: int
+) -> CheckpointManager.Config:
+    """Load-only checkpointer for the final export of a ``steps``-step run.
+
+    Inference never saves and needs only the trained weights, which the
+    model-only final save of a training run writes to
+    ``checkpoint/exports/step-<steps>``.
+    """
+    return CheckpointManager.Config(
+        load_only=True,
+        initial_load_path=os.path.abspath(
+            os.path.join(dump_folder, "checkpoint", "exports", f"step-{steps}")
+        ),
+    )
+
+
 def flux_debugmodel_inference() -> FluxTrainer.Config:
     config = flux_debugmodel()
-    config.checkpointer = CheckpointManager.Config(
-        exclude_from_loading=[DATALOADER, LR_SCHEDULER, OPTIMIZER, TRAIN_STATE],
+    config.checkpointer = _final_export_checkpointer(
+        config.dump_folder, steps=config.training.steps
     )
     return config
 
@@ -143,8 +155,18 @@ def flux_debugmodel_test() -> FluxTrainer.Config:
 
 
 def flux_debugmodel_inference_test() -> FluxTrainer.Config:
-    """Flux inference config pointed at the offline test assets."""
-    return _use_offline_test_assets(flux_debugmodel_inference())
+    """Flux inference config pointed at the offline test assets.
+
+    The integration runner overrides ``dump_folder`` on the command line, after
+    this recipe is built, so the export path is built from the
+    ``TORCHTITAN_TEST_OUTPUT_DIR`` the runner sets to that same directory.
+    """
+    config = _use_offline_test_assets(flux_debugmodel())
+    config.checkpointer = _final_export_checkpointer(
+        os.getenv("TORCHTITAN_TEST_OUTPUT_DIR", config.dump_folder),
+        steps=config.training.steps,
+    )
+    return config
 
 
 def flux_debugmodel_hsdp2x2_cp2_validation() -> FluxTrainer.Config:

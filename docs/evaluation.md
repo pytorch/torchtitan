@@ -42,7 +42,7 @@ Note that pip installing `lm-eval` may result in breaking `torchtitan` dev envir
 ```bash
 pip install "lm-eval[vllm]"
 lm_eval --model vllm \
-    --model_args pretrained=./outputs/checkpoint/step-1000,tensor_parallel_size=8,dtype=auto,gpu_memory_utilization=0.8, \
+    --model_args pretrained=./outputs/checkpoint/exports/step-1000,tensor_parallel_size=8,dtype=auto,gpu_memory_utilization=0.8, \
     --tasks mmlu \
     --batch_size auto
 ```

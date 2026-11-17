@@ -588,7 +588,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertTrue(backend_manager.closed)
         self.assertEqual(1, len(sync_manager.save_calls))
         checkpoint_id, checkpoint = sync_manager.save_calls[0]
-        self.assertEqual("/tmp/checkpoint/step-5", checkpoint_id)
+        self.assertEqual("/tmp/checkpoint/exports/step-5", checkpoint_id)
         self.assertEqual({MODEL}, set(checkpoint))
         self.assertTrue(sync_manager.closed)
         sync_config = build.call_args.args[0]
@@ -778,7 +778,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         sync_config = build.call_args_list[1].args[0]
         self.assertEqual(
-            "/tmp/checkpoint/step-5/sharded",
+            "/tmp/checkpoint/exports/step-5/sharded",
             sync_manager.save_calls[0][0],
         )
         checkpoint = sync_manager.save_calls[0][1]
@@ -813,8 +813,8 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             )
         )
         consolidate.assert_called_once_with(
-            "/tmp/checkpoint/step-5/tmp_sharded",
-            output_dir="/tmp/checkpoint/step-5",
+            "/tmp/checkpoint/exports/step-5/tmp_sharded",
+            output_dir="/tmp/checkpoint/exports/step-5",
             item_key=MODEL,
             fqn_to_index_mapping=adapter.fqn_to_index_mapping,
             storage_config=storage_config,
