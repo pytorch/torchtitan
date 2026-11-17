@@ -85,7 +85,6 @@ from torch._functorch._aot_autograd.autograd_cache import (
 )
 from torch._functorch._aot_autograd.schemas import AOTConfig
 from torch._inductor.codecache import PyCodeCache, write_atomic
-from torch._inductor.runtime.cache_dir_utils import cache_dir as inductor_cache_dir
 from torch._library.custom_ops import OPDEFS
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -127,12 +126,6 @@ _OPTIONAL_FX_BUILTINS = frozenset({"inf", "nan", "device"})
 
 # ((module, sha256 of its source, ops it registers), ...), sorted by module.
 OpDeps = tuple[tuple[str, str, tuple[str, ...]], ...]
-
-
-def default_cache_dir() -> str:
-    return os.environ.get("TORCHTITAN_SUBSTITUTE_KERNELS_DIR") or os.path.join(
-        inductor_cache_dir(), "substitute_kernels"
-    )
 
 
 def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
@@ -473,7 +466,7 @@ def substitute_with_kernels_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
     *,
-    cache_dir: str | os.PathLike | None = None,
+    cache_dir: str | os.PathLike,
 ) -> torch.fx.GraphModule:
     """Replace ``call_module`` nodes of GraphModules with cached kernels.
 
@@ -481,7 +474,7 @@ def substitute_with_kernels_pass(
     Arguments must be positional and carry ``meta["val"]`` (fake or real
     tensors); other ``call_module`` nodes are skipped.
     """
-    cache_dir = Path(cache_dir if cache_dir is not None else default_cache_dir())
+    cache_dir = Path(cache_dir)
     replaced: set[str] = set()
     for node in list(gm.graph.find_nodes(op="call_module")):
         submod = gm.get_submodule(node.target)
