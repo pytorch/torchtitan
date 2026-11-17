@@ -27,8 +27,14 @@ Configuration is provided by Python recipe functions. See
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
+import torch
+
+if TYPE_CHECKING:
+    # Runtime import would be circular: process_group_options imports
+    # torchtitan.config.
+    from torchtitan.distributed.process_group_options import NCCLProcessGroupOptions
 
 CommBackend = Literal["default", "fake", "real_pp_fake_spmd"]
 
@@ -153,6 +159,20 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
+    process_group_options: "dict[str, NCCLProcessGroupOptions.Config]" = field(
+        default_factory=dict
+    )
+    """Process-group options per mesh axis, e.g.
+    ``{"dp_shard": NCCLProcessGroupOptions.Config(min_ctas=16, max_ctas=16)}``;
+    other axes keep the backend's defaults. Groups that FSDP builds by flattening
+    several axes (``dp_shard`` x ``cp`` under context parallelism) keep the
+    defaults too."""
+
+    sm_carveout: int = 0
+    """SMs that GEMMs leave free for communication kernels (0: off). Read by
+    cuBLASLt matmuls, Inductor's persistent matmul templates and FlashAttention-3.
+    Tested on NVIDIA GPUs only; it may not work on ROCm or other accelerators."""
+
     backend: CommBackend = "default"
     """Communication topology used for training or distributed debugging.
 
@@ -170,6 +190,16 @@ class CommConfig:
     to ``"fake"``; ``"real_pp_fake_spmd"`` uses physical ``RANK`` as its PP
     coordinate. See ``docs/debugging.md`` for launch examples and limitations.
     """
+
+    def __post_init__(self) -> None:
+        if self.process_group_options and self.backend != "default":
+            raise ValueError(
+                "comm.process_group_options requires comm.backend='default', "
+                f"got {self.backend!r}"
+            )
+        if self.sm_carveout and torch.version.cuda is None:
+            # Tested on NVIDIA GPUs only; it may not work on ROCm or other chips.
+            raise ValueError("comm.sm_carveout requires a CUDA build of PyTorch")
 
 
 @dataclass(kw_only=True, slots=True)

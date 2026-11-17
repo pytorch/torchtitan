@@ -80,7 +80,10 @@ class TestParallelismContextValidation(unittest.TestCase):
             enable_sequence_parallel=False,
         )
         parallelism_context = ParallelismContext.from_config(
-            config, DistributedTopology(world_size=8), dump_folder=""
+            config,
+            DistributedTopology(world_size=8),
+            dump_folder="",
+            axis_backend_overrides={},
         )
         self.assertEqual(parallelism_context.dp_replicate, 2)
         self.assertEqual(
@@ -398,6 +401,7 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
                 ParallelismConfig(save_parallelism_folder="sub/parallelism"),
                 DistributedTopology(world_size=1),
                 dump_folder=dump_folder,
+                axis_backend_overrides={},
             )
             with open(
                 os.path.join(dump_folder, "sub", "parallelism", "rank_0.json")
@@ -432,7 +436,10 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_from_config_skips_mesh_build_without_parallelism_folder(self):
         parallelism_context = ParallelismContext.from_config(
-            ParallelismConfig(), DistributedTopology(world_size=1), dump_folder=""
+            ParallelismConfig(),
+            DistributedTopology(world_size=1),
+            dump_folder="",
+            axis_backend_overrides={},
         )
         self.assertEqual(parallelism_context._single_axis_meshes, {})
 
@@ -444,7 +451,7 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             real_pp_group_for_fake_spmd=group,
         )
         parallelism_context = ParallelismContext.from_config(
-            ParallelismConfig(), topology, dump_folder=""
+            ParallelismConfig(), topology, dump_folder="", axis_backend_overrides={}
         )
 
         parallelism_context.build_mesh()

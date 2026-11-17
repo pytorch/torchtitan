@@ -105,7 +105,13 @@ class FaultTolerantTrainingEngine(TrainingEngine):
                     "a slow process group reconfiguration can otherwise abort the replica."
                 )
         self.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, topology, dump_folder=self.output_dir
+            config.parallelism,
+            topology,
+            dump_folder=self.output_dir,
+            axis_backend_overrides={
+                axis: options.build().backend_override
+                for axis, options in config.comm.process_group_options.items()
+            },
         )
         dist_utils.set_pg_timeouts(
             timeout=timedelta(seconds=config.comm.init_timeout_seconds),

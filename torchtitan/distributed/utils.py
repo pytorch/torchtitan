@@ -28,6 +28,7 @@ from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed.parallelism_context import DistributedTopology, MeshAxisName
+from torchtitan.distributed.process_group_options import NCCLProcessGroupOptions
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
@@ -472,8 +473,9 @@ def build_alternative_fsdp_mesh(
                 f"got {backend!r} for mesh axis {axis_name!r}"
             )
 
-        options = dist.ProcessGroupNCCL.Options()
-        options.config.max_ctas = max_ctas
+        _, options = (
+            NCCLProcessGroupOptions.Config(max_ctas=max_ctas).build().backend_override
+        )
         # Keep redistribution channels independent from the FSDP parent.
         options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
         num_ranks = dist.get_world_size(parent_group)
@@ -538,6 +540,9 @@ def init_distributed(
     # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,
     # cannot access PGs, e.g. current_spmd_mesh().get_group("tp") to perform the collectives they need.
     torch.autograd.set_multithreading_enabled(False)
+
+    if comm_config.sm_carveout:
+        torch._C._set_sm_carveout_experimental(comm_config.sm_carveout)
 
     if comm_config.backend in {"fake", "real_pp_fake_spmd"}:
         logical_world_size = _env_int("NGPU")
