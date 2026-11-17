@@ -33,6 +33,12 @@ class _AudioPatchifier(Module):
         linear: Linear.Config
         norm: RMSNorm.Config
 
+        def __post_init__(self) -> None:
+            if self.patch_size < 1:
+                raise ValueError(
+                    f"audio patch size must be positive, got {self.patch_size}"
+                )
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.patch_size = config.patch_size
