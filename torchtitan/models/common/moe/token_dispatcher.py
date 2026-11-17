@@ -6,6 +6,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -87,6 +88,10 @@ class LocalTokenDispatcher(Module):
     Dispatchers are parameterless modules so they can own remat region names
     and policy state.
     """
+
+    # True when combine expects routed outputs already weighted by
+    # ``metadata.scores_R``: the experts then scale the W2 input instead.
+    scores_on_expert_input = False
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -880,6 +885,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     and is never replayed.
     """
 
+    scores_on_expert_input = True
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
         # Select the dispatch layout. False (default, also forced under autograd): compact,
@@ -1140,3 +1147,161 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
         return combined_TD
+
+
+class NCCLEPTokenDispatcher(BaseEPTokenDispatcher):
+    """NCCL EP BF16 transport with canonical expert-major receive rows.
+
+    Router scores remain FP32. Expert GEMM precision is selected separately.
+    """
+
+    # nccl_ep.combine is a plain sum: the expert scales its W2 input.
+    scores_on_expert_input = True
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseEPTokenDispatcher.Config):
+        hidden_dim: int
+        num_max_tokens_per_rank: int
+        pad_multiple: int = 1
+        ht_flow: Literal["push_pull", "pull_push"] = "push_pull"
+
+        def __post_init__(self) -> None:
+            if self.ht_flow not in ("push_pull", "pull_push"):
+                raise ValueError("NCCL EP ht_flow must be push_pull or pull_push.")
+            if self.hidden_dim <= 0 or self.hidden_dim % 8:
+                raise ValueError("NCCL EP BF16 requires hidden_dim divisible by 8.")
+            if self.num_max_tokens_per_rank <= 0:
+                raise ValueError("NCCL EP token capacity must be positive.")
+            if self.num_experts <= 0 or self.num_experts % 4:
+                raise ValueError("NCCL EP requires num_experts divisible by 4.")
+            if not 1 <= self.top_k <= self.num_experts:
+                raise ValueError("NCCL EP requires 1 <= top_k <= num_experts.")
+            if self.pad_multiple <= 0 or self.pad_multiple & (self.pad_multiple - 1):
+                raise ValueError(
+                    "NCCL EP pad_multiple must be a positive power of two."
+                )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.hidden_dim = config.hidden_dim
+        self.ht_flow = config.ht_flow
+        self.pad_multiple = config.pad_multiple
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
+        self._buffer = None
+        self._routing_pool = None
+        self._ep_group: torch.distributed.ProcessGroup | None = None
+        self._capacity = 0
+        # Register effects before checkpoint policies resolve their save sets.
+        from torchtitan.distributed import nccl_ep
+
+        self._nccl_ep = nccl_ep
+
+    def init_buffer(self) -> None:
+        if self._buffer is not None:
+            return
+        from torchtitan.distributed.nccl_ep_capture import get_buffer_owner
+
+        owner = get_buffer_owner()
+        ep_group = _ep_process_group()
+        if ep_group is None or ep_group.size() <= 1:
+            raise ValueError(
+                "NCCL EP requires a non-singleton ambient EP process group."
+            )
+        if self.num_experts % ep_group.size():
+            raise ValueError("NCCL EP num_experts must be divisible by the EP size.")
+        from torch.distributed._token_switch import _NCCLEPObject
+
+        num_local_experts = self.num_experts // ep_group.size()
+        raw_capacity = (
+            self.num_max_tokens_per_rank
+            * ep_group.size()
+            * min(self.top_k, num_local_experts)
+        )
+        alignment = self.pad_multiple
+        self._capacity = (
+            (raw_capacity + (alignment - 1) * num_local_experts + alignment - 1)
+            // alignment
+            * alignment
+        )
+        buffer = self._nccl_ep.acquire_buffer(
+            ep_group,
+            self.num_experts,
+            self.num_max_tokens_per_rank,
+            self._capacity,
+            self.hidden_dim,
+            self.top_k,
+            ht_flow=self.ht_flow,
+        )
+        try:
+            ids_TK = (
+                torch.arange(
+                    self.num_max_tokens_per_rank * self.top_k,
+                    device=torch.cuda.current_device(),
+                    dtype=torch.int64,
+                ).reshape(self.num_max_tokens_per_rank, self.top_k)
+                % self.num_experts
+            )
+            slots = self._nccl_ep.RoutingSlots(
+                buffer.switch,
+                ids_TK,
+                num_local_experts,
+                group=ep_group,
+                alignment=self.pad_multiple,
+            )
+            self._routing_pool = _NCCLEPObject(slots)
+            self._buffer = buffer
+            self._ep_group = ep_group
+            owner.dispatchers.append(self)
+        except BaseException:
+            self._nccl_ep.release_buffer(buffer)
+            raise
+
+    def close_buffer(self) -> None:
+        if self._buffer is not None:
+            buffer, self._buffer = self._buffer, None
+            self._routing_pool = None
+            self._ep_group = None
+            self._nccl_ep.release_buffer(buffer)
+
+    def dispatch(self, x_TD, topk_scores_TK, topk_expert_ids_TK, routing_map_TE):
+        del routing_map_TE
+        import torch.nn.functional as F
+
+        assert (
+            self._routing_pool is not None
+        ), "Initialize NCCL EP buffers before dispatch."
+        ep_group = _ep_process_group()
+        if ep_group is not self._ep_group:
+            raise ValueError(
+                "NCCL EP ambient process group changed after buffer initialization."
+            )
+        assert ep_group is not None
+        num_tokens = x_TD.shape[0]
+        if num_tokens > self.num_max_tokens_per_rank:
+            raise ValueError("NCCL EP input exceeds num_max_tokens_per_rank.")
+        if x_TD.shape[1] != self.hidden_dim or x_TD.dtype != torch.bfloat16:
+            raise ValueError(
+                "NCCL EP requires BF16 rows with the configured hidden_dim."
+            )
+        padding = self.num_max_tokens_per_rank - num_tokens
+        x_TD = F.pad(x_TD, (0, 0, 0, padding))
+        scores_TK = F.pad(topk_scores_TK.float(), (0, 0, 0, padding))
+        ids_TK = F.pad(topk_expert_ids_TK, (0, 0, 0, padding), value=-1)
+        return self._nccl_ep.dispatch(
+            x_TD,
+            scores_TK,
+            ids_TK,
+            self._routing_pool,
+            self._capacity,
+            ep_group.rank(),
+            self.num_max_tokens_per_rank,
+            ep_group.size(),
+            self.num_experts // ep_group.size(),
+            alignment=self.pad_multiple,
+            ht_flow=self.ht_flow,
+        )
+
+    def combine(self, routed_output_RD, metadata, x_TD):
+        return self._nccl_ep.combine(
+            routed_output_RD, metadata, self.num_max_tokens_per_rank
+        )[: x_TD.shape[0]]

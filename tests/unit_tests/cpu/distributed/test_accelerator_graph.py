@@ -4,12 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
+import weakref
 from contextlib import nullcontext
 from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+
 from torchtitan.distributed.accelerator_graph import (
     _ForwardBackwardAcceleratorGraphWrapper,
     _run_eager_on_accelerator_graph_stream,
@@ -441,3 +444,97 @@ def test_accelerator_graph_wrapper_requires_cleared_owned_gradients(
         parameter.grad = torch.ones_like(parameter)
         with pytest.raises(RuntimeError, match="must be None"):
             wrapper(torch.tensor(3.0))
+
+
+@pytest.fixture
+def capture_runtime(monkeypatch):
+    import torchtitan.distributed.accelerator_graph as accelerator_graph_module
+
+    monkeypatch.setattr(accelerator_graph_manager, "maybe_initialize", lambda: None)
+    monkeypatch.setattr(accelerator_graph_manager, "register", lambda wrapper: None)
+    monkeypatch.setattr(accelerator_graph_manager, "log_memory", lambda *args: None)
+    monkeypatch.setattr(accelerator_graph_manager, "_graph_pool", object())
+    monkeypatch.setattr(accelerator_graph_manager, "_stream", MagicMock())
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", MagicMock)
+    monkeypatch.setattr(torch.cuda, "graph", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        accelerator_graph_module,
+        "_run_eager_on_accelerator_graph_stream",
+        lambda fn, *args: fn(*args),
+    )
+    monkeypatch.setattr(accelerator_graph_module, "get_kernel_annotations", lambda: {})
+    return accelerator_graph_module
+
+
+def test_capture_reset_retains_opaque_input_but_terminal_teardown_releases_it(
+    capture_runtime,
+):
+    class OpaqueInput:
+        pass
+
+    fail_capture = True
+
+    def fn(value, opaque):
+        if fail_capture:
+            raise RuntimeError("capture failed")
+        return value
+
+    value = torch.tensor(1)
+    opaque = OpaqueInput()
+    owner_ref = weakref.ref(opaque)
+    wrapper = AcceleratorGraphWrapper(fn, (value, opaque), num_warmup_iterations=0)
+    with pytest.raises(RuntimeError, match="capture failed"):
+        wrapper(value, opaque)
+    assert wrapper._graph is None
+    with pytest.raises(ValueError, match="non-tensor inputs must remain constant"):
+        wrapper(value, OpaqueInput())
+    del opaque
+    gc.collect()
+    assert owner_ref() is not None
+    wrapper.reset_capture()
+    assert owner_ref() is not None
+    with pytest.raises(ValueError, match="non-tensor inputs must remain constant"):
+        wrapper(value, OpaqueInput())
+    fail_capture = False
+    assert wrapper(value, owner_ref()) is value
+    wrapper.reset_capture()
+    gc.collect()
+    assert owner_ref() is not None
+    wrapper.teardown()
+    wrapper.teardown()
+    gc.collect()
+    assert owner_ref() is None
+
+
+def test_graph_trainer_reset_preserves_opaque_input_contract(
+    capture_runtime, monkeypatch
+):
+    from torchtitan.experiments.graph_trainer import (
+        cuda_graph as graph_trainer_accelerator_graph,
+    )
+
+    class OpaqueInput:
+        pass
+
+    value = torch.tensor(1)
+    opaque = OpaqueInput()
+    owner_ref = weakref.ref(opaque)
+    wrapper = AcceleratorGraphWrapper(
+        lambda value, opaque: value, (value, opaque), num_warmup_iterations=0
+    )
+    monkeypatch.setattr(
+        graph_trainer_accelerator_graph, "_WRAPPERS", weakref.WeakSet([wrapper])
+    )
+    wrapper(value, opaque)
+    del opaque
+    graph_trainer_accelerator_graph.reset_cuda_graphs()
+    assert wrapper._graph is None and wrapper._warmup_remaining == 1
+    assert owner_ref() is not None
+    with pytest.raises(ValueError, match="non-tensor inputs must remain constant"):
+        wrapper(value, OpaqueInput())
+    wrapper(value, owner_ref())
+    wrapper(value, owner_ref())
+    assert wrapper._graph is not None
+    wrapper.teardown()
+    gc.collect()
+    assert owner_ref() is None

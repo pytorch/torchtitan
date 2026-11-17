@@ -21,6 +21,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 
 from torchtitan.distributed.accelerator_graph import AcceleratorGraphWrapper
+from torchtitan.distributed.nccl_ep_capture import NCCLEPRoutingCapturePlan
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
 
 
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 # Every wrapper ``cuda_graph_pass`` applied; see ``reset_cuda_graphs``.
 _WRAPPERS: weakref.WeakSet[AcceleratorGraphWrapper] = weakref.WeakSet()
+# Weak keys: a recompiled-away wrapper must not keep its graph, pool and
+# captured routing leases alive; its plan is released when it is collected.
+_CAPTURE_PLANS: weakref.WeakKeyDictionary[
+    AcceleratorGraphWrapper, NCCLEPRoutingCapturePlan
+] = weakref.WeakKeyDictionary()
 
 
 def reset_cuda_graphs() -> None:
@@ -44,8 +50,17 @@ def reset_cuda_graphs() -> None:
     and stream, after which a wrapper cannot capture again.
     """
     for wrapper in _WRAPPERS:
-        wrapper.teardown()
+        wrapper.reset_capture()
+        if (plan := _CAPTURE_PLANS.get(wrapper)) is not None:
+            plan.release()
         wrapper._warmup_remaining = 1
+
+
+def release_nccl_ep_capture_plans() -> None:
+    """Release experiment-owned routing leases after accelerator graph teardown."""
+    for plan in list(_CAPTURE_PLANS.values()):
+        plan.release()
+    _CAPTURE_PLANS.clear()
 
 
 def _has_dynamic_shape(val: Any) -> bool:
@@ -334,15 +349,19 @@ def cuda_graph_pass(
 
     if static_input_indices is None:
         static_input_indices = get_static_input_indices(gm, is_forward)
+    plan = NCCLEPRoutingCapturePlan()
     wrapper = AcceleratorGraphWrapper(
-        gm.forward,
+        partial(plan.run, gm.forward),
         example_inputs,
         static_input_indices,
         tensor_input_indices=tensor_input_indices,
         num_warmup_iterations=1,
+        prepare_for_capture=plan.prepare_for_capture,
     )
     _WRAPPERS.add(wrapper)
-    gm.forward = wrapper
+    _CAPTURE_PLANS[wrapper] = plan
+    weakref.finalize(wrapper, plan.release)
+    gm.forward = partial(plan.invoke, wrapper)
     logger.info("Applied CUDA graph pass.")
     return gm
 
