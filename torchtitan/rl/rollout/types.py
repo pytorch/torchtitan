@@ -18,6 +18,7 @@ from torchtitan.rl.observability import metrics as m
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator.types import SamplingConfig
+    from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
 
 
 _TRUNCATED = frozenset(
@@ -166,7 +167,7 @@ class GenerateFn(Protocol):
 
     async def __call__(
         self,
-        prompt: Prompt,
+        prompt: RDMAPrompt,
         *,
         request_id: str,
         group_id: int,
@@ -176,7 +177,8 @@ class GenerateFn(Protocol):
         """Run one generation.
 
         Args:
-            prompt: The prompt to generate from: its tokens and images.
+            prompt: The prompt to generate from: its tokens and images. Its large image files
+                may stay in the rollout worker (`RDMAImageFiles`); the generator reads them.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.

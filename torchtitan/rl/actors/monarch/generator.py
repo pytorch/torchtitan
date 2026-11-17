@@ -21,7 +21,8 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rollout.types import Completion, Prompt
+from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
+from torchtitan.rl.rollout.types import Completion
 
 
 class _GeneratorActorEndpoints:
@@ -84,7 +85,7 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def generate(
         self,
-        prompt: Prompt,
+        prompt: RDMAPrompt,
         *,
         request_id: str,
         group_id: int,

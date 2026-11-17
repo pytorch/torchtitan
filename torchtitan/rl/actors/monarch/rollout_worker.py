@@ -22,6 +22,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.actor import Actor
+from torchtitan.rl.actors.monarch.rdma import MonarchRDMAObject
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
@@ -44,6 +45,11 @@ class RolloutWorkerActor(Actor):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
+        if worker_config.rdma_min_image_bytes is not None:
+            worker_kwargs = {
+                **worker_kwargs,
+                "register_rdma_object": MonarchRDMAObject.register,
+            }
         self._worker = worker_config.build(**worker_kwargs)
 
     @concurrent_endpoint
