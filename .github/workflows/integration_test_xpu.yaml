@@ -1,0 +1,216 @@
+name: Integration Tests (XPU)
+# XPU runs its own workflow rather than being folded into
+# integration_test.yaml, because `uses:` is not templatable and each
+# gpu-arch's job needs its own trigger/concurrency group. The test body is
+# shared as a script instead.
+#
+# Trigger differs from ROCm's (push + ciflow/rocm/* tag): a path-scoped
+# pull_request lets pre-merge validation on a branch inside pytorch/torchtitan
+# (not a fork - self-hosted runners restrict fork PRs) re-run on every push
+# to the PR with no manual tag step. set-matrix.yaml already skips draft PRs,
+# so open the validation PR as ready-for-review to get a matrix.
+
+# push/pull_request below assume the AWS OIDC role (arn:...:role/arc) trusts
+# this repo - only true once this lives in pytorch/torchtitan, not in this
+# sandbox fork. Commented out here so nothing fires (and fails at the
+# "Configure AWS credentials" step) by accident; uncomment when opening the
+# validation PR/branch against pytorch/torchtitan.
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [ main ]
+  #   paths-ignore:
+  #     - 'torchtitan/experiments/**'
+  # # Scoped by paths (rather than requiring a ciflow tag like CUDA/ROCm) so
+  # # pre-merge validation on a branch inside pytorch/torchtitan (not a fork -
+  # # see the self-hosted runner restriction below) re-runs automatically on
+  # # every push to the PR, no manual tag needed.
+  # pull_request:
+  #   paths:
+  #     - '.ci/docker/xpu/**'
+  #     - 'tests/integration_tests/**'
+  #     - '.github/workflows/integration_test_xpu.yaml'
+  #     - '.github/workflows/set-matrix.yaml'
+  #     - '.github/workflows/docker-builds.yml'
+  #     - '.github/scripts/integration_test_real_pg.sh'
+  #     - 'run_train.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix:
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: xpu
+
+
+  print-matrix:
+    needs: set-matrix
+    runs-on: ubuntu-latest
+    env:
+      MATRIX: ${{ needs.set-matrix.outputs.matrix }}
+      DOCKER_HASH: ${{ needs.set-matrix.outputs.docker-hash }}
+    steps:
+      - name: Print matrix output
+        run: |
+          echo "Matrix output:"
+          echo "$MATRIX"
+          echo "Docker hash output:"
+          echo "$DOCKER_HASH"
+
+  test-xpu:
+    name: XPU smoke (docker pull + container test)
+    needs: set-matrix
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
+    # Runner label comes from the xpu matrix entry (linux.xe.xpu.dist.8gpu by default)
+    runs-on: ${{ fromJSON(needs.set-matrix.outputs.matrix).include[0].runner }}
+    env:
+      DOCKER_IMAGE: ci-image:pytorch-linux-noble-xpu-n-py3
+    steps:
+      # Checked out only to compute the docker image tag from its .ci tree hash.
+      - name: Checkout PyTorch
+        uses: actions/checkout@v4
+        with:
+          repository: pytorch/pytorch
+          ref: nightly
+          path: pytorch
+          fetch-depth: 1
+          submodules: false
+
+      # Runner health checks, GPU_FLAG, env preservation and ECR login are all
+      # handled by the shared setup-xpu action from pytorch/pytorch.
+      - name: Setup XPU
+        uses: pytorch/pytorch/.github/actions/setup-xpu@main
+
+      - name: Calculate docker image
+        id: calculate-docker-image
+        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
+        with:
+          docker-image-name: ${{ env.DOCKER_IMAGE }}
+          working-directory: pytorch
+          repo-name: pytorch
+
+      - name: Pull docker image
+        uses: pytorch/test-infra/.github/actions/pull-docker-image@main
+        with:
+          docker-image: ${{ steps.calculate-docker-image.outputs.docker-image }}
+
+      - name: XPU set GPU_FLAG
+        shell: bash
+        run: |
+          # Add render group for container creation.
+          render_gid=`cat /etc/group | grep render | cut -d: -f3`
+          echo "GPU_FLAG=--device=/dev/mem --device=/dev/dri --group-add video --group-add $render_gid -e ZE_AFFINITY_MASK" >> "${GITHUB_ENV}"
+
+      - name: Verify docker image pull
+        env:
+          DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker image inspect --format 'id={{.Id}} size={{.Size}}' "${DOCKER_IMAGE}"
+          docker run --rm "${DOCKER_IMAGE}" sh -c 'cat /etc/os-release | head -2'
+
+      - name: Test
+        id: test
+        env:
+          DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_WORKFLOW: ${{ github.workflow }}
+          GITHUB_JOB: ${{ github.job }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SHA1: ${{ github.event.pull_request.head.sha || github.sha }}
+        timeout-minutes: 30
+        run: |
+          set -x
+
+          # shellcheck disable=SC2086,SC2090
+          container_name=$(docker run \
+            ${GPU_FLAG:-} \
+            -e GITHUB_ACTIONS \
+            -e GITHUB_REPOSITORY \
+            -e GITHUB_WORKFLOW \
+            -e GITHUB_JOB \
+            -e GITHUB_RUN_ID \
+            -e GITHUB_RUN_NUMBER \
+            -e GITHUB_RUN_ATTEMPT \
+            -e SHA1 \
+            -e http_proxy -e https_proxy -e no_proxy \
+            -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+            --ulimit stack=10485760:83886080 \
+            --ulimit core=0 \
+            --security-opt seccomp=unconfined \
+            --cap-add=SYS_PTRACE \
+            --shm-size="8g" \
+            --tty \
+            --detach \
+            --user jenkins \
+            --privileged \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            "${DOCKER_IMAGE}"
+          )
+          # save container name (ID) for later steps / teardown
+          echo "CONTAINER_NAME=${container_name}" >> "$GITHUB_ENV"
+
+          # Simple smoke test: hostname, GPU visibility, conda env creation
+          docker exec -t "${container_name}" bash -c '
+            set -euxo pipefail
+            hostname
+            whoami
+            ls /dev/dri
+            conda create -y -n smoke python=3.11
+            conda run -n smoke python -c "import sys; print(sys.version)"
+          '
+
+      - name: Teardown container
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${CONTAINER_NAME:-}" ]]; then
+            docker rm -f "${CONTAINER_NAME}" || true
+          fi
+
+  # Real PG 8-GPU integration suite, through the real linux_job_v2.yml@main -
+  # same pattern as integration_test_rocm.yaml. docker-image resolves (inside
+  # that reusable workflow, via calculate-docker-image) to the image PR2's
+  # docker-builds.yml matrix entry builds and pushes to ECR; gpu-arch-type:
+  # xpu routes it through the shared workflow's own setup-xpu@main /
+  # teardown-xpu@main steps for GPU_FLAG and runner setup, same as ROCm gets
+  # from setup-rocm@main. No XPU goldens exist yet, so numerics are exported
+  # (EXPORT_RESULTS=true) and uploaded instead of compared.
+  integration-real-pg:
+    name: XPU 8 GPU Integration (Real PG - ${{ matrix.test_suite }})
+    needs: set-matrix
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        test_suite: [features]
+        runner_config: ${{ fromJSON(needs.set-matrix.outputs.matrix).include }}
+    with:
+      runner: ${{ matrix.runner_config.runner }}
+      gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
+      gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
+      docker-image: ${{ matrix.runner_config['docker-image'] }}
+      repository: pytorch/torchtitan
+      upload-artifact: integration-8gpu-xpu-${{ matrix.test_suite }}-outputs
+      timeout: 60
+      script: |
+        GPU_ARCH_TYPE="${{ matrix.runner_config['gpu-arch-type'] }}" \
+        TORCH_VERSION="${{ matrix.runner_config['torch-version'] }}" \
+        INDEX_URL="${{ matrix.runner_config['index-url'] }}" \
+        TEST_SUITE="${{ matrix.test_suite }}" \
+        EXPORT_RESULTS="true" \
+        TEST_NAME="all" \
+        TEST_SCOPE="" \
+        bash .github/scripts/integration_test_real_pg.sh

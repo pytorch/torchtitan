@@ -11,8 +11,12 @@ on:
         description: 'Override default (mt-l-x86aavx2-189-704-a10g-8) CUDA runner label'
         required: false
         type: string
+      runner-xpu:
+        description: 'Override default (linux.xe.xpu.dist.8gpu) XPU runner label'
+        required: false
+        type: string
       gpu-arch:
-        description: "Restrict the matrix to a single GPU arch ('cuda' or 'rocm'); 'all' (default) keeps both."
+        description: "Restrict the matrix to a single GPU arch ('cuda', 'rocm' or 'xpu'); 'all' (default) keeps cuda and rocm."
         required: false
         type: string
         default: all
@@ -44,10 +48,12 @@ jobs:
       # Default CUDA & ROCm runners
       DEFAULT_ROCM_RUNNER: linux.rocm.gpu.ecosystem.mi350.8
       DEFAULT_CUDA_RUNNER: mt-l-x86aavx2-189-704-a10g-8
+      DEFAULT_XPU_RUNNER: linux.xe.xpu.dist.8gpu
 
       # Input CUDA & ROCm runners
       ROCM_RUNNER_INPUT: ${{ inputs.runner-rocm }}
       CUDA_RUNNER_INPUT: ${{ inputs.runner-cuda }}
+      XPU_RUNNER_INPUT: ${{ inputs.runner-xpu }}
 
     steps:
       - uses: actions/checkout@v7
@@ -62,6 +68,7 @@ jobs:
 
           # Select runner if provided, else use default value
           ROCM_RUNNER="${ROCM_RUNNER_INPUT:-$DEFAULT_ROCM_RUNNER}"
+          XPU_RUNNER="${XPU_RUNNER_INPUT:-$DEFAULT_XPU_RUNNER}"
           CUDA_RUNNER="${CUDA_RUNNER_INPUT:-$DEFAULT_CUDA_RUNNER}"
 
           # Define CUDA matrix
@@ -80,6 +87,7 @@ jobs:
 
           if [[ "${{ inputs.is-experimental }}" == "true" ]]; then
             ROCM_MATRIX=""
+            XPU_MATRIX=""
             FULL_MATRIX="$CUDA_MATRIX"
           else
             ROCM_MATRIX="$(cat <<EOF
@@ -94,6 +102,20 @@ jobs:
           }
           EOF
             )"
+            XPU_MATRIX="$(cat <<EOF
+          {
+            "name": "xpu",
+            "runner": "${XPU_RUNNER}",
+            "gpu-arch-type": "xpu",
+            "gpu-arch-version": "",
+            "docker-image": "torchtitan-xpu-ubuntu-24.04-py3",
+            "index-url": "https://download.pytorch.org/whl/nightly/xpu",
+            "torch-version": ""
+          }
+          EOF
+            )"
+            # XPU is label-triggered only (gpu-arch=xpu), so it stays out of
+            # FULL_MATRIX and never runs on main pushes or schedules.
             FULL_MATRIX="$CUDA_MATRIX,$ROCM_MATRIX"
           fi
 
@@ -110,6 +132,10 @@ jobs:
             cat > matrix.json <<JSON
           {"include": [$FULL_MATRIX]}
           JSON
+          elif [[ "${GPU_ARCH_INPUT}" == "xpu" ]]; then
+            cat > matrix.json <<JSON
+          {"include": [$XPU_MATRIX]}
+          JSON
           else
             cat > matrix.json <<JSON
           {"include": [$CUDA_MATRIX]}
@@ -124,12 +150,12 @@ jobs:
           # run a single combined linux_job_v2 job.
           case "${GPU_ARCH_INPUT:-all}" in
             all) ;;
-            cuda|rocm)
+            cuda|rocm|xpu)
               jq -c --arg arch "$GPU_ARCH_INPUT" '{include: [.include[] | select(.["gpu-arch-type"] == $arch)]}' matrix.json > matrix.filtered.json
               mv matrix.filtered.json matrix.json
               ;;
             *)
-              echo "::error::Invalid gpu-arch '${GPU_ARCH_INPUT}'. Expected one of: all, cuda, rocm." >&2
+              echo "::error::Invalid gpu-arch '${GPU_ARCH_INPUT}'. Expected one of: all, cuda, rocm, xpu." >&2
               exit 1
               ;;
           esac

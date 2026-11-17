@@ -40,6 +40,7 @@ jobs:
           - docker-image-name: torchtitan-ubuntu-22.04-clang12
             image-tag-prefix: rl
           - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
+          - docker-image-name: torchtitan-xpu-ubuntu-24.04-py3
     # BuildKit runs out of cluster on the OSDC BuildKit pool, so this runner only
     # streams the (small) .ci/docker context and waits.
     runs-on: mt-l-x86iavx512-8-64
@@ -77,6 +78,33 @@ jobs:
           DOCKER_TAG=$(git rev-parse HEAD:.ci/docker)
           DOCKER_TAG="${{ matrix.image-tag-prefix && 'rl-' || '' }}${DOCKER_TAG}"
           echo "docker-image=${DOCKER_IMAGE}:${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"
+
+      # XPU's base is pytorch's own rolling CI image rather than a pinned
+      # vendor tag like CUDA/ROCm's, so it has to be resolved per-build from
+      # pytorch nightly's .ci/docker tree hash instead of being hardcoded
+      # above.
+      - name: Checkout PyTorch nightly (for XPU base image hash)
+        if: ${{ matrix.docker-image-name == 'torchtitan-xpu-ubuntu-24.04-py3' }}
+        uses: actions/checkout@v7
+        with:
+          repository: pytorch/pytorch
+          ref: nightly
+          path: pytorch
+          fetch-depth: 1
+          submodules: false
+
+      - name: Resolve XPU base image
+        if: ${{ matrix.docker-image-name == 'torchtitan-xpu-ubuntu-24.04-py3' }}
+        id: calculate-base-image
+        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
+        with:
+          docker-image-name: ci-image:pytorch-linux-noble-xpu-n-py3
+          working-directory: pytorch
+          repo-name: pytorch
+
+      - name: Export XPU base image
+        if: ${{ matrix.docker-image-name == 'torchtitan-xpu-ubuntu-24.04-py3' }}
+        run: echo "XPU_BASE_IMAGE=${{ steps.calculate-base-image.outputs.docker-image }}" >> "${GITHUB_ENV}"
 
       - name: Build and push to ECR
         uses: pytorch/test-infra/.github/actions/docker-build-remote-buildkit@main

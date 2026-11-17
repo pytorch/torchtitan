@@ -16,6 +16,7 @@ shift
 echo "Building ${IMAGE_NAME} Docker image"
 
 OS=ubuntu
+DOCKERFILE_DIR="${OS}"
 CLANG_VERSION=""
 PYTHON_VERSION=3.12
 MINICONDA_VERSION=24.3.0-0
@@ -37,6 +38,19 @@ case "${IMAGE_NAME}" in
     CLANG_VERSION=12
     BASE_IMAGE=rocm/dev-ubuntu-${OS_VERSION}:latest
     ;;
+  torchtitan-xpu-ubuntu-24.04-py3)
+    # Layers torchtitan deps on pytorch's official XPU CI image (noble/24.04),
+    # which already ships driver, oneAPI, conda and the jenkins user. Unlike
+    # CUDA/ROCm's pinned vendor tags, this base rolls with pytorch nightly, so
+    # there is no fixed tag to hardcode here: the caller (docker-builds.yml)
+    # must resolve XPU_BASE_IMAGE from the current nightly .ci/docker tree
+    # hash via test-infra's calculate-docker-image action and pass it in. No
+    # fallback - a stale pinned tag would silently build against whatever
+    # nightly snapshot happened to exist when someone last wrote it down.
+    OS_VERSION=24.04
+    BASE_IMAGE="${XPU_BASE_IMAGE}"
+    DOCKERFILE_DIR=xpu
+    ;;
   *)
     echo "Invalid image name ${IMAGE_NAME}"
     exit 1
@@ -52,7 +66,6 @@ else
 fi
 
 "${BUILD_CMD[@]}" \
-  --no-cache \
   --progress=plain \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
   --build-arg "OS_VERSION=${OS_VERSION}" \
@@ -61,6 +74,6 @@ fi
   --build-arg "MINICONDA_VERSION=${MINICONDA_VERSION}" \
   --build-arg "INSTALL_RL_DEPS=${INSTALL_RL_DEPS:-0}" \
   --shm-size=1g \
-  -f "${OS}"/Dockerfile \
+  -f "${DOCKERFILE_DIR}"/Dockerfile \
   "$@" \
   .
