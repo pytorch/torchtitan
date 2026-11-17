@@ -16,9 +16,8 @@ Bitwise parity and the original input/output contract are hard acceptance gates.
 When the problems come from a GraphTrainer `cache_dir` (written by
 `substitute_with_kernels_pass` in `graph_trainer/auto_fuser/substitute_kernels.py`):
 
-1. **Ask the user for `cache_dir` before doing anything else.** Do not guess or
-   fall back to `$TORCHTITAN_SUBSTITUTE_KERNELS_DIR` or the Inductor cache directory
-   without confirmation. A `cache_dir` given in the invoking prompt counts as
+1. **Ask the user for `cache_dir` before doing anything else.** Do not guess
+   it. A `cache_dir` given in the invoking prompt counts as
    confirmed. Only the coordinator writes into `cache_dir`, and only the
    `<l2>.py` files of the problem set (see 3).
 2. **The problem set is every `pat_<l1>/<l2>.py` file in `cache_dir`**, or, when
