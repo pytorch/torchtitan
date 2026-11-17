@@ -52,7 +52,7 @@ The pipeline has three layers.
 
 **2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [controller/WINDOWED_FIFO.md](controller/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
-**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore (or `ModelStateDictTransport`, see [MODEL_STATE_DICT_TRANSPORT.md](MODEL_STATE_DICT_TRANSPORT.md)) publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
+**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and `ModelStateDictTransport` (see [MODEL_STATE_DICT_TRANSPORT.md](MODEL_STATE_DICT_TRANSPORT.md)) publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
 `torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
@@ -61,7 +61,7 @@ optimization, checkpointing, profiling, GC, SDC replay, and CUDA graphs.
 The distributed layer builds on two core components:
 
 - **[Monarch](https://github.com/meta-pytorch/monarch) as the controller:** orchestrates trainers and generators on separate GPU meshes with asynchronous communication.
-- **[TorchStore](https://github.com/meta-pytorch/torchstore) for model state dict transfer:** efficiently publishes the model state dict from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
+- **[`ModelStateDictTransport`](MODEL_STATE_DICT_TRANSPORT.md) for model state dict transfer:** generators read the trainer's model state dict with one-sided RDMA reads over `torch.distributed._transport` (NIXL or Mooncake). `model_state_dict_load_mode="gpu_fetch"` requires `model_state_dict_transport=None`, which uses [TorchStore](https://github.com/meta-pytorch/torchstore) instead.
 
 ### Package organization
 
