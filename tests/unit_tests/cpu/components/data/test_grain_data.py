@@ -225,13 +225,10 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
     assert next(restored) == expected
 
 
-_HF_SHARDED_NUM_ROWS = 16
-
-
 def _hf_sharded_rows():
-    return datasets.Dataset.from_dict(
-        {"id": list(range(_HF_SHARDED_NUM_ROWS))}
-    ).to_iterable_dataset(num_shards=8)
+    return datasets.Dataset.from_dict({"id": list(range(16))}).to_iterable_dataset(
+        num_shards=8
+    )
 
 
 def test_hf_shuffled_repeat_advances_epoch():
@@ -312,10 +309,12 @@ def test_hf_resume_mid_second_epoch():
 def test_hf_cursor_state_after_restore(shuffle, num_consumed):
     """States saved after a restore resume to the same rows as the original's.
 
-    Once read, Hugging Face streaming state can carry different nested
-    bookkeeping after ``load_state_dict`` than an uninterrupted iterator's
-    for the same position, so states after advancing are compared by the rows
-    they resume to.
+    The states are compared by the rows they resume to, not by their bytes. As
+    of datasets 5.2, the first read after ``load_state_dict`` makes
+    ``RebatchedArrowExamplesIterable`` load ``previous_state`` into its child
+    iterable, which re-initializes the child's state dict. The
+    ``examples_iterable`` entry of its own state then stops tracking the child
+    (stale ``shard_idx``), while resume reads ``previous_state``.
     """
 
     def cursor():
@@ -327,7 +326,7 @@ def test_hf_cursor_state_after_restore(shuffle, num_consumed):
         iterator = cursor()
         try:
             iterator.set_state(state)
-            return [next(iterator) for _ in range(_HF_SHARDED_NUM_ROWS)]
+            return [next(iterator) for _ in range(16)]
         finally:
             iterator.close()
 

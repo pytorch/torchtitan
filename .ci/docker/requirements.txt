@@ -1,8 +1,6 @@
 grain == 0.2.18
 # datasets caps fsspec in every release; 5.2.0 is the first to allow fsspec
-# 2026.9.0. It also excludes 4.8.x (split_dataset_by_node yields no samples on
-# nonzero ranks when num_shards < world_size) and 5.0.0 (streaming state
-# restarts on a second resume).
+# 2026.9.0.
 datasets >= 5.2.0
 # PyArrow 26 requires NumPy 2; PyTorch CI also covers NumPy 1.x.
 pyarrow < 26
