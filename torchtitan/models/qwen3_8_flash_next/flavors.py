@@ -8,6 +8,7 @@
 
 from dataclasses import replace
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch.nn as nn
@@ -78,6 +79,7 @@ from .model import (
     Float32Softmax,
     Qwen38FlashNextBlock,
     Qwen38FlashNextModel,
+    Qwen38FlashNextMultimodalModel,
 )
 from .norm import GroupedOffsetRMSNorm, InputDtypeGatedRMSNorm
 from .residual import GatedResidual
@@ -481,22 +483,8 @@ def _config(*, debug, multimodal, seq_len, parallelism, indexer_loss):
                 sharding_config=block_sharding(enable_sp=enable_sp),
             )
         )
-    vision_encoder = None
-    if multimodal:
-        vision_encoder = make_qwen35_vision_encoder_config(
-            dim=128 if debug else 1152,
-            ffn_dim=256 if debug else 4304,
-            num_layers=2 if debug else 27,
-            num_heads=4 if debug else 16,
-            patch_size=16,
-            temporal_patch_size=2,
-            spatial_merge_size=2,
-            out_hidden_size=dim,
-            num_position_embeddings=1024 if debug else 2304,
-        )
-        vision_encoder.merger.act_fn = GELU.Config(approximate="none")
     output_std = dim**-0.5
-    return Qwen38FlashNextModel.Config(
+    decoder_fields: dict[str, Any] = dict(
         dim=dim,
         vocab_size=vocab_size,
         max_context_length=seq_len,
@@ -530,7 +518,23 @@ def _config(*, debug, multimodal, seq_len, parallelism, indexer_loss):
             },
             sharding_config=lm_head_sharding_config(),
         ),
-        vision_encoder=vision_encoder,
+    )
+    if not multimodal:
+        return Qwen38FlashNextModel.Config(**decoder_fields)
+    vision_encoder = make_qwen35_vision_encoder_config(
+        dim=128 if debug else 1152,
+        ffn_dim=256 if debug else 4304,
+        num_layers=2 if debug else 27,
+        num_heads=4 if debug else 16,
+        patch_size=16,
+        temporal_patch_size=2,
+        spatial_merge_size=2,
+        out_hidden_size=dim,
+        num_position_embeddings=1024 if debug else 2304,
+    )
+    vision_encoder.merger.act_fn = GELU.Config(approximate="none")
+    return Qwen38FlashNextMultimodalModel.Config(
+        vision_encoder=vision_encoder, **decoder_fields
     )
 
 

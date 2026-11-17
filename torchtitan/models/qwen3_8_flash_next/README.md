@@ -29,6 +29,10 @@ pip install -r .ci/docker/requirements-vlm.txt
 | `debugmodel_mm` | 256 | 8 | 4 / 2 | 64 | 8 / 2 |
 | `125B-A6B` | 2,560 | 48 | 24 / 2 | 256 | 512 / 10 |
 
+`debugmodel` builds the text-only `Qwen38FlashNextModel`; `debugmodel_mm` and
+`125B-A6B` build `Qwen38FlashNextMultimodalModel`, which adds the vision
+encoder.
+
 The released vision encoder has 27 layers, width 1,152 and 16-pixel patches.
 Its merger produces 2,560-wide decoder embeddings. The text vocabulary has
 248,320 entries. Released-model training capacity and throughput are unqualified;

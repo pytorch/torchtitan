@@ -32,9 +32,10 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
-from torchtitan.models.common.multimodal import replicate_to_residual
+from torchtitan.models.common.multimodal import MultimodalModel, replicate_to_residual
 from torchtitan.models.common.nn_modules import Identity
-from torchtitan.models.qwen3_5.model import Qwen35Model
+from torchtitan.models.qwen3_5.model import Qwen35Model, Qwen35MultimodalModel
+from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
 
 from .attention import QSAAttention, QSAIndexMetadata
 from .embedding import NGramTable, PLELayer
@@ -151,7 +152,10 @@ class Qwen38FlashNextBlock(TransformerBlock):
 
 
 class Qwen38FlashNextModel(Qwen35Model):
-    """Four-stream Flash-Next decoder sharing Qwen3.5's vision and training lifecycle."""
+    """Four-stream Flash-Next text decoder sharing Qwen3.5's training lifecycle.
+
+    ``Qwen38FlashNextMultimodalModel`` adds the vision encoder.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Qwen35Model.Config):
@@ -161,7 +165,7 @@ class Qwen38FlashNextModel(Qwen35Model):
         norm: Identity.Config  # pyrefly: ignore [bad-override]
 
         def __post_init__(self) -> None:
-            Qwen35Model.Config.__post_init__(self)
+            super(Qwen38FlashNextModel.Config, self).__post_init__()
             if sum(layer.ple is not None for layer in self.layers) != 1:
                 raise ValueError("Flash-Next requires exactly one PLE layer")
 
@@ -203,7 +207,12 @@ class Qwen38FlashNextModel(Qwen35Model):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         **kwargs: Any,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
+    ) -> tuple[
+        torch.Tensor | tuple[torch.Tensor, ...],
+        torch.Tensor | tuple[torch.Tensor, ...],
+        dict[str, Any],
+        dict[str, Any],
+    ]:
         # PLE needs original token history; multimodal rotary coordinates cannot
         # recover token IDs or one-dimensional document positions.
         lexical_inputs = {
@@ -254,11 +263,94 @@ class Qwen38FlashNextModel(Qwen35Model):
                             tensor, {"dp": spmd.V, "cp": spmd.V, "tp": spmd.R}
                         )
                 model_kwargs["ple_routing"] = routing
-        for metadata in model_kwargs.get("attention_metadata", {}).values():
-            if isinstance(metadata, QSAIndexMetadata):
-                metadata.annotate_spmd_types()
         model_kwargs.update(lexical_inputs)
         return inputs_T, labels_T, model_kwargs, loss_kwargs
+
+    def forward(  # pyrefly: ignore [bad-override]
+        self,
+        tokens: torch.Tensor,
+        *,
+        document_positions: torch.Tensor,
+        ple_input_ids: torch.Tensor,
+        ple_routing: RowShardedEmbeddingMetadata | None = None,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        with spmd_local_context("dp"):
+            if self.tok_embeddings is not None:
+                x_TC = self.tok_embeddings(tokens).repeat(1, self.num_streams)
+            else:
+                x_TC = tokens
+        return self._forward_streams(
+            x_TC,
+            positions,
+            attention_metadata,
+            document_positions=document_positions,
+            ple_input_ids=ple_input_ids,
+            ple_routing=ple_routing,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
+
+    def _forward_streams(
+        self,
+        x_TC: torch.Tensor,
+        positions: torch.Tensor | None,
+        attention_metadata: AttentionMetadataMap | None,
+        *,
+        document_positions: torch.Tensor,
+        ple_input_ids: torch.Tensor,
+        ple_routing: RowShardedEmbeddingMetadata | None,
+        padding_mask: torch.Tensor | None,
+        aux_loss_denominators: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run the layers, the final mixer and the LM head on the residual streams."""
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                x_TC,
+                residual_activation_placement(enable_sp=spmd_dense_sp_enabled()),
+            )
+        with spmd.no_typecheck():
+            denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
+        for module in self.layers.values():
+            layer = cast(Qwen38FlashNextBlock, module)
+            x_TC = layer(
+                x_TC,
+                attention_metadata.get(type(layer.attention.inner_attention))
+                if attention_metadata
+                else None,
+                positions,
+                ple_input_ids_T=ple_input_ids,
+                document_positions_T=document_positions,
+                ple_routing=ple_routing,
+                padding_mask_T=padding_mask,
+                aux_loss_denominator=denominator,
+            )
+        # The vocab-sharded lm_head, or the chunked loss, needs TP-Replicate input.
+        x_TD = maybe_gather_tp_input(
+            self.norm, self.norm(self.hyper_connection_mixer(x_TC))
+        )
+        if self._skip_lm_head:
+            return x_TD
+        return self.lm_head(x_TD) if self.lm_head is not None else x_TD
+
+
+class Qwen38FlashNextMultimodalModel(Qwen38FlashNextModel, Qwen35MultimodalModel):
+    """Flash-Next decoder with Qwen3.5's vision encoder."""
+
+    # Two slotted bases that both add fields cannot be combined, so this repeats
+    # Qwen35MultimodalModel.Config's only field instead of inheriting it. The
+    # config is therefore not a Qwen35MultimodalModel.Config; check
+    # MultimodalModel.Config instead.
+    @dataclass(kw_only=True, slots=True)
+    class Config(  # pyrefly: ignore [bad-override]
+        Qwen38FlashNextModel.Config, MultimodalModel.Config
+    ):
+        vision_encoder: Qwen35VisionEncoder.Config
 
     def forward(  # pyrefly: ignore [bad-override]
         self,
@@ -294,36 +386,16 @@ class Qwen38FlashNextModel(Qwen35Model):
                 x_TC = x_TD.repeat(1, self.num_streams)
             else:
                 x_TC = tokens
-        if self.tok_embeddings is not None and self.vision_encoder is not None:
+        if self.tok_embeddings is not None:
             # The vision scatter leaves the embeddings TP-Replicate.
             x_TC = replicate_to_residual(x_TC)
-        if spmd.is_type_checking():
-            spmd.assert_type(
-                x_TC,
-                residual_activation_placement(enable_sp=spmd_dense_sp_enabled()),
-            )
-        with spmd.no_typecheck():
-            denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for module in self.layers.values():
-            layer = cast(Qwen38FlashNextBlock, module)
-            x_TC = layer(
-                x_TC,
-                attention_metadata.get(type(layer.attention.inner_attention))
-                if attention_metadata
-                else None,
-                positions,
-                ple_input_ids_T=ple_input_ids,
-                document_positions_T=document_positions,
-                ple_routing=ple_routing,
-                padding_mask_T=padding_mask,
-                aux_loss_denominator=denominator,
-            )
-        # The vocab-sharded lm_head, or the chunked loss, needs TP-Replicate input.
-        x_TD = maybe_gather_tp_input(
-            self.norm, self.norm(self.hyper_connection_mixer(x_TC))
+        return self._forward_streams(
+            x_TC,
+            positions,
+            attention_metadata,
+            document_positions=document_positions,
+            ple_input_ids=ple_input_ids,
+            ple_routing=ple_routing,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
         )
-        if self._skip_lm_head:
-            return x_TD
-        return self.lm_head(x_TD) if self.lm_head is not None else x_TD

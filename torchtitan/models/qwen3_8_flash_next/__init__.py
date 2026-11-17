@@ -9,11 +9,12 @@ from .flavors import (
     MODEL_FLAVORS,
     QWEN3_8_FLASH_NEXT_SPECIAL_TOKENS,
 )
-from .model import Qwen38FlashNextModel
+from .model import Qwen38FlashNextModel, Qwen38FlashNextMultimodalModel
 
 __all__ = [
     "MODEL_FLAVORS",
     "build_model_config",
     "Qwen38FlashNextModel",
+    "Qwen38FlashNextMultimodalModel",
     "QWEN3_8_FLASH_NEXT_SPECIAL_TOKENS",
 ]

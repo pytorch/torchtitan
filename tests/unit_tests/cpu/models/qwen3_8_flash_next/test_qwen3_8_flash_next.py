@@ -39,7 +39,6 @@ def config():
         indexer_loss=QSAIndexerLoss.Config(coeff=1.0, reduce_mesh="loss"),
     )
     cfg.vocab_size = cfg.tok_embeddings.num_embeddings = cfg.lm_head.out_features = 64
-    cfg.vision_encoder = None
     cfg.layers[1].ple.ple_embedding.vocab_size = 64
     cfg.layers[1].ple.ple_embedding.eos_token_id = 63
     return cfg

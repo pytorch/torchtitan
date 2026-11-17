@@ -29,7 +29,10 @@ from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.qwen3_8_flash_next import build_model_config
+from torchtitan.models.qwen3_8_flash_next import (
+    build_model_config,
+    Qwen38FlashNextMultimodalModel,
+)
 from torchtitan.models.qwen3_8_flash_next.state_dict_adapter import (
     Qwen38FlashNextStateDictAdapter,
 )
@@ -69,6 +72,7 @@ class _Fixture:
     reference_vision: Any
     adapter: Qwen38FlashNextStateDictAdapter
     vision_adapter: Qwen38FlashNextStateDictAdapter
+    vision_model_config: Qwen38FlashNextMultimodalModel.Config
     tokens_T: torch.Tensor  # noqa: N815
     positions_T: torch.Tensor  # noqa: N815
     patches_PF: torch.Tensor  # noqa: N815
@@ -129,21 +133,24 @@ def _build_fixture(device: torch.device) -> _Fixture:
 
     torch.manual_seed(42)
     config = build_model_config(
+        "debugmodel", seq_len=64, parallelism=ParallelismConfig()
+    )
+    vision_model_config = build_model_config(
         "debugmodel_mm", seq_len=64, parallelism=ParallelismConfig()
     )
-    for layer in config.layers:
-        assert isinstance(layer.feed_forward, MoE.Config)
-        layer.feed_forward.router.aux_loss = None
-    vision_config = config.vision_encoder
-    assert vision_config is not None
-    config.vision_encoder = None
-    config.vocab_size = (
-        config.tok_embeddings.num_embeddings
-    ) = config.lm_head.out_features = 64
-    ple = config.layers[1].ple
-    assert ple is not None
-    ple.ple_embedding.vocab_size = 64
-    ple.ple_embedding.eos_token_id = 63
+    assert isinstance(vision_model_config, Qwen38FlashNextMultimodalModel.Config)
+    for model_config in (config, vision_model_config):
+        for layer in model_config.layers:
+            assert isinstance(layer.feed_forward, MoE.Config)
+            layer.feed_forward.router.aux_loss = None
+        model_config.vocab_size = (
+            model_config.tok_embeddings.num_embeddings
+        ) = model_config.lm_head.out_features = 64
+        ple = model_config.layers[1].ple
+        assert ple is not None
+        ple.ple_embedding.vocab_size = 64
+        ple.ple_embedding.eos_token_id = 63
+    vision_config = vision_model_config.vision_encoder
     hf_config = _reference_text_config()
     hf_config._attn_implementation = "sdpa"
     reference = Qwen4ExpForCausalLM(hf_config).to(device).eval()
@@ -211,8 +218,6 @@ def _build_fixture(device: torch.device) -> _Fixture:
     torch.manual_seed(VISION_SEED)
     reference_vision = Qwen4ExpVisionModel(vision_hf_config).to(device).eval()
     vision = vision_config.build().to(device).eval()
-    vision_model_config = copy.deepcopy(config)
-    vision_model_config.vision_encoder = vision_config
     vision_adapter = Qwen38FlashNextStateDictAdapter(vision_model_config, None)
     vision_state = {
         "model.visual." + key: value
@@ -238,6 +243,7 @@ def _build_fixture(device: torch.device) -> _Fixture:
         reference_vision,
         adapter,
         vision_adapter,
+        vision_model_config,
         tokens_T,
         positions_T,
         patches_PF,
@@ -532,7 +538,23 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
             ),
             "vision": _check_vision(fixture, target_device),
         }
-        fixture.native.vision_encoder = fixture.vision
+        # Reuse the checked decoder weights and keep the checked float32 vision
+        # module; the strict load needs its keys.
+        with torch.device("meta"):
+            multimodal = fixture.vision_model_config.build().to(torch.bfloat16)
+        multimodal.to_empty(device=target_device).eval()
+        multimodal.init_states(buffer_device=target_device)
+        multimodal.vision_encoder = fixture.vision
+        multimodal.load_state_dict(
+            {
+                **fixture.native.state_dict(),
+                **{
+                    "vision_encoder." + key: value
+                    for key, value in fixture.vision.state_dict().items()
+                },
+            },
+            strict=True,
+        )
         config = Qwen4ExpConfig(
             text_config=fixture.reference.config,
             vision_config=fixture.reference_vision.config,
@@ -557,11 +579,11 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
                     .normal_(0, 0.02, generator=generator)
                     .to(weight_ED)
                 )
-                fixture.native.layers[
-                    str(layer_id)
-                ].feed_forward.router.gate.weight.copy_(weight_ED)
+                multimodal.layers[str(layer_id)].feed_forward.router.gate.weight.copy_(
+                    weight_ED
+                )
         mapped = fixture.vision_adapter.from_hf(reference.state_dict())
-        native_state = fixture.native.state_dict()
+        native_state = multimodal.state_dict()
         assert native_state.keys() == mapped.keys()
         assert all(torch.equal(native_state[key], mapped[key]) for key in native_state)
         tokens_T = torch.tensor(
@@ -591,7 +613,7 @@ def run(*, device: str = "cuda") -> dict[str, Any]:
         )
         results["multimodal"] = _check_decoder(
             "multimodal",
-            fixture.native,
+            multimodal,
             reference,
             reference.model.language_model,
             fixture.vision_adapter,
