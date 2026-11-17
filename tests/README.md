@@ -252,6 +252,35 @@ automatically to PRs that touch RL code (see `.github/labeler.yml`). When a PR
 changes `.ci/docker/`, use the existing `ciflow/docker` label to build its image;
 rerun the RL unit job after that image is available.
 
+The H100/B200 RL workflows (`integration_test_rl_h100.yaml`,
+`integration_test_rl_b200.yaml`) share environment setup between standalone GPU
+checks and full GRPO integration:
+
+| Trigger | H100 | B200 |
+| --- | --- | --- |
+| PR tag (`ciflow/rl/*` or `ciflow/b200/*`, respectively) | Standalone checks | Standalone checks |
+| Push to `main` | Standalone checks | No run |
+| Daily at 00:00 UTC on `main` | Standalone checks + GRPO | Standalone checks + GRPO |
+| Daily at 12:00 UTC on `main` | Standalone checks | No run |
+| Manual dispatch | Standalone checks + GRPO | Standalone checks + GRPO |
+
+These workflows still reserve eight-GPU H100/B200 runners. Their GRPO suites
+cover Kimi K3 and DeepSeek V3, plus Dist-MoE on B200; those configurations are
+checked automatically once a day rather than on PR tags or `main` pushes.
+
+Manual runs require repository write access. Select an upstream branch with
+**Run workflow**, or dispatch an upstream branch or tag with the CLI:
+
+```bash
+gh workflow run integration_test_rl_h100.yaml --repo pytorch/torchtitan --ref BRANCH_OR_TAG
+```
+
+For a fork PR, a maintainer must use an upstream branch or tag pointing to the
+desired PR commit, such as its `ciflow/rl/*` or `ciflow/b200/*` tag; the fork branch
+is not available in the upstream branch picker. Manual runs on `main` do not
+cancel scheduled runs; repeated runs on the same non-`main` ref cancel the
+previous run.
+
 ### Running Specific Unit Test Files
 
 To run a specific test file:
