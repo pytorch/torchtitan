@@ -132,6 +132,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             message_env=_MessageEnvConfig(),
             token_env=token_env_config,
             advantage=_Config(_AdvantageEstimator()),
+            rdma_min_image_bytes=None,
         )
         worker = _CustomWorker(worker_config)
         released = []
@@ -254,6 +255,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rdma_min_image_bytes=None,
         )
     )
     builder = TrainingSampleBuilder.Config().build()
@@ -283,6 +285,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 env=env,
+                image_files=worker.rdma_image_files(),
                 sampling=SamplingConfig(),
                 group_id=0,
                 rollout_id=rollout_id,
@@ -332,6 +335,7 @@ def test_rollout_sends_and_records_prompt_images() -> None:
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rdma_min_image_bytes=None,
         )
     )
     generate_fn = _GenerateFn()
@@ -344,11 +348,99 @@ def test_rollout_sends_and_records_prompt_images() -> None:
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             env=_ImageTokenEnv(),
+            image_files=worker.rdma_image_files(),
             sampling=SamplingConfig(),
             group_id=0,
             rollout_id=0,
         )
     )
-    assert generate_fn.calls[0][0].images == (image,)
+    assert generate_fn.calls[0][0].prompt.images == (image,)
     assert rollout.turns[0].prompt_delta_images == (image,)
     assert rollout.turns[0].prompt_delta_image_placeholders == (placeholder,)
+
+
+def test_group_keeps_each_image_file_once_until_its_last_generate_call() -> None:
+    image = PromptImage(
+        hash_value="img-a", source_path="a.png", grid_thw=(1, 4, 4), data=b"x" * 64
+    )
+    image_prompt = Prompt(
+        token_ids=[1, 9, 2],
+        images=(image,),
+        image_placeholders=(PlaceholderRange(offset=1, length=1),),
+    )
+
+    class _TwoTurnImageTokenEnv(_TokenEnv):
+        """Each sibling sends the image in two turns: init, then one ongoing step."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.num_steps = 0
+
+        async def init(self) -> TokenEnvOutput:
+            return TokenEnvOutput(
+                next_prompt=image_prompt, status=RolloutStatus.ONGOING
+            )
+
+        async def step(self, completion: Completion) -> TokenEnvOutput:
+            self.num_steps += 1
+            if self.num_steps == 2:
+                return await super().step(completion)
+            return TokenEnvOutput(
+                next_prompt=image_prompt, status=RolloutStatus.ONGOING
+            )
+
+    class _RegisteredFile:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+            self.dropped = False
+
+        async def read(self) -> bytes:
+            assert not self.dropped
+            return self.data
+
+        async def drop(self) -> None:
+            self.dropped = True
+
+    registered: list[_RegisteredFile] = []
+
+    def register_rdma_object(value, *, min_bytes):
+        registered.append(_RegisteredFile(value))
+        return registered[-1]
+
+    token_env_config = SimpleNamespace(build=lambda **kwargs: _TwoTurnImageTokenEnv())
+    worker = MessageEnvRolloutWorker(
+        SimpleNamespace(
+            rubric=_Config(_Rubric()),
+            message_env=_MessageEnvConfig(),
+            token_env=token_env_config,
+            advantage=_Config(_AdvantageEstimator()),
+            rdma_min_image_bytes=64,
+        ),
+        register_rdma_object=register_rdma_object,
+    )
+    worker._renderer = None
+    read_prompts = []
+
+    async def generate_fn(prompt, **kwargs) -> Completion:
+        # The generator reads the file while the group runs.
+        read_prompts.append(await prompt.read())
+        return await _GenerateFn()(prompt, **kwargs)
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    group = asyncio.run(
+        worker.run_group(
+            generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
+            sample="sample",
+            group_id=0,
+            group_size=2,
+            sampling=SamplingConfig(),
+        )
+    )
+
+    assert all(r.status == RolloutStatus.COMPLETED for r in group.rollouts)
+    # 2 siblings x 2 turns read one registered file, dropped after the group.
+    assert [p.images[0].data for p in read_prompts] == [image.data] * 4
+    assert len(registered) == 1 and registered[0].dropped

@@ -24,6 +24,7 @@ from torchtitan.config import Configurable
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
+from torchtitan.rl.rollout.rdma_prompt import RDMAImageFiles
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
@@ -39,6 +40,7 @@ from torchtitan.rl.rollout.types import (
 if TYPE_CHECKING:
     from renderers import Renderer
 
+    from torchtitan.rl.actors.rdma import RegisterRDMAObject
     from torchtitan.rl.actors.system import ActorSystem
 
     # Type-only: importing the generator module here would pull in vLLM at import time.
@@ -285,7 +287,12 @@ class Rollouter(Configurable):
 
 class BaseRolloutWorker(Configurable, ABC):
     """Runs one rollout group in a rollout worker process, then scores it and computes its
-    advantages. Subclasses implement `run_group`."""
+    advantages. Subclasses implement `run_group`.
+
+    With `rdma_min_image_bytes` set, `register_rdma_object` (the actor system's RDMA
+    registration, e.g. `MonarchRDMAObject.register`) is required, and `rdma_image_files` keeps a
+    group's large image files in this worker.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -298,9 +305,46 @@ class BaseRolloutWorker(Configurable, ABC):
         """Post-scoring advantage estimator. Default = Dr.GRPO (mean-baseline only);
         set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
 
-    def __init__(self, config: Config) -> None:
+        rdma_min_image_bytes: int | None = None
+        """Keep each prompt image file of at least this many bytes in this worker as an RDMA
+        buffer, which generator rank 0 reads, instead of sending it in every `generate` call:
+            None (default): every file in the call.
+            e.g. 2_000_000: files of >= 2 MB stay here, one buffer per file per group,
+            until the group's last `generate` call returns.
+        Each read is a round trip back to this worker, so only multi-MB files gain. With
+        Monarch, each rollout worker makes a CUDA context on GPU 0 when it starts (~256 MiB,
+        so `Rollouter.Config.worker_pool_size` x 256 MiB on the rollout worker host)."""
+
+        def __post_init__(self) -> None:
+            if self.rdma_min_image_bytes is not None and self.rdma_min_image_bytes < 1:
+                raise ValueError(
+                    "rdma_min_image_bytes must be None or >= 1 (RDMABuffer rejects empty "
+                    f"buffers), got {self.rdma_min_image_bytes}"
+                )
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        register_rdma_object: RegisterRDMAObject | None = None,
+    ) -> None:
+        if config.rdma_min_image_bytes is not None and register_rdma_object is None:
+            raise ValueError(
+                "rdma_min_image_bytes is set, but no register_rdma_object was given: the "
+                "rollout worker must run in an actor system that provides RDMA."
+            )
+        self._rdma_min_image_bytes = config.rdma_min_image_bytes
+        self._register_rdma_object = register_rdma_object
         self.rubric: Rubric = config.rubric.build()
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
+
+    def rdma_image_files(self) -> RDMAImageFiles:
+        """A new holder for one group's image files (`rdma_min_image_bytes`); `run_group` sends
+        its prompts through it and drops it after the group's last `generate_fn` call."""
+        return RDMAImageFiles(
+            register_rdma_object=self._register_rdma_object,
+            min_bytes=self._rdma_min_image_bytes,
+        )
 
     async def setup_async(
         self,
@@ -369,8 +413,13 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
         """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
+    def __init__(
+        self,
+        config: Config,
+        *,
+        register_rdma_object: RegisterRDMAObject | None = None,
+    ) -> None:
+        super().__init__(config, register_rdma_object=register_rdma_object)
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
         self._renderer: Renderer
@@ -438,6 +487,8 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             group_size=group_size,
         )
 
+        # The siblings' prompts share the group's large image files.
+        image_files = self.rdma_image_files()
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
@@ -448,6 +499,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                         generate_fn=generate_fn,
                         release_session_fn=release_session_fn,
                         env=env,
+                        image_files=image_files,
                         # Offset the base seed per sample so a group's n=1
                         # requests are diverse yet reproducible run-to-run.
                         sampling=(
@@ -464,6 +516,9 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         finally:
             # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
+            # Every generate call has returned: `_run_single_rollout` catches its errors, and a
+            # cancelled gather cancels the calls first (a read rank 0 is still doing then fails).
+            await image_files.drop()
 
         # score
         outputs = await self.score_group(rollouts, sample)
@@ -484,6 +539,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         generate_fn: GenerateFn,
         release_session_fn: ReleaseSessionFn,
         env: TokenEnv,
+        image_files: RDMAImageFiles,
         sampling: SamplingConfig,
         group_id: int,
         rollout_id: int,
@@ -499,6 +555,8 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             release_session_fn: Async callable this rollout calls once after its last turn,
                 with its `routing_session_id`.
             env: The env for this rollout; `run_group` closes it.
+            image_files: The group's image files (`rdma_image_files`) that every prompt goes
+                through; `run_group` drops them.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
             rollout_id: Sibling index within the group; combined with the turn index into the
@@ -524,7 +582,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
 
                 # generator call
                 completion = await generate_fn(
-                    prompt=env_step.next_prompt,
+                    prompt=image_files.register(env_step.next_prompt),
                     request_id=turn_rollout_id.to_string(),
                     group_id=group_id,
                     routing_session_id=routing_session_id,

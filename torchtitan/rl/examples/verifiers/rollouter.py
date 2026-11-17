@@ -195,6 +195,10 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                 raise ValueError("renderer_multiplex must be positive")
             if self.connection_timeout_sec <= 0:
                 raise ValueError("connection_timeout_sec must be positive")
+            if self.rdma_min_image_bytes is not None:
+                raise ValueError(
+                    "rdma_min_image_bytes is set, but Verifiers prompts have no images"
+                )
 
     def __init__(self, config: Config, *, env_server_address: str) -> None:
         super().__init__(config)

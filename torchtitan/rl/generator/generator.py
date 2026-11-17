@@ -40,7 +40,8 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rollout.types import Completion, Prompt
+from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
+from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
@@ -383,7 +384,7 @@ class Generator(Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompt: Prompt,
+        prompt: RDMAPrompt,
         *,
         request_id: str,
         group_id: int,
@@ -402,7 +403,8 @@ class Generator(Configurable):
 
         Args:
             prompt: One prompt: its tokens and images, with their files' bytes (the engine
-                preprocesses the images).
+                preprocesses the images). Files the rollout worker kept (`RDMAImageFiles`) are
+                read from it first.
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
                 salt; `release_groups` drops it. Also sets the vLLM priority; see
@@ -414,7 +416,7 @@ class Generator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                Prompt(token_ids=[1, 2, 3]),
+                RDMAPrompt(Prompt(token_ids=[1, 2, 3])),
                 request_id="step=3/group=0/sample=0/turn=0",
                 group_id=0,
                 routing_session_id="group=0/rollout=0",
@@ -429,7 +431,7 @@ class Generator(Configurable):
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
-                prompt=prompt,
+                prompt=await prompt.read(),
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,

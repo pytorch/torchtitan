@@ -592,7 +592,7 @@ def test_generation_server_forwards_token_request() -> None:
         ):
             received.append(
                 {
-                    "prompt_token_ids": prompt.token_ids,
+                    "prompt_token_ids": prompt.prompt.token_ids,
                     "request_id": request_id,
                     "group_id": group_id,
                     "routing_session_id": routing_session_id,
@@ -800,7 +800,7 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
         prompt_lengths = []
 
         async def generate_fn(prompt, **kwargs):
-            prompt_lengths.append(len(prompt.token_ids))
+            prompt_lengths.append(len(prompt.prompt.token_ids))
             raise RuntimeError("generator reached")
 
         server = GenerationServer.Config(max_rollout_tokens=8).build()

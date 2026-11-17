@@ -17,6 +17,7 @@ from aiohttp import web
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
 from torchtitan.rl.rollout.types import GenerateFn, Prompt
 
 logger = logging.getLogger(__name__)
@@ -237,7 +238,7 @@ class GenerationServer(Configurable):
         # fails the generator, so the job exits 130 (https://github.com/meta-pytorch/monarch/issues/5301).
         try:
             completion = await self.generate_fn(
-                Prompt(token_ids=prompt_token_ids),
+                RDMAPrompt(Prompt(token_ids=prompt_token_ids)),
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=session_id,

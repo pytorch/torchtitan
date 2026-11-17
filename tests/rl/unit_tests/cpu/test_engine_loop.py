@@ -54,6 +54,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
+from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import (
@@ -886,7 +887,7 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
         waiting = asyncio.create_task(generator.wait_engine_loop())
         with pytest.raises(AssertionError, match="stop_token_ids must be set"):
             await generator.generate(
-                Prompt(token_ids=[1, 2]),
+                RDMAPrompt(Prompt(token_ids=[1, 2])),
                 request_id="r0",
                 group_id=4,
                 routing_session_id="s0",
@@ -895,7 +896,7 @@ def test_generate_endpoint_queues_a_request_with_the_default_sampling(
 
         completion = await asyncio.wait_for(
             generator.generate(
-                Prompt(token_ids=[1, 2, 3]),
+                RDMAPrompt(Prompt(token_ids=[1, 2, 3])),
                 request_id="r1",
                 group_id=4,
                 routing_session_id="s1",
