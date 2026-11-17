@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
@@ -24,7 +26,29 @@ class RLDataset(Configurable, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        @property
+        def paths_on_every_host(self) -> list[str]:
+            """Paths that this dataset's samples point at, e.g. an image dir.
+
+            A dataset whose samples point at files must override this. Most datasets read none.
+            Only the training dataset's paths are checked: each must exist on every rollout worker's
+            host by the time the workers start (`Rollouter.setup_async`).
+            """
+            return []
+
+
+def check_paths_exist_on_this_host(paths: list[str]) -> None:
+    """Raise if one of `paths` is missing on this host, naming the path and the host."""
+    for path in paths:
+        if not os.path.exists(path):
+            raise RuntimeError(
+                f"{os.path.abspath(path)} is missing on host {socket.gethostname()}. The "
+                "training dataset's samples point there (rollouter.training_dataloader.dataset). "
+                "Please make it available at this path on every host that runs rollout workers, "
+                "best in a shared folder, or keep every rollout worker on the controller's host: "
+                "set rollouter.worker_roles.generator=None and "
+                "rollouter.worker_roles.controller=True."
+            )
 
 
 class RolloutDataLoader(Stateful, ABC, Configurable):

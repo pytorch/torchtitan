@@ -11,6 +11,7 @@ import itertools
 import logging
 import math
 import random
+import socket
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -69,19 +70,15 @@ class RolloutWorkerRoles:
     roles counts once. Example job: t0 = trainer + controller (the controller runs on trainer host 0,
     as with `SlurmLauncher`), t1 = trainer, g0 and g1 = generators:
 
-        RolloutWorkerRoles(generator=True, controller=None)                  -> g0 g1
-        RolloutWorkerRoles(trainer=True, generator=True, controller=False)   -> t1 g0 g1
-        RolloutWorkerRoles(trainer=True, generator=True, controller=None)    -> t0 t1 g0 g1
-        RolloutWorkerRoles() (the default, controller=True)                  -> t0
-        RolloutWorkerRoles(generator=True) (controller stays True)           -> t0 g0 g1
+        RolloutWorkerRoles() (the default, generator=True)           -> g0 g1
+        RolloutWorkerRoles(trainer=True, controller=False)           -> t1 g0 g1
+        RolloutWorkerRoles(trainer=True)                             -> t0 t1 g0 g1
+        RolloutWorkerRoles(generator=None, controller=True)          -> t0
+        RolloutWorkerRoles(controller=True) (generator stays True)   -> t0 g0 g1
 
-    A role you don't set keeps its default, and `controller` defaults to True. Cases:
+    A role you don't set keeps its default, and `generator` defaults to True. Cases:
 
-        generator=True              adds the generator hosts to the controller's host
-        controller=None             the controller's role adds no host
-        controller=False            the controller's host runs no workers, even when another True
-                                    role includes it
-        the controller's host only  leave `generator` at None: `generator=False` vetoes the
+        the controller's host only  set `generator` to None: `generator=False` vetoes the
                                     controller's host when it is also a generator host, e.g. a
                                     one-host job from a launcher
         no launcher                 the workers run on this host, whatever the roles
@@ -90,10 +87,10 @@ class RolloutWorkerRoles:
     trainer: bool | None = None
     """The trainer's hosts."""
 
-    generator: bool | None = None
+    generator: bool | None = True
     """The generators' hosts."""
 
-    controller: bool | None = True
+    controller: bool | None = None
     """The controller's own machine (`this_host()`). When the launcher runs the controller on
     trainer host 0 (`MonarchLauncher.controller_on_first_trainer_host`), that host has the
     trainer's role too."""
@@ -264,12 +261,18 @@ class Rollouter(Configurable):
             ),
             worker_roles=self._config.worker_roles,
         )
+        # Each worker checks these on its host. The validation dataset isn't checked: it is built only
+        # at validation, after the workers start, and may be downloaded then.
+        paths_on_every_host = (
+            self._config.training_dataloader.dataset.paths_on_every_host
+        )
         await asyncio.gather(
             *(
                 host_workers.setup_async.call(
                     tokenizer_config=tokenizer_config,
                     renderer_config=renderer_config,
                     hf_assets_path=hf_assets_path,
+                    paths_on_every_host=paths_on_every_host,
                     vision_processor_config=vision_processor_config,
                 )
                 for host_workers in self._workers.by_host
@@ -416,7 +419,7 @@ def log_failed_rollout(rollout: Rollout) -> None:
 
     Example:
         "rollout group=3/rollout=1 failed: ERROR_TIMEOUT | TimeoutError: MessageEnv.step timed out
-        after 1800.0s"
+        after 1800.0s | host=gpu-host-7"
     """
     if not rollout.status.is_error():
         return
@@ -437,6 +440,9 @@ def log_failed_rollout(rollout: Rollout) -> None:
     other_logs = {key: value for key, value in rollout.logs.items() if key != "errors"}
     if other_logs:
         parts.append(" ".join(f"{key}={value}" for key, value in other_logs.items()))
+
+    # Rollout workers can run on any host of the job: name it.
+    parts.append(f"host={socket.gethostname()}")
 
     logger.warning(" | ".join(parts))
 

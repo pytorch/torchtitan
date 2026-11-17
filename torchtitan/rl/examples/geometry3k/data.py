@@ -73,6 +73,11 @@ class Geometry3kDataset(RLDataset):
 
         seed: int = 0
 
+        @property
+        def paths_on_every_host(self) -> list[str]:
+            # The dataset writes its images here when it is built, before the workers start.
+            return [self.image_dir]
+
     def __init__(self, config: Config) -> None:
         rows = datasets.load_dataset(config.path, split=config.split).cast_column(
             "images", datasets.Sequence(datasets.Image(decode=False))
