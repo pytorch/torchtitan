@@ -23,9 +23,11 @@ count of a token dispatcher) are keyed by the submodule's code and their
 description instead (plus the torch build and system, which the AOTAutograd key
 also covers), with the symbols renamed ``N0``, ``N1``, ... in order of first
 appearance: the AOTAutograd key would include the enclosing graph's symbol
-names, which differ at every call site. Both keys change with the torch build,
-so kernels are re-checked after every torch change. Neither key depends on the
-device index, so every rank finds the same kernels. ``<l2>.py`` is written
+names, which differ at every call site. Either form of the level-2 key changes
+with the torch build, so kernels are re-checked after every torch change; the
+level-1 key does not, so the new specialization is written next to the old
+kernel. Neither level depends on the device index, so every rank finds the
+same kernels. ``<l2>.py`` is written
 when a specialization is first seen::
 
     SPEC = json.loads(r\"\"\"
