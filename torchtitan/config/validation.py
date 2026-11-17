@@ -49,26 +49,19 @@ def _collect_model_layouts(
             (f"state_shardings[{key}]", layout)
             for key, layout in sharding.state_shardings.items()
         ]
-        if sharding.in_src_shardings is not None:
+        if sharding.input_shardings is not None:
             fields.extend(
-                (f"in_src_shardings[{key}]", layout)
-                for key, layout in sharding.in_src_shardings.items()
+                (f"input_shardings[{key}]", layout)
+                for key, layout in sharding.input_shardings.items()
             )
-        if sharding.in_dst_shardings is not None:
+        output = sharding.output_shardings
+        if output is not None:
             fields.extend(
-                (f"in_dst_shardings[{key}]", layout)
-                for key, layout in sharding.in_dst_shardings.items()
-            )
-        out_src = sharding.out_src_shardings
-        if out_src is not None:
-            fields.extend(
-                (f"out_src_shardings[{i}]", layout)
+                (f"output_shardings[{i}]", layout)
                 for i, layout in enumerate(
-                    out_src if isinstance(out_src, tuple) else (out_src,)
+                    output if isinstance(output, tuple) else (output,)
                 )
             )
-        if sharding.out_dst_shardings is not None:
-            fields.append(("out_dst_shardings", sharding.out_dst_shardings))
         for field, layout in fields:
             layouts.append((fqn, field, set(spmd_axes(layout))))
     return layouts
@@ -83,12 +76,15 @@ def _validate_declared_parallel_axes(
     that never mentions an axis is replicated over that axis, so a model
     that is only partly sharded must not pass.
 
-    Dense and sparse layouts get different treatment. Layouts on
-    ``routed_experts`` submodules (``w13``, ``w2``, postprocess, and
-    Dist-MoE children) live in the sparse ``{dp_replicate, edp_shard, ep}``
-    region. Activation contracts on the ``routed_experts`` container and all
-    other modules use the dense ``{dp, cp, tp}`` mesh. For each enabled
-    degree in that region, every layout must name the axis explicitly.
+    Dense and sparse layouts get different treatment. When
+    ``expert_parallel_degree > 1``, layouts on ``routed_experts``
+    submodules (``w13``, ``w2``, postprocess, and Dist-MoE children)
+    live in the sparse ``{dp_replicate, edp_shard, ep}`` region.
+    When EP is off, those weights use the dense mesh, so they are
+    checked as dense layouts. Activation contracts on the
+    ``routed_experts`` container and all other modules always use the
+    dense ``{dp, cp, tp}`` mesh. For each enabled degree in that
+    region, every layout must name the axis explicitly.
 
     A config built with ``expert_parallel_degree == 1`` gets dense expert
     weight placements, so validating it at ``expert_parallel_degree > 1``
@@ -130,7 +126,7 @@ def _validate_declared_parallel_axes(
             sparse_required.append(A.DP_REPLICATE)
 
     for fqn, field, axes in _collect_model_layouts(model):
-        if fqn.startswith(sparse_prefixes):
+        if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
             required = sparse_required
         else:
             required = dense_required

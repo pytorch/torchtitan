@@ -205,6 +205,46 @@ def test_ep_off_built_moe_rejects_ep_gt1() -> None:
         )
 
 
+def test_ep_off_routed_experts_checked_as_dense() -> None:
+    # When EP is off, routed-expert weights live on the dense mesh, so a
+    # layout under <moe>.routed_experts. that omits an active dense axis
+    # must raise (the same silently-replicated gap this check closes
+    # everywhere else).
+    import spmd_types as spmd
+
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+    from torchtitan.models.base.module import Module
+    from torchtitan.models.common.moe import MoE
+
+    config = deepseek_v3_debugmodel()
+    patched = False
+    for _, moe_cfg, _, _ in config.model.traverse(MoE.Config):
+        for _, rcfg, _, _ in moe_cfg.routed_experts.traverse(
+            Module.Config, recurse=True
+        ):
+            sharding = rcfg.sharding_config
+            if sharding is None or "weight" not in sharding.state_shardings:
+                continue
+            sharding.state_shardings["weight"] = spmd.SpmdType(
+                {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+                partition_spec=spmd.PartitionSpec(None, None),
+            )
+            patched = True
+            break
+        if patched:
+            break
+    assert patched
+    with pytest.raises(ValueError, match="declares no 'tp' sharding"):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(tensor_parallel_degree=2),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+
 def test_flux_pipeline_parallel_degree_gt1_raises() -> None:
     config = flux_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
