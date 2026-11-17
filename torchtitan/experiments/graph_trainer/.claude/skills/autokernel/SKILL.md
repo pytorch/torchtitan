@@ -33,15 +33,19 @@ When the problems come from a GraphTrainer `cache_dir` (written by
      semantics. Problems under one `pat_<l1>/` share the computation's structure
      but may differ in shapes, dtypes and constants, so a kernel written for
      another problem is a starting point that must pass the gate on this one.
+     The level-2 key changes with the torch build and the level-1 key does not,
+     so a `run = reference` file next to a promoted one is often the same region
+     under a newer torch build: start from that kernel.
    - `run(*args)` is the entrypoint the training run calls; the kernel does not
      receive the reference. While the file says `run = reference`, it has no
      kernel and the target is `reference`; otherwise `run` is the current best
      implementation to beat. The kernel goes into `impl` (and any helpers), and
      `run = impl` makes it the entrypoint.
-   - The file is executed as a standalone module, so it must be self-contained
-     with no relative imports. A candidate is a full copy of the problem file:
-     the generated `SPEC` block and `reference` function unchanged, `impl`
-     written, and `run = impl`.
+   - The file is loaded from a copy outside `cache_dir`, so it must be
+     self-contained: no relative imports, no helper files next to it and no
+     paths relative to `__file__`. A candidate is a full copy of the problem
+     file: the generated `SPEC` block and `reference` function unchanged,
+     `impl` written, and `run = impl`.
    - Never modify `SPEC` or `reference`. Writers, reviewers and verifiers work
      only in the run directory.
 3. **Every claimed win gets a newly spawned verifier.** Each time a writer or
