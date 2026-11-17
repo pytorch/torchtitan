@@ -276,11 +276,16 @@ class _DecoderBody(Module):
             padding_mask = F.pad(
                 forward_batch.out_cache_loc == 0, (0, num_padding), value=True
             )
-            # Every EP rank passes the same count, and the MoE splits a step's tokens
-            # evenly over TP. Under attention DP the EP group spans the DP ranks, so
-            # the count is the largest DP rank's step (SGLang's global_num_tokens,
-            # set at capture too); otherwise the EP group is the TP group, which
-            # shares the step. The count is fixed per captured graph.
+            # Dist-MoE needs the same per-call token count on every EP rank, and the
+            # MoE splits a step's tokens evenly over TP, so the count is the step's
+            # token count over TP:
+            # - DP = 1: the EP group is the TP group, whose ranks all run this
+            #   batch, so this rank's padded token count is every rank's.
+            # - DP > 1 (SGLang's attention DP): the EP group spans the DP ranks,
+            #   which run batches of different sizes, so every rank uses the
+            #   largest DP rank's token count (SGLang's global_num_tokens). Dist-MoE
+            #   routes a smaller rank's missing rows to no expert.
+            # CUDA graph capture runs this too, so the count is fixed per graph.
             tp = self._parallelism_context.tp
             dp_num_tokens = forward_batch.global_num_tokens_cpu
             step_num_tokens = (
