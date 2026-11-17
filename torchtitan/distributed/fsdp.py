@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from functools import partial
 from typing import Any, cast, NamedTuple, TYPE_CHECKING
 
 import torch
@@ -24,7 +25,6 @@ from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymm
 from torchtitan.distributed.flex_shard_fsdp import (
     record_buckets,
     record_grad_norm_mesh,
-    record_param_layouts,
     reshard_flex_shard,
 )
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
@@ -487,7 +487,9 @@ def _apply_flex_shard(
     setting, and a root bucket takes the parameters left over, as
     ``fully_shard(model)`` does. Gradients are summed over ``dp_mesh`` without
     division, as ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets'
-    collectives then match FSDP2's byte for byte.
+    collectives then match FSDP2's byte for byte. Each sharded parameter's
+    ``param_init`` function is wrapped with flex_shard's ``init_from_full``, so
+    the shards start as one device's initialization.
 
     With expert parallelism, ``edp_mesh`` is the sparse mesh, with the
     ``edp_shard`` and ``ep`` axes. ``fully_shard`` splits an MoE block into one
@@ -500,7 +502,9 @@ def _apply_flex_shard(
     from flex_shard import (
         BucketSpec,
         flex_shard,
+        get_flex_shard_global_layouts,
         GlobalLayout,
+        init_from_full,
         MixedPrecisionPolicy,
         set_global_layout,
     )
@@ -520,8 +524,9 @@ def _apply_flex_shard(
         # mesh, and raises if its layout differs.
         record_grad_norm_mesh(expert_mesh, edp_mesh._flatten("loss_mesh"))
         # EP has split each routed-expert parameter's dim 0, the experts, over
-        # ep. Declaring this rank's part makes the layouts that init_param uses
-        # cover all experts, so each shard is its slice of one device's init.
+        # ep. Declaring this rank's part makes the layouts that the wrapped
+        # param_init functions use cover all experts, so each shard is its slice
+        # of one device's init, which briefly holds the parameter with all experts.
         ep, ep_rank = edp_mesh["ep"].size(), edp_mesh["ep"].get_local_rank()
         for group in groups:
             if group.routed_experts is None:
@@ -611,7 +616,24 @@ def _apply_flex_shard(
         buckets.append(bucket(root_fqns, reshard_after_forward=False))
 
     flex_shard_module = flex_shard(model, buckets=buckets)
-    record_param_layouts(model)
+    # FlexShard parameters are plain local shards. Wrap each one's param_init
+    # function so that it fills the full parameter and the shard keeps its part:
+    # one device's initialization, whatever the sharding. to_empty() replaces
+    # the parameters but keeps the modules, so the wrapped functions survive it.
+    # validate_flex_shard_training rejects modules without param_init, whose
+    # reset_parameters() would bypass this.
+    for fqn, layout in get_flex_shard_global_layouts(model).items():
+        module_fqn, _, name = fqn.rpartition(".")
+        module = model.get_submodule(module_fqn)
+        assert isinstance(module, Module) and module._param_init is not None, fqn
+        if name in module._param_init:
+            # A new dict: modules built from one Config share its param_init.
+            module._param_init = {
+                **module._param_init,
+                name: partial(
+                    init_from_full, layout=layout, init_fn=module._param_init[name]
+                ),
+            }
     # Every bucket holds parameters, so there is one storage per bucket.
     assert len(flex_shard_module.sharded_bucket_storages) == len(buckets)
     storages = iter(flex_shard_module.sharded_bucket_storages)
@@ -647,6 +669,146 @@ def _apply_flex_shard(
             # In backward, FSDP2 prefetches a module's groups in reverse.
             following[0].set_buckets_to_backward_prefetch(current[::-1])
     logger.info("Applied FlexShard to the model")
+
+
+def _apply_fsdp2(
+    model: "Decoder",
+    dp_mesh: DeviceMesh,
+    embedding: _FSDPGroup | None,
+    head: _FSDPGroup | None,
+    blocks: list[_FSDPGroup],
+    *,
+    param_dtype: torch.dtype,
+    reduce_dtype: torch.dtype,
+    cpu_offload: bool,
+    ep_degree: int,
+    edp_mesh: DeviceMesh | None,
+    dp_mesh_dims: "DataParallelMeshDims | None",
+    edp_mesh_dims: "DataParallelMeshDims | None",
+    symm_mem_scope: FSDPSymmMemScope,
+    unshard_in_current_stream: bool,
+) -> None:
+    """Shard ``model`` with FSDP2's ``fully_shard``: each of the decoder's
+    groups, then the root for any leftover parameters. ``apply_fsdp_to_decoder``
+    documents the arguments."""
+    mp_policy = mixed_precision_policy(
+        model,
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cast_forward_inputs=False,
+    )
+    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+    if dp_mesh_dims is not None:
+        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+    if cpu_offload:
+        fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+    if embedding is not None:
+        fully_shard(
+            embedding.modules,
+            **fsdp_config,
+            reshard_after_forward=embedding.reshard_after_forward,
+        )
+        # Embedding backward needs only grad_output and the token indices,
+        # not the weight, so skip the backward all-gather. The flag covers
+        # the whole FSDP unit, so only set it when the unit holds nothing
+        # but embedding weights (e.g. a learned norm weight inside
+        # tok_embeddings would be read after being freed).
+        if not model.enable_weight_tying and _fsdp_unit_holds_only_embedding_weights(
+            cast(FSDPModule, model.tok_embeddings), model
+        ):
+            model.tok_embeddings.set_unshard_in_backward(False)
+    if head is not None:
+        fully_shard(
+            head.modules,
+            **fsdp_config,
+            reshard_after_forward=head.reshard_after_forward,
+        )
+
+    for block in blocks:
+        if ep_degree == 1 or block.routed_experts is None:
+            # dict.get returns None for parameters that use the default
+            # Shard(0), matching shard_placement_fn's contract.
+            fully_shard(
+                block.modules,
+                **fsdp_config,
+                reshard_after_forward=block.reshard_after_forward,
+                shard_placement_fn=block.placements.get,
+            )
+        else:
+            # With EP > 1, routed-expert parameters use edp_mesh, while other
+            # parameters use dp_mesh: a mesh per parameter.
+            from torch.distributed.fsdp._fully_shard._fsdp_common import (
+                FSDPMeshInfo,
+                ShardPlacementResult,
+            )
+            from torch.distributed.fsdp._fully_shard._fsdp_init import _get_mesh_info
+
+            assert edp_mesh is not None
+
+            # Delegate to FSDP2's mesh-info builder. When mesh_dims is set
+            # it extracts and FLATTENS the DP submesh from the full SPMD
+            # mesh.
+            edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
+            dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
+            # _get_mesh_info is typed to the DataParallelMeshInfo base; with
+            # a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
+            assert isinstance(edp_mesh_info, FSDPMeshInfo)
+            assert isinstance(dp_mesh_info, FSDPMeshInfo)
+
+            expert_params = set(block.routed_experts.parameters())
+
+            def _shard_placement_fn(
+                param: nn.Parameter,
+                _placements: dict[nn.Parameter, Shard] = block.placements,
+                _expert_params: set[nn.Parameter] = expert_params,
+                _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
+                _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
+            ) -> ShardPlacementResult:
+                return ShardPlacementResult(
+                    placement=_placements.get(param, Shard(0)),
+                    mesh_info=(
+                        _edp_mesh_info if param in _expert_params else _dp_mesh_info
+                    ),
+                )
+
+            fully_shard(
+                block.modules,
+                **fsdp_config,
+                reshard_after_forward=block.reshard_after_forward,
+                shard_placement_fn=_shard_placement_fn,
+            )
+
+    fully_shard(model, **fsdp_config)
+
+    enable_fsdp_symm_mem(model, symm_mem_scope)
+
+    # Disable FSDP's automatic gradient division for all FSDP modules
+    disable_fsdp_gradient_division(model)
+
+    # HSDP when the data-parallel mesh carries a replicate axis, else pure FSDP.
+    if "dp_replicate" in (dp_mesh.mesh_dim_names or ()):
+        logger.info("Applied HSDP to the model")
+    else:
+        logger.info("Applied FSDP to the model")
+    if cpu_offload:
+        logger.info("Applied CPU Offloading to the model")
+
+    # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
+    # in EP could interfere with implicit prefetching in FSDP, and when
+    # unsharding in the current stream, as all-gathers issued on the compute
+    # stream only overlap with compute if they are issued ahead of time
+    if ep_degree == 1 and not unshard_in_current_stream:
+        return
+
+    fsdp_modules = [cast(FSDPModule, m) for m in _decoder_prefetch_order(model)]
+    for module, next_module in zip(fsdp_modules, fsdp_modules[1:]):
+        module.set_modules_to_forward_prefetch([next_module])
+        next_module.set_modules_to_backward_prefetch([module])
+
+    if unshard_in_current_stream:
+        assert isinstance(model, FSDPModule)
+        model.set_unshard_in_current_stream(True)
 
 
 def apply_fsdp_to_decoder(
@@ -731,123 +893,20 @@ def apply_fsdp_to_decoder(
             reduce_dtype=reduce_dtype,
             edp_mesh=edp_mesh if ep_degree > 1 else None,
         )
-        return
-
-    mp_policy = mixed_precision_policy(
-        model,
-        param_dtype=param_dtype,
-        reduce_dtype=reduce_dtype,
-        cast_forward_inputs=False,
-    )
-    fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
-    if dp_mesh_dims is not None:
-        fsdp_config["dp_mesh_dims"] = dp_mesh_dims
-    if cpu_offload:
-        fsdp_config["offload_policy"] = CPUOffloadPolicy()
-
-    if embedding is not None:
-        fully_shard(
-            embedding.modules,
-            **fsdp_config,
-            reshard_after_forward=embedding.reshard_after_forward,
-        )
-        # Embedding backward needs only grad_output and the token indices,
-        # not the weight, so skip the backward all-gather. The flag covers
-        # the whole FSDP unit, so only set it when the unit holds nothing
-        # but embedding weights (e.g. a learned norm weight inside
-        # tok_embeddings would be read after being freed).
-        if not model.enable_weight_tying and _fsdp_unit_holds_only_embedding_weights(
-            cast(FSDPModule, model.tok_embeddings), model
-        ):
-            model.tok_embeddings.set_unshard_in_backward(False)
-    if head is not None:
-        fully_shard(
-            head.modules,
-            **fsdp_config,
-            reshard_after_forward=head.reshard_after_forward,
-        )
-
-    for block in blocks:
-        if ep_degree == 1 or block.routed_experts is None:
-            # dict.get returns None for parameters that use the default
-            # Shard(0), matching shard_placement_fn's contract.
-            fully_shard(
-                block.modules,
-                **fsdp_config,
-                reshard_after_forward=block.reshard_after_forward,
-                shard_placement_fn=block.placements.get,
-            )
-            continue
-        # With EP > 1, routed-expert parameters use edp_mesh, while other
-        # parameters use dp_mesh: a mesh per parameter.
-        from torch.distributed.fsdp._fully_shard._fsdp_common import (
-            FSDPMeshInfo,
-            ShardPlacementResult,
-        )
-        from torch.distributed.fsdp._fully_shard._fsdp_init import _get_mesh_info
-
-        assert edp_mesh is not None
-
-        # Delegate to FSDP2's mesh-info builder. When mesh_dims is set
-        # it extracts and FLATTENS the DP submesh from the full SPMD
-        # mesh.
-        edp_mesh_info = _get_mesh_info(edp_mesh, edp_mesh_dims)
-        dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
-        # _get_mesh_info is typed to the DataParallelMeshInfo base; with
-        # a shard dim it always yields FSDPMeshInfo/HSDPMeshInfo.
-        assert isinstance(edp_mesh_info, FSDPMeshInfo)
-        assert isinstance(dp_mesh_info, FSDPMeshInfo)
-
-        expert_params = set(block.routed_experts.parameters())
-
-        def _shard_placement_fn(
-            param: nn.Parameter,
-            _placements: dict[nn.Parameter, Shard] = block.placements,
-            _expert_params: set[nn.Parameter] = expert_params,
-            _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
-            _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
-        ) -> ShardPlacementResult:
-            return ShardPlacementResult(
-                placement=_placements.get(param, Shard(0)),
-                mesh_info=(
-                    _edp_mesh_info if param in _expert_params else _dp_mesh_info
-                ),
-            )
-
-        fully_shard(
-            block.modules,
-            **fsdp_config,
-            reshard_after_forward=block.reshard_after_forward,
-            shard_placement_fn=_shard_placement_fn,
-        )
-
-    fully_shard(model, **fsdp_config)
-
-    enable_fsdp_symm_mem(model, symm_mem_scope)
-
-    # Disable FSDP's automatic gradient division for all FSDP modules
-    disable_fsdp_gradient_division(model)
-
-    # HSDP when the data-parallel mesh carries a replicate axis, else pure FSDP.
-    if "dp_replicate" in (dp_mesh.mesh_dim_names or ()):
-        logger.info("Applied HSDP to the model")
     else:
-        logger.info("Applied FSDP to the model")
-    if cpu_offload:
-        logger.info("Applied CPU Offloading to the model")
-
-    # NOTE: set up explicit prefetching when EP is enabled, as D2H syncs
-    # in EP could interfere with implicit prefetching in FSDP, and when
-    # unsharding in the current stream, as all-gathers issued on the compute
-    # stream only overlap with compute if they are issued ahead of time
-    if ep_degree == 1 and not unshard_in_current_stream:
-        return
-
-    fsdp_modules = [cast(FSDPModule, m) for m in _decoder_prefetch_order(model)]
-    for module, next_module in zip(fsdp_modules, fsdp_modules[1:]):
-        module.set_modules_to_forward_prefetch([next_module])
-        next_module.set_modules_to_backward_prefetch([module])
-
-    if unshard_in_current_stream:
-        assert isinstance(model, FSDPModule)
-        model.set_unshard_in_current_stream(True)
+        _apply_fsdp2(
+            model,
+            dp_mesh,
+            embedding,
+            head,
+            blocks,
+            param_dtype=param_dtype,
+            reduce_dtype=reduce_dtype,
+            cpu_offload=cpu_offload,
+            ep_degree=ep_degree,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=symm_mem_scope,
+            unshard_in_current_stream=unshard_in_current_stream,
+        )
