@@ -39,6 +39,7 @@ from torch_checkpointing.hf.metadata import (
 )
 from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
+from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.checkpointer import (
     CheckpointManager,
@@ -57,6 +58,7 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
 from torchtitan.config import CallableFunction
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 
 
 class _BackendManager:
@@ -1013,6 +1015,91 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 manager.close()
 
             torch.testing.assert_close(model.weight.detach(), expected_weight)
+
+    def test_quantized_fsdp_weights_round_trip_through_a_real_backend(self) -> None:
+        """Each storage-free quantized FSDP weight loads and saves its own value."""
+
+        class _Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                for name in ("w0", "w1"):
+                    weight = _ShardedFSDPTensor(torch.zeros(2, 2))
+                    self.register_parameter(
+                        name, nn.Parameter(weight, requires_grad=False)
+                    )
+
+        class _IdentityAdapter:
+            fqn_to_index_mapping = None
+
+            def __init__(self, hf_assets_path: str) -> None:
+                self.hf_assets_path = hf_assets_path
+
+            def to_hf(self, state_dict):
+                return dict(state_dict)
+
+            def from_hf(self, state_dict):
+                return dict(state_dict)
+
+        def build_manager(model: nn.Module, base_folder: str, hf_checkpoint_id: str):
+            config = TorchCheckpointingManager.Config(
+                interval=1,
+                keep_latest_k=0,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+            )
+            return config.build(
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                extra_states={"train_state": _Stateful("train")},
+                sd_adapter=_IdentityAdapter(hf_assets_path=hf_checkpoint_id),
+                base_folder=base_folder,
+                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
+            )
+
+        expected = {
+            "w0": torch.arange(4, dtype=torch.float32).reshape(2, 2),
+            "w1": torch.arange(4, 8, dtype=torch.float32).reshape(2, 2),
+        }
+        # Keep the async save, whose staging copy is what a wrapper breaks, but
+        # drop the barrier and pinned memory so it needs no process group or GPU.
+        async_save_config = AsyncCheckpointSaverConfig(
+            writer_config=manager_module._writer_config(use_barrier=False),
+            staging_config=CheckpointStagerConfig(use_pinned_memory=False),
+        )
+        with tempfile.TemporaryDirectory() as base_folder, mock.patch.object(
+            manager_module, "_async_save_config", lambda: async_save_config
+        ):
+            hf_checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(hf_checkpoint_id)
+            shard = "model-00001-of-00001.safetensors"
+            save_file(expected, os.path.join(hf_checkpoint_id, shard))
+            with open(
+                os.path.join(hf_checkpoint_id, "model.safetensors.index.json"), "w"
+            ) as f:
+                json.dump({"weight_map": {key: shard for key in expected}}, f)
+
+            # No native checkpoint yet: load from the HF export, then save step 1.
+            model = _Model()
+            manager = build_manager(model, base_folder, hf_checkpoint_id)
+            try:
+                self.assertTrue(manager.load())
+                for name, value in expected.items():
+                    torch.testing.assert_close(getattr(model, name)._tensor, value)
+                self.assertTrue(manager.save(curr_step=1))
+            finally:
+                manager.close()
+
+            # Resume from the native step-1 checkpoint into a fresh model.
+            model = _Model()
+            manager = build_manager(model, base_folder, hf_checkpoint_id)
+            try:
+                self.assertTrue(manager.load())
+            finally:
+                manager.close()
+            for name, value in expected.items():
+                torch.testing.assert_close(getattr(model, name)._tensor, value)
 
     def test_hf_load_leaves_parameters_the_export_does_not_carry(self) -> None:
         """A LoRA model loads its base weights from an HF export of the base model."""
