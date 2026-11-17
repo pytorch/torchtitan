@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import json
 import logging
 import os
 import time
@@ -166,6 +167,31 @@ class SGLangEngine(GenerationEngine):
                     "extra_server_args cannot set ServerArgs that TorchTitan controls: "
                     f"{owned_keys}"
                 )
+            # A HiCache storage backend (L3) outlives a run and a new run's policy
+            # versions (the cache salts) restart at 0, so a run could read KV that
+            # another run's weights computed. Only Mooncake has a verified key
+            # prefix that scopes keys to a run (extra_backend_tag).
+            storage_backend = self.extra_server_args.get("hicache_storage_backend")
+            if storage_backend not in (None, "mooncake"):
+                raise ValueError(
+                    "TorchTitan allows only the 'mooncake' HiCache storage backend "
+                    f"(SGLang supports more), got {storage_backend!r}: only Mooncake "
+                    "has a verified key prefix that scopes keys to a run "
+                    "(extra_backend_tag), and without one a run could read KV that "
+                    "another run's weights computed"
+                )
+            if storage_backend == "mooncake":
+                extra_config = json.loads(
+                    self.extra_server_args.get("hicache_storage_backend_extra_config")
+                    or "{}"
+                )
+                if not extra_config.get("extra_backend_tag"):
+                    raise ValueError(
+                        "The Mooncake HiCache storage backend needs an "
+                        "'extra_backend_tag' (the Store key prefix that scopes keys "
+                        "to a run) in hicache_storage_backend_extra_config (a JSON "
+                        "string)"
+                    )
 
     def __init__(
         self,
@@ -204,6 +230,21 @@ class SGLangEngine(GenerationEngine):
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        # Reset mode clears KV at each weight load instead of salting requests by
+        # policy version, but SGLang's KV reset (flush_cache) clears GPU and host
+        # memory, not the storage backend: unsalted requests would read KV that
+        # earlier weights computed.
+        # TODO(https://github.com/pytorch/torchtitan/pull/5953): drop with the
+        # reset mode.
+        if (
+            config.extra_server_args.get("hicache_storage_backend") is not None
+            and reset_kv_cache_on_model_state_dict_load
+        ):
+            raise ValueError(
+                "A HiCache storage backend requires "
+                "reset_kv_cache_on_model_state_dict_load=False: SGLang's KV reset "
+                "does not clear the storage backend"
+            )
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
             isinstance(layer.attention, KDA.Config) for layer in model.layers
         ):
