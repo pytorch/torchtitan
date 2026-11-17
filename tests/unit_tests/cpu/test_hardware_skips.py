@@ -11,7 +11,7 @@ import importlib.metadata
 
 import pytest
 
-from tests.integration_tests import IntegrationTestDefinition, hardware_skips
+from tests.integration_tests import hardware_skips, IntegrationTestDefinition
 from tests.integration_tests.hardware_skips import HardwareSkipTestCases
 from tests.integration_tests.run_tests import _filter_tests
 
@@ -119,8 +119,7 @@ def test_entry_point_registration(monkeypatch, tmp_path) -> None:
     )
     hardware_skips._load()
     assert any(
-        testcases.skip_hardware == "cuda"
-        and "entry_case" in testcases.tests
+        testcases.skip_hardware == "cuda" and "entry_case" in testcases.tests
         for testcases in hardware_skips._TESTCASES_TO_SKIP
     )
 

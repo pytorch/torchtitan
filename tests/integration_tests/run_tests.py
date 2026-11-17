@@ -27,9 +27,7 @@ from tests.integration_tests import (
     SELF_LAUNCHING_ENTRYPOINTS,
     validate_fake_pg_compatibility,
 )
-from tests.integration_tests.hardware_skips import (
-    get_tests_to_skip_on_current_hardware,
-)
+from tests.integration_tests.hardware_skips import get_tests_to_skip_on_current_hardware
 
 
 logger = logging.getLogger(__name__)
