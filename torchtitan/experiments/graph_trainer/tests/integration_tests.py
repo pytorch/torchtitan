@@ -7,8 +7,10 @@
 import argparse
 import dataclasses
 import os
+from pathlib import Path
 
 from tests.integration_tests import IntegrationTestDefinition
+from tests.integration_tests.hardware_skips import register_hardware_skips
 from tests.integration_tests.run_tests import run_tests
 from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
 
@@ -329,10 +331,10 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             test_descr="GraphTrainer SDC replay",
             test_name="sdc_replay",
             ngpu=1,
-            skip_rocm_test=True,
         ),
         # === GraphRuntime tests ===
-        # Note: aot_fx_trace applies CUDA graph by default, so skip_rocm_test=True.
+        # Note: aot_fx_trace applies CUDA graph by default; the ROCm skip lives
+        # in hardware_skips/skipped_tests.toml.
         #
         # Disable cuda_graph: replaying coalesced FSDP collectives with CP fails
         # with "CUDA error: invalid argument".
@@ -341,7 +343,6 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             test_descr="aot_fx_trace llama3 FSDP+TP+CP",
             test_name="aot_fx_trace_llama3_fsdp_tp_cp",
             ngpu=8,
-            skip_rocm_test=True,
             disabled=_FLEX_CP_INDUCTOR_DISABLED,
         ),
         # async_tp test lives in graph_trainer_h100 suite (needs NVLink).
@@ -356,14 +357,12 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             test_descr="aot_fx_trace llama3 SPMD gradient accumulation",
             test_name="aot_fx_trace_llama3_spmd_gradient_accumulation",
             ngpu=1,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_ga_per_microbatch_fsdp_collectives],
             test_descr="aot_fx_trace llama3 GA with per-microbatch FSDP collectives",
             test_name="aot_fx_trace_llama3_ga_per_microbatch_fsdp_collectives",
             ngpu=4,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_ga_first_unshard_last_reduce_fsdp_collectives],
@@ -373,14 +372,12 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             ),
             test_name="aot_fx_trace_llama3_ga_first_unshard_last_reduce_fsdp",
             ngpu=4,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_fsdp_tp_sac_and_offload],
             test_descr="aot_fx_trace llama3 FSDP+TP+sac_and_offload",
             test_name="aot_fx_trace_llama3_fsdp_tp_sac_and_offload",
             ngpu=8,
-            skip_rocm_test=True,
             # GraphRuntime must preserve offload/reload pairs when it
             # extracts scheduled graph callables.
             disabled=True,
@@ -625,7 +622,6 @@ def _build_async_tp_tests() -> list[IntegrationTestDefinition]:
             test_descr="aot_fx_trace llama3 FSDP+TP+async_tp",
             test_name="aot_fx_trace_llama3_fsdp_tp_asynctp",
             ngpu=8,
-            skip_rocm_test=True,
             # TODO: Disabled — async_tp (micro_pipeline_tp) fails with an
             # inductor stride mismatch: assert_size_stride on the fused
             # collective-matmul input expects a different stride than produced
@@ -754,6 +750,9 @@ def main():
         raise RuntimeError("Please provide an empty output directory.")
 
     test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
+    register_hardware_skips(
+        Path(__file__).parent / "hardware_skips" / "skipped_tests.toml"
+    )
     run_tests(args, test_list)
 
 
