@@ -16,6 +16,8 @@ import logging
 import time
 
 import torch
+from autoparallel import ForwardInputs, UNCONSTRAINED
+from torch._functorch._aot_autograd.fx_utils import get_plain_input_and_grad_nodes
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Replicate, Shard
 
@@ -24,10 +26,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
-from torchtitan.experiments.graph_trainer.autoparallel_api import (
-    AutoParallelGraph,
-    AutoParallelModelOutput,
-)
+from torchtitan.experiments.graph_trainer.autoparallel_api import AutoParallelGraph
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.tools.utils import device_type
@@ -46,11 +45,13 @@ def parallelize_autoparallel_llama(
     compile_config: GraphTrainerCompileConfig,
     activation_remat: ActivationRematConfig | None,
     dump_folder: str,
+    max_num_documents: int | None = None,
 ):
     """Apply AutoParallelGraph SPMD sharding to Llama3.
 
-    Returns a sharded model carrying AutoParallel train-step metadata for
-    graph_trainer's aot_fx_trace path.
+    Trace the same named inputs and fixed-capacity metadata as the dataloader.
+    Metadata-backed models currently require data parallel degree one because
+    sharding packed-document offsets is not supported by this adapter.
     """
     if parallelism_context.dp_replicate_enabled:
         raise ValueError("AutoParallel Llama3 does not support DDP yet")
@@ -58,6 +59,11 @@ def parallelize_autoparallel_llama(
         raise ValueError("AutoParallel Llama3 does not support CP yet")
     if parallelism_context.pp_enabled:
         raise ValueError("AutoParallel Llama3 does not support PP yet")
+    if max_num_documents is None:
+        raise ValueError(
+            "AutoParallel Llama3 requires a fixed dataloader max_num_documents "
+            "to trace attention metadata."
+        )
 
     # CP is rejected above, so the former flattened ``fsdp = dp_shard * cp``
     # axis maps exactly to ``dp_shard`` here.
@@ -69,28 +75,47 @@ def parallelize_autoparallel_llama(
     ]
     dense_mesh = parallelism_context.get_mesh(dense_names)
 
+    dp_degree = parallelism_context.dp_replicate * parallelism_context.dp_shard
+    num_tokens = training.num_tokens_per_microbatch_per_dp_rank * dp_degree
+    traced_inputs: ForwardInputs | None = None
+
     def input_fn():
-        dp_degree = parallelism_context.dp_replicate * parallelism_context.dp_shard
-        num_tokens_per_train_step = training.num_tokens_per_train_step
-        if num_tokens_per_train_step < 0:
-            num_tokens_per_train_step = (
-                training.num_tokens_per_microbatch_per_dp_rank * dp_degree
-            )
+        nonlocal traced_inputs
         tokens = torch.randint(
             0,
             model.config.vocab_size,
-            (num_tokens_per_train_step,),
+            (num_tokens,),
             device=torch.device(device_type),
         )
         positions = (
             torch.arange(
-                num_tokens_per_train_step,
+                num_tokens,
                 dtype=torch.int32,
                 device=torch.device(device_type),
             )
             % model.config.max_context_length
         )
-        return tokens, positions
+        padding_mask = torch.zeros_like(tokens, dtype=torch.bool)
+        attention_metadata = model._get_attention_metadata(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+        )
+        if attention_metadata and dp_degree != 1:
+            raise ValueError(
+                "AutoParallel Llama3 attention metadata currently requires "
+                "data parallel degree one; packed-document offsets cannot be "
+                "sharded across data-parallel ranks."
+            )
+        traced_inputs = ForwardInputs(
+            args=(tokens,),
+            kwargs={
+                "positions": positions,
+                "padding_mask": padding_mask,
+                "attention_metadata": attention_metadata,
+            },
+        )
+        return traced_inputs
 
     param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
     reduce_dtype = TORCH_DTYPE_MAP[precision.reduce_dtype]
@@ -136,7 +161,25 @@ def parallelize_autoparallel_llama(
         reshard_after_forward=reshard_after_forward,
     ) as autop:
         autop.add_parameter_memory_constraint(low=None, high=None)
-        autop.add_input_constraints([x_sharding, x_sharding])
+        assert traced_inputs is not None
+        flat_inputs, _ = torch.utils._pytree.tree_flatten(
+            (traced_inputs.args, traced_inputs.kwargs)
+        )
+        consumed_inputs = {
+            desc.idx for desc in get_plain_input_and_grad_nodes(autop.gm.graph)
+        }
+        replicated_metadata = tuple(Replicate() for _ in range(dense_mesh.ndim))
+        input_constraints = []
+        for index, value in enumerate(flat_inputs):
+            if index not in consumed_inputs:
+                input_constraints.append(UNCONSTRAINED)
+            elif not isinstance(value, torch.Tensor):
+                input_constraints.append(None)
+            else:
+                input_constraints.append(
+                    x_sharding if index < 3 else replicated_metadata
+                )
+        autop.add_input_constraints(input_constraints)
         autop.add_output_constraints([output_sharding])
 
         t0 = time.time()
@@ -144,19 +187,9 @@ def parallelize_autoparallel_llama(
         t1 = time.time()
         logger.info(f"AutoParallelGraph took {t1 - t0:.2f} seconds")
 
-        model_output = (
-            AutoParallelModelOutput(
-                output_mesh=parallelism_context.get_mesh("tp"),
-                output_placements=(Shard(1),),
-                sharded_output_axis=1,
-            )
-            if parallelism_context.tp_enabled
-            else None
-        )
         parallel_mod = autop.apply_placement_for_fx_module(
             sharding_placement,
             compile_config=compile_config,
-            model_output=model_output,
         )
 
     model = apply_compile(

@@ -105,12 +105,14 @@ def parallelize_autoparallel_deepseekv3(
     compile_config: GraphTrainerCompileConfig,
     activation_remat: ActivationRematConfig | None,
     dump_folder: str,
+    max_num_documents: int | None = None,
 ):
     """Apply AutoParallelGraph SPMD sharding to DeepSeek V3.
 
     Returns a sharded model carrying AutoParallel train-step metadata.
     Requires a 2D sparse mesh (``edp_shard`` + ``ep``).
     """
+    del max_num_documents
     if parallelism_context.dp_replicate_enabled:
         raise ValueError("AutoParallel DeepSeek V3 does not support DDP yet")
     if parallelism_context.cp_enabled:

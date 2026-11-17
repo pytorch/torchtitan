@@ -93,8 +93,8 @@ class GraphTrainingEngine(TrainingEngine):
         """Return the extra kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
 
         GraphTrainer models expect ``compile_config`` (whole-step compile) instead of
-        ``local_compile``, and ``training`` in ``parallelize``: the token-budget check and
-        AutoParallel read it.
+        ``local_compile``, and ``training`` in ``parallelize``. AutoParallel also needs
+        the dataloader's document capacity to trace fixed-shape attention metadata.
         """
         # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
         # GraphTrainer to stop reading its compile config there first (apply_compile,
@@ -103,6 +103,10 @@ class GraphTrainingEngine(TrainingEngine):
         # The PP path already receives ``training`` from the core pipeline call.
         if not self.parallelism_context.pp_enabled:
             kwargs["training"] = self.config.training
+        if self.config.compile.enable_autoparallel:
+            if self.parallelism_context.pp_enabled:
+                raise ValueError("AutoParallel does not support pipeline parallelism.")
+            kwargs["max_num_documents"] = self.max_num_documents
         return kwargs
 
     def _initialize_forward_backward(self) -> None:
