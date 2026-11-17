@@ -386,7 +386,7 @@ class TestDecoderCpSharding(unittest.TestCase):
 
         metadata = object()
         permutation = torch.arange(1024).unsqueeze(0)
-        load_balancer = mock.Mock(max_num_fragments=4)
+        load_balancer = mock.Mock(max_num_fragments=2)
         load_balancer.generate_permutation.return_value = permutation
         model = SimpleNamespace(
             config=SimpleNamespace(
@@ -400,7 +400,7 @@ class TestDecoderCpSharding(unittest.TestCase):
             "attention_metadata": {ContextParallelInnerKDA: metadata},
         }
         with mock.patch.object(
-            PTRRFlexAttentionCPLoadBalancer.Config,
+            HeadTailCPLoadBalancer.Config,
             "build",
             return_value=load_balancer,
         ), mock.patch.object(
@@ -415,11 +415,11 @@ class TestDecoderCpSharding(unittest.TestCase):
                 parallelism_context=mock.Mock(),
                 parallelism=ParallelismConfig(
                     context_parallel_degree=2,
-                    context_parallel_load_balancer=PTRRFlexAttentionCPLoadBalancer.Config(),
+                    context_parallel_load_balancer=HeadTailCPLoadBalancer.Config(),
                 ),
             )
         prepare.assert_called_once_with(
-            metadata, permutation=permutation, max_num_fragments=4
+            metadata, permutation=permutation, max_num_fragments=2
         )
 
     def test_dispatches_linear_cp_metadata_and_leaves_non_cp_metadata_unchanged(self):
@@ -1063,11 +1063,14 @@ class TestUlysses(unittest.TestCase):
                     if isinstance(layer.attention, LinearAttention.Config):
                         self.assertIs(layer.attention.inner_attention._owner, backend)
 
-                for load_balancer in (
-                    HeadTailCPLoadBalancer.Config(),
-                    PTRRFlexAttentionCPLoadBalancer.Config(),
-                ):
-                    parallelism.context_parallel_load_balancer = load_balancer
+                parallelism.context_parallel_load_balancer = (
+                    HeadTailCPLoadBalancer.Config()
+                )
+                validate_context_parallel(model, parallelism)
+                parallelism.context_parallel_load_balancer = (
+                    PTRRFlexAttentionCPLoadBalancer.Config()
+                )
+                with self.assertRaisesRegex(ValueError, "does not support PTRR"):
                     validate_context_parallel(model, parallelism)
 
     def test_rejects_gdn_key_heads_indivisible_by_tp_times_cp(self):

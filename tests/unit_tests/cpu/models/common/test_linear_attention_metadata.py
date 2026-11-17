@@ -13,14 +13,9 @@ from unittest.mock import patch
 import pytest
 import torch
 from attn_gym.linear.context_parallel import ContextParallelRouting
-from torch.nn.attention.flex_attention import create_block_mask
 from torch.utils import _pytree as pytree
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.accelerator_graph import AcceleratorGraphInputSpec
-from torchtitan.distributed.context_parallel import (
-    get_token_fragments,
-    PTRRFlexAttentionCPLoadBalancer,
-)
+from torchtitan.distributed.context_parallel import get_token_fragments
 
 from torchtitan.models.common.attention import (
     LinearAttentionMetadata,
@@ -169,89 +164,3 @@ def test_routing_preserves_global_capacity_and_active_entries(cp_rank, permuted)
                 }
             )
     assert shapes[0] == shapes[1]
-
-
-@pytest.mark.parametrize("cp_rank", [0, 1])
-def test_ptrr_routing_capacity_is_independent_of_batch_fragmentation(cp_rank):
-    """Rebuilding real PTRR for a new packed batch must not resize graph inputs."""
-    tokens = 1024
-    parallelism = ParallelismConfig(
-        context_parallel_degree=2,
-        context_parallel_load_balancer=PTRRFlexAttentionCPLoadBalancer.Config(),
-    )
-    group = SimpleNamespace(size=lambda: 2)
-    routings, fragment_counts = [], []
-    with patch(
-        "torchtitan.distributed.context_parallel.spmd_mesh_group", return_value=group
-    ), patch(
-        "torchtitan.models.common.attention.cp_linear_attention.spmd_mesh_group",
-        return_value=group,
-    ), patch(
-        "torchtitan.models.common.attention.cp_linear_attention.dist.get_rank",
-        return_value=cp_rank,
-    ):
-        for layout in ([0, 1024, 1024, 1024, 1024], [0, 512, 1024, 1024, 1024]):
-            document_ids = torch.bucketize(
-                torch.arange(tokens), torch.tensor(layout[1:-1]), right=True
-            )
-
-            def document_causal(batch, head, query, key):
-                return (query >= key) & (document_ids[query] == document_ids[key])
-
-            block_mask = create_block_mask(
-                document_causal,
-                B=1,
-                H=1,
-                Q_LEN=tokens,
-                KV_LEN=tokens,
-                device="cpu",
-                BLOCK_SIZE=128,
-            )
-            load_balancer = parallelism.context_parallel_load_balancer.build(
-                seq_len=tokens, attention_metadata=block_mask
-            )
-            permutation = load_balancer.generate_permutation()
-            assert load_balancer.max_num_fragments == 4
-            fragments = get_token_fragments(tokens, cp_size=2, permutation=permutation)
-            fragment_counts.append(max(len(owned) for owned in fragments))
-            offsets = torch.tensor(layout, dtype=torch.int32)
-            metadata = LinearAttentionMetadata(
-                varlen=VarlenAttentionMetadata(
-                    cu_seq_q=offsets, cu_seq_k=offsets, max_q=tokens, max_k=tokens
-                ),
-                num_conv_history_tokens=3,
-            )
-            routing = ContextParallelInnerKDA.prepare_cp_metadata(
-                metadata,
-                permutation=permutation,
-                max_num_fragments=load_balancer.max_num_fragments,
-            ).cp_routing
-            compact = ContextParallelRouting.from_fragments(
-                cu_seqlens_global=layout,
-                fragments=fragments,
-                cp_rank=cp_rank,
-                device="cpu",
-                slots=4,
-                conv_history=3,
-            )
-            assert routing.slots == 4
-            assert routing.cu_seqlens.shape == (8,)
-            _assert_active_routing(routing, compact)
-            routings.append(routing)
-    assert fragment_counts == [3, 4]
-    spec = AcceleratorGraphInputSpec(routings[0])
-    saved, current = (spec.flatten(routing) for routing in routings)
-    for destination, source in zip(saved, current, strict=True):
-        if isinstance(destination, torch.Tensor):
-            assert destination.shape == source.shape
-            destination.copy_(source)
-        else:
-            assert destination == source
-    refreshed = spec.unflatten(saved)
-    for name, value in vars(routings[1]).items():
-        if isinstance(value, torch.Tensor):
-            torch.testing.assert_close(getattr(refreshed, name), value, rtol=0, atol=0)
-
-
-if __name__ == "__main__":
-    unittest.main()
