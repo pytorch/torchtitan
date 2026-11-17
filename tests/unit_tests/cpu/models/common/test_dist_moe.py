@@ -39,9 +39,7 @@ from torchtitan.models.common.dist_moe import (
     DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
-    NVFP4W4A16DistMoeRoutedExperts,
 )
-from torchtitan.models.common.dist_moe.nvfp4_w4a16 import _nvfp4_qdq, _round_to_e2m1
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import RoutedExperts
@@ -684,70 +682,6 @@ def test_mxfp8_mega_fused_inference_requires_mxfp8_mega() -> None:
         match="mxfp8_mega_fused_inference requires block_scaled_config",
     ):
         DistMoeTransform(expert_precision="mxfp8", mxfp8_mega_fused_inference=True)
-
-
-def test_round_to_e2m1_ties_to_even_and_saturates() -> None:
-    """Halfway magnitudes round to the even E2M1 code; overflow clamps to 6."""
-    x = torch.tensor(
-        [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 0.26, 2.9, 7.0, -0.74, -1e9]
-    )
-    expected = torch.tensor(
-        [0.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 0.5, 3.0, 6.0, -0.5, -6.0]
-    )
-    torch.testing.assert_close(_round_to_e2m1(x), expected, rtol=0, atol=0)
-
-
-def test_nvfp4_qdq_applies_block_and_global_scales() -> None:
-    """One expert with amax 6 has global scale 448, so its block scales are exact.
-
-    The block holding the amax has scale 448 and keeps the E2M1 values; a block
-    with amax 3 has scale 224, so it lands on the E2M1 grid halved.
-    """
-    full_block = torch.tensor(
-        [6.0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0]
-        + [0.26, 2.9, -0.74, -4.4, 0.0, 1.1, -2.2, 3.3]
-    )
-    half_block = full_block / 2.0
-    weight_ENK = torch.cat([full_block, half_block]).view(1, 1, 32)
-
-    expected = torch.cat(
-        [_round_to_e2m1(full_block), _round_to_e2m1(2.0 * half_block) / 2.0]
-    ).view(1, 1, 32)
-    torch.testing.assert_close(_nvfp4_qdq(weight_ENK), expected, rtol=0, atol=0)
-
-
-def test_nvfp4_w4a16_experts_feed_qdq_operands_and_own_wgrad() -> None:
-    """Dist-MoE sees the QDQ weights, and WGRAD goes to the parameters."""
-    config = DistMoeTransform(expert_precision="nvfp4_w4a16").transform(_stock_config())
-    module = cast(NVFP4W4A16DistMoeRoutedExperts, config.build())
-    module.init_states()
-    generator = torch.Generator().manual_seed(0)
-    with torch.no_grad():
-        for proj in (module.w13, module.w2):
-            proj.weight.copy_(torch.randn(proj.weight.shape, generator=generator))
-
-    w13_EFD, w2_EDF = module._weight_operands()
-
-    w13_E2FD = module.w13.weight._tensor
-    w2_ref_EDF = module.w2.weight._tensor
-    torch.testing.assert_close(
-        w13_EFD, _nvfp4_qdq(w13_E2FD.flatten(1, 2)), rtol=0, atol=0
-    )
-    torch.testing.assert_close(w2_EDF, _nvfp4_qdq(w2_ref_EDF), rtol=0, atol=0)
-    assert not torch.equal(w2_EDF, w2_ref_EDF)
-    owners = module._wgrad_parameter_owners()
-    assert owners is not None
-    assert owners[0] is module.w13.weight
-    assert owners[1] is module.w2.weight
-
-    # Before a parameter has a gradient buffer, Dist-MoE returns WGRAD to
-    # autograd for the operand; it must reach the parameter unchanged.
-    (w13_EFD.sum() + w2_EDF.sum()).backward()
-    for proj in (module.w13, module.w2):
-        assert proj.weight.grad is not None
-        torch.testing.assert_close(
-            proj.weight.grad, torch.ones(proj.weight.shape), rtol=0, atol=0
-        )
 
 
 @pytest.mark.parametrize(

@@ -141,10 +141,7 @@ class DistMoeRoutedExperts(Module):
         return w13_EFD, w2_EDF
 
     def _wgrad_parameter_owners(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Return the W13/W2 gradient owners when the operands are not their views.
-
-        ``None`` lets Dist-MoE derive the owners from the operands.
-        """
+        """W13/W2 gradient owners if the operands are not their views, else None."""
         return None
 
     def _output_postprocess(

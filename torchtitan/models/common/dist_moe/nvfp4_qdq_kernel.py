@@ -4,28 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Fused Triton kernel for the NVFP4 W4A16 expert-weight QDQ.
+"""Fused Triton NVFP4 quantize-dequantize (QDQ) of grouped expert weights.
 
-One pass over the weight: load a tile, compute each 1x16 block's E4M3 scale,
-round to E2M1, dequantize, and store in the weight's dtype. It reproduces
-``nvfp4_w4a16._nvfp4_qdq_reference`` bit for bit, which the GPU unit test
-checks: every division is IEEE round-to-nearest (``tl.div_rn``, not Triton's
-approximate ``/``), the FP8 cast rounds to nearest even, and the E2M1 sign is
-copied from the scaled value's sign bit so ``-0.0`` survives.
-
-Imported lazily by ``nvfp4_w4a16`` so CPU-only installs never need Triton.
+It reproduces dist_moe's NVFP4 weight quantizer bit for bit (GPU unit test):
+divisions round to nearest (``tl.div_rn``), the E4M3 cast rounds to nearest
+even, and the E2M1 sign is copied from the scaled value. Imported lazily, so
+CPU-only installs never need Triton.
 
 Shape suffixes: ``E`` experts, ``N`` rows, ``K`` columns (the blocked input
-dimension), ``R``/``C`` a tile's rows/columns, ``B`` blocks in a tile row,
-``V`` values in one block.
+dimension), ``R``/``C`` a tile's rows/columns, ``B`` 1x16 blocks in a tile
+row, ``V`` values in one block.
 """
 
 import torch
 import triton
 import triton.language as tl
-
-_BLOCK_ROWS = 16
-_BLOCK_COLS = 256
 
 
 @triton.jit
@@ -64,7 +57,8 @@ def _nvfp4_qdq_kernel(
     )
 
     scaled_RBV = x_RBV * tl.div_rn(global_scale, block_scale_RB)[:, :, None]
-    # E2M1 round-to-nearest-even with saturation; see _round_to_e2m1.
+    # E2M1 round-to-nearest-even: ties at 0.25, 1.25, 2.5 and 5 round down,
+    # those at 0.75, 1.75 and 3.5 up; magnitudes above 6 saturate.
     magnitude_RBV = tl.abs(scaled_RBV)
     code_RBV = tl.where(magnitude_RBV > 5.0, 6.0, 4.0)
     code_RBV = tl.where(magnitude_RBV < 3.5, 3.0, code_RBV)
@@ -87,25 +81,33 @@ def _nvfp4_qdq_kernel(
     )
 
 
-def nvfp4_qdq_into(
-    weight_ENK: torch.Tensor, global_scale_E: torch.Tensor, out_ENK: torch.Tensor
-) -> None:
-    """Write the NVFP4 QDQ of contiguous ``weight_ENK`` into ``out_ENK``."""
-    assert weight_ENK.is_contiguous() and out_ENK.is_contiguous()
-    assert out_ENK.shape == weight_ENK.shape
-    assert global_scale_E.dtype == torch.float32
-    num_experts, num_rows, num_cols = weight_ENK.shape
-    grid = (
-        triton.cdiv(num_rows, _BLOCK_ROWS),
-        triton.cdiv(num_cols, _BLOCK_COLS),
-        num_experts,
+def nvfp4_qdq(
+    weight_ENK: torch.Tensor, out_ENK: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Return the NVFP4 QDQ of ``weight_ENK``, written into ``out_ENK`` if given.
+
+    Each expert has one FP32 global scale, ``2688 * reciprocal(amax)`` as
+    dist_moe computes it; a division can differ by 1 ulp and flip codes.
+    """
+    if weight_ENK.device.type == "cpu":
+        raise ValueError("NVFP4 W4A16 QDQ runs a Triton kernel; got a CPU tensor")
+    weight_ENK = weight_ENK.contiguous()
+    amax_E = torch.linalg.vector_norm(
+        weight_ENK, ord=float("inf"), dim=(-2, -1), dtype=torch.float32
     )
+    global_scale_E = 2688.0 * torch.reciprocal(amax_E.clamp(min=1e-12))
+    if out_ENK is None:
+        out_ENK = torch.empty_like(weight_ENK)
+    assert out_ENK.is_contiguous() and out_ENK.shape == weight_ENK.shape
+    num_experts, num_rows, num_cols = weight_ENK.shape
+    grid = (triton.cdiv(num_rows, 16), triton.cdiv(num_cols, 256), num_experts)
     _nvfp4_qdq_kernel[grid](
         weight_ENK,
         global_scale_E,
         out_ENK,
         num_rows,
         num_cols,
-        BLOCK_ROWS=_BLOCK_ROWS,
-        BLOCK_COLS=_BLOCK_COLS,
+        BLOCK_ROWS=16,
+        BLOCK_COLS=256,
     )
+    return out_ENK

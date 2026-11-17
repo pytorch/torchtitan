@@ -29,9 +29,9 @@ from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
+    DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
-    NVFP4W4A16DistMoeRoutedExperts,
 )
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
@@ -61,8 +61,8 @@ _HAS_NVFP4_W4A16_MEGA = "weight_only" in {
 }
 
 
-def _mega_generator_config(transform: DistMoeTransform) -> Controller.Config:
-    """Build a one-GPU debug MoE generator with ``transform``'s Mega inference weights."""
+def _mega_generator_config(expert_precision: str) -> Controller.Config:
+    """Build a one-GPU debug MoE generator with Mega inference weights."""
     config = rl_grpo_qwen3_moe_debug_varlen()
     generator_parallelism = InferenceParallelismConfig(
         data_parallel_degree=1,
@@ -86,7 +86,20 @@ def _mega_generator_config(transform: DistMoeTransform) -> Controller.Config:
     config.generator.gpu_memory_limit = 0.1
     config.generator.engine.cuda_graph.mode = "FULL"
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(inference=True)
-    config.generator = apply_transforms(config.generator, [transform])
+    config.generator = apply_transforms(
+        config.generator,
+        [
+            DistMoeTransform(
+                expert_precision="mxfp8",
+                block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
+                mxfp8_mega_fused_inference=True,
+            )
+            if expert_precision == "mxfp8"
+            else DistMoeTransform(
+                expert_precision="nvfp4_w4a16", nvfp4_w4a16_mega_fused_inference=True
+            )
+        ],
+    )
     return config
 
 
@@ -137,15 +150,12 @@ def _trainer_model(wrapper, state_dict: dict[str, torch.Tensor]) -> SimpleNamesp
 
 
 def _operands(experts) -> list[torch.Tensor]:
-    """Return each expert weight's FSDP-managed inference operands: MXFP8 qdata
-    and FPROP scales; NVFP4 qdata, block scales and global scales.
-    """
+    """Return each expert weight's FSDP-managed, non-empty inference operands."""
     return [
         tensor
         for module in experts.values()
         for weight in (module.w13.weight, module.w2.weight)
         for field in dataclasses.fields(weight.operands)
-        # MXFP8 inference operands keep an empty DGRAD scale
         if (tensor := getattr(weight.operands, field.name)).numel()
     ]
 
@@ -174,7 +184,7 @@ def _generate(engine, prompt_ids, request_prefix: str) -> list[list[float]]:
     return logprobs
 
 
-def _check_inference_operands(engine, experts_cls: type) -> None:
+def _check_inference_operands(engine) -> None:
     """Check the experts' inference operands across FULL-graph weight loads.
 
     - The engine replays FULL CUDA graphs rather than running eagerly
@@ -192,7 +202,7 @@ def _check_inference_operands(engine, experts_cls: type) -> None:
     experts = {
         name: module
         for name, module in wrapper.model.named_modules()
-        if isinstance(module, experts_cls)
+        if isinstance(module, DistMoeRoutedExperts)
     }
     assert experts
     for module in experts.values():
@@ -201,7 +211,7 @@ def _check_inference_operands(engine, experts_cls: type) -> None:
             # The wrapper already unsharded the weights, so their operands come
             # from the first preparation
             assert isinstance(weight, _UnshardedFSDPTensor)
-            if experts_cls is MXFP8DistMoeRoutedExperts:
+            if isinstance(module, MXFP8DistMoeRoutedExperts):
                 assert weight.operands.dgrad_scale.numel() == 0
 
     weights_a = _state_dict_with_random_experts(wrapper, experts, seed=0)
@@ -230,8 +240,7 @@ def _check_inference_operands(engine, experts_cls: type) -> None:
     for tensor, tensor_0, data_ptr in zip(
         _operands(experts), operands, data_ptrs, strict=True
     ):
-        assert tensor is tensor_0
-        assert tensor.data_ptr() == data_ptr
+        assert tensor is tensor_0 and tensor.data_ptr() == data_ptr
     assert logprobs_b != logprobs_a
     assert logprobs_a_again == logprobs_a
 
@@ -247,8 +256,7 @@ def _check_inference_operands(engine, experts_cls: type) -> None:
         pytest.param(
             "nvfp4_w4a16",
             marks=pytest.mark.skipif(
-                not _HAS_NVFP4_W4A16_MEGA,
-                reason="needs dist_moe's W4A16 Mega kernel (weight_only)",
+                not _HAS_NVFP4_W4A16_MEGA, reason="needs dist_moe's W4A16 Mega"
             ),
         ),
     ],
@@ -256,10 +264,9 @@ def _check_inference_operands(engine, experts_cls: type) -> None:
 def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
     """The generator serves Mega experts with Mega fused inference weights.
 
-    With ``mxfp8_mega_fused_inference``, every MXFP8 expert's operands have no
-    DGRAD scales from the first unshard; with
-    ``nvfp4_w4a16_mega_fused_inference``, every NVFP4 W4A16 expert's operands
-    are the Mega kernel's NVFP4 codes and scales. Under FULL CUDA graphs, weight
+    With ``mxfp8_mega_fused_inference`` or ``nvfp4_w4a16_mega_fused_inference``,
+    every expert's operands are inference operands (for MXFP8, no DGRAD scales)
+    from the first unshard. Under FULL CUDA graphs, weight
     loads refill those retained operands in place: their objects stay fixed
     while their contents and the generated logprobs follow the loaded weights.
     """
@@ -271,19 +278,7 @@ def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
     if world_size != 1:
         pytest.skip(f"requires exactly 1 GPU, got {world_size}")
 
-    if expert_precision == "mxfp8":
-        transform = DistMoeTransform(
-            expert_precision="mxfp8",
-            block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
-            mxfp8_mega_fused_inference=True,
-        )
-        experts_cls = MXFP8DistMoeRoutedExperts
-    else:
-        transform = DistMoeTransform(
-            expert_precision="nvfp4_w4a16", nvfp4_w4a16_mega_fused_inference=True
-        )
-        experts_cls = NVFP4W4A16DistMoeRoutedExperts
-    config = _mega_generator_config(transform)
+    config = _mega_generator_config(expert_precision)
     owns_process_group = not dist.is_initialized()
     temporary_dump_folder = None
     engine = None
@@ -301,7 +296,7 @@ def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
             model_state_dict_load_mode="cpu_prefetch",
         )
         engine = build_inference_engine(config)
-        _check_inference_operands(engine, experts_cls)
+        _check_inference_operands(engine)
     finally:
         if engine is not None:
             renderer = getattr(engine, "renderer", None)
@@ -311,9 +306,8 @@ def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
         _clear_cached_model_class()
         gc.collect()
         torch.cuda.empty_cache()
-        # A process group provided by an earlier test or fixture stays alive.
-        # An owned one goes together with vLLM's groups on it, so the next
-        # parametrization's engine starts on a fresh process group.
+        # A process group provided by an earlier test or fixture stays alive. An
+        # owned one goes with vLLM's groups on it, for the next parametrization.
         if owns_process_group and dist.is_initialized():
             cleanup_dist_env_and_memory()
         if temporary_dump_folder is not None:

@@ -553,11 +553,6 @@ def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
 def rl_dapo_qwen3_30b_a3b_math_8k_nvfp4_w4a16() -> Controller.Config:
     """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, NVFP4 W4A16 Dist-MoE experts.
 
-    The trainer runs the BF16 expert kernels on NVFP4 quantize-dequantized
-    expert weights. The generator runs the fused W4A16 Mega kernel on the same
-    NVFP4 codes and scales; it applies each expert's global scale to the FP32
-    accumulator instead of rounding the dequantized weights to BF16, so the two
-    differ by that rounding. The Mega kernel needs a dist_moe build with
-    ``BlockScaledConfig.weight_only``.
+    The generator runs dist_moe's fused W4A16 Mega kernel.
     """
     return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="nvfp4_w4a16")
