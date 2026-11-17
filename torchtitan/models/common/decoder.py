@@ -285,6 +285,8 @@ class Decoder(BaseModel):
             # which unties the weights. Tie them again before FSDP groups the
             # tied modules, so it shards and communicates one parameter.
             self.tok_embeddings.weight = self.lm_head.weight
+        # Share the RoPE caches again too, for code that runs before init_states.
+        self._tie_rope_caches()
 
     def init_states(
         self,
