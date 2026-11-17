@@ -11,6 +11,8 @@ The recipes train on ``local/tmax@v1``, the TMax tasks exported by
 Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 ``~/.cache/harbor`` on first use. Edit the ids below to use other datasets.
 The Muse Glimmer example is capped at its model's 16K context length.
+On more than one host, every host that runs rollout workers needs the Harbor
+cache and Docker: see "More than one host" in the Terminal-Bench README.
 """
 
 import verifiers.v1 as vf
@@ -127,6 +129,9 @@ def _terminal_bench_rollouter_config(
                     # TODO: measure how long the rollout workers' close takes with Docker, and set
                     #   `Rollouter.Config.worker_close_timeout_s` from it. Each worker removes its
                     #   containers on its threads. Not measured yet.
+                    # TODO: cap the containers per host, so many rollout workers on one host don't
+                    #   overload its Docker daemon. Each running rollout holds one container. Not
+                    #   done yet: no run has measured how many containers a host can hold.
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
                     timeout=AgentTimeoutConfig(

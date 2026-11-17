@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -48,7 +50,10 @@ class RolloutWorkerActor(Actor):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
-        self._worker = worker_config.build()
+        self._worker_config = worker_config
+        # Built in `setup_async`: a build error there, e.g. a Verifiers env that fails to load,
+        # reaches the caller as an endpoint error. Raised here, it would kill the actor.
+        self._worker: BaseRolloutWorker
         # Created at the end of `setup_async`, so setup isn't counted as lag.
         self._event_loop_lag: m.EventLoopLag
         self._thread_pool_lag: m.ThreadPoolLag
@@ -60,8 +65,22 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        paths_on_every_host: list[str],
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
+        # The training dataset's paths, e.g. its image dir. A host without one fails the job here, at
+        # start, instead of failing each rollout that reads it.
+        for path in paths_on_every_host:
+            if not os.path.exists(path):
+                raise RuntimeError(
+                    f"{os.path.abspath(path)} is missing on host {socket.gethostname()}. The "
+                    "training dataset's samples point there (rollouter.training_dataloader.dataset). "
+                    "Please make it available at this path on every host that runs rollout workers, "
+                    "best in a shared folder, or keep every rollout worker on the controller's host: "
+                    "set rollouter.worker_roles.generator=None and "
+                    "rollouter.worker_roles.controller=True."
+                )
+        self._worker = self._worker_config.build()
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
@@ -127,7 +146,10 @@ class RolloutWorkerActor(Actor):
 
     @concurrent_endpoint
     async def close(self) -> None:
-        await self._worker.close()
+        # The controller closes every host's workers, also when `setup_async` failed before it
+        # built this one, e.g. on a missing path. Then there is nothing to close.
+        if hasattr(self, "_worker"):
+            await self._worker.close()
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
