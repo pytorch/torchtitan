@@ -4,12 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `MonarchRDMAMicrobatch` and `RDMAMicrobatchPrefetcher`, with Monarch's RDMA
-classes faked except in one test over real Monarch (TCP)."""
+"""Unit tests for `TransportRDMAMicrobatch` and `RDMAMicrobatchPrefetcher`, with the transport
+faked except in one test over real NIXL across processes."""
 
 import asyncio
 import contextvars
 import dataclasses
+import pickle
 import threading
 import time
 from types import SimpleNamespace
@@ -22,17 +23,15 @@ from torch.utils import _pytree as pytree
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
-from torchtitan.rl.actors.monarch import rdma_microbatch
-from torchtitan.rl.actors.monarch.rdma_microbatch import (
-    _TensorRef,
-    MonarchRDMAMicrobatch,
-)
 from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.trainer import rdma_microbatch
 from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     _NUM_MICROBATCHES_READ_AHEAD,
+    _TensorRef,
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
+    TransportRDMAMicrobatch,
 )
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -40,30 +39,96 @@ from torchtitan.rl.trainer.training_sample_builder import (
 )
 
 
-class _FakeRDMABuffer:
-    """Stands in for `monarch.rdma.RDMABuffer`: keeps the owner's byte view."""
-
-    def __init__(self, data: torch.Tensor) -> None:
-        self.data = data
-        self.dropped = False
-
-    async def drop(self) -> None:
-        self.dropped = True
+# Fake remote buffers pickle as an id, so a reader sees the owner's live memory, like a real transport.
+_fake_memories: dict[int, "_FakeMemory"] = {}
 
 
-class _FakeRDMAAction:
-    """Stands in for `monarch.rdma.RDMAAction`: copies every queued read on `submit()`."""
+def _fake_remote_buffer(memory_id: int) -> "_FakeRemoteBuffer":
+    return _FakeRemoteBuffer(_fake_memories[memory_id])
 
-    def __init__(self) -> None:
-        self._reads: list[tuple[torch.Tensor, _FakeRDMABuffer]] = []
 
-    def read_remote(self, dst: torch.Tensor, src: _FakeRDMABuffer) -> "_FakeRDMAAction":
-        self._reads.append((dst, src))
-        return self
+class _FakeRemoteBuffer:
+    __slots__ = ("memory",)
 
-    async def submit(self) -> None:
-        for dst, src in self._reads:
-            dst.copy_(src.data)
+    def __init__(self, memory: "_FakeMemory") -> None:
+        self.memory = memory
+
+    def __reduce__(self) -> tuple[object, ...]:
+        return _fake_remote_buffer, (id(self.memory),)
+
+
+class _FakeMemory:
+    def __init__(self, tensor: torch.Tensor) -> None:
+        self.data = tensor
+        self.unregistered = False
+        _fake_memories[id(self)] = self
+
+    def to_remote_buffer(self) -> _FakeRemoteBuffer:
+        return _FakeRemoteBuffer(self)
+
+    def to_mutable_view(self, offset: int, nbytes: int) -> torch.Tensor:
+        assert offset + nbytes <= self.data.numel()
+        return self.data[offset : offset + nbytes]
+
+
+class _FakeWork:
+    """Copies when waited on, so a reader that skips `wait_all` sees no data."""
+
+    def __init__(self, local: torch.Tensor, remote: _FakeRemoteBuffer) -> None:
+        self.local = local
+        self.remote = remote
+
+    def run(self) -> None:
+        assert not self.remote.memory.unregistered
+        self.local.copy_(self.remote.memory.data)
+
+
+class _FakeTransport:
+    """Stands in for a `torch.distributed._transport` transport in one process."""
+
+    def __init__(self, backend: str) -> None:
+        self.url = backend.encode()
+        self.connected: set[bytes] = set()
+        self.memories: list[_FakeMemory] = []
+
+    def bind(self) -> bytes:
+        return self.url
+
+    def connect(self, url: bytes) -> None:
+        self.connected.add(url)
+
+    def register_memory(self, tensor: torch.Tensor) -> _FakeMemory:
+        assert tensor.dtype == torch.uint8 and tensor.numel() > 0
+        assert tensor.is_contiguous()
+        memory = _FakeMemory(tensor)
+        self.memories.append(memory)
+        return memory
+
+    def unregister_memory(self, memory: _FakeMemory) -> None:
+        memory.unregistered = True
+
+    def read(
+        self, local: torch.Tensor, remote: _FakeRemoteBuffer, *, async_op: bool
+    ) -> _FakeWork:
+        assert async_op and self.url in self.connected
+        assert not remote.memory.unregistered
+        return _FakeWork(local, remote)
+
+
+async def _wait_all(works, *, timeout: float) -> None:
+    assert timeout == rdma_microbatch._READ_TIMEOUT_S
+    for work in works:
+        work.run()
+
+
+@pytest.fixture
+def fake_transport(monkeypatch) -> _FakeTransport:
+    transport = _FakeTransport("nixl")
+    monkeypatch.setattr(
+        rdma_microbatch, "_transports", {"nixl": (transport, transport.bind())}
+    )
+    monkeypatch.setattr(rdma_microbatch, "wait_all", _wait_all)
+    return transport
 
 
 def _microbatch(num_tokens: int) -> TrainingMicrobatch:
@@ -90,19 +155,25 @@ def _microbatch(num_tokens: int) -> TrainingMicrobatch:
 
 
 def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
-    monkeypatch,
+    fake_transport,
 ) -> None:
-    monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
-    monkeypatch.setattr(rdma_microbatch, "RDMAAction", _FakeRDMAAction)
     # At 512 tokens the int64 (4 KiB), float (2 KiB) and routed-id (2 KiB, in model_kwargs)
     # tensors go by ref; the bool masks (512 B), token counts and empty tensor go by value.
     microbatch = _microbatch(num_tokens=512)
 
     min_bytes = 1024
-    registered = MonarchRDMAMicrobatch.register(
-        microbatch, min_bytes=min_bytes, batch_index=0, dp_rank=0, microbatch_index=0
+    registered = TransportRDMAMicrobatch.register(
+        microbatch,
+        backend="nixl",
+        min_bytes=min_bytes,
+        batch_index=0,
+        dp_rank=0,
+        microbatch_index=0,
     )
-    read_microbatch = asyncio.run(registered.read())
+    # A trainer rank gets a pickled copy, without the owner's registrations.
+    received = pickle.loads(pickle.dumps(registered))
+    assert registered.registered and not received.registered
+    read_microbatch = asyncio.run(received.read())
 
     names = [field.name for field in dataclasses.fields(microbatch)]
     leaves = pytree.tree_leaves({name: getattr(microbatch, name) for name in names})
@@ -119,17 +190,55 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
         assert isinstance(rdma_leaf, _TensorRef) == (leaf.nbytes >= min_bytes)
         assert torch.equal(leaf, read_leaf) and leaf.dtype == read_leaf.dtype
 
-    asyncio.run(registered.drop())
     tensor_refs = [leaf for leaf in rdma_leaves if isinstance(leaf, _TensorRef)]
-    assert tensor_refs and all(tensor_ref.buffer.dropped for tensor_ref in tensor_refs)
+    # The reader unregisters its buffer once the reads finish.
+    assert len(fake_transport.memories) == len(tensor_refs) + 1
+    assert fake_transport.memories[-1].unregistered
+    asyncio.run(registered.drop())
+    assert tensor_refs and all(
+        tensor_ref.buffer.memory.unregistered for tensor_ref in tensor_refs
+    )
 
 
-def test_only_registered_microbatches_are_rdma_microbatches(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("error", "unregistered"), [(RuntimeError, True), (TimeoutError, False)]
+)
+def test_read_failure_unregisters_only_when_reads_are_done(
+    fake_transport, monkeypatch, error: type[Exception], unregistered: bool
+) -> None:
+    """A read error drains the reads, so the reader frees its buffer; a timeout leaves them in flight."""
+
+    async def failing_wait_all(works, *, timeout: float) -> None:
+        raise error
+
+    monkeypatch.setattr(rdma_microbatch, "wait_all", failing_wait_all)
+    registered = TransportRDMAMicrobatch.register(
+        _microbatch(num_tokens=512),
+        backend="nixl",
+        min_bytes=1024,
+        batch_index=0,
+        dp_rank=0,
+        microbatch_index=0,
+    )
+    num_owner_memories = len(fake_transport.memories)
+
+    with pytest.raises(error):
+        asyncio.run(registered.read())
+
+    assert len(fake_transport.memories) == num_owner_memories + 1
+    assert fake_transport.memories[-1].unregistered == unregistered
+
+
+def test_only_registered_microbatches_are_rdma_microbatches(fake_transport) -> None:
     """The trainer tells the two kinds apart with `isinstance(..., RDMAMicrobatch)`."""
-    monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
     microbatch = _microbatch(num_tokens=512)
-    registered = MonarchRDMAMicrobatch.register(
-        microbatch, min_bytes=1024, batch_index=0, dp_rank=0, microbatch_index=0
+    registered = TransportRDMAMicrobatch.register(
+        microbatch,
+        backend="nixl",
+        min_bytes=1024,
+        batch_index=0,
+        dp_rank=0,
+        microbatch_index=0,
     )
 
     assert isinstance(registered, RDMAMicrobatch)
@@ -146,20 +255,7 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
         dp_degree=1,
         pad_id=0,
         temperature=1.0,
-        register_rdma_microbatch=MonarchRDMAMicrobatch.register,
     )
-
-
-def test_batcher_rejects_rdma_without_a_registration() -> None:
-    with pytest.raises(ValueError, match="no register_rdma_microbatch"):
-        Batcher.Config(rdma_min_tensor_bytes=1024).build(
-            num_tokens_per_microbatch_per_dp_rank=256,
-            max_context_length=256,
-            num_prompts_per_train_step=1,
-            dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
-        )
 
 
 def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampleGroup:
@@ -181,11 +277,7 @@ def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampl
     return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
 
 
-def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> None:
-    def fail_to_register(tensor: torch.Tensor) -> None:
-        pytest.fail("registered an RDMA buffer with rdma_min_tensor_bytes unset")
-
-    monkeypatch.setattr(rdma_microbatch, "RDMABuffer", fail_to_register)
+def test_batcher_without_rdma_min_tensor_bytes_never_registers(fake_transport) -> None:
     batcher = _build_batcher(rdma_min_tensor_bytes=None)
 
     batch, _ = batcher.add_training_samples(
@@ -194,10 +286,10 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
     asyncio.run(batcher.maybe_release_oldest_batch())
 
     assert isinstance(batch.microbatch_groups[0][0][0], TrainingMicrobatch)
+    assert not fake_transport.memories
 
 
-def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
-    monkeypatch.setattr(rdma_microbatch, "RDMABuffer", _FakeRDMABuffer)
+def test_batcher_registers_each_batch_and_releases_the_oldest(fake_transport) -> None:
     batcher = _build_batcher(rdma_min_tensor_bytes=1024)
 
     batches = [
@@ -208,9 +300,9 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     ]
     asyncio.run(batcher.maybe_release_oldest_batch())
 
-    buffers = [
+    memories = [
         [
-            leaf.buffer
+            leaf.buffer.memory
             for group in batch.microbatch_groups
             for row in group
             for microbatch in row
@@ -219,8 +311,8 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
         ]
         for batch in batches
     ]
-    assert buffers[0] and all(buffer.dropped for buffer in buffers[0])
-    assert buffers[1] and not any(buffer.dropped for buffer in buffers[1])
+    assert memories[0] and all(memory.unregistered for memory in memories[0])
+    assert memories[1] and not any(memory.unregistered for memory in memories[1])
     assert [batch.microbatch_groups[0][0][0].batch_index for batch in batches] == [
         0,
         1,
@@ -235,7 +327,7 @@ class _ReadMicrobatch(int):
 
 
 def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
-    """Stands in for a `MonarchRDMAMicrobatch`: `read()` records its index."""
+    """Stands in for a `TransportRDMAMicrobatch`: `read()` records its index."""
 
     async def read() -> _ReadMicrobatch:
         started.append(index)
@@ -323,17 +415,14 @@ class _TrainerRank(Actor):
 
     @endpoint
     async def read_column(
-        self, rdma_microbatches: list[list[MonarchRDMAMicrobatch]]
+        self, rdma_microbatches: list[list[TransportRDMAMicrobatch]]
     ) -> list[TrainingMicrobatch]:
         dp_rank = current_rank().rank
         return [await row[dp_rank].read() for row in rdma_microbatches]
 
 
-def test_four_ranks_read_their_columns_exactly_across_released_batches(
-    monkeypatch,
-) -> None:
-    # Real Monarch RDMA over TCP (works on any CI host; the rank processes inherit the env var).
-    monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
+def test_four_ranks_read_their_columns_exactly_across_released_batches() -> None:
+    # Real NIXL: UCX uses TCP or shared memory on hosts without RDMA devices.
     batcher_kwargs = dict(
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=16,
@@ -342,9 +431,7 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
         pad_id=0,
         temperature=1.0,
     )
-    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
-        **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register
-    )
+    rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(**batcher_kwargs)
     by_value_batcher = Batcher.Config().build(**batcher_kwargs)
 
     async def run() -> None:

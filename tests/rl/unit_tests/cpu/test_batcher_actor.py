@@ -14,7 +14,6 @@ import pytest
 import torch
 from monarch.actor import ActorError, this_host
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.rdma_microbatch import _TensorRef
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutGroup,
@@ -24,6 +23,7 @@ from torchtitan.rl.rollout.types import (
 )
 
 from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.rdma_microbatch import _TensorRef
 
 _BATCHER_KWARGS = dict(
     num_tokens_per_microbatch_per_dp_rank=256,
@@ -62,9 +62,7 @@ def _group(group_id: int, rewards: list[float]) -> RolloutGroup:
     return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
 
-def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> None:
-    # TCP, not ibverbs: works on any CI host. The batcher process inherits the env var.
-    monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
+def test_batcher_actor_returns_the_in_process_batch(tmp_path) -> None:
     # Batch A after group 2, batch B after group 4. Group 1 has zero reward spread, so the
     # builder drops it: it rides along but isn't trainable.
     groups = [
