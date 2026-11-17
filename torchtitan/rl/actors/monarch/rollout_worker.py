@@ -22,6 +22,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.actor import Actor
+from torchtitan.rl.rollout.data import check_paths_exist_on_this_host
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
@@ -47,7 +48,10 @@ class RolloutWorkerActor(Actor):
         asyncio.get_running_loop().set_default_executor(
             ThreadPoolExecutor(max_workers=num_threads)
         )
-        self._worker = worker_config.build()
+        self._worker_config = worker_config
+        # Built in `setup_async`: a build error there, e.g. a Verifiers env that fails to load,
+        # reaches the caller as an endpoint error. Raised here, it would kill the actor.
+        self._worker: BaseRolloutWorker
 
     @concurrent_endpoint
     async def setup_async(
@@ -56,8 +60,13 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        paths_on_every_host: list[str],
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
+        # A missing path fails the job at start, with the path and the host.
+        # Check before the build: building a worker may read these paths.
+        check_paths_exist_on_this_host(paths=paths_on_every_host)
+        self._worker = self._worker_config.build()
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
@@ -87,7 +96,10 @@ class RolloutWorkerActor(Actor):
 
     @concurrent_endpoint
     async def close(self) -> None:
-        await self._worker.close()
+        # The controller closes every host's workers, also when `setup_async` failed before it
+        # built this one, e.g. on a missing path. Then there is nothing to close.
+        if hasattr(self, "_worker"):
+            await self._worker.close()
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
