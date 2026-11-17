@@ -186,14 +186,9 @@ class Generator(Configurable):
         generator rank."""
 
         receive_quantized_operands: bool = False
-        """Receive each parameter the model quantizes (e.g. MXFP8 Dist-MoE experts) as the
-        quantized operands its forward reads, quantized by the trainer, instead of in
-        ``precision.param_dtype``. A load copies them into the operands in place, without
-        reallocating, unsharding or re-quantizing the parameter, and MXFP8 moves half the bytes
-        of BF16. The operands are bitwise the ones a load re-quantizes otherwise. Needs a
-        format that implements ``_ShardedFSDPTensor._packed_operands``, whole rows of dim 0 of
-        each such parameter on every trainer and generator rank (e.g. whole experts), and its
-        own FSDP parameter group in the generator (e.g. routed experts under expert
+        """Receive quantized parameters (e.g. MXFP8 Dist-MoE experts) as the operands the
+        forward reads, quantized by the trainer, and load them in place without
+        re-quantizing. Needs ``"cpu_prefetch"`` and whole experts per rank (expert
         parallelism). See ``torchtitan/rl/quantized_operands.py``."""
 
         def __post_init__(self):
@@ -221,7 +216,7 @@ class Generator(Configurable):
                 and self.model_state_dict_load_mode != "cpu_prefetch"
             ):
                 raise ValueError(
-                    'receive_quantized_operands requires model_state_dict_load_mode="cpu_prefetch"'
+                    'receive_quantized_operands needs model_state_dict_load_mode="cpu_prefetch"'
                 )
             if (
                 self.debug.batch_invariant
@@ -488,9 +483,7 @@ class Generator(Configurable):
         self._torchstore_loop = asyncio.get_running_loop()
 
     async def quantized_operand_formats(self) -> dict[str, OperandFormat]:
-        """Return the format of each parameter received as quantized operands, by model
-        state dict key, for the trainer to quantize it with; empty unless
-        ``Config.receive_quantized_operands``."""
+        """Return the formats the trainer quantizes ``receive_quantized_operands`` in."""
         return self._quantized_operand_formats
 
     async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:

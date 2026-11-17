@@ -89,7 +89,7 @@ jobs:
             -v
           # Loads of quantized operands need expert parallelism: 2 GPUs.
           torchrun --nproc-per-node=2 -m pytest \
-            tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py::test_vllm_generator_loads_mxfp8_quantized_operands \
+            'tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py::test_vllm_generator_enables_mxfp8_mega_inference_weights[2]' \
             -v
 
       # Runs even if the unit tests failed, so one failure does not hide the other.

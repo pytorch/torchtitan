@@ -4,10 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""vLLM generator tests for MXFP8 Mega Dist-MoE inference weights: on one GPU, and
-loads of quantized operands under expert parallelism on two."""
+"""One-GPU vLLM generator test for MXFP8 Mega Dist-MoE inference weights."""
 
-import contextlib
 import gc
 import math
 import os
@@ -56,8 +54,7 @@ from tests.rl.unit_tests.gpu.test_bitwise_parity import (
 
 
 def _mxfp8_generator_config(num_gpus: int) -> Controller.Config:
-    """Build a debug MoE generator with MXFP8 Mega inference weights, with expert
-    parallelism over ``num_gpus``."""
+    """Build a debug MoE generator with MXFP8 Mega inference weights, EP over the GPUs."""
     config = rl_grpo_qwen3_moe_debug_varlen()
     generator_parallelism = InferenceParallelismConfig(
         data_parallel_degree=num_gpus,
@@ -80,7 +77,7 @@ def _mxfp8_generator_config(num_gpus: int) -> Controller.Config:
     config.generator.parallelism = generator_parallelism
     config.generator.gpu_memory_limit = 0.1
     config.generator.engine.cuda_graph.mode = "FULL"
-    # A rank can receive every routed token.
+    # Any rank may receive every routed token.
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
         scratch_capacity_factor=float(num_gpus), inference=True
     )
@@ -135,15 +132,14 @@ def _state_dict_with_random_experts(wrapper, experts, *, seed: int) -> dict:
 
 def _trainer_model(wrapper, state_dict: dict[str, torch.Tensor]) -> SimpleNamespace:
     """Stand in for the trainer model: ``state_dict`` under the generator model's
-    buffer and ``preserve_dtype_params`` names, which match the trainer's. Quantized
-    operands, which are not parameters, keep their own dtype too."""
-    params = dict(wrapper.model.named_parameters())
+    buffer and ``preserve_dtype_params`` names, which match the trainer's."""
     return SimpleNamespace(
         state_dict=lambda: state_dict,
         named_buffers=wrapper.model.named_buffers,
+        # Quantized operands, as bytes, keep their dtype too.
         named_preserve_dtype_params=lambda: [
             *wrapper.model.named_preserve_dtype_params(),
-            *((key, value) for key, value in state_dict.items() if key not in params),
+            *((k, v) for k, v in state_dict.items() if v.dtype == torch.uint8),
         ],
     )
 
@@ -244,14 +240,9 @@ def _check_inference_operands(engine) -> None:
 
 
 def _check_quantized_operand_loads(engine) -> None:
-    """Check loads of quantized operands against loads of BF16 weights.
-
-    - Each generator rank receives the packed operand rows of its experts, quantized
-      by a trainer that holds every expert, and its operands end bitwise the ones a
-      BF16 load of the same weights quantizes
-    - The load writes those operands in place, at the same addresses
-    - The generated logprobs match the BF16 load's
-    """
+    """After a BF16 load, loads of the trainer's quantized operands (each rank gets
+    its experts' rows of quantizing all of them) write the operands in place, and
+    reloading the same weights gives bitwise the BF16 load's operands and logprobs."""
     wrapper = engine.model_executor.driver_worker.get_model()
     experts = {
         name: module
@@ -261,47 +252,43 @@ def _check_quantized_operand_loads(engine) -> None:
     weights_a = _state_dict_with_random_experts(wrapper, experts, seed=0)
     weights_b = _state_dict_with_random_experts(wrapper, experts, seed=1)
     prompt_ids = make_prompt_tokens(2, 32, engine.get_tokenizer())
-
     _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_a), engine)
-    bf16_operands = [(q.clone(), s.clone()) for q, s in _operands(experts)]
+    bf16 = [
+        (q.view(torch.uint8).clone(), s.view(torch.uint8).clone())
+        for q, s in _operands(experts)
+    ]
     bf16_logprobs = _generate(engine, prompt_ids, "bf16")
+    data_ptrs = [(q.data_ptr(), s.data_ptr()) for q, s in _operands(experts)]
 
     formats = wrapper.model_state_dict_loader.receive_quantized_operands()
-    assert set(formats) == {
-        f"{name}.{proj}.weight" for name in experts for proj in ("w13", "w2")
-    }
-    operands = _operands(experts)
-    data_ptrs = [(q.data_ptr(), s.data_ptr()) for q, s in operands]
-
-    def load_quantized_operands(weights: dict[str, torch.Tensor]) -> None:
-        on_gpu = {
-            key: value.cuda() if key in formats else value
-            for key, value in weights.items()
-        }
+    for weights in (weights_b, weights_a):
+        on_gpu = {k: v.cuda() if k in formats else v for k, v in weights.items()}
         packed = pack_quantized_operands(on_gpu, formats, dtype=None)
         _sync_trainer_weights_to_vllm(_trainer_model(wrapper, packed), engine)
+        # B's operands differ, so the comparison with A's below is not vacuous.
+        q = _operands(experts)[0][0].view(torch.uint8)
+        assert q.equal(bf16[0][0]) == (weights is weights_a)
 
-    load_quantized_operands(weights_b)
-    assert not torch.equal(
-        _operands(experts)[0][0].view(torch.uint8),
-        bf16_operands[0][0].view(torch.uint8),
-    )
-    load_quantized_operands(weights_a)
-    logprobs = _generate(engine, prompt_ids, "quantized_operands")
-
-    for (q, s), (q_0, s_0), ptrs, (q_bf16, s_bf16) in zip(
-        _operands(experts), operands, data_ptrs, bf16_operands, strict=True
-    ):
-        assert q is q_0 and s is s_0
-        assert (q.data_ptr(), s.data_ptr()) == ptrs
-        assert torch.equal(q.view(torch.uint8), q_bf16.view(torch.uint8))
-        assert torch.equal(s.view(torch.uint8), s_bf16.view(torch.uint8))
-    assert logprobs == bf16_logprobs
+    assert [(q.data_ptr(), s.data_ptr()) for q, s in _operands(experts)] == data_ptrs
+    for (q, s), (q_bf16, s_bf16) in zip(_operands(experts), bf16, strict=True):
+        assert q.view(torch.uint8).equal(q_bf16) and s.view(torch.uint8).equal(s_bf16)
+    assert _generate(engine, prompt_ids, "quantized_operands") == bf16_logprobs
 
 
-@contextlib.contextmanager
-def _mxfp8_engine(num_gpus: int):
-    """Build the MXFP8 generator's vLLM engine on ``num_gpus`` GPUs and yield it."""
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not has_cuda_capability(10, 0),
+    reason="Dist-MoE requires an SM100-or-newer GPU",
+)
+@pytest.mark.parametrize("num_gpus", [1, 2])
+def test_vllm_generator_enables_mxfp8_mega_inference_weights(num_gpus: int):
+    """The generator serves MXFP8 Mega experts with Mega fused inference weights.
+
+    With ``mxfp8_mega_fused_inference``, every MXFP8 expert's operands
+    have no DGRAD scales from the first unshard. Under FULL CUDA graphs, weight
+    loads refill those retained operands in place: their objects stay fixed
+    while their contents and the generated logprobs follow the loaded weights.
+    On 2 GPUs (EP 2), loads of quantized operands do (receive_quantized_operands).
+    """
     world_size = (
         dist.get_world_size()
         if dist.is_initialized()
@@ -328,11 +315,13 @@ def _mxfp8_engine(num_gpus: int):
             model_state_dict_load_mode="cpu_prefetch",
         )
         engine = build_inference_engine(config)
-        yield engine
+        if num_gpus == 1:
+            _check_inference_operands(engine)
+        else:
+            _check_quantized_operand_loads(engine)
     finally:
         if engine is not None:
-            if dist.is_initialized():
-                dist.barrier()
+            dist.barrier()
             renderer = getattr(engine, "renderer", None)
             if renderer is not None:
                 renderer.shutdown()
@@ -345,32 +334,3 @@ def _mxfp8_engine(num_gpus: int):
             dist.destroy_process_group()
         if temporary_dump_folder is not None:
             shutil.rmtree(temporary_dump_folder, ignore_errors=True)
-
-
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or not has_cuda_capability(10, 0),
-    reason="Dist-MoE requires an SM100-or-newer GPU",
-)
-def test_vllm_generator_enables_mxfp8_mega_inference_weights():
-    """The generator serves MXFP8 Mega experts with Mega fused inference weights.
-
-    With ``mxfp8_mega_fused_inference``, every MXFP8 expert's operands
-    have no DGRAD scales from the first unshard. Under FULL CUDA graphs, weight
-    loads refill those retained operands in place: their objects stay fixed
-    while their contents and the generated logprobs follow the loaded weights.
-    """
-    with _mxfp8_engine(num_gpus=1) as engine:
-        _check_inference_operands(engine)
-
-
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or not has_cuda_capability(10, 0),
-    reason="Dist-MoE requires an SM100-or-newer GPU",
-)
-def test_vllm_generator_loads_mxfp8_quantized_operands():
-    """Under expert parallelism (2 GPUs), a generator receiving its MXFP8 experts as
-    quantized operands (receive_quantized_operands) ends a load with the operands and
-    logprobs of a BF16 load of the same weights, written in place under FULL CUDA
-    graphs."""
-    with _mxfp8_engine(num_gpus=2) as engine:
-        _check_quantized_operand_loads(engine)

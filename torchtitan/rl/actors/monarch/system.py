@@ -222,7 +222,7 @@ class MonarchActorSystem(ActorSystem):
 
     async def initialize_quantized_operands(self) -> None:
         assert self._trainer is not None, "spawn the trainer first"
-        # Every generator builds the same model, so any rank's formats do.
+        # Every generator rank builds the same model.
         formats = await self._generators[0].rank0.quantized_operand_formats.call_one()
         await self._trainer.register_quantized_operand_formats.call(formats)
 

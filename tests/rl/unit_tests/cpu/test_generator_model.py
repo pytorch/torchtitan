@@ -24,38 +24,6 @@ from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator import model as generator_model
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import ModelStateDictLoader
-from torchtitan.rl.quantized_operands import pack_quantized_operands
-
-
-@dataclass(frozen=True)
-class RowOperands:
-    codes: torch.Tensor
-    scale: torch.Tensor
-
-
-class RowQuantizedTensor(_ShardedFSDPTensor):
-    """A quantized parameter format that quantizes each row of dim 0 (e.g. an expert)
-    on its own: int8 codes and one float32 scale per row, as NVFP4 keeps one global
-    scale per expert."""
-
-    def _build_operands(
-        self, logical_tensor: torch.Tensor, out: RowOperands | None = None
-    ) -> RowOperands:
-        scale = logical_tensor.float().abs().amax(dim=(1, 2)) / 127
-        codes = torch.round(logical_tensor.float() / scale[:, None, None])
-        operands = RowOperands(codes.to(torch.int8), scale)
-        if out is None:
-            return operands
-        out.codes.copy_(operands.codes)
-        out.scale.copy_(operands.scale)
-        return out
-
-    def _packed_operands(self, operands: RowOperands) -> dict[str, torch.Tensor]:
-        num_rows = operands.codes.shape[0]
-        return {
-            "codes": operands.codes.view(num_rows, -1),
-            "scale": operands.scale.view(num_rows, -1),
-        }
 
 
 def _copy_from(new_state_dict: dict[str, torch.Tensor]):
@@ -257,87 +225,42 @@ def test_load_model_state_dict_fetches_params_in_their_own_dtype(tmp_path) -> No
         dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("own_param_group", [True, False])
-def test_load_quantized_operands(tmp_path, monkeypatch, own_param_group: bool) -> None:
-    """With receive_quantized_operands, a load copies the trainer's packed operand rows
-    into the quantized parameter's operands, in place: they end bitwise the operands an
-    unshard quantizes from the same weights, at the same tensors, and the parameter's
-    FSDP group is never resharded, so its high-precision shard is never reallocated.
-    Experts that share their FSDP group with other parameters (no expert parallelism)
-    are rejected: the group would be resharded with them."""
+@dataclass(frozen=True)
+class _Operands:
+    value: torch.Tensor
+
+
+class _CopyQuantizedTensor(_ShardedFSDPTensor):
+    def _build_operands(self, logical_tensor, out=None):
+        if out is None:
+            return _Operands(logical_tensor.clone())
+        out.value.copy_(logical_tensor)
+        return out
+
+
+def test_quantized_operands_need_their_own_param_group(tmp_path, monkeypatch) -> None:
+    """Quantized experts in an FSDP parameter group with other parameters (no expert
+    parallelism) cannot be received as operands: loads would reshard the group and
+    re-quantize them from an unfilled shard."""
     dist.init_process_group(
         "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
     )
     try:
-        model = nn.Module()
-        model.experts = nn.Module()
-        model.experts.w = nn.Parameter(RowQuantizedTensor(torch.randn(4, 2, 8)))
-        model.dense = nn.Linear(8, 8)
-        mesh = init_device_mesh("cpu", (1,))
-        if own_param_group:
-            fully_shard(model.experts, mesh=mesh, reshard_after_forward=False)
-        fully_shard(model, mesh=mesh, reshard_after_forward=False)
+        model = nn.Linear(4, 4)
+        model.experts = nn.Parameter(_CopyQuantizedTensor(torch.randn(2, 4)))
+        fully_shard(model, mesh=init_device_mesh("cpu", (1,)))
         model.set_keep_unsharded_storage(True)
-        # Pinned host memory needs a GPU.
+        # Pinned host memory needs a GPU; keep the receive buffers' state dict as is.
         monkeypatch.setattr(
             generator_model,
             "_create_cpu_state_dict",
-            lambda state_dict, pin_memory: {
-                k: v.detach().clone() for k, v in state_dict.items()
-            },
+            lambda state_dict, pin_memory: dict(state_dict),
         )
         loader = _build_loader(
             model, loads_checkpoint=False, model_state_dict_load_mode="cpu_prefetch"
         )
-        if not own_param_group:
-            with pytest.raises(ValueError, match="holds the quantized parameters"):
-                loader.receive_quantized_operands()
-            return
-
-        formats = loader.receive_quantized_operands()
-        assert formats == {"experts.w": (RowQuantizedTensor, (torch.float32,))}
-        prefetched = loader.prefetched_model_state_dict
-        assert prefetched is not None
-        assert {k: v.dtype for k, v in prefetched.items()} == {
-            "experts.w.codes": torch.uint8,
-            "experts.w.scale": torch.uint8,
-            "dense.weight": torch.float32,
-            "dense.bias": torch.float32,
-        }
-        operands = model.experts.w.operands
-        (expert_group,) = model.experts._get_fsdp_state()._fsdp_param_groups
-        weights = {
-            "experts.w": torch.randn(4, 2, 8),
-            "dense.weight": torch.randn(8, 8),
-            "dense.bias": torch.randn(8),
-        }
-        fetched_keys = []
-        copy = _copy_from(prefetched)
-
-        def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
-            fetched_keys.append(sorted(state_dict))
-            assert expert_group.is_unsharded
-            return copy(state_dict)
-
-        for key, tensor in pack_quantized_operands(
-            weights, formats, dtype=None
-        ).items():
-            prefetched[key].to_local().copy_(tensor)
-        loader.load(fetch)
-
-        assert fetched_keys == [
-            ["dense.bias", "dense.weight"],
-            ["experts.w.codes", "experts.w.scale"],
-        ]
-        assert model.experts.w.operands is operands
-        (expert_param,) = expert_group.fsdp_params
-        assert expert_param._sharded_param_data._tensor.untyped_storage().size() == 0
-        expected = RowQuantizedTensor(weights["experts.w"])._build_operands(
-            weights["experts.w"]
-        )
-        assert operands.codes.equal(expected.codes)
-        assert operands.scale.equal(expected.scale)
-        assert model.dense.weight.equal(weights["dense.weight"])
+        with pytest.raises(ValueError, match="not quantized"):
+            loader.receive_quantized_operands()
     finally:
         dist.destroy_process_group()
 

@@ -362,7 +362,8 @@ class ModelStateDictTransport(Configurable):
             model_state_dict: This trainer rank's model state dict.
             generator_rank_layouts: ``shard_layout`` of each rank of a generator,
                 in rank order.
-            transfer_dtype: The dtype parameters are sent in, or None for their own.
+            transfer_dtype: The dtype floating-point tensors are sent in, or None for
+                their own.
             preserve_dtype_keys: Keys sent in their own dtype.
 
         Raises:
@@ -376,7 +377,9 @@ class ModelStateDictTransport(Configurable):
                 continue
             dtypes[key] = (
                 tensor.dtype
-                if transfer_dtype is None or key in preserve_dtype_keys
+                if transfer_dtype is None
+                or key in preserve_dtype_keys
+                or not tensor.is_floating_point()
                 else transfer_dtype
             )
             for layout in generator_rank_layouts:

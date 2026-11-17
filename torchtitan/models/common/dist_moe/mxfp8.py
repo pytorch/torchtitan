@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 import spmd_types as spmd
@@ -163,26 +163,12 @@ class _DistMoeMXFP8ShardedTensorBase(_ShardedFSDPTensor):
         """
         return type(self)(tensor, mega_fused_inference=self.mega_fused_inference)
 
-    def _packed_operands(
-        self, operands: _DistMoeMXFP8Operands
-    ) -> dict[str, torch.Tensor]:
-        """One row per expert: its qdata and scales.
-
-        Every expert quantizes on its own: a scale block never spans two experts,
-        and the blocked scale layout tiles each expert's rows (a multiple of 128,
-        which preparation requires) separately, so each expert's scales are
-        contiguous. Inference operands have no DGRAD scales.
-        """
+    def _packed_operands(self, operands: _DistMoeMXFP8Operands) -> dict:
+        # Experts quantize alone, and the blocked scales tile each expert's rows (a
+        # multiple of 128) separately. Inference operands have empty DGRAD scales.
+        tensors = {f.name: getattr(operands, f.name) for f in fields(operands)}
         num_experts = operands.qdata.shape[0]
-        return {
-            name: tensor.view(num_experts, -1)
-            for name, tensor in (
-                ("qdata", operands.qdata),
-                ("fprop_scale", operands.fprop_scale),
-                ("dgrad_scale", operands.dgrad_scale),
-            )
-            if tensor.numel() > 0
-        }
+        return {k: v.view(num_experts, -1) for k, v in tensors.items() if v.numel()}
 
 
 class _DistMoeW13ShardedTensor(_DistMoeMXFP8ShardedTensorBase):
