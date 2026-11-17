@@ -82,6 +82,23 @@ checkpointer=CheckpointManager.Config(
 
 A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). DCP-specific `async_mode` is on `CheckpointManager.Config` in `torchtitan/components/checkpointer/dcp.py`.
 
+## Remote storage with `TorchCheckpointingManager`
+
+`TorchCheckpointingManager` can keep checkpoints on any store fsspec has a driver for.
+Point `folder` at a URI and install the driver (`gcsfs` for `gs://`, `s3fs` for `s3://`):
+
+```python
+checkpointer=TorchCheckpointingManager.Config(
+    folder="gs://my-bucket/run-1/checkpoint",
+    interval=500,
+),
+```
+
+Interval saves, the final save, resume, `keep_latest_k` retention, Hugging Face export
+(`last_save_in_hf`), and Hugging Face load (`initial_load_in_hf`) all go through the
+remote store. `folder`, `initial_load_path`, and the `hf_assets_path` an HF initial load
+reads must all be on the same storage: all local, or all remote with the same protocol.
+
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.
