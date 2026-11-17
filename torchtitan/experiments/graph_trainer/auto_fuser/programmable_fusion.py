@@ -47,6 +47,10 @@ from dataclasses import dataclass
 import torch
 import torch.fx as fx
 
+from torchtitan.experiments.graph_trainer.auto_fuser.substitute_kernels import (
+    normalize_names,
+    substitute_with_kernels_pass,
+)
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_module_fqn,
     _is_backward_node,
@@ -54,10 +58,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     mutation_target_nodes,
-)
-from torchtitan.experiments.graph_trainer.substitute_kernels import (
-    normalize_names,
-    substitute_with_kernels_pass,
 )
 
 
@@ -72,7 +72,7 @@ class FusionRegion:
 class ProgrammableFusionConfig:
     regions: tuple[FusionRegion, ...]
     kernel_cache_dir: str | None = None
-    """Kernel store for ``substitute_with_kernels_pass``; None uses its default."""
+    """Local cache_dir of ``substitute_with_kernels_pass``; None uses its default."""
 
 
 class FusionPlan:

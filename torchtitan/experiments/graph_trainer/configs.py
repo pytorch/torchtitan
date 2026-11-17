@@ -10,14 +10,14 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.experiments.graph_trainer.auto_fuser.programmable_fusion import (
+    ProgrammableFusionConfig,
+)
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     disable_inplace_wgrad_accum,
-)
-from torchtitan.experiments.graph_trainer.programmable_fusion import (
-    ProgrammableFusionConfig,
 )
 from torchtitan.models.base.model import BaseModel
 from torchtitan.trainer import Trainer

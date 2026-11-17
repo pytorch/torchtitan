@@ -14,7 +14,7 @@ Bitwise parity and the original input/output contract are hard acceptance gates.
 ## Substitute-kernels problem sets
 
 When the problems come from a GraphTrainer `cache_dir` (written by
-`substitute_with_kernels_pass` in `graph_trainer/substitute_kernels.py`):
+`substitute_with_kernels_pass` in `graph_trainer/auto_fuser/substitute_kernels.py`):
 
 1. **Ask the user for `cache_dir` before doing anything else.** Do not guess or
    fall back to `$TORCHTITAN_SUBSTITUTE_KERNELS_DIR` or the Inductor cache directory

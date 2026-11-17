@@ -10,7 +10,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.graph_trainer.programmable_fusion import (
+from torchtitan.experiments.graph_trainer.auto_fuser.programmable_fusion import (
     FusionPlan,
     op_paths,
     programmable_fusion_pass,
