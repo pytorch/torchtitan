@@ -66,7 +66,7 @@ scripts/install_rl_env.sh --sglang
 | Feature | Status |
 | --- | --- |
 | Dense softmax attention, varlen backend (Qwen3, Llama 3) | Supported |
-| Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's TP all-reduce (custom all-reduce) instead of NCCL |
+| Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's attention-TP all-reduce (custom all-reduce) instead of NCCL |
 | CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
 | Prompt KV reuse within a rollout group | Supported for softmax attention, not linear attention (GDN, KDA); see below |
@@ -78,13 +78,13 @@ scripts/install_rl_env.sh --sglang
 | KV shared across generators (Mooncake Store) | Supported through `extra_server_args`; see below |
 | Batch-invariant mode | Supported; see below |
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
-| Data parallelism within a generator | Not supported: run more generators |
+| Data parallelism within a generator | Supported with expert parallelism, as SGLang's attention DP; see below |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
 | GDN linear attention (Qwen3.5) | Supported; see below |
 | KDA linear attention (Kimi K3) | Supported; see below |
 | MLA (DeepSeek V3) | Supported with per-head K/V in the KV cache, as the vLLM engine runs MLA in batch-invariant mode; SGLang's compressed-latent MLA cache is not used |
 | Flex attention, attention sinks (GPT-OSS) | Not supported |
-| MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
+| MoE with expert parallelism over the DP and TP ranks, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
 
 Unsupported configurations raise at engine build.
@@ -115,8 +115,8 @@ host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. DeepEP wit
 `cuda_graph_compatible` and HybridEP with `non_blocking_capacity_factor` dispatch
 without a host sync, so they run under CUDA graphs; without those options they
 need `cuda_graph="none"` too. Their `num_max_tokens_per_rank` must cover a step's
-tokens per EP rank, `(chunked_prefill_size + max_running_requests) / TP`; the
-engine checks it at build. HybridEP needs an EP degree divisible by 4: a step can
+tokens per EP rank, `(chunked_prefill_size + max_running_requests) / TP`, with
+the per-DP-rank values; the engine checks it at build. HybridEP needs an EP degree divisible by 4: a step can
 have any token count, which HybridEP's 16-byte alignment otherwise rejects.
 DeepEP's deterministic dispatch (`DebugConfig.deterministic`) cannot run in CUDA
 graphs, and HybridEP's `non_blocking_capacity_factor` must be 1.0 (below it,
@@ -128,6 +128,34 @@ fails its NCCL version check under the PyTorch nightly. Dist-MoE
 (`Generator.Config.dist_moe_runtime`) runs under CUDA graphs: decode graphs, and
 breakable or full prefill graphs. It shards a step's tokens over the TP ranks
 even without expert parallelism, so with TP > 1 it needs expert parallelism too.
+
+## Data parallelism
+
+`data_parallel_degree` > 1 supplies ranks for expert parallelism (Generator.Config
+requires `expert_parallel_degree == data_parallel_degree * tensor_parallel_degree`).
+The engine runs it as SGLang's attention DP: one SGLang instance over the DP x TP
+world (`tp_size = DP * TP`, `attn_dp_size = DP`). Each DP rank runs its own
+requests, with attention heads sharded over its attention-TP group, and the MoE
+layers run EP over every rank. For DP 2 x TP 2:
+
+```
+world = 4 ranks, DP 2 x TP 2
+SGLang TP group (= world):   [0 1 2 3]   <- EP 4 for the MoE layers
+attention-TP groups:         [0 1] [2 3] <- heads sharded over these
+DP rank 0 = ranks 0, 1       DP rank 1 = ranks 2, 3
+```
+
+NOTE: SGLang names its groups after the whole instance. SGLang's "TP" (`tp_size`,
+`tp_group`, `tensor_model_parallel_all_reduce`) spans all DP x TP ranks, while its
+"attention TP" (`attn_tp_size`, `attn_tp_group`, `attn_tp_all_reduce`) is one DP
+rank's TP ranks: torchtitan's `tensor_parallel_degree`. So the engine's TP code
+(attention head sharding, the model's routed TP all-reduce) uses the attention-TP
+names. The two coincide at DP = 1.
+
+The EP collectives span the DP ranks, so every DP rank steps together: SGLang runs
+a DP rank without requests on an empty batch, which the model pads to one row per
+TP rank, and `has_unfinished_requests` is True on every rank while any DP rank has
+requests. `max_num_seqs` and `max_num_batched_tokens` are per DP rank.
 
 ## GDN and KDA
 
