@@ -512,6 +512,21 @@ class ModelStateDictLoader:
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
 
+    @property
+    def load_groups(self) -> list[dict[str, torch.Tensor]]:
+        """The tensors each ``fetch`` of ``load`` fills, in order: each FSDP group's
+        trainable sharded parameters, then the buffers. Outside ``load`` the sharded
+        storage is freed: use only their layout."""
+        groups = [
+            {key: fsdp_param.sharded_param for key, fsdp_param in trainable_params}
+            for _, trainable_params, _ in self._fsdp_load_groups
+        ]
+        if self._buffer_keys:
+            groups.append(
+                {key: self._model.get_buffer(key) for key in self._buffer_keys}
+            )
+        return groups
+
     def load(self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]) -> None:
         """Fetch new weights into the model, allocating one FSDP group's sharded buffers at a time.
 

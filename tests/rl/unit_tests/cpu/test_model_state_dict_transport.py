@@ -6,8 +6,8 @@
 
 """Checks that staging, the read plan, the reads and the load move every
 element of a generator shard from the right trainer rank to the right place,
-across trainer FSDP/HSDP and generator TP shardings, over an in-process fake
-transport."""
+across trainer FSDP/HSDP and generator TP shardings and both generator load
+modes, over an in-process fake transport."""
 
 import asyncio
 import itertools
@@ -52,6 +52,11 @@ class _FakeMemory:
         return self.data[offset : offset + nbytes]
 
 
+class _FakeWork:
+    def wait(self, timeout):
+        assert 0 < timeout.total_seconds() <= 5.0
+
+
 class _FakeTransport:
     _urls = itertools.count()
 
@@ -73,6 +78,7 @@ class _FakeTransport:
         assert remote.url in self.connected
         assert local.shape == remote.data.shape
         local.copy_(remote.data)
+        return _FakeWork()
 
 
 async def _wait_all(works, *, timeout):
@@ -103,10 +109,13 @@ def _transfer(
     generator_index=0,
     transfer_dtype=None,
     preserve_dtype_keys=frozenset(),
+    fetch_groups=None,
 ):
     """Register and stage each trainer rank's ``{key: (local tensor, box)}``, then
     connect, read and load each generator rank's ``{key: (box, dtype)}``; returns
-    the generator ranks' loaded state dicts."""
+    the generator ranks' loaded state dicts. With ``fetch_groups``, a list of key
+    lists, generator ranks fetch each group in turn during the load ("gpu_fetch")
+    instead of prefetching."""
     boxes = {}
     monkeypatch.setattr(
         m,
@@ -154,13 +163,24 @@ def _transfer(
     loaded_sds = []
     for rank, sd in enumerate(generator_sds):
         generator = ModelStateDictTransport(config)
+        loaded = {key: torch.full_like(tensor, -1) for key, tensor in sd.items()}
+        loaded_sds.append(loaded)
+        if fetch_groups is not None:
+            generator.connect_fetching_generator(
+                [{key: sd[key] for key in group} for group in fetch_groups],
+                sources=sources,
+                rank=rank,
+                generator_index=generator_index,
+            )
+            for group in fetch_groups:
+                fetched = generator.fetch_({key: loaded[key] for key in group})
+                assert list(fetched) == group
+            continue
         generator.connect_generator(
             sd, sources=sources, rank=rank, generator_index=generator_index
         )
         asyncio.run(generator.read())
-        loaded = {key: torch.full_like(tensor, -1) for key, tensor in sd.items()}
         generator.copy_prefetched_(loaded)
-        loaded_sds.append(loaded)
     return loaded_sds
 
 
@@ -284,6 +304,45 @@ def test_mixed_dtypes(monkeypatch):
     )
     torch.testing.assert_close(out["a"], a.to(torch.bfloat16), rtol=0, atol=0)
     torch.testing.assert_close(out["b"], b, rtol=0, atol=0)
+
+
+def test_gpu_fetch(monkeypatch):
+    # Two load groups reuse one fetch buffer: a packed stacked weight after an
+    # odd-sized bf16 key, then a contiguous key kept in fp32.
+    w = torch.arange(2 * 8 * 6, dtype=torch.float32).reshape(2, 8, 6)
+    a = torch.arange(4 * 3, dtype=torch.float32).reshape(4, 3)
+    b = torch.arange(4 * 4, dtype=torch.float32).reshape(4, 4) / 3
+    fulls = {"a": a, "w": w, "b": b}
+    trainer_boxes = {"a": (a.shape, 0), "w": (w.shape, 1), "b": (b.shape, 0)}
+    generator_boxes = {"a": (a.shape, 0), "w": (w.shape, 2), "b": (b.shape, 1)}
+    dtypes = {"a": torch.bfloat16, "w": torch.bfloat16, "b": torch.float32}
+    trainer_shards = [
+        {
+            key: (fulls[key][_index(*box)], box)
+            for key, (shape, dim) in trainer_boxes.items()
+            for box in [_boxes(shape, 4, dim)[rank]]
+        }
+        for rank in range(4)
+    ]
+    generator_shards = [
+        {
+            key: (_boxes(shape, 2, dim)[rank], dtypes[key])
+            for key, (shape, dim) in generator_boxes.items()
+        }
+        for rank in range(2)
+    ]
+    outputs = _transfer(
+        monkeypatch,
+        trainer_shards,
+        generator_shards,
+        transfer_dtype=torch.bfloat16,
+        preserve_dtype_keys=frozenset({"b"}),
+        fetch_groups=[["a", "w"], ["b"]],
+    )
+    for out, shards in zip(outputs, generator_shards):
+        for key, (box, dtype) in shards.items():
+            expected = fulls[key][_index(*box)].to(dtype)
+            torch.testing.assert_close(out[key], expected, rtol=0, atol=0)
 
 
 def test_dtype_mismatch(monkeypatch):

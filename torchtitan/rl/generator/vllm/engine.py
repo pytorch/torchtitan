@@ -405,6 +405,12 @@ class VLLMEngine(GenerationEngine):
         ``model_state_dict_load_mode="gpu_fetch"``."""
         return self._get_model().model_state_dict_loader.prefetched_model_state_dict
 
+    @property
+    def model_state_dict_load_groups(self) -> list[dict[str, torch.Tensor]]:
+        """The model state dict tensors each fetch of a model state dict load fills, in
+        load order. Their storage is freed outside loads: use only their layout."""
+        return self._get_model().model_state_dict_loader.load_groups
+
     def add_requests(
         self, requests: list[EngineRequest]
     ) -> list[tuple[str, Exception]]:

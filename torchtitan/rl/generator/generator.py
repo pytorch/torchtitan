@@ -76,8 +76,9 @@ class Generator(Configurable):
     engine loop reads on a load: the router awaits it before `load_model_state_dict`, and the
     controller awaits that load before the trainer's next push, so the two never overlap.
     With ``model_state_dict_load_mode="gpu_fetch"``, the prefetch is a no-op and the load reads
-    the StorageVolume snapshot directly into the engine's weights; it resolves only after every
-    rank finishes reading, so the trainer's next push cannot overwrite it mid-read.
+    the trainer's staging buffers (or the StorageVolume snapshot) into the engine's weights; it
+    resolves only after every rank finishes reading, so the trainer's next push cannot overwrite
+    it mid-read.
 
     Args:
         config: Generator-specific configuration, including its model.
@@ -175,8 +176,8 @@ class Generator(Configurable):
         - ``"cpu_prefetch"``: `prefetch_model_state_dict` reads the weights into pinned CPU
           buffers while generation continues, and the load copies them to the GPU. Costs one
           full copy of the weights in generator host memory.
-        - ``"gpu_fetch"``: the load reads the snapshot directly into the GPU weights, one FSDP
-          group at a time, with no CPU copy. For hosts with little CPU memory, e.g. GB300. The
+        - ``"gpu_fetch"``: the load reads the pushed weights onto the GPU, one FSDP group
+          at a time, with no CPU copy. For hosts with little CPU memory, e.g. GB300. The
           transfer happens while the engine is paused: with hot_swap, in-flight requests stall
           for it; without it, the generator stays drained for it. Quantized parameters are not
           supported.
@@ -307,6 +308,11 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        self._model_state_dict_load_groups = (
+            engine.model_state_dict_load_groups
+            if config.model_state_dict_load_mode == "gpu_fetch"
+            else None
+        )
         # Set by `connect_model_state_dict_transport`; None reads from TorchStore.
         self._model_state_dict_transport: ModelStateDictTransport | None = None
         # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
@@ -334,7 +340,7 @@ class Generator(Configurable):
             fetch_model_state_dict=(
                 self._copy_prefetched_model_state_dict
                 if config.model_state_dict_load_mode == "cpu_prefetch"
-                else self._fetch_model_state_dict_from_storage_volume
+                else self._fetch_model_state_dict
             ),
         )
 
@@ -464,9 +470,17 @@ class Generator(Configurable):
         self._torchstore_loop = asyncio.get_running_loop()
 
     async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:
-        """Return this rank and the layout of its prefetched model state dict."""
-        assert self._prefetched_model_state_dict is not None
-        return self._rank, shard_layout(self._prefetched_model_state_dict)
+        """Return this rank and the layout of the model state dict it receives."""
+        if self._prefetched_model_state_dict is not None:
+            return self._rank, shard_layout(self._prefetched_model_state_dict)
+        assert self._model_state_dict_load_groups is not None
+        return self._rank, shard_layout(
+            {
+                key: tensor
+                for group in self._model_state_dict_load_groups
+                for key, tensor in group.items()
+            }
+        )
 
     async def connect_model_state_dict_transport(
         self,
@@ -475,15 +489,24 @@ class Generator(Configurable):
         trainer_sources: list[TrainerSource],
         generator_index: int,
     ) -> None:
-        """Connect to every trainer rank's staging buffer for prefetches to read.
+        """Connect to every trainer rank's staging buffer for prefetches, or with
+        ``model_state_dict_load_mode="gpu_fetch"`` loads, to read.
 
         Args:
             config: The transport config.
             trainer_sources: Every trainer rank's staging buffer.
             generator_index: Index of this generator.
         """
-        assert self._prefetched_model_state_dict is not None
         self._model_state_dict_transport = config.build()
+        if self._model_state_dict_load_groups is not None:
+            self._model_state_dict_transport.connect_fetching_generator(
+                self._model_state_dict_load_groups,
+                sources=trainer_sources,
+                rank=self._rank,
+                generator_index=generator_index,
+            )
+            return
+        assert self._prefetched_model_state_dict is not None
         self._model_state_dict_transport.connect_generator(
             self._prefetched_model_state_dict,
             sources=trainer_sources,
@@ -498,7 +521,8 @@ class Generator(Configurable):
 
         With ``model_state_dict_load_mode="cpu_prefetch"``, the network transfer has already
         completed and this load copies the prefetched weights to the GPU. With
-        ``"gpu_fetch"``, this load reads the weights from the StorageVolume.
+        ``"gpu_fetch"``, this load reads the weights from the trainer's staging buffers,
+        or with no ``ModelStateDictTransport``, from the StorageVolume.
 
         Args:
             version: Policy version to load
@@ -542,16 +566,18 @@ class Generator(Configurable):
                 tensor.copy_(self._prefetched_model_state_dict[key])
         return state_dict.keys()
 
-    def _fetch_model_state_dict_from_storage_volume(
+    def _fetch_model_state_dict(
         self, state_dict: dict[str, torch.Tensor]
     ) -> Iterable[str]:
-        """Read `state_dict`'s weights in place from the StorageVolume snapshot.
+        """Read `state_dict`'s weights in place from the trainer's staging buffers, or
+        with no transport, from the StorageVolume snapshot.
 
-        Returns the keys read; strict=False skips unpublished keys.
+        Returns the keys read; TorchStore's strict=False skips unpublished keys.
 
-        Called on the engine loop thread during a load; blocks it while the read runs
-        on the TorchStore client's event loop.
+        Called on the engine loop thread during a load; blocks it while the reads run.
         """
+        if self._model_state_dict_transport is not None:
+            return self._model_state_dict_transport.fetch_(state_dict)
         # The read writes outside the current stream; wait for queued work that
         # still uses state_dict's storage, e.g. its reallocation.
         torch.accelerator.current_stream().synchronize()
