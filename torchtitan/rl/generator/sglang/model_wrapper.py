@@ -312,6 +312,7 @@ class SGLangModelWrapper(Module):
         dist_moe_runtime: The runtime of the model's Dist-MoE experts, if any (see
             ``build_dist_moe_runtime``).
         model_state_dict_load_mode: See ``ModelStateDictLoader``.
+        hf_assets_path: See ``ModelStateDictLoader``.
     """
 
     def __init__(
@@ -324,13 +325,14 @@ class SGLangModelWrapper(Module):
         checkpointer_config: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         model_state_dict_load_mode: ModelStateDictLoadMode,
+        hf_assets_path: str,
     ) -> None:
         super().__init__()
         self.config = _replace_sglang_layer_configs(copy.deepcopy(model_config))
         device_index = torch.accelerator.current_device_index()
         device_type = torch.accelerator.current_accelerator().type
         device = torch.device(device_type, device_index)
-        decoder, self.parallelism_context = build_inference_model(
+        decoder, self.parallelism_context, frozen_param_keys = build_inference_model(
             self.config, parallelism=parallelism, precision=precision, device=device
         )
         schedule = get_schedule()
@@ -360,6 +362,8 @@ class SGLangModelWrapper(Module):
             decoder,
             checkpointer_config=checkpointer_config,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            frozen_param_keys=frozen_param_keys,
+            hf_assets_path=hf_assets_path,
         )
         # SGLang's TP all-reduce picks its algorithm by message size, which breaks
         # batch invariance. It sends every sum all-reduce to the TP group, so it comes

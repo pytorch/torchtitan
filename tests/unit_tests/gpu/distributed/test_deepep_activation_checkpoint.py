@@ -34,6 +34,7 @@ from torchtitan.models.common.activation import (
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
     HybridEPTokenDispatcher,
 )
@@ -240,12 +241,25 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     )
                 ).to(self.device_type, torch.bfloat16)
                 ac_model.load_state_dict(baseline.state_dict())
+                # DeepEP: compare with router scores applied after W2. HybridEP:
+                # compare with AllToAll, which has no capacity rows past the last
+                # expert offset that could reach the postprocess weight grad.
+                is_deepep = isinstance(dispatcher_config, DeepEPTokenDispatcher.Config)
                 reference = None
-                if isinstance(dispatcher_config, DeepEPTokenDispatcher.Config):
+                if is_deepep or isinstance(
+                    dispatcher_config, HybridEPTokenDispatcher.Config
+                ):
+                    reference_block = _PostW2 if is_deepep else _EPBlock
                     reference = _Model(
-                        _PostW2(
+                        reference_block(
                             num_experts,
-                            dispatcher_config,
+                            (
+                                dispatcher_config
+                                if is_deepep
+                                else AllToAllTokenDispatcher.Config(
+                                    num_experts=num_experts, top_k=_TOP_K
+                                )
+                            ),
                             grouped_linear_cls=grouped_linear_cls,
                             activation_fn=activation_fn,
                             output_postprocess=output_postprocess,
@@ -315,10 +329,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
 
                 if reference is not None:
                     reference_values = _run_forward_backward(reference, x_TD)
-                    # Compare pre-W2 absorption with the previous post-W2 scoring.
+                    # Normwise within BF16 rounding: a wrong postprocess weight grad
+                    # has a relative error near 1.
                     bf16_rtol = 2 * torch.finfo(torch.bfloat16).eps
                     for value, reference_value in zip(expected, reference_values):
-                        if output_postprocess is not None and exact:
+                        if is_deepep and output_postprocess is not None and exact:
                             torch.testing.assert_close(
                                 value, reference_value, rtol=0, atol=0
                             )
@@ -431,7 +446,14 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
                     ),
-                    expert_configs=((GroupedLinear, SwiGLU.Config(), None),),
+                    expert_configs=(
+                        (GroupedLinear, SwiGLU.Config(), None),
+                        (
+                            GroupedLinear,
+                            SwiGLU.Config(),
+                            RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                        ),
+                    ),
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",

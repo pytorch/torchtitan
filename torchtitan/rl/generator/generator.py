@@ -22,6 +22,7 @@ import torchstore as ts
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import Configurable, DebugConfig, PrecisionConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.decoder import Decoder
@@ -33,7 +34,13 @@ from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadM
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    shard_layout,
+    TensorShard,
+    TrainerSource,
+)
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
@@ -85,6 +92,8 @@ class Generator(Configurable):
             adapter supplies ``Channel.open``; standalone runtimes can supply
             an equivalent transport. It is unused when data parallelism is
             disabled.
+        vision_processor: How the model turns an image into vision tokens; the engine
+            preprocesses image prompts' files with it. None: text only.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -135,7 +144,7 @@ class Generator(Configurable):
         """Optional initial-weight loader for the engine's model.
 
         In the RL loop this stays ``None`` because weights arrive from
-        TorchStore. Standalone inference supplies a config that loads the
+        the trainer. Standalone inference supplies a config that loads the
         initial Hugging Face weights.
         """
 
@@ -155,12 +164,15 @@ class Generator(Configurable):
         later turns reuse its KV across model state dict loads, while new groups use the current
         version.
         Enable this to clear prefix-cache entries and preempt running requests; the engine
-        then recomputes their KV under the new weights when they resume."""
+        then recomputes their KV under the new weights when they resume. With image
+        prompts it also clears vLLM's encoder cache (image embeddings from the old vision
+        weights); without it, image embeddings are salted by the pinned version like the
+        KV."""
 
         model_state_dict_load_mode: ModelStateDictLoadMode = "cpu_prefetch"
-        """How a model state dict load moves the StorageVolume snapshot into the engine's weights.
+        """How a model state dict load moves the pushed weights into the engine's weights.
 
-        - ``"cpu_prefetch"``: `prefetch_model_state_dict` reads the snapshot into pinned CPU
+        - ``"cpu_prefetch"``: `prefetch_model_state_dict` reads the weights into pinned CPU
           buffers while generation continues, and the load copies them to the GPU. Costs one
           full copy of the weights in generator host memory.
         - ``"gpu_fetch"``: the load reads the snapshot directly into the GPU weights, one FSDP
@@ -212,6 +224,7 @@ class Generator(Configurable):
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
+        vision_processor: VisionProcessor.Config | None = None,
     ):
         init_logger()
         # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -255,6 +268,7 @@ class Generator(Configurable):
                         config.reset_kv_cache_on_model_state_dict_load
                     ),
                     model_state_dict_load_mode=config.model_state_dict_load_mode,
+                    vision_processor=vision_processor,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -293,6 +307,8 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        # Set by `connect_model_state_dict_transport`; None reads from TorchStore.
+        self._model_state_dict_transport: ModelStateDictTransport | None = None
         # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
         self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
@@ -367,7 +383,7 @@ class Generator(Configurable):
     @sl.log_trace_span("generate")
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -385,7 +401,8 @@ class Generator(Configurable):
         `VLLMValidationError` or `ValueError`).
 
         Args:
-            prompt_token_ids: One tokenized prompt `[token_ids]`.
+            prompt: One prompt: its tokens and images, with their files' bytes (the engine
+                preprocesses the images).
             request_id: Unique id for this request, echoed on the `Completion`.
             group_id: Rollout group id. Requests of one group share a prefix cache
                 salt; `release_groups` drops it. Also sets the vLLM priority; see
@@ -397,7 +414,7 @@ class Generator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3],
+                Prompt(token_ids=[1, 2, 3]),
                 request_id="step=3/group=0/sample=0/turn=0",
                 group_id=0,
                 routing_session_id="group=0/rollout=0",
@@ -412,7 +429,7 @@ class Generator(Configurable):
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
+                prompt=prompt,
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
@@ -446,6 +463,34 @@ class Generator(Configurable):
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
         self._torchstore_loop = asyncio.get_running_loop()
 
+    async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:
+        """Return this rank and the layout of its prefetched model state dict."""
+        assert self._prefetched_model_state_dict is not None
+        return self._rank, shard_layout(self._prefetched_model_state_dict)
+
+    async def connect_model_state_dict_transport(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        trainer_sources: list[TrainerSource],
+        generator_index: int,
+    ) -> None:
+        """Connect to every trainer rank's staging buffer for prefetches to read.
+
+        Args:
+            config: The transport config.
+            trainer_sources: Every trainer rank's staging buffer.
+            generator_index: Index of this generator.
+        """
+        assert self._prefetched_model_state_dict is not None
+        self._model_state_dict_transport = config.build()
+        self._model_state_dict_transport.connect_generator(
+            self._prefetched_model_state_dict,
+            sources=trainer_sources,
+            rank=self._rank,
+            generator_index=generator_index,
+        )
+
     @sl.log_trace_span("load_model_state_dict")
     async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
         """Queues a model state dict load for `version` and blocks until the engine loop has finished loading.
@@ -471,6 +516,9 @@ class Generator(Configurable):
         """
         if self.config.model_state_dict_load_mode == "gpu_fetch":
             return
+        if self._model_state_dict_transport is not None:
+            await self._model_state_dict_transport.read()
+            return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         await ts.get_state_dict(
@@ -487,6 +535,8 @@ class Generator(Configurable):
 
         Called on the engine loop thread during a load.
         """
+        if self._model_state_dict_transport is not None:
+            return self._model_state_dict_transport.copy_prefetched_(state_dict)
         with torch.no_grad():
             for key, tensor in state_dict.items():
                 tensor.copy_(self._prefetched_model_state_dict[key])

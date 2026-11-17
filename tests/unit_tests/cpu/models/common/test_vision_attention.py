@@ -5,13 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 from torch.nn.attention.flex_attention import create_block_mask
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.vision_encoder import VisionAttention
+from torchtitan.models.common.vision_encoder import (
+    VisionAttention,
+    VisionTransformerBlock,
+)
 
 
 class _IdentityAttention(nn.Module):
@@ -63,3 +68,37 @@ class TestVisionAttention(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _RecordDenseSP(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[bool] = []
+
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        self.seen.append(spmd_dense_sp_enabled())
+        return x
+
+
+def test_vision_block_disables_dense_sp_outside_the_encoder_scope() -> None:
+    """Activation remat replays a vision block during backward, after the
+    encoder forward's disable_dense_sp scope has exited. The block must enter
+    the scope itself so the replay picks the same TP layout as the forward."""
+    import torchtitan.distributed.spmd_types as spmd_types_module
+
+    block = VisionTransformerBlock.__new__(VisionTransformerBlock)
+    torch.nn.Module.__init__(block)
+    block.norm1 = torch.nn.Identity()
+    block.norm2 = torch.nn.Identity()
+    block.attn = _RecordDenseSP()
+    block.mlp = _RecordDenseSP()
+
+    with patch.object(
+        spmd_types_module._MESH_TLS, "dense_sp_enabled", True, create=True
+    ):
+        # The decoder registered SP; replay runs outside the encoder forward.
+        block(torch.zeros(2, 3), rope_cache=None, rope_apply=None, attention_mask=None)
+        assert spmd_dense_sp_enabled()
+
+    assert block.attn.seen == [False]
+    assert block.mlp.seen == [False]

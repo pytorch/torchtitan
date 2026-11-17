@@ -12,15 +12,27 @@ These tests pin that pure-geometry behavior, and the ``VisionProcessor`` image
 and video preprocessing built on the resize rules.
 """
 
+import io
+import json
 import math
 import unittest
 from dataclasses import dataclass
 
+import grain.python as grain
 import numpy as np
+import pytest
 import torch
 import torchvision.transforms.v2.functional as TVF
 from PIL import Image
-from torchtitan.components.data.multimodal.mm_datasets import _process_mm_sample
+from renderers import CustomRendererConfig
+from torchtitan.components.data.dataset import SingleDatasetConfig
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
+    _process_mm_sample,
+    MMSamplePackingConfig,
+    MultiModalChatProcessor,
+)
+from torchtitan.components.data.multimodal.utils.text import expand_image_placeholders
 from torchtitan.components.data.multimodal.vision_processor import (
     MuseGlimmerPatchGridResize,
     NaViTPatchGridResize,
@@ -28,8 +40,12 @@ from torchtitan.components.data.multimodal.vision_processor import (
     ResizeRule,
     VisionProcessor,
 )
+from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.renderer import from_renderers
+from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 
 
 def _vision_processor_config(**overrides) -> VisionProcessor.Config:
@@ -459,6 +475,234 @@ class TestProcessMmSampleImageErrors(unittest.TestCase):
                 tokenizer=_FakeMMTokenizer(),
                 vision_processor=None,
             )
+
+
+def test_expand_image_placeholders_rejects_count_mismatch():
+    with pytest.raises(ValueError, match="2 image placeholders for 1 images"):
+        expand_image_placeholders(
+            [3, 3], [False, False], [1], image_id=3, image_start_id=1, image_end_id=2
+        )
+
+
+_MUSE_SPECIAL_TOKENS = {
+    "<|begin_of_text|>": 200000,
+    "<|end_of_text|>": 200001,
+    "<|eom|>": 200007,
+    "<|eot|>": 200008,
+    "<|finetune_right_pad|>": 200018,
+    "<|start|>": 200022,
+    "<|message|>": 200023,
+    "<|image_start|>": 200080,
+    "<|image_end|>": 200081,
+    "<|video|>": 200091,
+    "<|patch|>": 200092,
+}
+
+
+@pytest.fixture
+def muse_tokenizer(tmp_path):
+    # Character tokens with the Muse special-token ids, without checkpoint assets.
+    vocab = {chr(index): index for index in range(128)} | _MUSE_SPECIAL_TOKENS
+    (tmp_path / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "version": "1.0",
+                "model": {"type": "BPE", "vocab": vocab, "merges": []},
+                "decoder": {"type": "Fuse"},
+                "added_tokens": [
+                    {
+                        "id": token_id,
+                        "content": token,
+                        "single_word": False,
+                        "lstrip": False,
+                        "rstrip": False,
+                        "normalized": False,
+                        "special": True,
+                    }
+                    for token, token_id in _MUSE_SPECIAL_TOKENS.items()
+                ],
+            }
+        )
+    )
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps({"bos_token": "<|begin_of_text|>", "eos_token": "<|end_of_text|>"})
+    )
+    return MultiModalTokenizer.Config(
+        image_token="<|patch|>",
+        video_token="<|video|>",
+        vision_start_token="<|image_start|>",
+        vision_end_token="<|image_end|>",
+        pad_token="<|finetune_right_pad|>",
+    ).build(tokenizer_path=str(tmp_path))
+
+
+def _png_bytes(height: int, width: int) -> bytes:
+    buffer = io.BytesIO()
+    _synthetic_rgb_image(height, width).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _vqa_messages(sample: dict) -> list[dict]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": sample["image"]},
+                {"type": "text", "text": sample["question"]},
+            ],
+        },
+        {"role": "assistant", "content": sample["answer"]},
+    ]
+
+
+def _chat_vision_processor() -> VisionProcessor:
+    # 56 x 84 pixels stay unresized: a 2 x 3 grid of 28-pixel merged patches.
+    return _vision_processor_config(
+        patch_size=14,
+        resize=PixelBudgetResize.Config(min_pixels=784, max_pixels=1_000_000),
+    ).build()
+
+
+def _chat_processor(renderer, tokenizer, max_context_length=2048):
+    return MultiModalChatProcessor.Config(
+        messages_fn=_vqa_messages,
+        renderer=renderer,
+    ).build(
+        context=DatasetBuildContext(
+            tokenizer=tokenizer,
+            max_context_length=max_context_length,
+            num_tokens_per_microbatch=max_context_length,
+            read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+            vision_processor=_chat_vision_processor(),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "renderer, answer_targets",
+    [
+        (
+            MuseSparkRendererConfig(current_date="2026-01-15"),
+            " to=user<|message|>yes<|eot|>",
+        ),
+        (
+            from_renderers(
+                CustomRendererConfig(
+                    import_path=(
+                        "torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+                    )
+                )
+            ),
+            "yes<|eot|>",
+        ),
+    ],
+)
+def test_chat_processor_expands_image_and_masks_prompt(
+    muse_tokenizer, renderer, answer_targets
+):
+    processor = _chat_processor(renderer, muse_tokenizer)
+    sample = processor(
+        {"image": _png_bytes(56, 84), "question": "Is it a lung?", "answer": "yes"},
+        np.random.default_rng(0),
+    )
+
+    input_ids = sample["input_ids"].tolist()
+    image_start = input_ids.index(muse_tokenizer.vision_start_id)
+    assert input_ids[image_start : image_start + 8] == [
+        muse_tokenizer.vision_start_id,
+        *[muse_tokenizer.image_id] * 6,
+        muse_tokenizer.vision_end_id,
+    ]
+    assert input_ids.count(muse_tokenizer.image_id) == 6
+    assert [image.shape for image in sample["pixel_values"]] == [(1, 56, 84, 3)]
+    labels = sample["labels"]
+    assert len(labels) == len(input_ids)
+    targets = labels[labels != IGNORE_INDEX].tolist()
+    assert muse_tokenizer.decode(targets, skip_special_tokens=False) == answer_targets
+
+
+@pytest.mark.parametrize(
+    "part",
+    [{"type": "video", "video": "clip.mp4"}, {"type": "image_url", "image_url": "x"}],
+)
+def test_chat_processor_rejects_non_image_media(muse_tokenizer, part):
+    # The Glimmer renderer renders a video part as a pixel-less placeholder and
+    # silently skips an image_url part.
+    processor = MultiModalChatProcessor.Config(
+        messages_fn=lambda row: [
+            {"role": "user", "content": [part, {"type": "text", "text": "Lung?"}]},
+            {"role": "assistant", "content": "yes"},
+        ],
+        renderer=from_renderers(
+            CustomRendererConfig(
+                import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
+            )
+        ),
+    ).build(
+        context=DatasetBuildContext(
+            tokenizer=muse_tokenizer,
+            max_context_length=2048,
+            num_tokens_per_microbatch=2048,
+            read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+            vision_processor=_chat_vision_processor(),
+        )
+    )
+    with pytest.raises(ValueError, match=f"'{part['type']}' content part"):
+        processor({}, np.random.default_rng(0))
+
+
+def test_chat_loss_mask_survives_packing_and_collation(muse_tokenizer):
+    processor = _chat_processor(
+        MuseSparkRendererConfig(current_date="2026-01-15"), muse_tokenizer
+    )
+    samples = [
+        processor(
+            {"image": _png_bytes(56, 84), "question": question, "answer": answer},
+            np.random.default_rng(0),
+        )
+        for question, answer in (("Lung?", "yes"), ("Organ?", "liver"))
+    ]
+    num_tokens = sum(len(sample["input_ids"]) for sample in samples) + 3
+
+    @dataclass(frozen=True)
+    class _SamplesSourceConfig:
+        def build(self):
+            return samples
+
+    context = DatasetBuildContext(
+        tokenizer=muse_tokenizer,
+        max_context_length=num_tokens,
+        num_tokens_per_microbatch=num_tokens,
+        read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
+        vision_processor=_chat_vision_processor(),
+    )
+    packed = next(
+        iter(
+            MMSamplePackingConfig(
+                dataset=SingleDatasetConfig(source=_SamplesSourceConfig())
+            ).build(
+                context=context,
+                dataset_iteration_policy=DatasetIterationPolicy(
+                    seed=0,
+                    shuffle=False,
+                    repeat=False,
+                    dp_rank=0,
+                    dp_world_size=1,
+                    streaming_shuffle_buffer_size=1,
+                ),
+            )
+        )
+    )
+
+    expected_labels = torch.cat([sample["labels"] for sample in samples])
+    assert torch.equal(packed["labels"][: len(expected_labels)], expected_labels)
+    assert (packed["labels"][len(expected_labels) :] == IGNORE_INDEX).all()
+    assert len(packed["pixel_values"]) == 2
+
+    collator = MultiModalCollator.Config().build(context=context)
+    microbatch = collator([packed])
+    assert torch.equal(microbatch.labels, packed["labels"])
+    assert microbatch.model_kwargs["grid_thw"].tolist() == [[1, 4, 6], [1, 4, 6]]
 
 
 if __name__ == "__main__":

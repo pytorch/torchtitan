@@ -156,6 +156,7 @@ def register_to_sglang(
     checkpointer_config: CheckpointManager.Config | None,
     dist_moe_runtime: DistMoeRuntime.Config | None,
     model_state_dict_load_mode: ModelStateDictLoadMode,
+    hf_assets_path: str,
 ) -> None:
     """Register the TorchTitan model class, config parser and attention backend with SGLang.
 
@@ -182,6 +183,7 @@ def register_to_sglang(
         dist_moe_runtime: The runtime of the model's Dist-MoE experts, if any (see
             ``build_dist_moe_runtime``).
         model_state_dict_load_mode: See ``ModelStateDictLoader``.
+        hf_assets_path: See ``ModelStateDictLoader``.
     """
     from sglang.srt.configs.model_config_parser_registry import (
         ModelConfigParserBase,
@@ -220,6 +222,7 @@ def register_to_sglang(
                 checkpointer_config=checkpointer_config,
                 dist_moe_runtime=dist_moe_runtime,
                 model_state_dict_load_mode=model_state_dict_load_mode,
+                hf_assets_path=hf_assets_path,
             )
 
     # TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang registers models

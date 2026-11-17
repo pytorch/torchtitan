@@ -121,9 +121,8 @@ def _batch_invariant_recurrent_gdn_fwd(
         device=q_BTHK.device,
     )
     # The recurrent operator consumes normalized Q/K.
-    autotune = not torch.are_deterministic_algorithms_enabled()
-    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
-    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
+    normalized_q_BTHK = l2norm(q_BTHK, cu_seqlens=cu_seqlens)
+    normalized_k_BTHK = l2norm(k_BTHK, cu_seqlens=cu_seqlens)
     out_BTHV, _ = recurrent_gdn(
         normalized_q_BTHK,
         normalized_k_BTHK,
@@ -135,9 +134,8 @@ def _batch_invariant_recurrent_gdn_fwd(
         scale=q_BTHK.shape[-1] ** -0.5,
         state_indices=state_indices,
         has_initial_state=has_initial_state,
-        autotune=False,
         # The scan otherwise picks its arithmetic from the batch shape.
-        kernel_options={"batch_invariant": True},
+        kernel_options={"batch_invariant": True, "autotune": False},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
@@ -168,9 +166,8 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        autotune = not torch.are_deterministic_algorithms_enabled()
-        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens, autotune=autotune)
-        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens, autotune=autotune)
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens)
         output_BTHV, _ = chunk_gdn(
             normalized_q_BTHK,
             normalized_k_BTHK,
@@ -340,9 +337,8 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        autotune = not torch.are_deterministic_algorithms_enabled()
-        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
-        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens, autotune=autotune)
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
         output_BTHV, _ = chunk_gdn(
             normalized_q_BTHK,
             normalized_k_BTHK,
@@ -607,6 +603,11 @@ class GDN(LinearAttention):
 
         def __post_init__(self):
             LinearAttention.Config.__post_init__(self)
+            # Before the modulo: 0 raises ZeroDivisionError, and 4 % -2 == 0.
+            if self.n_key_heads < 1:
+                raise ValueError(
+                    f"n_key_heads must be positive, got {self.n_key_heads}"
+                )
             if self.n_heads % self.n_key_heads != 0:
                 raise ValueError(
                     f"n_heads ({self.n_heads}) must be divisible by "

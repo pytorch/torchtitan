@@ -18,9 +18,11 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
 from torchtitan.models.base.model import FlopsEstimator
@@ -31,9 +33,9 @@ from torchtitan.models.common.attention import (
     GQAttention,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
@@ -246,10 +248,9 @@ class EmbeddingWithNorm(Module):
     the default PP module split instead of being pruned to ``None``.
 
     The norm is a sibling child that runs *after* the embedding child so that,
-    under TP, it sees the embedding's already-reduced output. (Vocab-parallel
-    embedding emits a ``Partial`` result; the embedding child's sharding
-    all-reduces it at the child boundary before the norm runs -- normalizing a
-    partial sum would be incorrect.)
+    under TP, it sees the embedding's already-reduced output.
+    (``VocabParallelEmbedding`` reduces its ``Partial`` lookup before
+    returning, so the norm never normalizes a partial sum.)
 
     Contrast with :class:`SoftCappedLinear` at the other end of the model. That
     transform is *elementwise per logit*, so it commutes with both vocab
@@ -264,7 +265,7 @@ class EmbeddingWithNorm(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        embedding: Embedding.Config
+        embedding: VocabParallelEmbedding.Config
         norm: RMSNorm.Config
 
     def __init__(self, config: Config) -> None:
@@ -276,25 +277,19 @@ class EmbeddingWithNorm(Module):
         return self.norm(self.embedding(tokens))
 
 
-class MuseGlimmerModel(MultimodalModel):
-    state_dict_adapter_cls = MuseGlimmerStateDictAdapter
-    multimodal_encoder_fqns = ("vision_encoder",)
-
-    pipeline_first_stage_module_fqns = (
-        "vision_encoder",
-        "vision_adapter",
-        "vision_projection",
-        "perception_emb_norm",
-    )
-
+class MuseGlimmerModel(Decoder):
     """Muse Glimmer decoder-only language model.
+
+    ``MuseGlimmerMultimodalModel`` adds the vision stack.
 
     Args:
         config (MuseGlimmerModel.Config): Model configuration.
     """
 
+    state_dict_adapter_cls = MuseGlimmerStateDictAdapter
+
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config):
+    class Config(Decoder.Config):
         dim: int = 6656
         vocab_size: int = 202048
         # pyrefly: ignore [bad-override]
@@ -309,23 +304,74 @@ class MuseGlimmerModel(MultimodalModel):
                 ]
             )
         )
-        # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
-        # bundled embedding+norm unit whose .embedding/.norm children carry the sharding.
+        # Narrows the base Decoder.Config.tok_embeddings
+        # (VocabParallelEmbedding.Config) to the bundled embedding+norm unit
+        # whose .embedding/.norm children carry the sharding.
         # Dataclass fields are invariant, so pyrefly flags the (intentional) override.
         # pyrefly: ignore [bad-override]
         tok_embeddings: EmbeddingWithNorm.Config
-        # Optional LLM-side multimodal injection. Preprocessing builds absolute
-        # packed-bank indices before CP; forward gathers the corresponding vision
-        # rows into the TP-replicated token embeddings.
-        vision_projection: Linear.Config | None = None
-        perception_emb_norm: RMSNorm.Config | None = None
-        # Optional owned vision stack. When set, ``MuseGlimmerModel`` builds the encoder
-        # + adapter as submodules and runs them inside ``forward`` (from padded
-        # ``pixel_values`` + ``grid_thw``), mirroring qwen3_5's
-        # ``Qwen35Model.vision_encoder``. The adapter output dim must match
-        # ``vision_projection`` in_features. Both default to None (text-only model).
-        vision_encoder: NaViTEncoder.Config | None = None
-        vision_adapter: MuseSparkNaViTAdapter.Config | None = None
+
+    def forward_embeddings(
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ):
+        """`Decoder.forward_embeddings` for Muse Glimmer's blocks, which take neither
+        a padding mask nor an aux-loss denominator."""
+        del aux_loss_denominators, padding_mask
+        h_TD = h
+        for layer in self.layers.values():
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
+            h_TD = layer(
+                h_TD,
+                layer_attention_metadata,
+                positions,
+            )
+
+        h_TD = self._pre_lm_head_norm_and_gather(h_TD)
+
+        # _skip_lm_head is an attribute (not a kwarg) because PP backward calls
+        # .requires_grad on all stage inputs, which fails on bool kwargs.
+        if self._skip_lm_head:
+            return h_TD
+        return self.lm_head(h_TD) if self.lm_head is not None else h_TD
+
+
+class MuseGlimmerMultimodalModel(MuseGlimmerModel, MultimodalModel):
+    """Muse Glimmer with its vision stack.
+
+    The model owns the encoder + adapter and runs them inside ``forward`` (from
+    padded ``pixel_values`` + ``grid_thw``), mirroring qwen3_5's
+    ``Qwen35MultimodalModel.vision_encoder``. Preprocessing builds absolute
+    packed-bank indices before CP; forward projects the adapter output to the
+    model dim, normalizes it, and gathers the corresponding vision rows into the
+    token embeddings.
+    """
+
+    multimodal_encoder_fqns = ("vision_encoder",)
+
+    pipeline_first_stage_module_fqns = (
+        "vision_encoder",
+        "vision_adapter",
+        "vision_projection",
+        "perception_emb_norm",
+    )
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MuseGlimmerModel.Config, MultimodalModel.Config):
+        vision_encoder: NaViTEncoder.Config
+        vision_adapter: MuseSparkNaViTAdapter.Config
+        # The adapter output dim must match ``vision_projection`` in_features.
+        vision_projection: Linear.Config
+        perception_emb_norm: RMSNorm.Config
 
         def build_flops_estimator(
             self,
@@ -336,20 +382,21 @@ class MuseGlimmerModel(MultimodalModel):
         ) -> FlopsEstimator:
             from torchtitan.models.common.flops import active_parameter_flops_per_token
 
-            model = cast(MuseGlimmerModel, model)
+            model = cast(MuseGlimmerMultimodalModel, model)
             vision_outputs = (
                 model.vision_adapter,
                 model.vision_projection,
                 model.perception_emb_norm,
             )
-            base_estimate = super(MuseGlimmerModel.Config, self).build_flops_estimator(
+            base_estimate = super(
+                MuseGlimmerMultimodalModel.Config, self
+            ).build_flops_estimator(
                 model,
                 seq_len=seq_len,
                 excluded_submodules=(*vision_outputs, *excluded_submodules),
             )
             vision_config = self.vision_encoder
-            if vision_config is None:
-                return base_estimate
+            # Pipeline stages other than the first drop the vision modules.
             vision_output_flops = sum(
                 active_parameter_flops_per_token(module)
                 for module in vision_outputs
@@ -360,27 +407,12 @@ class MuseGlimmerModel(MultimodalModel):
                 + vision_config.get_num_output_tokens(input_dict) * vision_output_flops
             )
 
-    def __init__(self, config: "MuseGlimmerModel.Config") -> None:
+    def __init__(self, config: "MuseGlimmerMultimodalModel.Config") -> None:
         super().__init__(config)
-        # LLM-side multimodal injection modules (None for the text-only model).
-        self.vision_projection = (
-            config.vision_projection.build()
-            if config.vision_projection is not None
-            else None
-        )
-        self.perception_emb_norm = (
-            config.perception_emb_norm.build()
-            if config.perception_emb_norm is not None
-            else None
-        )
-        # Owned vision stack (None unless a multimodal flavor configured it). When
-        # present, ``forward`` runs encoder->adapter on packed pixel_values.
-        self.vision_encoder = (
-            config.vision_encoder.build() if config.vision_encoder is not None else None
-        )
-        self.vision_adapter = (
-            config.vision_adapter.build() if config.vision_adapter is not None else None
-        )
+        self.vision_projection = config.vision_projection.build()
+        self.perception_emb_norm = config.perception_emb_norm.build()
+        self.vision_encoder = config.vision_encoder.build()
+        self.vision_adapter = config.vision_adapter.build()
 
     def parallelize(
         self,
@@ -391,11 +423,11 @@ class MuseGlimmerModel(MultimodalModel):
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
-    ) -> MuseGlimmerModel:
+    ) -> MuseGlimmerMultimodalModel:
         vision_encoder_config = cast(
-            MuseGlimmerModel.Config, self.config
+            MuseGlimmerMultimodalModel.Config, self.config
         ).vision_encoder
-        if vision_encoder_config is not None and parallelism_context.tp_enabled:
+        if parallelism_context.tp_enabled:
             assert vision_encoder_config.num_heads % parallelism_context.tp == 0, (
                 f"vision num_heads ({vision_encoder_config.num_heads}) must be "
                 f"divisible by TP degree ({parallelism_context.tp})"
@@ -435,14 +467,6 @@ class MuseGlimmerModel(MultimodalModel):
                 "Muse Glimmer vision encoder does not support video inputs."
             )
         if has_images:
-            vision_encoder_config = cast(
-                MuseGlimmerModel.Config, self.config
-            ).vision_encoder
-            if vision_encoder_config is None:
-                raise ValueError(
-                    "pixel_values were provided but the model config has no "
-                    "vision_encoder configured."
-                )
             if grid_thw is None:
                 raise ValueError(
                     "pixel_values were provided but grid_thw was not provided."
@@ -514,9 +538,6 @@ class MuseGlimmerModel(MultimodalModel):
         ``pixel_values`` contains all visual patches packed into one sequence,
         and ``grid_thw`` describes each visual item's contiguous segment.
         """
-        assert self.vision_encoder is not None and self.vision_adapter is not None
-        assert self.vision_projection is not None
-        assert self.perception_emb_norm is not None
         assert pixel_values is not None and grid_thw is not None
         image_grids = grid_thw.tolist()
         if any(temporal != 1 for temporal, _, _ in image_grids):
@@ -527,10 +548,20 @@ class MuseGlimmerModel(MultimodalModel):
                 f"grid_thw describes {num_patches} patches, but pixel_values contains "
                 f"{pixel_values.shape[0]}"
             )
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_VD = self.vision_adapter(
-            self.vision_encoder(pixel_values, grid_thw=grid_thw)
+            invariant_to_replicate(
+                self.vision_encoder(pixel_values, grid_thw=grid_thw), MeshAxisName.CP
+            )
         )
-        return self.perception_emb_norm(self.vision_projection(vision_features_VD))
+        vision_embeds_VD = self.perception_emb_norm(
+            self.vision_projection(vision_features_VD)
+        )
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_VD = invariant_to_replicate(vision_embeds_VD, MeshAxisName.TP)
+        return vision_embeds_VD
 
     def _prepare_multimodal_embeds(
         self,
@@ -541,9 +572,6 @@ class MuseGlimmerModel(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Build and inject image embeddings on the embedding pipeline stage."""
-        if self.vision_encoder is None:
-            return h_TD
-
         image_is_dummy = pixel_values is None
         if image_is_dummy:
             grid_size = self.vision_encoder.downsample_factor
@@ -580,7 +608,7 @@ class MuseGlimmerModel(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None = None,
     ):
         # Video inputs are rejected by preprocess_inputs.
-        del aux_loss_denominators, padding_mask, pixel_values_videos, grid_thw_videos
+        del pixel_values_videos, grid_thw_videos
 
         # Embedding stage: embed tokens (the scaleless norm is bundled inside
         # tok_embeddings) and inject vision features before the decoder layers.
@@ -597,23 +625,10 @@ class MuseGlimmerModel(MultimodalModel):
                 )
         else:
             h_TD = tokens
-
-        for layer in self.layers.values():
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
-            )
-            h_TD = layer(
-                h_TD,
-                layer_attention_metadata,
-                positions,
-            )
-
-        h_TD = self.norm(h_TD) if self.norm is not None else h_TD
-
-        # _skip_lm_head is an attribute (not a kwarg) because PP backward calls
-        # .requires_grad on all stage inputs, which fails on bool kwargs.
-        if self._skip_lm_head:
-            return h_TD
-        return self.lm_head(h_TD) if self.lm_head is not None else h_TD
+        return self.forward_embeddings(
+            h_TD,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )

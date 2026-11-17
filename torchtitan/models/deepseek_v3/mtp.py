@@ -33,7 +33,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -168,7 +168,7 @@ class MTPTransformerBlock(TransformerBlock):
             )
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
-        return self.mtp_norm(h)
+        return maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h))
 
     def _maybe_shard_mtp_valid_mask_across_tp(
         self, mtp_input_valid_mask_T: torch.Tensor
@@ -425,7 +425,7 @@ class MTPDecoder(Decoder):
             )
 
         prev_depth_hidden = h
-        h = self.norm(h) if self.norm is not None else h
+        h = self._pre_lm_head_norm_and_gather(h)
 
         mtp_outputs = []
         for depth, (layer, depth_tokens, mtp_input_valid_mask) in enumerate(

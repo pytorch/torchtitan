@@ -67,6 +67,8 @@ from typing import Any, cast
 import grain.python as grain
 import numpy as np
 import torch
+from renderers import build_training_sample, Message
+from renderers.base import ImagePart
 
 from torchtitan.components.data.dataset import (
     DatasetConfig as GrainDatasetConfig,
@@ -76,10 +78,15 @@ from torchtitan.components.data.dataset import (
 from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.renderer import (
+    RendererConfig,
+    require_content_types,
+    TEXT_CONTENT_TYPES,
+)
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
 from .utils.audio import resample_waveform
-from .utils.text import insert_vision_placeholders
+from .utils.text import expand_image_placeholders, insert_vision_placeholders
 
 from .vision_processor import VisionProcessor
 
@@ -244,24 +251,22 @@ def _process_mm_sample(
     if not texts or len(texts) != len(images):
         return None
 
-    processed_images = []
-    num_image_tokens = []
-
-    for idx, img in enumerate(images):
-        if img is None:
-            continue
+    sample_images = [image for image in images if image is not None]
+    processed_images: list[torch.Tensor] = []
+    num_image_tokens: list[int] = []
+    if sample_images:
         if vision_processor is None:
             raise ValueError("Image samples require Trainer.Config.vision_processor.")
         try:
-            processed_image, grid_thw = vision_processor.resize_and_normalize(img)
+            processed_images, num_image_tokens = vision_processor.process_images(
+                sample_images
+            )
         except Exception as e:
             # Pretraining data skips a sample with an unreadable image.
             logger.warning(f"Dropping sample, error processing image: {e}")
             return None
-        processed_images.append(processed_image)
-        num_image_tokens.append(vision_processor.num_placeholder_tokens(grid_thw))
-        # Keep the accepted image at this aligned position as a placeholder.
-        texts[idx] = None
+    # Keep each image at its aligned position as a placeholder.
+    texts = [None if image is not None else text for text, image in zip(texts, images)]
 
     # Replace image placeholders (None) with image token sequences
     processed_text = insert_vision_placeholders(
@@ -371,6 +376,107 @@ class VisionSampleProcessor(SampleProcessor):
         )
         return _filter_overlong_sample(
             processed,
+            max_context_length=self._max_context_length,
+        )
+
+
+# Only image parts get pixels; renderers may render other media parts as
+# placeholders with no data, or skip them.
+_CHAT_CONTENT_TYPES = TEXT_CONTENT_TYPES | {"image"}
+
+
+class MultiModalChatProcessor(SampleProcessor):
+    """Processes chat rows with images for Grain.
+
+    ``messages_fn`` returns chat messages whose image parts are
+    ``{"type": "image", "image": <bytes, path, or PIL image>}``. The renderer emits
+    one image token per image part, which is expanded to the image's placeholder
+    count from the trainer's ``vision_processor``. Only tokens the renderer marks
+    as model output get loss.
+
+    Example::
+
+        MultiModalChatProcessor.Config(
+            messages_fn=vqa_messages,
+            renderer=MuseSparkRendererConfig(),
+        )
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(SampleProcessor.Config):
+        messages_fn: Callable[[dict[str, Any]], list[Message]]
+        renderer: RendererConfig
+
+    def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
+        if context.vision_processor is None:
+            raise ValueError(
+                "MultiModalChatProcessor requires Trainer.Config.vision_processor."
+            )
+        if not isinstance(context.tokenizer, MultiModalTokenizer):
+            raise ValueError("MultiModalChatProcessor requires a MultiModalTokenizer.")
+        self._tokenizer = context.tokenizer
+        self._vision_processor = context.vision_processor
+        self._max_context_length = context.max_context_length
+        self._messages_fn = config.messages_fn
+        self._renderer = config.renderer.build(tokenizer=context.tokenizer)
+
+    def __call__(
+        self,
+        sample: dict[str, Any],
+        rng: np.random.Generator,
+    ) -> dict[str, Any] | None:
+        del rng
+        messages = self._messages_fn(sample)
+        if not messages or messages[-1]["role"] != "assistant":
+            raise ValueError("Chat samples must end with an assistant message.")
+        require_content_types(messages, _CHAT_CONTENT_TYPES)
+        rendered = build_training_sample(
+            self._renderer, messages, ensure_final_stop=True
+        )
+        if rendered.multi_modal_data is not None:
+            raise ValueError(
+                "MultiModalChatProcessor expands images itself; use a renderer "
+                "that emits one image token per image."
+            )
+
+        images = [
+            cast(ImagePart, part)["image"]
+            for message in messages
+            for part in (
+                message["content"] if isinstance(message.get("content"), list) else ()
+            )
+            if part.get("type") == "image"
+        ]
+        try:
+            processed_images, num_image_tokens = self._vision_processor.process_images(
+                images
+            )
+        except Exception as e:
+            logger.warning(f"Dropping sample, error processing image: {e}")
+            return None
+        tokenizer = self._tokenizer
+        token_ids, loss_mask = expand_image_placeholders(
+            rendered.token_ids,
+            [bool(target) for target in rendered.loss_mask],
+            num_image_tokens,
+            # pyrefly: ignore [missing-attribute]
+            image_id=tokenizer.image_id,
+            # pyrefly: ignore [missing-attribute]
+            image_start_id=tokenizer.vision_start_id,
+            # pyrefly: ignore [missing-attribute]
+            image_end_id=tokenizer.vision_end_id,
+        )
+        tokens = torch.tensor(token_ids)
+        labels = tokens[1:].clone()
+        # Label j predicts token j + 1, so shift the mask with the labels.
+        labels[~torch.tensor(loss_mask[1:])] = IGNORE_INDEX
+        return _filter_overlong_sample(
+            {
+                "input_ids": tokens[:-1],
+                "labels": labels,
+                "positions": torch.arange(len(tokens) - 1),
+                "pixel_values": processed_images,
+            },
             max_context_length=self._max_context_length,
         )
 

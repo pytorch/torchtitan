@@ -334,7 +334,7 @@ class DeepSeekV4Model(Decoder):
         # Only the last PP stage owns hc_head and norm.
         if self.norm is None:
             return h_TMD
-        h_TD = self.norm(self.hc_head(h_TMD))
+        h_TD = self._pre_lm_head_norm_and_gather(self.hc_head(h_TMD))
 
         if len(self.mtp_layers) == 0:
             if self._skip_lm_head or self.lm_head is None:

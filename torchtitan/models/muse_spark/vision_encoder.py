@@ -28,6 +28,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_types import disable_dense_sp
+
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
@@ -42,6 +44,7 @@ from torchtitan.models.common.vision_encoder import (
     RopeApply,
     VisionTransformerBlock,
 )
+from torchtitan.ops.grid_sample import deterministic_grid_sample
 
 
 def _identity_rope(
@@ -169,7 +172,6 @@ class NaViTEncoder(Module):
         block: VisionTransformerBlock.Config
         ln_post: LayerNorm.Config
         use_rope: bool = True
-        grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
 
         def __post_init__(self) -> None:
@@ -262,7 +264,6 @@ class NaViTEncoder(Module):
         self.pos_emb_grid_h = config.pos_emb_grid_h
         self.pos_emb_grid_w = config.pos_emb_grid_w
         self.use_rope = config.use_rope
-        self.grid_sample_mode = config.grid_sample_mode
         self.pos_emb_grid_order = config.pos_emb_grid_order
 
         self.rope_freq = config.rope_freq.build()
@@ -333,12 +334,9 @@ class NaViTEncoder(Module):
                 1, 1, grid_h * grid_w, 2
             )
         pos_xy = _annotate_vision_activation_type(pos_xy)
-        sampled = F.grid_sample(
-            pos_emb_DHW,
-            pos_xy,
-            mode=self.grid_sample_mode,
-            align_corners=False,
-        )
+        # The CUDA grid_sample backward uses atomic adds; every TP/CP rank must
+        # compute the same grad for the invariant positional embedding.
+        sampled = deterministic_grid_sample(pos_emb_DHW, pos_xy)
         return sampled[0, :, 0].transpose(0, 1)
 
     def _pixel_shuffle_downsample(
@@ -430,6 +428,8 @@ class NaViTEncoder(Module):
         x_TD = self.ln_post(x_TD)
         return self._pixel_shuffle_downsample(x_TD, grid_h, grid_w)
 
+    # Vision activations are never sequence-sharded, so they stay TP-invariant.
+    @disable_dense_sp()
     def forward(
         self,
         pixel_values_NP: torch.Tensor,

@@ -36,7 +36,7 @@ class _GeneratorHandle(RoutingCandidate):
     to run."""
 
     reserved_load: int = 0
-    """Router-side estimate of in-flight routed generation work."""
+    """Number of in-flight generate calls reserved on this generator."""
 
     draining: bool = False
     """True while the generator drains for a model state dict load (hot_swap=False only)."""
@@ -49,6 +49,12 @@ class InterGeneratorRouter(Configurable):
     generator *meshes* (replicas). Within the chosen mesh, ``IntraGeneratorRouter``
     then routes the request across that mesh's data-parallel ranks.
 
+    Look-aside routing:
+        The router never sees a generate call's payload. ``reserve`` picks a
+        generator, adds one unit of load to it and returns its rank-0 handle; the
+        caller sends the generate call there directly, then calls
+        ``release_reservation``.
+
     Singleton:
         Routing decisions read and write mutable states such as
         ``_GeneratorHandle.draining``, and so on. These states are not backed by
@@ -59,8 +65,9 @@ class InterGeneratorRouter(Configurable):
           * this mesh should consists of only 1 actor.
 
         This pattern is simpler to implement, and should be good enough to handle
-        the RL job's scale because the router is just a proxy, and the number of
-        concurrent requests should be reasonable for a singleton to handle.
+        the RL job's scale because the router only exchanges small routing
+        messages, and the number of concurrent requests should be reasonable for
+        a singleton to handle.
 
     Actor:
        The router singleton is reached from different processes and hosts, so it
@@ -110,30 +117,16 @@ class InterGeneratorRouter(Configurable):
             raise ValueError("InterGeneratorRouter requires at least one generator")
 
         self._strategy = config.strategy.build()
+        self._reservations: dict[str, _GeneratorHandle] = {}
 
-    def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
-        """Reserve estimated generation work on a handle before dispatch."""
-
-        if cost < 0:
-            raise ValueError(f"route estimated_cost must be non-negative, got {cost}")
-        h.reserved_load += cost
-
-    def _release(self, h: _GeneratorHandle, cost: int) -> None:
-        """Release estimated generation work after a routed call finishes."""
-
-        h.reserved_load -= cost
+    def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
+        """Pick a generator for one generate call, reserve one load unit on it, and
+        return its rank-0 handle."""
         assert (
-            h.reserved_load >= 0
-        ), f"generator reserved_load went negative: {h.reserved_load}"
+            request_id not in self._reservations
+        ), f"request_id {request_id!r} already has a reservation"
 
-    async def _route(
-        self,
-        method: str,
-        *args,
-        routing_ctx: RoutingContext,
-        **kwargs,
-    ) -> Any:
-        """Dispatch one call to a generator's rank 0 and return its result."""
+        routing_ctx = RoutingContext(session_id=routing_session_id)
         pinned = self._strategy.pinned_candidate(routing_ctx)
         if pinned is not None and pinned.draining:
             # Stay on the draining generator, which queues the turn until its load is
@@ -145,11 +138,20 @@ class InterGeneratorRouter(Configurable):
             # together at the start of a load, so then use any.
             candidates = [g for g in self._generators if not g.draining]
             h = self._strategy.choose(routing_ctx, candidates or self._generators)
-        self._reserve(h, routing_ctx.estimated_cost)
-        try:
-            return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
-        finally:
-            self._release(h, routing_ctx.estimated_cost)
+        # TODO: one load unit per call ignores the request's size, the KV that sessions
+        #   hold between turns (vLLM reports only running requests' KV), and tokens
+        #   generated so far. Reserve by a token or KV estimate, ideally refreshed from
+        #   generator-reported KV usage, and stop sending to nearly full generators.
+        h.reserved_load += 1
+        self._reservations[request_id] = h
+        # Returning the handle keeps callers simple. If router CPU becomes a bottleneck,
+        #   return the generator index and have callers keep the handle list.
+        return h.rank0_actor
+
+    def release_reservation(self, request_id: str) -> None:
+        """Free the load unit ``reserve`` placed for ``request_id``. Routing
+        bookkeeping only; unlike ``release_session``, it doesn't call a generator."""
+        self._reservations.pop(request_id).reserved_load -= 1
 
     async def _fanout(
         self,
@@ -220,32 +222,6 @@ class InterGeneratorRouter(Configurable):
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
-
-    async def generate(
-        self,
-        prompt_token_ids: list[int],
-        *,
-        request_id: str,
-        group_id: int,
-        routing_session_id: str | None,
-        sampling_config: Any | None,
-    ) -> Any:
-        """Route one generation call to a generator and return its completion."""
-        return await self._route(
-            "generate",
-            prompt_token_ids,
-            request_id=request_id,
-            group_id=group_id,
-            # Generator.generate also requires this field for its
-            # intra-mesh DP routing.
-            routing_session_id=routing_session_id,
-            sampling_config=sampling_config,
-            # Load is measured as in-flight request count (one unit per call).
-            routing_ctx=RoutingContext(
-                estimated_cost=1,
-                session_id=routing_session_id,
-            ),
-        )
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""

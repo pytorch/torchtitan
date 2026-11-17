@@ -810,6 +810,24 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
         manager.close()
 
+    def test_hf_final_save_rejects_frozen_params(self) -> None:
+        """State dict adapters drop LoRA adapters, so the export would be the base."""
+        model = nn.Linear(2, 2)
+        model.bias.requires_grad_(False)
+        config = TorchCheckpointingManager.Config(
+            last_save_model_only=True, last_save_in_hf=True
+        )
+        with self.assertRaisesRegex(ValueError, "frozen parameters"):
+            config.build(
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                extra_states={},
+                sd_adapter=_StateDictAdapter(),
+                storage_config=mock.Mock(),
+            )
+
     def test_hf_load_uses_temporary_model_only_manager_and_restores_model(
         self,
     ) -> None:

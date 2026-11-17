@@ -102,6 +102,7 @@ from typing import Any
 # and in train.py; see the note there.
 import torch  # noqa: F401
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -110,6 +111,8 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.models.common.multimodal import MultimodalModel
+from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
@@ -124,11 +127,12 @@ from torchtitan.rl.controller.work_buffer import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
+from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
@@ -313,6 +317,13 @@ class Controller(Configurable):
         )
         """Tokenizer loaded from `hf_assets_path`."""
 
+        vision_processor: VisionProcessor.Config | None = None
+        """The model's image preprocessing, for image prompts, e.g.
+        `VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`. The renderer computes each
+        image's patch grid and number of placeholder tokens with it, and the generator
+        and the trainer turn the image files into pixel values with it, so all three
+        agree on every image. None: text prompts only."""
+
         renderer: RendererConfig
         """The model's chat template; renders messages to token ids and parses completions
         back. E.g. `from_renderers(Qwen3RendererConfig(enable_thinking=False))`."""
@@ -353,6 +364,13 @@ class Controller(Configurable):
         """The actor framework that places the trainer, generators, router and rollout
         workers on processes, selected by config type, e.g.
         ``MonarchActorSystem.Config()`` (default)."""
+
+        model_state_dict_transport: ModelStateDictTransport.Config | None = None
+        """Moves the model state dict from the trainer into the generators with
+        one-sided ``torch.distributed._transport`` reads, or None to move it through
+        TorchStore. TODO: drop None (and TorchStore) once this has rolled out and
+        covers ``gpu_fetch``. Requires ``generator.model_state_dict_load_mode="cpu_prefetch"``.
+        See ``torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md``."""
 
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(
@@ -403,11 +421,15 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
-            if self.generator.checkpointer is not None:
+            # TODO: support "gpu_fetch" by reading into generator GPU memory
+            # (https://github.com/pytorch/torchtitan/issues/6070).
+            if (
+                self.model_state_dict_transport is not None
+                and self.generator.model_state_dict_load_mode != "cpu_prefetch"
+            ):
                 raise ValueError(
-                    "Generator checkpoint must be disabled in the RL loop "
-                    "(weights are synced from the trainer via TorchStore). "
-                    "Set generator.checkpointer=None."
+                    "model_state_dict_transport requires "
+                    'generator.model_state_dict_load_mode="cpu_prefetch"'
                 )
             if (
                 self.trainer.dist_moe_runtime is not None
@@ -440,6 +462,37 @@ class Controller(Configurable):
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
                     "trainer pipeline parallelism yet."
                 )
+            generator_model = self.generator.model
+            if self.vision_processor is None:
+                if isinstance(generator_model, MultimodalModel.Config):
+                    raise ValueError(
+                        "vision_processor is not set, but the generator model "
+                        f"({type(generator_model).__qualname__}) is multimodal. Use "
+                        "the model family's text-only flavor, or set vision_processor "
+                        "to serve image prompts."
+                    )
+            else:
+                # Images need the vision encoder in particular: a MultimodalModel may
+                # have only other encoders (e.g. Muse Spark's audio encoder).
+                if (
+                    not isinstance(generator_model, MultimodalModel.Config)
+                    or getattr(generator_model, "vision_encoder", None) is None
+                ):
+                    raise ValueError(
+                        "vision_processor is set, but the generator model "
+                        f"({type(generator_model).__qualname__}) is not a multimodal "
+                        "model with a vision encoder."
+                    )
+                # The generator gives image tokens M-RoPE positions exactly when the model
+                # uses M-RoPE; the batcher must give the trainer the same.
+                uses_mrope = get_mrope_config(self.trainer.model) is not None
+                if self.async_loop.batcher.build_mrope_positions != uses_mrope:
+                    raise ValueError(
+                        "async_loop.batcher.build_mrope_positions="
+                        f"{self.async_loop.batcher.build_mrope_positions}, but the trainer "
+                        f"model's image tokens take {'M-RoPE' if uses_mrope else '1D'} "
+                        f"positions; set it to {uses_mrope}."
+                    )
             if self.trainer.parallelism.enable_sequence_parallel:
                 sp_degree = self.trainer.parallelism.tensor_parallel_degree
                 max_context_length = self.trainer.model.max_context_length
@@ -530,7 +583,14 @@ class Controller(Configurable):
             job_config=config.to_dict(),
         )
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
-        self.renderer = config.renderer.build(tokenizer=self.tokenizer)
+        vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
+        self.renderer = config.renderer.build(
+            tokenizer=self.tokenizer, vision_processor=vision_processor
+        )
 
         # Carry the base seed and renderer stop tokens on the sampling config so
         # the generator reads them off each request; the rollouter offsets the
@@ -615,8 +675,9 @@ class Controller(Configurable):
         return result.get(0)
 
     def _make_generate_fn(self) -> GenerateFn:
-        """Build the rollouter's `GenerateFn`: route a completion via the generator router, pinning sticky
-        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV)."""
+        """Build the rollouter's `GenerateFn`: reserve a generator from the generator router, pinning sticky
+        routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV), and call it
+        directly."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
@@ -625,20 +686,29 @@ class Controller(Configurable):
 
         @sl.log_trace_span("generate")
         async def generate(
-            prompt_token_ids: list[int],
+            prompt: Prompt,
             *,
             request_id: str,
             group_id: int,
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
-            return await generator_router.generate.call_one(
-                prompt_token_ids,
-                request_id=request_id,
-                group_id=group_id,
-                routing_session_id=routing_session_id,
-                sampling_config=sampling_config,
+            # TODO: a cancelled caller releases while the generator still runs its call,
+            #   and a caller that dies never releases. Moot today: nothing cancels a
+            #   generate call, and a dead rollout worker fails the run.
+            generator = await generator_router.reserve.call_one(
+                request_id, routing_session_id=routing_session_id
             )
+            try:
+                return await generator.generate.call_one(
+                    prompt,
+                    request_id=request_id,
+                    group_id=group_id,
+                    routing_session_id=routing_session_id,
+                    sampling_config=sampling_config,
+                )
+            finally:
+                generator_router.release_reservation.broadcast(request_id)
 
         return generate
 
@@ -666,9 +736,9 @@ class Controller(Configurable):
         """Spawn the services through the actor system and initialize weights.
 
         Kept separate from ``__init__`` because provisioning processes, spawning
-        actors, TorchStore initialization, and the initial model state dict
-        push/pull are all ``await``-based runtime side effects that cannot run in
-        a synchronous constructor.
+        actors, model state dict transport initialization, and the initial model
+        state dict push/pull are all ``await``-based runtime side effects that
+        cannot run in a synchronous constructor.
 
         Provisions and spawns the trainer, generators, router, batcher and rollout
         workers through the actor system, and synchronizes initial weights from
@@ -710,6 +780,7 @@ class Controller(Configurable):
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
+                vision_processor=config.vision_processor,
             )
             self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,
@@ -728,6 +799,7 @@ class Controller(Configurable):
                 temperature=self._sampling.temperature,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
+                vision_processor=config.vision_processor,
             )
 
             await self._rollouter.setup_async(
@@ -735,11 +807,18 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
+                vision_processor_config=config.vision_processor,
             )
 
-        # Initialize TorchStore, which carries the model state dict from the trainer to the generators.
-        with sl.log_trace_span("torchstore_init"):
-            await actor_system.initialize_torchstore()
+        if config.model_state_dict_transport is not None:
+            with sl.log_trace_span("model_state_dict_transport_init"):
+                await actor_system.initialize_model_state_dict_transport(
+                    config.model_state_dict_transport
+                )
+        else:
+            # Initialize TorchStore, which carries the model state dict from the trainer to the generators.
+            with sl.log_trace_span("torchstore_init"):
+                await actor_system.initialize_torchstore()
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
         # policy version and rollouter state.
@@ -767,7 +846,9 @@ class Controller(Configurable):
         with sl.log_trace_span("generator_start_engine_loop"):
             await self.generator_router.start_engine_loop.call_one()
 
-        # Initial push and pull: only the trainer loads weights; generators pull them at start_step.
+        # Initial push and pull: generators pull the trainer's trainable weights at
+        # start_step; they load the frozen ones (e.g. a LoRA base) from
+        # `generator.checkpointer`.
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.all_ranks.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
@@ -1208,9 +1289,9 @@ class Controller(Configurable):
             Trainer:    forward/backward N
             Controller: await push N-1     (optimizer N must not mutate weights push N-1 reads)
             Trainer:    optimizer N -> policy N
-            Controller: await pull N-1     (push N must not overwrite the TorchStore key mid-pull)
+            Controller: await pull N-1     (push N must not overwrite pushed weights mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: TorchStore put_state_dict of policy N
+                          |-> Trainer: TorchStore put_state_dict (or ModelStateDictTransport stage) of policy N
                           |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)
@@ -1343,7 +1424,7 @@ class Controller(Configurable):
                     pull_s = await pull_task if pull_task is not None else 0.0
 
                 # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
-                push_task = asyncio.create_task(self._push_model_state_dict())
+                push_task = self._start_push_model_state_dict()
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
                         optimizer_result.policy_version, after=push_task
@@ -1400,12 +1481,18 @@ class Controller(Configurable):
             await push_task
             await pull_task
 
-    async def _push_model_state_dict(self) -> float:
-        """Push the trainer's model state dict to TorchStore; returns its wall time in seconds."""
-        with sl.log_trace_span("trainer_push_model_state_dict"):
-            start = time.perf_counter()
-            await self.trainer.all_ranks.push_model_state_dict.call()
+    def _start_push_model_state_dict(self) -> asyncio.Task[float]:
+        """Send the trainer's model state dict push now, so each trainer rank starts it before the next
+        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
+        start = time.perf_counter()
+        push = self.trainer.all_ranks.push_model_state_dict.call()
+
+        async def wait() -> float:
+            with sl.log_trace_span("trainer_push_model_state_dict"):
+                await push
             return time.perf_counter() - start
+
+        return asyncio.create_task(wait())
 
     async def _pull_model_state_dict_and_release_groups(
         self, version: int, *, after: asyncio.Task[float]

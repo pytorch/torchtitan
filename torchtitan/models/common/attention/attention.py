@@ -651,6 +651,18 @@ class DeterministicVarlenInnerAttention(InnerAttention):
 FlexAttentionMetadata: TypeAlias = BlockMask
 
 
+def _needs_dq_write_order(kernel_options: dict) -> bool:
+    """Whether the BlockMask needs dQ write-order metadata.
+
+    Only the deterministic FLASH backward reads it, and it requires it. Call this
+    when the mask is built: set_determinism runs after the config is built.
+    """
+    return (
+        kernel_options.get("BACKEND") == "FLASH"
+        and torch.are_deterministic_algorithms_enabled()
+    )
+
+
 class FlexInnerAttention(InnerAttention):
     """Inner attention using ``flex_attention`` with torch.compile.
 
@@ -700,6 +712,7 @@ class FlexInnerAttention(InnerAttention):
                 # on the particular batch
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
+                compute_dq_write_order=_needs_dq_write_order(self.kernel_options),
             )
 
     inductor_configs: ClassVar[dict[str, bool]] = {
@@ -882,6 +895,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
                 # on the particular batch
                 # for batch invariance, we disable this optimization
                 separate_full_blocks=not is_in_batch_invariant_mode(),
+                compute_dq_write_order=_needs_dq_write_order(self.kernel_options),
             )
 
 

@@ -19,6 +19,7 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -37,6 +38,7 @@ __all__ = [
     "mixed_precision_policy",
     "resolve_fsdp_mesh",
     "resolve_sparse_fsdp_mesh",
+    "maybe_store_frozen_params_in_param_dtype_",
 ]
 
 logger = logging.getLogger(__name__)
@@ -257,6 +259,33 @@ def mixed_precision_policy(
         cast_forward_inputs=cast_forward_inputs,
         param_dtype_override_fn=param_dtype_override_fn if preserved else None,
     )
+
+
+def maybe_store_frozen_params_in_param_dtype_(
+    module: Module, precision: PrecisionConfig
+) -> None:
+    """Store the frozen parameters of ``module`` in ``precision.param_dtype`` when
+    it is narrower than ``precision.dtype``.
+
+    A frozen parameter is never updated and FSDP computes it in ``param_dtype``,
+    so a wider dtype only costs memory. Parameters listed in
+    ``preserve_dtype_params`` keep their dtype. Each tensor is
+    swapped rather than assigned to ``param.data``, because setting ``.data`` would
+    leave a quantized tensor subclass's inner tensor in the old dtype. Parameter
+    identity (tied weights) and attributes (e.g. the SPMD type) are kept. Call
+    before ``fully_shard``, which records parameter dtypes.
+    """
+    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
+    if param_dtype.itemsize >= TORCH_DTYPE_MAP[precision.dtype].itemsize:
+        return
+    preserved = {param for _, param in module.named_preserve_dtype_params()}
+    for param in module.parameters():
+        if param.requires_grad or param in preserved or param.dtype == param_dtype:
+            continue
+        new_param = nn.Parameter(param.detach().to(param_dtype), requires_grad=False)
+        for name, value in param.__dict__.items():
+            new_param.__dict__.setdefault(name, value)
+        torch.utils.swap_tensors(param, new_param)
 
 
 def apply_fsdp_to_multimodal_encoder(
