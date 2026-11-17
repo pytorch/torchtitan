@@ -83,10 +83,11 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             #   run 2: trainer TP=2 (DP=1) + 1 generator (TP=4); resume from the
             #          step-2 checkpoint and train through step 4.
             # This covers (1) trainer DCP checkpoint resharding (DP->TP),
-            # (2) trainer->generator ModelStateDictTransport resharding, and (3) the
-            # multi-generator vs single-generator paths. The second run errors
-            # if resume is broken. lr_scheduler.total_steps is pinned so the LR
-            # is identical across save/load.
+            # (2) trainer->generator resharding with ModelStateDictTransport
+            # (run 1) and TorchStore (run 2), and (3) the multi-generator vs
+            # single-generator paths. The second run errors if resume is
+            # broken. lr_scheduler.total_steps is pinned so the LR is identical
+            # across save/load.
             configs=[rl_grpo_checkpoint_save, rl_grpo_checkpoint_resume],
             test_descr="RL GRPO checkpoint save + resume (resharding)",
             test_name="rl_grpo_checkpoint_resume",
