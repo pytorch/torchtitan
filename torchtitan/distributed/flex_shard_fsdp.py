@@ -22,9 +22,11 @@ over. Under context parallelism, the buckets shard over ``dp_shard`` and ``cp``
 flattened into one axis, as ``fully_shard`` does.
 
 FlexShard parameters and grads are plain local shards, with no DTensor.
-``init_param`` initializes each parameter as one device would, while each of
-FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm_mesh``
-gives the mesh a grad's norm is reduced over. Two more differences change only
+``apply_fsdp_to_decoder`` wraps each FlexShard parameter's ``param_init``
+function with flex_shard's ``init_from_full``: it fills the full parameter and
+the shard keeps its part, as one device would initialize it, while each of
+FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm``
+reduces a bucket's grad norm as DTensor does. Two more differences change only
 memory and communication. FSDP2 skips the embedding's backward all-gather
 (``set_unshard_in_backward``), which FlexShard can't yet, so it gathers the
 embedding again in backward, with the same values. And an MoE block's expert
@@ -45,7 +47,6 @@ shards, each rank reading only its part of each Hugging Face tensor.
 """
 
 import math
-import sys
 import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -53,6 +54,7 @@ from importlib.util import find_spec
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
@@ -65,31 +67,18 @@ if TYPE_CHECKING:
 __all__ = [
     "declare_optimizer_state_layouts",
     "declare_state_dict_layouts",
-    "flex_shard_grad_norm_mesh",
+    "flex_shard_grad_norm",
     "flex_shard_partial_backwards",
     "has_flex_shard_bucket",
-    "has_flex_shard_params",
-    "init_param",
-    "is_outer_sharded",
     "load_hf_into_local_shards",
     "record_buckets",
     "record_grad_norm_mesh",
-    "record_param_layouts",
     "reshard_flex_shard",
     "validate_flex_shard_training",
 ]
 
-# Where each FlexShard parameter's local shard sits in the full parameter, by
-# module and parameter name, for init_param. to_empty() replaces FlexShard's
-# parameters but keeps the modules.
-# TODO: Read each parameter's layout from flex_shard instead, once its
-# parameters keep their layouts through to_empty().
-_PARAM_LAYOUTS: weakref.WeakKeyDictionary[
-    nn.Module, dict[str, Any]
-] = weakref.WeakKeyDictionary()
-
 # The mesh FSDP2 lays out the grads of the parameters of the FlexShard buckets
-# on a mesh, when it isn't that mesh, for flex_shard_grad_norm_mesh. Keyed by the
+# on a mesh, when it isn't that mesh, for flex_shard_grad_norm. Keyed by the
 # mesh the buckets hold, which keeps the entry alive as long as the model.
 _GRAD_NORM_MESHES: weakref.WeakKeyDictionary[
     DeviceMesh, DeviceMesh
@@ -106,56 +95,9 @@ _MODULE_BUCKETS: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 
 
-def record_param_layouts(model: nn.Module) -> None:
-    """Record where each of ``model``'s FlexShard parameters sits in the full
-    parameter, for ``init_param``. Call it after ``flex_shard(model)``.
-
-    flex_shard composes each layout with the outer layout the parameter
-    declared before ``flex_shard(model)``, such as expert parallelism's split of
-    the routed experts.
-    """
-    # pyrefly: ignore [missing-import]
-    from flex_shard import get_flex_shard_global_layouts
-
-    for fqn, layout in get_flex_shard_global_layouts(model).items():
-        module_fqn, _, name = fqn.rpartition(".")
-        _PARAM_LAYOUTS.setdefault(model.get_submodule(module_fqn), {})[name] = layout
-
-
-def init_param(
-    module: nn.Module,
-    name: str,
-    param: torch.Tensor,
-    init_fn: Callable[[torch.Tensor], object],
-) -> None:
-    """Initialize ``module``'s parameter ``name``, ``param``, with ``init_fn``.
-
-    A FlexShard parameter is a plain local shard. ``init_fn`` fills a tensor of
-    the full parameter's shape, and the shard keeps its part (flex_shard's
-    ``init_from_full``). With the same RNG state on every rank, the shards are
-    one device's initialization, whatever the sharding. Each call briefly holds
-    one full parameter: under expert parallelism, a routed-expert parameter with
-    all experts.
-    """
-    layout = _PARAM_LAYOUTS.get(module, {}).get(name)
-    if layout is None:
-        init_fn(param)
-        return
-    # pyrefly: ignore [missing-import]
-    from flex_shard import init_from_full
-
-    init_from_full(param, layout, init_fn)
-
-
-def has_flex_shard_params(module: nn.Module) -> bool:
-    """Whether FlexShard sharded any of ``module``'s own parameters, which only
-    ``init_param`` initializes as one device would."""
-    return module in _PARAM_LAYOUTS
-
-
 def record_grad_norm_mesh(bucket_mesh: DeviceMesh, mesh: DeviceMesh) -> None:
-    """Record that ``flex_shard_grad_norm_mesh`` gives ``mesh`` for the
-    parameters of the FlexShard buckets on ``bucket_mesh``.
+    """Record that ``flex_shard_grad_norm`` reduces the grads of the parameters
+    of the FlexShard buckets on ``bucket_mesh`` over ``mesh``.
 
     For parameters that an outer sharding, tensor or expert parallelism, split
     over more ranks before FlexShard sharded each part over ``bucket_mesh``.
@@ -169,27 +111,73 @@ def record_grad_norm_mesh(bucket_mesh: DeviceMesh, mesh: DeviceMesh) -> None:
     _GRAD_NORM_MESHES[bucket_mesh] = mesh
 
 
-def flex_shard_grad_norm_mesh(param: torch.Tensor) -> DeviceMesh | None:
-    """The mesh ``param``'s grad norm is reduced over if it's a FlexShard
-    parameter, else None.
+def flex_shard_grad_norm(
+    params: list[torch.Tensor],
+    mesh: DeviceMesh,
+    norm_type: float,
+    error_if_nonfinite: bool,
+    foreach: bool | None,
+) -> torch.Tensor:
+    """The norm of the grads of FlexShard parameters ``params``, whose buckets
+    are on the 1D ``mesh`` (``flex_shard.get_mesh``).
 
-    A FlexShard parameter and its grad are plain local shards over the mesh of
-    their bucket, or over the mesh ``record_grad_norm_mesh`` recorded for it.
-    Like FSDP2's DTensor grads, they're sharded over its first dim, and over the
-    others if ``is_outer_sharded``.
+    The grads are plain local shards over ``mesh``, or over the mesh
+    ``record_grad_norm_mesh`` recorded for it, whose first dim is ``mesh``'s
+    ranks. Like FSDP2's DTensor grads, each is sharded over that mesh's first
+    dim, and over the others if ``is_outer_sharded``. This computes the norm as
+    ``get_total_norm`` does for DTensor grads with that layout, so the result is
+    bitwise equal. Each grad's local norm is partial over the dims that shard
+    it. Stacking the norms makes them partial over every dim that shards any
+    grad: a norm replicated on such a dim is divided by the dim's size
+    ** (1 / p), so that its copies sum to it. The stacked norms are reduced over
+    each dim in turn, and their norm is taken last. Taking it before the
+    reduction isn't bitwise equal.
     """
-    # FlexShard parameters exist only once flex_shard is imported, which
-    # happens only when it is selected.
-    flex_shard = sys.modules.get("flex_shard")
-    mesh = None if flex_shard is None else flex_shard.get_mesh(param)
-    return None if mesh is None else _GRAD_NORM_MESHES.get(mesh, mesh)
+    mesh = _GRAD_NORM_MESHES.get(mesh, mesh)
+    grads = [p.grad for p in params if p.grad is not None]
+    replicated = [not is_outer_sharded(p) for p in params if p.grad is not None]
+    # From flex_shard's examples/deepseek_v3/train.py.
+    if foreach is False:
+        norm_list = [torch.linalg.vector_norm(g, norm_type) for g in grads]
+    else:
+        norm_list = list(torch._foreach_norm(grads, norm_type))
+    # The dims that shard some grad, over which the stacked norms are partial.
+    dims = range(1 if all(replicated) else mesh.ndim)
+    for dim in dims[1:]:
+        # Each norm on its own, so that no mask has to be copied to the device.
+        scale = math.pow(mesh.size(dim), 1.0 / norm_type)
+        norm_list = [
+            norm / scale if is_replicated else norm
+            for norm, is_replicated in zip(norm_list, replicated, strict=True)
+        ]
+    norms = torch.stack(norm_list)
+    for dim in dims:
+        # DTensor skips dims of size 1.
+        if mesh.size(dim) == 1:
+            continue
+        if math.isinf(norm_type):
+            dist.all_reduce(norms, op=dist.ReduceOp.MAX, group=mesh.get_group(dim))
+        else:
+            norms **= norm_type
+            dist.all_reduce(norms, group=mesh.get_group(dim))
+            norms **= 1.0 / norm_type
+    total_norm = torch.linalg.vector_norm(norms, norm_type)
+    if error_if_nonfinite and not torch.isfinite(total_norm):
+        raise RuntimeError(
+            f"The total norm of order {norm_type} for gradients from `parameters` "
+            "is non-finite, so it cannot be clipped. To disable this error and "
+            "scale the gradients by the non-finite norm anyway, set "
+            "`error_if_nonfinite=False`"
+        )
+    return total_norm
 
 
 def is_outer_sharded(param: torch.Tensor) -> bool:
     """Whether FlexShard parameter ``param`` is a shard of an outer sharding,
     tensor or expert parallelism, which declared its layout before
-    ``flex_shard()``. Else its grad is the same on the ranks of each dim of its
-    ``flex_shard_grad_norm_mesh`` but the first, e.g. a norm weight's under TP."""
+    ``flex_shard()``. Else its grad is the same on the ranks of each dim of the
+    mesh ``flex_shard_grad_norm`` reduces it over but the first, e.g. a norm
+    weight's under TP."""
     # pyrefly: ignore [missing-import]
     from flex_shard import get_outer_layout
 
@@ -570,6 +558,16 @@ def validate_flex_shard_training(
         for _, module_config, _, _ in model_config.traverse(Module.Config, recurse=True)
     ):
         unsupported.append("preserve_dtype_params")
+    # FlexShard parameters are plain local shards, and only param_init
+    # initializes them as one device would: apply_fsdp_to_decoder wraps it with
+    # init_from_full. reset_parameters() would draw every rank's shard as the
+    # whole parameter, with the same values.
+    if any(
+        module_config.param_init is None
+        and callable(getattr(module_config._owner, "reset_parameters", None))
+        for _, module_config, _, _ in model_config.traverse(Module.Config, recurse=True)
+    ):
+        unsupported.append("modules initialized by reset_parameters() (set param_init)")
     # FlexShard stores parameters as plain tensors, which would drop the
     # quantized all-gather that MXFP8 and NVFP4 weights implement for FSDP2.
     if has_quantization(model_config):

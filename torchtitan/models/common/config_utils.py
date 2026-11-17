@@ -180,8 +180,8 @@ def fused_qkv_param_init(
                     # t is this tp rank's shard. RL generator init_weights() only
                     # needs non-persistent buffers; weights come from trainer
                     # state dict. Until it has a DTensor static state dict path,
-                    # copy this TP shard here. (Under TP, FlexShard's init_param
-                    # passes a full tensor.)
+                    # copy this TP shard here. (Under TP, FlexShard's wrapped
+                    # param_init passes a full tensor.)
                     # TODO: Remove once RL can init buffers without weight init.
                     tp_size = spmd_mesh_size("tp")
                     mesh = current_spmd_mesh()

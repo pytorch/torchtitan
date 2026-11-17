@@ -228,7 +228,12 @@ class TestFlexShardDecoder(DTensorTestBase):
                         loss.backward()
                 losses.append(loss.detach())
             grad_norm = dist_utils.clip_grad_norm_(
-                list(model.parameters()), max_norm=1.0, foreach=True
+                list(model.parameters()),
+                max_norm=1.0,
+                foreach=True,
+                flex_shard_enabled=isinstance(
+                    parallelism.fsdp_backend, FlexShardConfig
+                ),
             )
             grads = {
                 fqn: _local(param.grad).clone()
