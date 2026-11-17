@@ -21,8 +21,7 @@ dependency of its own: it declares the service's methods as
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
-| `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process; supplies `MonarchRDMAMicrobatch.register`. |
-| `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/trainer/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
+| `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process. |
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
@@ -114,8 +113,8 @@ meshes themselves. Generator handles come only from the router: its `reserve`
 returns the one a generate call goes to, and every other generator call goes
 through the router's endpoints. These calls appear in the controller (and its
 `GenerateFn`), the rollouter (`.choose()` on the worker pool) and the router (on
-generator handles). The batcher and the trainer see RDMA microbatches only
-through the `RDMAMicrobatch` interface.
+generator handles). The trainer sees RDMA microbatches only through the
+`RDMAMicrobatch` interface.
 
 Another actor framework (e.g. Ray) would add its own `ActorSystem`
 implementation and adapters, wrapping its handles to provide this call

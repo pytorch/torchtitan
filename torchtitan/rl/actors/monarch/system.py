@@ -103,7 +103,7 @@ class MonarchActorSystem(ActorSystem):
         # loop for the controller's GIL.
         self._router_mesh = spawn_cpu_procs(1)
         # Same for the batcher: build + pack would contend for the controller's GIL.
-        # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
+        # It drops its own buffers (maybe_release_oldest_batch): the transport's unregister must run in the owning process.
         self._batcher_mesh = spawn_cpu_procs(1)
 
         await setup_torch_elastic_env(self._trainer_mesh)
