@@ -211,6 +211,13 @@ class SGLangEngine(GenerationEngine):
             isinstance(layer.attention, LinearAttention.Config)
             for layer in model.layers
         )
+        if has_linear_attention and parallelism.data_parallel_degree > 1:
+            # TODO: an idle attention-DP rank has no linear attention metadata; skip
+            # the kernel there, as SGLangInnerAttention does, and test it.
+            raise ValueError(
+                "SGLangEngine does not support data_parallel_degree > 1 for linear "
+                "attention (GDN, KDA) models yet"
+            )
         if has_linear_attention and config.cuda_graph == "full":
             # TODO(https://github.com/sgl-project/sglang/issues/48593): SGLang's
             # hybrid linear attention backend fails to capture full prefill graphs.
@@ -239,7 +246,6 @@ class SGLangEngine(GenerationEngine):
             torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
             dist.init_process_group(init_method="env://")
         self._dp_size = parallelism.data_parallel_degree
-        self._dp_rank = rank // parallelism.tensor_parallel_degree
         world_size = self._dp_size * parallelism.tensor_parallel_degree
         if dist.get_world_size() != world_size:
             raise ValueError(
@@ -290,6 +296,9 @@ class SGLangEngine(GenerationEngine):
                 gpu_id=torch.accelerator.current_device_index(),
             ),
         )
+        # SGLang's attention-DP rank, so the Generator's check of data_parallel_rank
+        # verifies that this rank's request slice matches its attention-TP group.
+        self._dp_rank = get_parallel().attn_dp_rank
         logger.info("Building the SGLang scheduler...")
         self._scheduler = Scheduler(server_args, PortArgs.init_new(server_args))
         # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang has no option
@@ -632,8 +641,8 @@ class SGLangEngine(GenerationEngine):
         return bool(flag.item())
 
     def step(self) -> list[FinishedRequest]:
-        """Run one iteration of SGLang's event loop, a TP collective, and return the
-        requests whose results it processed."""
+        """Run one iteration of SGLang's event loop, a collective over all DP and TP
+        ranks, and return the requests whose results it processed."""
         scheduler = self._scheduler
         # As SGLang's own event loops; the model's TP all-reduces take their fast
         # path only with grad mode off.

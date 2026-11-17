@@ -94,11 +94,6 @@ def run_linear_attention(
     object.__setattr__(layer, "dt_bias", dt_bias)
     forward_batch = get_forward_batch()
     num_tokens = forward_batch.out_cache_loc.shape[0]
-    if num_tokens == 0:
-        # An idle attention-DP rank: only padding rows, and no attention metadata.
-        return mixed_qkv_TC.new_zeros(
-            mixed_qkv_TC.shape[0], layer.num_v_heads, layer.head_v_dim
-        )
     num_padding = mixed_qkv_TC.shape[0] - num_tokens
     out_THV = layer(
         forward_batch, mixed_qkv_TC[:num_tokens], a[:num_tokens], b[:num_tokens]

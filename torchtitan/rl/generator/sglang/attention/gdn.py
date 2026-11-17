@@ -202,7 +202,7 @@ class SGLangInnerGDN(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        tp_size = get_parallel().attn_tp_size
+        tp_size = get_parallel().tp_size
         for name in ("num_k_heads", "num_v_heads"):
             if getattr(config, name) % tp_size != 0:
                 raise ValueError(

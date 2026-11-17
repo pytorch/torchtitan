@@ -37,9 +37,9 @@ same in-place model state dict load.
 
 Runs in the B200 RL CI job.
 Run each class in its own launch, with as many processes as its DP x TP degree (one
-for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP, else two),
-with the SGLang environment (see
-torchtitan/rl/generator/sglang/README.md; the Dist-MoE class also needs the dist_moe
+for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP and
+TestSGLangBitwiseParityDistMoEDPEP, else two), with the SGLang environment (see
+torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
 package):
     torchrun --nproc_per_node=2 -m pytest \
         tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v
@@ -587,18 +587,31 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
         cls.model.train()
 
 
-def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:
-    """``_qwen3_moe_debug_tp2_ep2_config`` with Dist-MoE experts on both sides."""
+def _with_dist_moe(config: Controller.Config) -> Controller.Config:
+    """``config`` with Dist-MoE experts on both sides."""
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
-    config = _qwen3_moe_debug_tp2_ep2_config()
-    # The most rows a rank can receive at EP 2.
+    # The most rows a rank can receive: every EP rank's tokens.
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
-        scratch_capacity_factor=2.0, inference=True
+        scratch_capacity_factor=float(
+            config.generator.parallelism.expert_parallel_degree
+        ),
+        inference=True,
     )
     config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
     config.generator = apply_transforms(config.generator, [DistMoeTransform()])
     return config
+
+
+def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:
+    """``_qwen3_moe_debug_tp2_ep2_config`` with Dist-MoE experts on both sides."""
+    return _with_dist_moe(_qwen3_moe_debug_tp2_ep2_config())
+
+
+def _qwen3_moe_debug_dist_moe_dp2_tp2_ep4_config() -> Controller.Config:
+    """The Qwen3 MoE debug recipe (DP 2 x TP 2, EP 4) with Dist-MoE experts on both
+    sides."""
+    return _with_dist_moe(rl_grpo_qwen3_moe_debug_varlen_batch_invariant())
 
 
 @unittest.skipUnless(
@@ -620,9 +633,7 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
     def setUpClass(cls):
         super().setUpClass()
         cls.model.requires_grad_(False)
-        cls.trainer_dist_moe_runtime = DistMoeRuntime.Config(
-            scratch_capacity_factor=2.0, inference=True
-        ).build(
+        cls.trainer_dist_moe_runtime = cls.config_fn().generator.dist_moe_runtime.build(
             model_parts=[cls.model],
             parallelism_context=cls.parallelism_context,
             device=cls.device,
@@ -637,7 +648,24 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
     def _trainer_logprobs(self, token_ids):
         sequences = token_ids if isinstance(token_ids[0], list) else [token_ids]
         num_tokens = sum(len(sequence) for sequence in sequences)
+        # Every EP rank passes the same count. With DP, the EP group spans the DP
+        # ranks, whose batches can differ in size: take the largest.
+        num_local_tokens = torch.tensor(
+            [num_tokens // self.parallelism_context.tp], device=self.device
+        )
+        dist.all_reduce(num_local_tokens, op=dist.ReduceOp.MAX)
         self.trainer_dist_moe_runtime.set_num_local_input_tokens_per_call(
-            num_tokens // self.parallelism_context.tp
+            int(num_local_tokens.item())
         )
         return super()._trainer_logprobs(token_ids)
+
+
+class TestSGLangBitwiseParityDistMoEDPEP(
+    TestSGLangBitwiseParityDistMoE, TestSGLangBitwiseParityMoEDPEP
+):
+    """Dist-MoE experts at DP 2 x TP 2, EP 4 across the DP ranks, with SGLang's CUDA
+    graphs, on 4 GPUs: covers the Dist-MoE count of the largest DP rank and an idle
+    DP rank's steps in CUDA graphs."""
+
+    config_fn = staticmethod(_qwen3_moe_debug_dist_moe_dp2_tp2_ep4_config)
+    cuda_graph = "full"

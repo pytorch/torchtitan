@@ -19,7 +19,7 @@ from sglang.srt.layers.dp_attention import attn_tp_all_reduce
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_executor.runner_utils.forward_batch import set_forward_batch
-from sglang.srt.runtime_context import get_schedule
+from sglang.srt.runtime_context import get_parallel, get_schedule
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig
@@ -352,9 +352,12 @@ class SGLangModelWrapper(Module):
         schedule = get_schedule()
         token_multiple = parallelism.expert_sequence_parallel_size
         # A step runs at most chunked_prefill_size prefill tokens plus a decode token
-        # per running request, padded up to a multiple of token_multiple.
+        # per running request, padded up to a multiple of token_multiple. Under
+        # attention DP, SGLang's chunked_prefill_size is already per DP rank, while
+        # max_running_requests is the whole instance's.
         max_num_tokens_per_step = round_up(
-            schedule.chunked_prefill_size + schedule.max_running_requests,
+            schedule.chunked_prefill_size
+            + schedule.max_running_requests // get_parallel().attn_dp_size,
             token_multiple,
         )
         validate_ep_token_dispatcher_capacity(
