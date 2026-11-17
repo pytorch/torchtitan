@@ -27,11 +27,7 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 
-from torchtitan.config.transform import (
-    apply_transforms,
-    ContextParallelTransform,
-    LMHeadFP32OutputConverter,
-)
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.models.common.attention import (
@@ -425,7 +421,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         "30B-A3B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )

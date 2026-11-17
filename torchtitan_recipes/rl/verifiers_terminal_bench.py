@@ -450,7 +450,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
-        # Muse's SoftCappedLinear head cannot use LMHeadFP32OutputConverter.
+        # Muse's SoftCappedLinear head cannot use LMHeadFP32OutputTransform.
         fp32_lm_head=False,
     )
     return Controller.Config(

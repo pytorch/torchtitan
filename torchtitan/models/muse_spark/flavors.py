@@ -8,7 +8,7 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
-from typing import Any, cast, Literal
+from typing import Any, Literal
 
 import spmd_types as spmd
 import torch
@@ -18,10 +18,6 @@ from torchtitan.components.data.multimodal.vision_processor import (
     MuseGlimmerPatchGridResize,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import (
     DeterministicVarlenInnerAttention,
@@ -1139,7 +1135,6 @@ def build_model_config(
     parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> MuseSparkModel.Config:
     if flavor not in MODEL_FLAVORS:
         available = ", ".join(sorted(MODEL_FLAVORS))
@@ -1160,12 +1155,5 @@ def build_model_config(
         seq_len=context_len,
         parallelism=ParallelismConfig() if parallelism is None else parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter in converters:
-            config = cast(
-                MuseSparkModel.Config,
-                converter.build().convert(config),
-            )
 
     return config

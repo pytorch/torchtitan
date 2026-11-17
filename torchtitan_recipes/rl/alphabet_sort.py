@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
@@ -33,9 +34,9 @@ from torchtitan.config import (
 )
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
-    BatchInvariantFlexConverter,
-    ModelConfigConverter,
-    MXFP8LinearConverter,
+    BatchInvariantFlexTransform,
+    ModelConfigTransform,
+    MXFP8LinearTransform,
 )
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -97,7 +98,7 @@ def _qwen3_rl_model_configs(
     attn_backend: str,
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
+    transforms: Sequence[ModelConfigTransform] = (),
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -105,9 +106,9 @@ def _qwen3_rl_model_configs(
         flavor,
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        transforms=transforms,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
 
 
@@ -305,11 +306,11 @@ def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchControllerWithLauncher.Config":
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
     """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
     config = rl_grpo_qwen3_0_6b_varlen()
-    # TODO: Allow LMHeadCastConverter and QuantizationConverter to
+    # TODO: Allow LMHeadFP32OutputTransform and QuantizationTransform to
     # co-exist, since they target different layers
-    converter = MXFP8LinearConverter.Config(fqns=["layers."]).build()
-    config.trainer.model = converter.convert(config.trainer.model)
-    config.generator.model = converter.convert(config.generator.model)
+    transform = MXFP8LinearTransform(fqns=["layers."])
+    config.trainer.model = transform.transform(config.trainer.model)
+    config.generator.model = transform.transform(config.generator.model)
     return config
 
 
@@ -346,7 +347,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
-        converters=[BatchInvariantFlexConverter.Config()],
+        transforms=[BatchInvariantFlexTransform()],
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
@@ -785,7 +786,6 @@ def _qwen3_5_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -795,7 +795,6 @@ def _qwen3_5_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
 
 

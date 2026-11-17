@@ -15,10 +15,6 @@ import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.common import (
     ComplexRoPE,
     DenseFeedForward,
@@ -1186,7 +1182,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     n_mtp_layers: int = 0,
-    converters: list[ModelConfigConverter.Config] | None = None,
     indexer_loss_coeff: float = 0.01,
     indexer_loss_mass_weighted: bool = False,
     indexer_loss_chunk_size: int = 128,
@@ -1225,8 +1220,4 @@ def build_model_config(
                 if indexer_loss_coeff > 0
                 else None
             )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter_cfg in converters:
-            config = converter_cfg.build().convert(config)
     return config

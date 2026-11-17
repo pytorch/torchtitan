@@ -58,7 +58,7 @@ The model itself is not compiled by the standard Trainer.
 
 ## MXFP8 Quantization
 
-The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating training on SM100+ hardware (B200, B100). This uses the existing `MXFP8LinearConverter` from torchtitan, which dynamically quantizes linear layers to MXFP8 precision.
+The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating training on SM100+ hardware (B200, B100). This uses the existing `MXFP8LinearTransform` from torchtitan, which dynamically quantizes linear layers to MXFP8 precision.
 
 **Requirements:**
 - SM100+ GPU (e.g., NVIDIA B200, B100)
@@ -79,23 +79,20 @@ MODULE=torchtitan_recipes.models.flux CONFIG=flux_dev_mxfp8 ./run_train.sh
 ### Custom Configuration
 
 To create a custom MXFP8 config, define a new function in a recipe module.
-`build_model_config` applies `converters` and returns the model config assigned
-to `config.model`:
+`apply_transforms` returns a copy of the config with the quantized model config:
 
 ```python
-from torchtitan.config.transform import MXFP8LinearConverter
-from torchtitan.models.flux import build_model_config
+from torchtitan.config.transform import apply_transforms, MXFP8LinearTransform
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan_recipes.models.flux import flux_dev, flux_schnell
 
 
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
-    config.model = build_model_config(
-        "flux-schnell",  # or "flux-dev" with flux_dev()
-        parallelism=config.parallelism,
-        converters=[
-            MXFP8LinearConverter.Config(
+    return apply_transforms(
+        config,
+        [
+            MXFP8LinearTransform(
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -108,7 +105,6 @@ def my_custom_mxfp8() -> FluxTrainer.Config:
             ),
         ],
     )
-    return config
 ```
 
 The `fqns` parameter specifies which fully qualified module names to quantize. The listed names cover all the linear-layer-containing submodules in the Flux transformer. Dimensions must be aligned to 32 bytes for MXFP8; Flux's default hidden sizes satisfy this requirement.

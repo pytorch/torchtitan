@@ -6,14 +6,11 @@
 
 """Contracts shared by every model's ``build_model_config``."""
 
-import copy
 import importlib
-from dataclasses import dataclass
 
 import pytest
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import ModelConfigConverter
 from torchtitan.models.common.attention import (
     Attention,
     InnerAttention,
@@ -121,38 +118,3 @@ def test_first_full_attention_skips_sliding_window(backend):
 
     config.layers = []
     assert config.first_full_attention is None
-
-
-class _ReplaceRootConverter(ModelConfigConverter):
-    """Return a new root config and remember it."""
-
-    returned: list = []
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        self.config = config
-
-    def convert(self, model_config):
-        replacement = copy.copy(model_config)
-        _ReplaceRootConverter.returned.append(replacement)
-        return replacement
-
-
-@pytest.mark.parametrize("model", _MODELS)
-def test_build_model_config_returns_the_converted_root(model):
-    """A converter may replace the root config; the builder must return it."""
-    module = importlib.import_module(f"torchtitan.models.{model}")
-    flavor = next(iter(module.MODEL_FLAVORS))
-    _ReplaceRootConverter.returned.clear()
-
-    config = module.build_model_config(
-        flavor,
-        parallelism=ParallelismConfig(),
-        converters=[_ReplaceRootConverter.Config()],
-    )
-
-    assert _ReplaceRootConverter.returned
-    assert config is _ReplaceRootConverter.returned[-1]

@@ -17,7 +17,6 @@ Update this file in the same PR that starts, finishes, or reverses a migration.
 - **Model config**: `build_model_config(flavor, *, parallelism, ...)` builds a
   complete config, sharding included (`torchtitan/models/README.md`).
 - **Config transforms**: `ModelConfigTransform` (`torchtitan/config/transform/`).
-  `ModelConfigConverter` is legacy -- don't add new converters.
 - **Optional components**: `X.Config | None`. Remaining `enable_*` booleans are
   legacy; don't add new ones.
 - **Data**: the Grain-based pipeline (`torchtitan/components/data/`); HF datasets

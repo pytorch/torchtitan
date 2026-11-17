@@ -9,9 +9,8 @@ This is the reference for how the mechanism works and how to write overrides.
 
 Torchtitan has a config-driven build system: every component defines a nested
 `Config` dataclass and `config.build()` constructs the owning object. Swapping a
-component currently works through model config converters and transforms,
-which traverse the model config tree and replace `Config` nodes before model
-construction.
+component currently works through model config transforms, which traverse
+the model config tree and replace `Config` nodes before model construction.
 
 That works well for in-repo, first-class features, but it requires editing the
 repo for *every* alternative implementation. The override mechanism removes that
@@ -77,7 +76,7 @@ tree and replaces matching nodes with the factory's output.
   model.
 - **Minimal surface.** The whole mechanism lives in
   `torchtitan/config/override.py`, reusing the `Configurable.Config.traverse()` +
-  replace pattern that quantization converters and the LoRA transform already use.
+  replace pattern that the quantization and LoRA transforms already use.
 
 ## How It Works
 
@@ -244,8 +243,8 @@ Settings that must differ between the RL trainer and generator (for example the
 MoE token dispatcher) belong in per-role model config transforms instead. Preserving the full path (rather
 than resetting to bare model names) lets per-node conflict detection recognize
 a whole-model override as an ancestor of a component override. (This differs
-from converter `filter_fqns`, which are bare because converters traverse the
-model config directly.)
+from quantization transform `fqns`, which are bare because transforms traverse
+the model config directly.)
 
 ### External packages
 
@@ -370,39 +369,39 @@ in by targeting `OptimizersContainer.Config` without editing a recipe
 function. The model config itself is a valid target for a whole-model swap
 because it is a `Configurable.Config` subclass.
 
-## Interaction with Converters and Transforms
+## Interaction with Transforms
 
-In-repo quantization converters run first inside `build_model_config()` during
-config construction. Model config transforms such as LoRA run afterward when
-the recipe calls `apply_transforms`. Overrides run later in `Trainer.__init__`
-and see the post-converter, post-transform tree. The order is deliberate:
-in-repo conversions run against known core configs, and overrides layer on top.
+In-repo model config transforms such as quantization and LoRA run during
+config construction, when the recipe calls `apply_transforms`. Overrides run
+later in `Trainer.__init__` and see the post-transform tree. The order is
+deliberate: in-repo transforms run against known core configs, and overrides
+layer on top.
 
-Conversely, converter-style transforms *can* be expressed as overrides (a
-factory that rewrites a `Config`), so external code does not need the converter
-machinery.
+Conversely, a transform that rewrites `Config` nodes *can* be expressed as an
+override (a factory that rewrites a `Config`), so external code does not need
+the transform machinery.
 
-| Override Target | Conflicts with a converter? | Notes |
-|-----------------|------------------------------|-------|
-| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
+| Override Target | Conflicts with quantization or LoRA? | Notes |
+|-----------------|--------------------------------------|-------|
+| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Neither touches these |
+| GroupedLinear.Config | Possibly | Quantization transforms can rewrite this |
 | Linear.Config | Yes | Quantization and LoRA can replace these |
 
-Where a converter already rewrote a node, target that node by location with
+Where a transform already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific
-layers the converter left as plain `Linear.Config`). Field/type-based exclusion
+layers the transform left as plain `Linear.Config`). Field/type-based exclusion
 -- "skip instances already turned into a quantized config" -- is not expressible
 with FQN globs alone and motivates the future predicate selector.
 
-### Override vs. converter: which to use
+### Override vs. transform: which to use
 
-Converters are the right home for **core, broadly-applicable transforms that
+Transforms are the right home for **core, broadly-applicable rewrites that
 preserve a property we guarantee** (e.g. batch-invariance, which is largely
 op-level and must hold across the model). Overrides exist for an *unblocking*
 purpose: swapping in an alternative implementation. By design we make **no
 promise that any core property survives an arbitrary override** — that is the
 override author's responsibility. So features like batch-invariant mode stay
-converters, not overrides.
+transforms, not overrides.
 
 ## Checkpoint Compatibility
 
@@ -531,4 +530,4 @@ is the point of the design.
 
 - **Predicate `fqns` selector.** A `(fqn, cfg) -> bool` selector to complement
   the glob strings, enabling field/type-based selection (e.g. skipping linears a
-  converter already turned into a quantized config).
+  quantization transform already turned into a quantized config).

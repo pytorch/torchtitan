@@ -15,10 +15,6 @@ import torch.nn as nn
 
 from torchtitan.components.data.multimodal.vision_processor import NaViTPatchGridResize
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ColumnParallelLinear,
@@ -606,7 +602,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> KimiK2Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -620,8 +615,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

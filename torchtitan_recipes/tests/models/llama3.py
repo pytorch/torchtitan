@@ -31,7 +31,7 @@ from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
     LoRATransform,
-    NVFP4LinearConverter,
+    NVFP4LinearTransform,
 )
 from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
@@ -52,7 +52,7 @@ from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
 
-from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
+from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_transform
 
 
 def llama3_debugmodel(
@@ -156,12 +156,9 @@ def llama3_debugmodel_mxfp8(
     config.model = build_model_config(
         "debugmodel_mxfp8",
         seq_len=seq_len,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
         parallelism=config.parallelism,
     )
-    return config
+    return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
 def llama3_debugmodel_nvfp4(
@@ -171,17 +168,7 @@ def llama3_debugmodel_nvfp4(
     # fqns=["layers"] converts every in-layer Linear (attention + feed_forward)
     # while leaving the lm_head stock: NVFP4 requires each GEMM dim divisible by
     # 128, which the vocab projection does not satisfy.
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=["layers"],
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=["layers"])])
 
 
 def llama3_debugmodel_first_85_pct_layers_nvfp4(
@@ -193,17 +180,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     n_layers = len(cast(Llama3Model.Config, config.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def llama3_debugmodel_lora(
@@ -281,30 +258,12 @@ def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.C
     n_layers = len(cast(Llama3Model.Config, config.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     config = llama3_8b(seq_len=seq_len)
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:

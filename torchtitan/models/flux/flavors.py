@@ -12,10 +12,6 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.linear import Linear
@@ -577,7 +573,6 @@ MODEL_FLAVORS = {
 
 def build_model_config(
     flavor: str,
-    converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
@@ -587,8 +582,4 @@ def build_model_config(
     del parallelism
     get_config, default_seq_len = MODEL_FLAVORS[flavor]
     config = get_config(seq_len=seq_len or default_seq_len)
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

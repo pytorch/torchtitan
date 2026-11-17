@@ -5,18 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import BatchInvariantFlexConverter
+from torchtitan.config.transform import BatchInvariantFlexTransform
 from torchtitan.models.common.attention import FlexInnerAttention, MLAAttention
 from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_config
 from torchtitan.models.llama3 import build_model_config
 
 
-def test_batch_invariant_flex_converter_pins_kernel_options():
+def test_batch_invariant_flex_transform_pins_kernel_options():
     model = build_model_config(
         "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
     )
 
-    converted = BatchInvariantFlexConverter.Config().build().convert(model)
+    converted = BatchInvariantFlexTransform().transform(model)
 
     assert converted is model
     for layer in model.layers:
@@ -27,12 +27,12 @@ def test_batch_invariant_flex_converter_pins_kernel_options():
         }
 
 
-def test_batch_invariant_flex_converter_pins_composed_mla_kernel_options():
+def test_batch_invariant_flex_transform_pins_composed_mla_kernel_options():
     model = build_deepseek_config(
         "debugmodel", parallelism=ParallelismConfig(), attn_backend="flex", seq_len=128
     )
 
-    converted = BatchInvariantFlexConverter.Config().build().convert(model)
+    converted = BatchInvariantFlexTransform().transform(model)
 
     assert converted is model
     for layer in model.layers:

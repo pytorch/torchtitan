@@ -6,13 +6,13 @@
 
 """Model config helpers shared by the RL recipes."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     DisableMoELoadBalancingTransform,
-    LMHeadFP32OutputConverter,
+    LMHeadFP32OutputTransform,
     ModelConfigTransform,
     transform_model_config_,
 )
@@ -26,6 +26,7 @@ def build_rl_model_configs(
     *,
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
+    transforms: Sequence[ModelConfigTransform] = (),
     fp32_lm_head: bool = True,
     disable_moe_load_balancing: bool = True,
     **kwargs: Any,
@@ -35,6 +36,7 @@ def build_rl_model_configs(
     Both come from the same ``build_model_config(flavor, **kwargs)`` call, so
     they share the architecture; each is sharded for its own role's
     parallelism. Changes made to one afterwards must be made to the other.
+    ``transforms`` are applied to both, together with the RL defaults.
 
     RL defaults, applied to both (pass False to skip one):
         fp32_lm_head                lm_head -> HiMidLoLinear (fp32 logits)
@@ -43,23 +45,20 @@ def build_rl_model_configs(
                                     bias grows the trainer-vs-generator logprob gap
     Per-role transforms go through ``apply_transforms(config.generator, ...)``.
     """
-    if fp32_lm_head:
-        kwargs["converters"] = [
-            *(kwargs.get("converters") or []),
-            LMHeadFP32OutputConverter.Config(),
-        ]
     model_configs = (
         build_model_config(flavor, parallelism=trainer_parallelism, **kwargs),
         build_model_config(
             flavor, parallelism=generator_parallelism.to_training(), **kwargs
         ),
     )
-    transforms: list[ModelConfigTransform] = []
+    all_transforms = list(transforms)
+    if fp32_lm_head:
+        all_transforms.append(LMHeadFP32OutputTransform())
     if disable_moe_load_balancing:
-        transforms.append(DisableMoELoadBalancingTransform())
+        all_transforms.append(DisableMoELoadBalancingTransform())
     # A transform may return a new root (e.g. LoRA), so keep what it returns.
     trainer_model, generator_model = (
-        cast(Decoder.Config, transform_model_config_(model_config, transforms))
+        cast(Decoder.Config, transform_model_config_(model_config, all_transforms))
         for model_config in model_configs
     )
     return trainer_model, generator_model

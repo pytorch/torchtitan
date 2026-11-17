@@ -7,10 +7,6 @@
 """Qwen3.8 model flavors."""
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.common import Linear, VocabParallelEmbedding
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
@@ -122,7 +118,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen35Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -136,8 +131,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter_config in converters:
-            config = converter_config.build().convert(config)
     return config

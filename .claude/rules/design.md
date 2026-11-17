@@ -44,7 +44,7 @@ globs: torchtitan/**, torchtitan_recipes/**
   "Registry" is only an accurate name if something registers.
 - The override mechanism (`torchtitan/config/OVERRIDE.md`) is for out-of-repo
   extension and opt-in in-repo examples. Features the repo maintains and
-  guarantees are first-class (configs, converters, transforms), not overrides.
+  guarantees are first-class (configs, transforms), not overrides.
 
 ## Folder Conventions
 - Every model folder has the same skeleton (`flavors.py`, `model.py`,

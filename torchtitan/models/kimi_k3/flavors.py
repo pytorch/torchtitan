@@ -17,10 +17,6 @@ import torch.nn as nn
 
 from torchtitan.components.data.multimodal.vision_processor import NaViTPatchGridResize
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ColumnParallelLinear,
@@ -820,7 +816,6 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
@@ -837,8 +832,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter in converters:
-            config = converter.build().convert(config)
     return config
