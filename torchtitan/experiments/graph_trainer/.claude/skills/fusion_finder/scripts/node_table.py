@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Attribute the profiled step's GPU kernels to FX nodes and rank glue by roofline gap.
+"""Attribute the profiled step's GPU kernels to FX nodes.
 
     python node_table.py <capture dir>
 
 Reads ``graph.jsonl.gz`` and ``profile/iteration_<step>/rank0_trace.json[.gz]``
-(written by a ``configure_capture`` run) and ``hbm_bandwidth.json``. Writes
-``node_table.csv`` (one row per node, in graph order) and ``step_budget.json``,
-and prints the step budget and the glue ops furthest above their roofline.
+(written by a ``configure_capture`` run). Writes ``node_table.csv`` (one row per
+node, in graph order) and ``step_budget.json``, and prints the step budget.
+
+Categories: ``gemm``, ``attention``, ``fused_moe`` (Dist-MoE's fused ops),
+``collective`` (including the send-buffer packs of bucketed collectives), ``glue``
+(any other node that launches kernels), ``no_kernel`` and ``input``.
 
 A kernel is attributed through its CUDA launch call (same ``correlation`` id) to
 the innermost node label enclosing the launch on the launching thread. Kernels
@@ -51,30 +54,30 @@ _ATTENTION = (
     "cudnn_attention",
     "varlen_attn",
 )
-_TOP = 25
 
 
-def _input_nodes(x) -> list[str]:
+def input_nodes(x) -> list[str]:
     """Names of the nodes referenced by an encoded args/kwargs structure, in order."""
     if isinstance(x, list):
-        return [n for v in x for n in _input_nodes(v)]
+        return [n for v in x for n in input_nodes(v)]
     if isinstance(x, dict):
         if set(x) == {"node"}:
             return [x["node"]]
-        return [n for v in x.values() for n in _input_nodes(v)]
+        return [n for v in x.values() for n in input_nodes(v)]
     return []
 
 
-def _tensors(val) -> list[dict]:
+def tensors(val) -> list[dict]:
+    """The encoded tensors in a node's ``val``."""
     if isinstance(val, dict) and val.get("t") == "tensor":
         return [val]
     if isinstance(val, list):
-        return [t for v in val for t in _tensors(v)]
+        return [t for v in val for t in tensors(v)]
     return []
 
 
-def _nbytes(t: dict, symbols: dict, *, unique: bool) -> int | None:
-    """Bytes of an encoded tensor; ``unique`` skips broadcast (stride 0) dims.
+def _nbytes(t: dict, symbols: dict) -> int | None:
+    """Bytes of an encoded tensor, broadcast (stride 0) dims counted once.
 
     None if a size is a symbol the trace did not resolve; 0 for host tensors.
     """
@@ -85,23 +88,41 @@ def _nbytes(t: dict, symbols: dict, *, unique: bool) -> int | None:
         size = symbols.get(size) if isinstance(size, str) else size
         if size is None:
             return None
-        if not (unique and stride == 0):
+        if stride != 0:
             n *= size
     return n
 
 
-def _category(target: str, kernel_names: set[str]) -> str:
-    lower = target.lower()
-    if target.rsplit(".", 1)[0] in _GEMMS:
-        return "gemm"
-    if any(a in lower for a in _ATTENTION) or any("flex" in k for k in kernel_names):
-        return "attention"
-    if target.startswith("dist_moe.") and not target.startswith("dist_moe.prepare_"):
-        return "fused_moe"
-    if (
+def _is_collective(target: str) -> bool:
+    return (
         target.startswith(("_c10d_functional.", "c10d_functional.", "_dtensor."))
         or "wait_tensor" in target
         or (target.startswith("torchtitan.") and "token_exchange" in target)
+    )
+
+
+def _category(node: dict, user_targets: list[str], kernel_names: set[str]) -> str:
+    target = node["target"]
+    if node["op"] in ("placeholder", "get_attr"):
+        return "input"
+    if target.rsplit(".", 1)[0] in _GEMMS:
+        return "gemm"
+    if any(a in target.lower() for a in _ATTENTION) or any(
+        "flex" in k for k in kernel_names
+    ):
+        return "attention"
+    if target.startswith("dist_moe.") and not target.startswith("dist_moe.prepare_"):
+        return "fused_moe"
+    # A bucketed collective's send buffer is packed by an FSDP bucketing op, or by a
+    # cat that only collectives read.
+    if (
+        _is_collective(target)
+        or target.startswith("bucketing.")
+        or (
+            target == "aten.cat.default"
+            and user_targets
+            and all(_is_collective(t) for t in user_targets)
+        )
     ):
         return "collective"
     return "glue" if kernel_names else "no_kernel"
@@ -136,8 +157,6 @@ def main() -> None:
     root = args.capture_dir
     with gzip.open(os.path.join(root, "graph.jsonl.gz"), "rt") as f:
         nodes = {r["name"]: r for r in map(json.loads, f)}
-    with open(os.path.join(root, "hbm_bandwidth.json")) as f:
-        hbm_gbps = json.load(f)["hbm_gbps"]
 
     kernels = []  # (ts, dur, name, correlation)
     launches = {}  # correlation -> (tid, ts) of the CUDA runtime call
@@ -197,13 +216,13 @@ def main() -> None:
     # its node arguments.
     symbols = {}
     for name, dims in input_dims.items():
-        arg_nodes = _input_nodes(nodes[name]["args"])
+        arg_nodes = input_nodes(nodes[name]["args"])
         if not isinstance(dims, list) or len(dims) != len(arg_nodes):
             continue
         for arg, sizes in zip(arg_nodes, dims):
             val = nodes[arg]["val"]
             if (
-                _tensors(val) == [val]
+                tensors(val) == [val]
                 and isinstance(sizes, list)
                 and len(sizes) == len(val["shape"])
             ):
@@ -211,23 +230,22 @@ def main() -> None:
                     if isinstance(s, str):
                         symbols.setdefault(s, v)
 
+    users = defaultdict(list)
+    for name, n in nodes.items():
+        for a in dict.fromkeys(input_nodes([n["args"], n["kwargs"]])):
+            users[a].append(name)
+
+    def out_bytes(name: str) -> int | None:
+        sizes = [_nbytes(t, symbols) for t in tensors(nodes[name]["val"])]
+        return None if None in sizes else sum(sizes)
+
     rows = []
     for name, n in nodes.items():
-        if n["op"] not in ("call_function", "call_module"):
+        if n["op"] == "output":
             continue
-        category = _category(n["target"], kernel_names[name])
-        nbytes = ideal_us = gap_us = None
-        if category == "glue":
-            reads = [
-                _nbytes(t, symbols, unique=True)
-                for a in dict.fromkeys(_input_nodes([n["args"], n["kwargs"]]))
-                for t in _tensors(nodes[a]["val"])
-            ]
-            writes = [_nbytes(t, symbols, unique=False) for t in _tensors(n["val"])]
-            if None not in reads + writes:
-                nbytes = sum(reads + writes)
-                ideal_us = nbytes / (hbm_gbps * 1e3)
-                gap_us = max(kernel_us[name] - ideal_us, 0.0)
+        category = _category(
+            n, [nodes[u]["target"] for u in users[name]], kernel_names[name]
+        )
         rows.append(
             {
                 "name": name,
@@ -237,9 +255,7 @@ def main() -> None:
                 "category": category,
                 "kernel_us": round(kernel_us[name], 2),
                 "num_kernels": num_kernels[name],
-                "bytes": nbytes,
-                "ideal_us": None if ideal_us is None else round(ideal_us, 2),
-                "gap_us": None if gap_us is None else round(gap_us, 2),
+                "out_bytes": out_bytes(name),
                 "src": n["src"],
                 "kernels": " | ".join(sorted(kernel_names[name])[:2]),
             }
@@ -251,8 +267,8 @@ def main() -> None:
 
     by_category = defaultdict(float)
     for r in rows:
-        by_category[r["category"]] += r["kernel_us"] / 1e3
-    glue = [r for r in rows if r["category"] == "glue"]
+        if r["category"] != "input":
+            by_category[r["category"]] += r["kernel_us"] / 1e3
     kernel_ms = sum(d for _, d, _, _ in kernels) / 1e3
     window_ms = (
         max(t + d for t, d, _, _ in kernels) - min(t for t, _, _, _ in kernels)
@@ -267,37 +283,12 @@ def main() -> None:
         "graph_ms_by_category": {
             c: round(v, 3) for c, v in sorted(by_category.items())
         },
-        "glue_gap_ms": round(sum(r["gap_us"] or 0 for r in glue) / 1e3, 3),
-        "glue_nodes_without_bytes": sum(r["bytes"] is None for r in glue),
-        "hbm_gbps": hbm_gbps,
+        # Nodes with a size the trace did not resolve: regions.py counts them as 0 bytes.
+        "nodes_without_bytes": sum(r["out_bytes"] is None for r in rows),
     }
     with open(os.path.join(root, "step_budget.json"), "w") as f:
         json.dump(budget, f, indent=1)
     print(json.dumps(budget, indent=1))
-
-    # The same op in every layer is one group: these are the ops worth a kernel.
-    groups = defaultdict(lambda: [0, 0.0, 0.0, ""])
-    for r in glue:
-        key = (
-            r["phase"],
-            re.sub(r"\blayers\.\d+", "layers.*", r["module_fqn"]),
-            r["target"],
-        )
-        g = groups[key]
-        g[0] += 1
-        g[1] += r["kernel_us"] / 1e3
-        g[2] += (r["gap_us"] or 0) / 1e3
-        g[3] = g[3] or r["src"]
-    print(
-        f"\nglue furthest above roofline ({hbm_gbps} GB/s), grouped by phase, module and op:"
-    )
-    print(f"{'gap_ms':>8} {'meas_ms':>8} {'nodes':>5}  phase      module / op / source")
-    for (phase, fqn, target), (count, meas, gap, src) in sorted(
-        groups.items(), key=lambda kv: -kv[1][2]
-    )[:_TOP]:
-        print(
-            f"{gap:8.3f} {meas:8.3f} {count:5d}  {phase:9s}  {fqn or '-'}  {target}  {src}"
-        )
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ A recipe calls ``configure_capture(config, out_dir)``. The step then runs the
 ``fusion_finder`` pass pipeline: the default GraphTrainer passes, followed by
 
 - ``dump_graph_pass``, which writes ``<out_dir>/graph.jsonl.gz``: one JSON record
-  per node of the graph that runs;
+  per node of the graph that runs, including its line of FX code;
 - ``custom_codegen_pass``, which runs every node under
   ``_RecordFunctionFast("<node>: <op> (<file>:<line>)")``, so that each kernel in
   the profiler trace can be attributed to the node that launched it.
@@ -32,6 +32,8 @@ from torchtitan.experiments.graph_trainer.registry import register_pass_pipeline
 
 _PROFILE_STEP = 10
 _FRAME_RE = re.compile(r'File "(.+)", line (\d+), in (\S+)')
+# A node's line in FX code: <name>[: "<dtype>[<shape>][<stride>]<device>"] = ...
+_CODE_RE = re.compile(r'\s*(\w+)(?:: "([^"]*)")? = (.*)')
 
 
 def configure_capture(config: Any, out_dir: str) -> Any:
@@ -112,12 +114,30 @@ def _source_line(stack_trace: str | None) -> str:
     return ""
 
 
+def _code_lines(gm: fx.GraphModule) -> dict[str, str]:
+    """Each node's line in the FX code of ``gm``'s top-level graph, with shapes and
+    strides, without the trailing ``;  <name> = None`` frees. The type annotation is
+    single-quoted so that the line needs no escaping in JSON."""
+    src = gm.graph.python_code(
+        "self", verbose=True, include_stride=True, include_device=True
+    ).src
+    lines = {}
+    for line in src.splitlines():
+        m = _CODE_RE.match(line)
+        if m:
+            name, annotation, rhs = m.groups()
+            typed = f"{name}: '{annotation}'" if annotation else name
+            lines[name] = f"{typed} = {rhs.split(';  ')[0]}"
+    return lines
+
+
 def dump_graph_pass(
     gm: fx.GraphModule, example_inputs: Any = None, *, path: str
 ) -> fx.GraphModule:
     """Write one JSON record per node of ``gm`` to ``path`` (rank 0 only)."""
     if torch.distributed.get_rank() != 0:
         return gm
+    code = _code_lines(gm)
     with gzip.open(path, "wt") as f:
         for node in gm.graph.nodes:
             record = {
@@ -130,6 +150,7 @@ def dump_graph_pass(
                 "phase": _phase(node),
                 "module_fqn": node.meta.get("custom", {}).get("module_fqn", ""),
                 "src": _source_line(node.meta.get("stack_trace")),
+                "code": code.get(node.name, ""),
             }
             f.write(json.dumps(record) + "\n")
     return gm
