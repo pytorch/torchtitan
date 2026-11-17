@@ -400,7 +400,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
 
 
 def _qwen3_30b_a3b_dapo_math_8k_config(
-    *, expert_precision: Literal["bf16", "mxfp8"]
+    *, expert_precision: Literal["bf16", "mxfp8", "nvfp4_w4a16"]
 ) -> Controller.Config:
     """Build the shared Qwen3-30B-A3B-Base DAPO-Math configuration with Dist-MoE experts.
 
@@ -527,6 +527,10 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             block_scaled_config=BlockScaledConfig(pipeline="mega"),
             mxfp8_mega_fused_inference=True,
         )
+    elif expert_precision == "nvfp4_w4a16":
+        generator_transform = DistMoeTransform(
+            expert_precision="nvfp4_w4a16", nvfp4_w4a16_mega_fused_inference=True
+        )
     else:
         generator_transform = DistMoeTransform(expert_precision=expert_precision)
     config.generator = apply_transforms(config.generator, [generator_transform])
@@ -544,3 +548,16 @@ def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
     The generator uses the Mega pipeline with fused SwiGLU inference weights.
     """
     return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="mxfp8")
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_nvfp4_w4a16() -> Controller.Config:
+    """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, NVFP4 W4A16 Dist-MoE experts.
+
+    The trainer runs the BF16 expert kernels on NVFP4 quantize-dequantized
+    expert weights. The generator runs the fused W4A16 Mega kernel on the same
+    NVFP4 codes and scales; it applies each expert's global scale to the FP32
+    accumulator instead of rounding the dequantized weights to BF16, so the two
+    differ by that rounding. The Mega kernel needs a dist_moe build with
+    ``BlockScaledConfig.weight_only``.
+    """
+    return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="nvfp4_w4a16")

@@ -18,6 +18,7 @@ from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
+    NVFP4W4A16DistMoeRoutedExperts,
 )
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
@@ -88,7 +89,7 @@ def _replace_routed_experts(
 
 @dataclass(kw_only=True, slots=True)
 class DistMoeTransform(ModelConfigTransform):
-    """Replace stock routed experts with BF16 or MXFP8 Dist-MoE execution.
+    """Replace stock routed experts with BF16, MXFP8 or NVFP4 W4A16 Dist-MoE.
 
     Expert activation semantics come from each source
     ``RoutedExperts.Config.activation_fn``. The transform translates supported
@@ -97,7 +98,10 @@ class DistMoeTransform(ModelConfigTransform):
 
     Args:
         expert_precision: Expert compute precision. BF16 is the high-precision
-            default; MXFP8 selects the annex's asynchronous block-scaled path.
+            default; MXFP8 selects the annex's asynchronous block-scaled path;
+            ``"nvfp4_w4a16"`` runs the BF16 path on NVFP4 quantize-dequantized
+            expert weights (weight-only fake quantization), and passes the
+            weight gradients to the parameters unchanged (straight-through).
         inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients directly
             into existing standard ``parameter.grad`` buffers. This is enabled
             by default; Dist-MoE derives the owners from the logical expert
@@ -111,16 +115,32 @@ class DistMoeTransform(ModelConfigTransform):
             the W13 GEMM, for inference only. Quantized weights and scales match
             training numerics exactly. Requires
             ``expert_precision="mxfp8"`` and ``block_scaled_config.pipeline="mega"``.
+        nvfp4_w4a16_mega_fused_inference: Keep real NVFP4 expert weights and run
+            dist_moe's fused W4A16 Mega kernel, for an inference generator only.
+            It uses the codes and scales the trainer's QDQ weights dequantize;
+            it applies each expert's global scale to the FP32 accumulator
+            instead of rounding the dequantized weights to BF16. Requires
+            ``expert_precision="nvfp4_w4a16"`` and a dist_moe build with the
+            W4A16 Mega kernel (``BlockScaledConfig.weight_only``).
     """
 
-    expert_precision: Literal["bf16", "mxfp8"] = "bf16"
+    expert_precision: Literal["bf16", "mxfp8", "nvfp4_w4a16"] = "bf16"
     inplace_wgrad_accum: bool = True
     bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
     block_scaled_config: dist_moe.BlockScaledConfig | None = None
     mxfp8_mega_fused_inference: bool = False
+    nvfp4_w4a16_mega_fused_inference: bool = False
 
     def __post_init__(self) -> None:
-        if self.expert_precision == "bf16":
+        if (
+            self.nvfp4_w4a16_mega_fused_inference
+            and self.expert_precision != "nvfp4_w4a16"
+        ):
+            raise ValueError(
+                "nvfp4_w4a16_mega_fused_inference requires "
+                "expert_precision='nvfp4_w4a16'"
+            )
+        if self.expert_precision in ("bf16", "nvfp4_w4a16"):
             if self.block_scaled_config is not None:
                 raise ValueError(
                     "block_scaled_config requires expert_precision='mxfp8'"
@@ -160,6 +180,14 @@ class DistMoeTransform(ModelConfigTransform):
                 DistMoeRoutedExperts,
                 inplace_wgrad_accum=self.inplace_wgrad_accum,
                 bf16_grouped_gemm_preset=self.bf16_grouped_gemm_preset,
+            )
+        if self.expert_precision == "nvfp4_w4a16":
+            return _replace_routed_experts(
+                model,
+                NVFP4W4A16DistMoeRoutedExperts,
+                inplace_wgrad_accum=self.inplace_wgrad_accum,
+                bf16_grouped_gemm_preset=self.bf16_grouped_gemm_preset,
+                mega_fused_inference=self.nvfp4_w4a16_mega_fused_inference,
             )
         return _replace_routed_experts(
             model,

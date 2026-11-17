@@ -6,9 +6,9 @@ in TorchTitan and produces top-k expert IDs and scores. Dist-MoE owns token
 dispatch, grouped expert computation, activation storage, scratch storage, and
 combine as one ordered operation.
 
-TorchTitan supports BF16 and asynchronous MXFP8 Dist-MoE training on NVIDIA
-SM100 or newer. The annex also provides NVFP4 inference, which TorchTitan does
-not expose yet. Dist-MoE requires
+TorchTitan supports BF16, asynchronous MXFP8 and NVFP4 weight-only (W4A16)
+Dist-MoE training on NVIDIA SM100 or newer, and the fused MXFP8 and W4A16 Mega
+inference kernels for RL generators. Dist-MoE requires
 `precision.param_dtype="bfloat16"` because FSDP unshards its persistent
 parameters in BF16.
 
@@ -111,6 +111,43 @@ Set `mxfp8_mega_fused_inference` only on the RL generator, since it does not
 support backward. During validation, the trainer runs under `torch.no_grad()`
 instead.
 
+For NVFP4 weight-only experts, set `expert_precision="nvfp4_w4a16"`. The
+trainer runs the BF16 kernels on NVFP4 quantize-dequantized (QDQ) expert
+weights, with activations in BF16, and passes the weight gradients to the
+high-precision parameters unchanged (a straight-through estimator). An RL
+generator can instead run the fused W4A16 Mega kernel on the same NVFP4 codes
+and scales:
+
+```python
+config.trainer = apply_transforms(
+    config.trainer, [DistMoeTransform(expert_precision="nvfp4_w4a16")]
+)
+config.generator = apply_transforms(
+    config.generator,
+    [
+        DistMoeTransform(
+            expert_precision="nvfp4_w4a16",
+            nvfp4_w4a16_mega_fused_inference=True,
+        )
+    ],
+)
+```
+
+```text
+trainer:    weight --QDQ, once per unshard--> BF16 weight -> BF16 FPROP/DGRAD
+            WGRAD -> weight.grad (straight-through)
+generator:  weight --quantize, on every weight load, in place--> E2M1 codes,
+            E4M3 block scales (1x16), FP32 global scale per expert
+            -> W4A16 Mega: dispatch, W13 + SwiGLU, W2 and combine in one kernel
+```
+
+Both sides use the same codes and scales. They differ only in rounding: the
+QDQ weight rounds `code * block_scale / global_scale` to BF16, while the Mega
+kernel applies the global scale to its FP32 accumulator. The Mega kernel needs
+a dist_moe build with `BlockScaledConfig.weight_only`, which dist_moe main does
+not ship yet. `rl_dapo_qwen3_30b_a3b_math_8k_nvfp4_w4a16` in
+`torchtitan_recipes.rl.dapo_math` is the verified recipe.
+
 Verified 671B recipes live in `torchtitan_recipes.models.deepseek_v3`, while
 debug and 16B CI recipes live in `torchtitan_recipes.tests.models.deepseek_v3`.
 GraphTrainer follows the corresponding `graph_trainer` and
@@ -136,11 +173,12 @@ Per-layer settings belong to the transform:
 
 | Setting | Meaning |
 | --- | --- |
-| `expert_precision` | Select `"bf16"` (default) or the asynchronous `"mxfp8"` expert path. |
+| `expert_precision` | Select `"bf16"` (default), the asynchronous `"mxfp8"` expert path, or `"nvfp4_w4a16"` (BF16 kernels on NVFP4 QDQ expert weights). |
 | `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default for BF16 and MXFP8 experts. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
 | `bf16_grouped_gemm_preset` | Optional BF16 FPROP/DGRAD schedule override for expert users. `None` uses the annex's shape-aware production defaults. BF16 WGRAD has its own production schedule. |
 | `block_scaled_config` | MXFP8-only annex policy. `pipeline="staged"` uses separate expert kernels; `pipeline="mega"` uses the fused chunk-pipelined implementation. `fast_math` selects approximate fused-SwiGLU sigmoid math, and `kernel_config` is an expert-only CuTe tuning override. |
 | `mxfp8_mega_fused_inference` | MXFP8 RL generator only; requires `pipeline="mega"`. Prepare weights in the interleaved format so the Mega kernel can fuse SwiGLU into the W13 GEMM, for inference only. Quantized weights and scales match training numerics exactly. |
+| `nvfp4_w4a16_mega_fused_inference` | NVFP4 W4A16 RL generator only. Keep real NVFP4 weights and run the fused W4A16 Mega kernel, for inference only. Codes and scales match the trainer's QDQ weights; only the global scale's rounding differs. |
 
 One `DistMoeRuntime.Config` owns rank-wide resources shared by every local
 Dist-MoE layer:
@@ -272,12 +310,12 @@ steady-state placement, kernel behavior, or execution-time synchronization.
 
 ## FSDP, MXFP8, And Rematerialization
 
-BF16 weights use the ordinary FSDP lifecycle. MXFP8 experts reuse TorchTitan's
-prepared-weight tensor lifecycle:
+BF16 weights use the ordinary FSDP lifecycle. MXFP8 and NVFP4 W4A16 experts
+reuse TorchTitan's prepared-weight tensor lifecycle:
 
 1. FSDP all-gathers the persistent high-precision shard in BF16.
 2. The post-all-gather hook prepares grouped 32x32 MXFP8 qdata and FPROP/DGRAD
-   scale layouts.
+   scale layouts, the NVFP4 QDQ weight, or the W4A16 Mega NVFP4 operands.
 3. FSDP releases the temporary BF16 communication storage.
 4. Dist-MoE consumes the prepared operands for that unshard lifetime.
 5. FSDP releases prepared storage at the normal reshard boundary.
