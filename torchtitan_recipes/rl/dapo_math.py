@@ -457,7 +457,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 "timing/validate",
             ],
         ),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -479,9 +478,10 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
-                # Pack several rollouts per microbatch (a multiple of
-                # max_total_tokens).
-                num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
+                # Pack two rollouts per microbatch (a multiple of
+                # max_total_tokens). With FP32 parameters and optimizer
+                # states, four run out of memory on the four trainer GPUs.
+                num_tokens_per_microbatch_per_dp_rank=2 * max_total_tokens,
             ),
             dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             parallelism=trainer_parallelism,
