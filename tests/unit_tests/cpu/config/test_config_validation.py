@@ -16,6 +16,7 @@ from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
 from torchtitan.distributed.flex_shard_fsdp import validate_flex_shard_training
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
@@ -226,7 +227,7 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 # CPU CI doesn't install flex_shard, which validate_flex_shard_training
 # requires last.
 @mock.patch("torchtitan.distributed.flex_shard_fsdp.find_spec", mock.Mock())
-def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
+def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
     # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
     # than silently shard with FSDP2.
     def validate(config):
@@ -241,6 +242,16 @@ def test_flex_shard_rejects_models_with_their_own_fsdp() -> None:
         match=r"models that override Decoder._apply_fsdp \(DeepSeekV4Model\)",
     ):
         validate(deepseek_v4_debugmodel())
+
+    # Without param_init, a module falls back to reset_parameters(), which would
+    # give every rank the same shard.
+    config = llama3_debugmodel()
+    _, linear_config, _, _ = next(config.model.traverse(Linear.Config, recurse=True))
+    linear_config.param_init = None
+    with pytest.raises(
+        ValueError, match=r"modules initialized by reset_parameters\(\)"
+    ):
+        validate(config)
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
