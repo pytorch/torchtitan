@@ -53,8 +53,13 @@ elif [[ "${GPU_ARCH_TYPE}" == "xpu" ]]; then
   # expandable_segments.
   export PYTORCH_ALLOC_CONF=""
   # The image's sccache (/opt/cache/bin) has no backend configured and breaks
-  # triton's JIT builds; point triton at the plain compilers (same workaround
-  # as torchao's ci_test_xpu.sh).
+  # triton's JIT builds; point triton at the plain compilers. Same workaround
+  # as torchao:
+  # https://github.com/pytorch/ao/blob/566d15ea721da0d305270b4c552c59970ec89304/.github/scripts/ci_test_xpu.sh#L6-L8
+  # TODO: this works around a misconfigured CI image (sccache shims on PATH
+  # with no backend configured). The fix belongs in the image definition;
+  # file and link a test-infra/image issue, then drop this override once
+  # it's fixed there.
   export CC=/usr/bin/gcc CXX=/usr/bin/g++ SCCACHE_DISABLE=1
 fi
 
