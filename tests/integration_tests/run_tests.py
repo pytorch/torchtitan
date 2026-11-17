@@ -27,6 +27,9 @@ from tests.integration_tests import (
     SELF_LAUNCHING_ENTRYPOINTS,
     validate_fake_pg_compatibility,
 )
+from tests.integration_tests.hardware_skips import (
+    get_tests_to_skip_on_current_hardware,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -372,17 +375,26 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[IntegrationTestDefinition]
-) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
-    """Filter tests by name, scope, disabled state, architecture, and GPU count.
+) -> tuple[
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+]:
+    """Filter tests by name, scope, disabled state, hardware skips, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu).
+    Hardware skips are matched by test name, the same way ``--exclude`` is.
+
+    Returns (runnable, skipped_ngpu, skipped_by_hardware).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
+    tests_to_skip = get_tests_to_skip_on_current_hardware()
+
     runnable: list[IntegrationTestDefinition] = []
     skipped_ngpu: list[IntegrationTestDefinition] = []
+    skipped_by_hardware: list[IntegrationTestDefinition] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -396,16 +408,14 @@ def _filter_tests(
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-        if (
-            getattr(args, "gpu_arch_type", "cuda") == "rocm"
-            and test_flavor.skip_rocm_test
-        ):
+        if test_flavor.test_name in tests_to_skip:
+            skipped_by_hardware.append(test_flavor)
             continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu
+    return runnable, skipped_ngpu, skipped_by_hardware
 
 
 def run_tests(
@@ -414,7 +424,9 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    runnable, skipped_ngpu, skipped_by_hardware = _filter_tests(args, test_list)
+    for test_flavor in skipped_by_hardware:
+        logger.info(f"Skipping test {test_flavor.test_name} (hardware-specific skip)")
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
