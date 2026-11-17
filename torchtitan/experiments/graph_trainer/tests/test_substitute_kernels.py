@@ -30,8 +30,9 @@ from torchtitan.experiments.graph_trainer.tests import _substitute_kernels_ops
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
-# An op that is not a torch.library.custom_op, hence not cacheable.
-_lib = torch.library.Library("sk_test_lib", "DEF")
+# An op defined with torch.library.Library and no Python fake kernel, hence not
+# cacheable.
+_lib = torch.library.Library("sk_test_nofake", "DEF")
 _lib.define("neg(Tensor x) -> Tensor")
 _lib.impl("neg", lambda x: -x, "CompositeExplicitAutograd")
 
@@ -591,12 +592,29 @@ def reference(in0, in1, in2):
         with self.assertRaisesRegex(ValueError, "auto_functionalized wrapping an op"):
             cache_keys(gm, [torch.randn(4)])
 
-    def test_submodule_with_library_defined_op_is_skipped(self):
+    def test_submodule_with_library_op_without_fake_kernel_is_skipped(self):
         args = _inputs()
-        gm = _parent([_layer(lambda x, w1, w2: torch.ops.sk_test_lib.neg(x))], args)
+        gm = _parent([_layer(lambda x, w1, w2: torch.ops.sk_test_nofake.neg(x))], args)
         gm = substitute_with_kernels_pass(gm, cache_dir=self.cache)
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
         self.assertEqual(self._patterns(), [])
+
+    def test_library_op_reference_imports_its_fake_kernel_module(self):
+        args = _inputs()
+        gm = _parent(
+            [_layer(lambda x, w1, w2: torch.ops.sk_test_lib.double(x @ w1))], args
+        )
+        expected = gm(*args)
+        substitute_with_kernels_pass(gm, cache_dir=self.cache)
+
+        (pattern,) = self._patterns()
+        (reference,) = pattern.iterdir()
+        self.assertIn(
+            "import torchtitan.experiments.graph_trainer.tests._substitute_kernels_ops"
+            "  # sk_test_lib::double",
+            self._reference_text(reference),
+        )
+        self.assertEqual(self._run_in_fresh_process(reference, args), expected)
 
     def test_non_graph_module_and_missing_meta_val_call_modules_are_skipped(self):
         args = _inputs()

@@ -23,6 +23,18 @@ def _(x: torch.Tensor, s: float) -> torch.Tensor:
     return torch.empty_like(x)
 
 
+# An op defined with torch.library.Library, a backend kernel and a Python fake
+# kernel, as torchao defines its ops.
+_lib = torch.library.Library("sk_test_lib", "DEF")
+_lib.define("double(Tensor x) -> Tensor")
+_lib.impl("double", lambda x: x * 2, "CPU")
+
+
+@torch.library.register_fake("sk_test_lib::double")
+def _(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
 try:
     import triton
     import triton.language as tl

@@ -1,6 +1,6 @@
 ---
 name: fusion_finder
-description: Profile one GraphTrainer training step with every FX node labelled, attribute each GPU kernel to its node, group the memory-bound glue ops (norms, casts, RoPE, routing, permutes, residual adds) into fusion regions that one kernel could replace, rank the regions by time above their HBM roofline, and lift each region into a call_module with a compile.extra_passes graph pass. Use when asked where a graph_trainer step spends GPU time per FX node, which glue ops are worth fusing, or to prepare fusion targets for handwritten kernels.
+description: Profile one GraphTrainer training step with every FX node labelled, attribute each GPU kernel to its node, group the memory-bound glue ops (norms, casts, RoPE, routing, permutes, residual adds) into fusion regions that one kernel could replace, rank the regions by time above their HBM roofline, lift each region into a call_module with a compile.extra_passes graph pass, and write the lifted regions as kernel problems (reference, contract, real inputs, bitwise checker) for kernel-writing agents. Use when asked where a graph_trainer step spends GPU time per FX node, which glue ops are worth fusing, or to prepare fusion targets for handwritten kernels.
 ---
 
 # Finding fusion opportunities in a GraphTrainer step
@@ -9,8 +9,9 @@ Capture one training step as GraphTrainer runs it, with every FX node labelled i
 the profiler trace; attribute each GPU kernel to its node; group the glue into
 fusion regions and rank them by time above their HBM roofline; lift each region
 into a `call_module`, the target a kernel replaces, and check that the lifted step
-is bitwise identical. The scripts are in `scripts/` and write to one capture
-directory under `outputs/` (gitignored).
+is bitwise identical; write each lifted region as a kernel problem that a
+kernel-writing agent can take. The scripts are in `scripts/` and write to one
+capture directory under `outputs/` (gitignored).
 
 Terms:
 - **Glue:** a node that launches kernels and is not a GEMM, attention, Dist-MoE
@@ -34,10 +35,12 @@ OUT=outputs/fusion_finder/<model>
 
 **1. Recipe.** Write `$OUT/ff_recipe.py`: build the model's verified GraphTrainer
 config, change only what one GPU needs, and pass it through `configure_capture`.
-The `lifted` config is the same step with the regions lifted (step 6):
+The `lifted` config is the same step with the regions lifted (step 6), and
+`problems` also writes them as kernel problems (step 7):
 
 ```python
 from fusion_finder_capture import configure_capture
+from kernel_problems import register_kernel_problems
 from lift_regions import register_lift_passes
 from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
@@ -59,6 +62,17 @@ def capture():
 def lifted():
     config = configure_capture(_base(), f"{OUT}/lifted")
     config.compile.extra_passes = register_lift_passes(OUT)
+    return config
+
+
+def problems():
+    config = configure_capture(_base(), f"{OUT}/problems_run")
+    config.compile.extra_passes = [
+        *register_lift_passes(OUT),
+        register_kernel_problems(OUT, f"{OUT}/problems"),
+    ]
+    config.training.steps = 1
+    config.profiler.enable_profiling = False
     return config
 ```
 
@@ -110,6 +124,17 @@ instances it lifted. The passes also apply to other variants of the model (layer
 count, shapes, parallelism): check a variant the same way, with its own config
 with and without `register_lift_passes(OUT)`.
 
+**7. Kernel problems.** Run the `problems` config like the capture (step 2):
+
+```bash
+PYTHONPATH=$SKILL:$OUT:. NGPU=8 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=<idle GPU> \
+  python -m torchtitan.train --module ff_recipe --config problems --comm-backend fake
+```
+
+It writes `$OUT/problems/` (see "Kernel problems"): one problem per specialization
+of a lifted region, by gap in `problems.json`. Hand a problem directory to a
+kernel-writing agent; `check_kernel.py` decides whether its kernel is correct.
+
 ## Outputs
 
 | file | content |
@@ -119,6 +144,7 @@ with and without `register_lift_passes(OUT)`.
 | `hbm_bandwidth.json` | the device and its measured HBM bandwidth |
 | `node_table.csv` | per node, in graph order: phase, module, op, category, kernel time and count, output bytes, source, kernel names |
 | `step_budget.json` | GPU window, busy and idle time, time by category, time outside the graph, nodes with unresolved sizes |
+| `problems/` | the kernel problems of the lifted regions (see "Kernel problems") |
 | `regions.json` | `profit_floor_ms` and every region, in the order the lift passes run (see "Lift passes"): `id`, `gap_ms`, `measured_ms`, `ideal_ms`, `instances`, `kernels_per_instance`, `phases`, `modules`, `ops`, `code` (the first instance's FX code, one line per node), and `pattern`: the first instance's `match_key` per node (`nodes`, node names as labels) and the nodes used outside it (`outputs`); `null` for a region with no pattern |
 
 ## How attribution works
@@ -209,6 +235,58 @@ tensor or a shared storage, move after the call in their order, and nothing else
 moves. A submodule that writes storage is marked impure so that dead code
 elimination keeps it. A pass raises if it finds no match, or if a path leaves a
 match and comes back. To plug in a kernel, a later graph pass replaces the call.
+
+## Kernel problems
+
+`register_kernel_problems(capture_dir, problems_dir)` registers
+`write_kernel_problems`, which runs after the lift passes. A problem is one
+specialization of a lifted submodule: its exact code on inputs of its exact shapes,
+strides and dtypes. It is keyed as `substitute_kernels` keys its kernel cache:
+
+```
+problems/
+  problems.json             # the problems of this run, by gap
+  check_kernel.py           # the bitwise gate, shared by all problems
+  pattern_<l1>/             # level 1: the structure, ignoring literals and views
+    <l2>/                   # level 2: the exact code and inputs
+      problem.py            # reference(in0, ...); Model, get_inputs, get_init_inputs
+      spec.json             # contract, input cases, the calls it comes from
+      inputs.pt             # the integer, bool and complex inputs of each case
+      kernel.py             # written by the agent: kernel_function(in0, ...)
+```
+
+The instances of a region at other sizes share `pattern_<l1>`, so a kernel written
+for one problem is a start for the others. E.g. DeepSeek-V3's SwiGLU region has
+one problem for the dense FFN and one for the shared experts.
+
+- `problem.py`: `reference` is the submodule's code, the computation a kernel
+  replaces; `Model`, `get_inputs` and `get_init_inputs` are the KernelBench interface
+  that KernelAgent loads. Its docstring describes the problem: region, calls,
+  modules, phase, measured and ideal time.
+- `spec.json`: `signature`; `inputs` and `outputs` (shape, stride, dtype, device;
+  symbolic sizes as `N0`, `N1`, ...); `mutated_inputs` (the inputs `reference` writes
+  in place) and `output_aliases` (the input each output is a view of); `cases`
+  (the call of each case, and the layout of its inputs: shapes, strides,
+  storages, alignment); `source`: the
+  region and each call of the step with this specialization, with its module,
+  phase, and measured and ideal time when the call is an instance of the capture;
+  `env`: GPU, torch, CUDA, and whether deterministic algorithms were on.
+- `inputs.pt`: the integer, bool and complex inputs of each case, the first 3
+  calls of the problem in the step (several layers; for symbolic sizes several
+  sizes): index inputs (expert
+  ids, positions, split sizes), masks and counts have the values of the run.
+  Floating-point inputs are not saved: `check_kernel.build_args` generates them
+  from a seed, in the case's layout. When a case is added, `reference` on the
+  call's inputs must reproduce its outputs and in-place writes bit for bit, or the
+  run raises.
+
+The contract: `kernel_function` takes the inputs of `reference` and returns what it
+returns, bit for bit, with the same strides and aliasing, and makes the same
+in-place writes to its inputs and no others.
+`python check_kernel.py <problem dir> kernel.py` checks it on each case, with the
+floating-point inputs from 2 seeds, and prints `PASS` (exit 0) or the first
+difference. A test that runs next to `kernel.py`, as KernelAgent runs its
+tests, calls `check_kernel.main(["<problem dir>", "kernel.py"])`.
 
 ## Traps
 
