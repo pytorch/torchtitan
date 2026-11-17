@@ -6,7 +6,7 @@
 
 """Custom ops used by test_substitute_kernels.py.
 
-They live in their own module so that a generated ``reference.py`` can import
+They live in their own module so that a generated ``<l2>.py`` can import
 it from a fresh process.
 """
 
