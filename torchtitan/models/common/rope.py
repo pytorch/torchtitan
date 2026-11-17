@@ -442,7 +442,15 @@ class ComplexVisionRoPE(RoPE):
         super().__init__(config)
         self.pair_layout = config.pair_layout
 
-    apply_rotary_emb = staticmethod(ComplexRoPE.apply_rotary_emb)
+    @staticmethod
+    def apply_rotary_emb(
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        rope_cache: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return ComplexRoPE.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Complex rotation table ``(max_context_length, dim / 4)``."""

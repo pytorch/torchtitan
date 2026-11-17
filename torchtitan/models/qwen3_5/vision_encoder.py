@@ -212,7 +212,15 @@ class CosSinVisionRoPE(RoPE):
             if self.scaling is not None:
                 raise ValueError("CosSinVisionRoPE does not support frequency scaling.")
 
-    apply_rotary_emb = staticmethod(CosSinRoPE.apply_rotary_emb)
+    @staticmethod
+    def apply_rotary_emb(
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        rope_cache: torch.Tensor,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return CosSinRoPE.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Compute the per-coordinate angle table.
