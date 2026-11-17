@@ -718,24 +718,6 @@ class BaseCheckpointManager(Configurable, ABC):
             if self.last_save_in_hf and not self.last_save_model_only:
                 raise ValueError("last_save_in_hf requires last_save_model_only=True.")
 
-            # Remote (fsspec) checkpoint IO supports only the native DCP format.
-            # HF safetensors read/write to a remote URI is not implemented, so
-            # reject the combination up front instead of failing deep in DCP.
-            if self.last_save_in_hf and filesystem.is_remote(self.folder):
-                raise ValueError(
-                    "last_save_in_hf is not supported with a remote "
-                    f"checkpointer.folder: {self.folder}"
-                )
-            if (
-                self.initial_load_in_hf
-                and self.initial_load_path
-                and filesystem.is_remote(self.initial_load_path)
-            ):
-                raise ValueError(
-                    "initial_load_in_hf is not supported with a remote "
-                    f"initial_load_path: {self.initial_load_path}"
-                )
-
             if self.load_only and self.enable_first_step_checkpoint:
                 logger.warning(
                     "checkpointer.load_only is True; enable_first_step_checkpoint "
