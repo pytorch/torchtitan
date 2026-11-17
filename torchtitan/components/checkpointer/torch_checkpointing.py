@@ -11,7 +11,7 @@ import queue
 import threading
 from collections.abc import Callable
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +95,7 @@ def _backend_path(path: str) -> str:
 
 
 class _BackendCheckpointStorage:
-    """``CheckpointStorage`` backed by a ``torch_checkpointing`` ``Storage``.
+    """``CheckpointStorage`` backed by ``torch_checkpointing`` ``Storage``.
 
     Path probes have to go through the same ``Storage`` the backend saves and
     loads with, or a caller-supplied remote storage would be written by the
@@ -106,36 +106,56 @@ class _BackendCheckpointStorage:
     directories leaves exactly the existing non-directory entries.
 
     Paths arrive as ``str`` and may be remote URIs. The backend addresses
-    storage by scheme-less ``Path``, so the scheme is dropped once it matches
-    the protocol that selected the wrapped ``Storage``. A path on other
-    storage is rejected rather than rewritten into a path on this one.
+    storage by scheme-less ``Path``, so each path is read from the storage its
+    own scheme names and handed over without the scheme. A path on the
+    folder's protocol uses the folder's storage config; any other path, such as
+    HF weights on local disk next to a ``gs://`` folder, uses the default
+    config for its protocol.
     """
 
-    def __init__(self, storage: Storage, *, protocol: str | None) -> None:
-        self._storage = storage
+    def __init__(
+        self, folder_storage_config: StorageConfig | None, *, protocol: str | None
+    ) -> None:
+        self._folder_storage_config = folder_storage_config
         self._protocol = protocol
+        self._storages: dict[str | None, Storage] = {
+            protocol: (
+                folder_storage_config or LocalFileSystemStorageConfig()
+            ).create_storage()
+        }
 
-    def _path(self, path: str) -> Path:
-        if _protocol(path) != self._protocol:
-            raise ValueError(
-                f"{path!r} is not on the checkpoint storage "
-                f"({self._protocol or 'local'}); folder, initial_load_path and "
-                "hf_assets_path must all be on the same storage."
-            )
-        return Path(_backend_path(path))
+    def storage_config_for(self, path: str) -> StorageConfig | None:
+        """Config of the storage ``path`` is on, for backend managers."""
+        protocol = _protocol(path)
+        if protocol == self._protocol:
+            return self._folder_storage_config
+        if protocol is None:
+            return LocalFileSystemStorageConfig()
+        return FsspecStorageConfig(protocol=protocol)
+
+    def _storage_and_path(self, path: str) -> tuple[Storage, Path]:
+        protocol = _protocol(path)
+        if protocol not in self._storages:
+            storage_config = self.storage_config_for(path)
+            assert storage_config is not None
+            self._storages[protocol] = storage_config.create_storage()
+        return self._storages[protocol], Path(_backend_path(path))
 
     def isdir(self, path: str) -> bool:
-        return self._storage.isdir(self._path(path))
+        storage, target = self._storage_and_path(path)
+        return storage.isdir(target)
 
     def isfile(self, path: str) -> bool:
-        target = self._path(path)
-        return self._storage.exists(target) and not self._storage.isdir(target)
+        storage, target = self._storage_and_path(path)
+        return storage.exists(target) and not storage.isdir(target)
 
     def listdir(self, path: str) -> list[str]:
-        return self._storage.ls(self._path(path))
+        storage, target = self._storage_and_path(path)
+        return storage.ls(target)
 
     def remove(self, path: str) -> None:
-        self._storage.rmdir(self._path(path))
+        storage, target = self._storage_and_path(path)
+        storage.rmdir(target)
 
 
 def _init_subprocess_logging(
@@ -245,12 +265,15 @@ class TorchCheckpointingManager(BaseCheckpointManager):
     """TorchTitan checkpoint manager backed by ``torch_checkpointing``.
 
     Args:
-        storage_config: Backend storage for reading and writing checkpoints.
-            Defaults to the local filesystem, or to fsspec storage for the
-            folder's protocol when ``checkpointer.folder`` is a remote URI
-            such as ``gs://bucket/run``. This is an init parameter rather than
-            a ``Config`` field because the backend is a live storage object,
-            not declarative configuration.
+        storage_config: Backend storage for writing checkpoints and reading
+            them back. Defaults to the local filesystem, or to fsspec storage
+            for the folder's protocol when ``checkpointer.folder`` is a remote
+            URI such as ``gs://bucket/run``. ``initial_load_path`` and the
+            ``hf_assets_path`` an HF initial load reads may be on other
+            storage; each is read with the default storage for its own
+            protocol. This is an init parameter rather than a ``Config`` field
+            because the backend is a live storage object, not declarative
+            configuration.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -275,30 +298,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         folder_protocol = _protocol(self.folder)
-        # A manager reads and writes through one storage, so a load path on
-        # other storage fails here, before the model is built, rather than at
-        # load.
-        if (
-            config.initial_load_path
-            and _protocol(config.initial_load_path) != folder_protocol
-        ):
-            raise ValueError(
-                "checkpointer.folder and checkpointer.initial_load_path must "
-                f"be on the same storage, got {self.folder!r} and "
-                f"{config.initial_load_path!r}."
-            )
-        hf_assets_path = sd_adapter.hf_assets_path if sd_adapter else None
-        if (
-            config.initial_load_in_hf
-            and not config.initial_load_path
-            and hf_assets_path
-            and _protocol(hf_assets_path) != folder_protocol
-        ):
-            raise ValueError(
-                "checkpointer.folder and hf_assets_path must be on the same "
-                "storage to load Hugging Face weights, got "
-                f"{self.folder!r} and {hf_assets_path!r}."
-            )
         if storage_config is not None:
             # Paths reach the backend without their scheme, so a storage that
             # cannot hold the folder would quietly use another location:
@@ -360,12 +359,13 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             storage_config=storage_config,
         )
         self._manager_config = manager_config
-        storage_config = (
-            self._manager_config.storage_config or LocalFileSystemStorageConfig()
+        self._folder_protocol = folder_protocol
+        backend_storage = _BackendCheckpointStorage(
+            self._manager_config.storage_config, protocol=folder_protocol
         )
-        self._storage = _BackendCheckpointStorage(
-            storage_config.create_storage(), protocol=folder_protocol
-        )
+        self._storage = backend_storage
+        # Loads build their backend manager on the storage the path is on.
+        self._storage_config_for = backend_storage.storage_config_for
         self._prewarmed = False
 
         self.sd_adapter = sd_adapter
@@ -447,7 +447,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             )
             hf_config = _default_backend_config(
                 _sync_save_config(use_barrier=False),
-                storage_config=self._manager_config.storage_config,
+                storage_config=self._storage_config_for(checkpoint_id),
                 items={item_key: hf_model_spec},
                 default=None,
             )
@@ -469,11 +469,20 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             # TODO: Initializing a LoRA model from a native base checkpoint fails
             # here: the checkpoint lacks the new adapter parameters. Exempt them
             # on an initial load, as the HF path above already does.
-            loaded = self._manager.load(
-                _backend_path(checkpoint_id),
-                into=state_dict,
-                strict=True,
-            )
+            backend_path = _backend_path(checkpoint_id)
+            if _protocol(checkpoint_id) == self._folder_protocol:
+                loaded = self._manager.load(backend_path, into=state_dict, strict=True)
+            else:
+                # An initial_load_path on other storage than the folder.
+                manager = replace(
+                    self._manager_config,
+                    save=_sync_save_config(use_barrier=False),
+                    storage_config=self._storage_config_for(checkpoint_id),
+                ).build()
+                try:
+                    loaded = manager.load(backend_path, into=state_dict, strict=True)
+                finally:
+                    manager.close()
             for key, target in states.items():
                 if isinstance(target, Stateful):
                     target.load_state_dict(state_dict[key])

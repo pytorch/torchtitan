@@ -278,20 +278,45 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
         manager.close()
 
-    def test_storage_rejects_a_path_on_other_storage(self) -> None:
-        # Dropping the scheme of a path on other storage would turn
-        # gs://bucket/hf into the local relative path bucket/hf.
-        for protocol, path in (
-            (None, "gs://bucket/hf"),
-            ("gs", "/data/hf"),
-            ("gs", "s3://bucket/hf"),
+    def test_storage_reads_each_path_from_the_storage_its_scheme_names(self) -> None:
+        # Dropping the scheme and reading through the folder's storage would
+        # turn gs://bucket/hf into bucket/hf on S3.
+        folder_storage_config = FsspecStorageConfig(protocol="s3")
+        folder_storage, local_storage, gcs_storage = (mock.Mock() for _ in range(3))
+        with (
+            mock.patch.object(
+                FsspecStorageConfig,
+                "create_storage",
+                autospec=True,
+                side_effect=lambda config: {"s3": folder_storage, "gs": gcs_storage}[
+                    config.protocol
+                ],
+            ),
+            mock.patch.object(
+                LocalFileSystemStorageConfig,
+                "create_storage",
+                return_value=local_storage,
+            ),
         ):
-            with self.subTest(protocol=protocol, path=path):
-                storage = mock.Mock()
-                adapter = _BackendCheckpointStorage(storage, protocol=protocol)
-                with self.assertRaisesRegex(ValueError, "same storage"):
-                    adapter.isdir(path)
-                storage.isdir.assert_not_called()
+            adapter = _BackendCheckpointStorage(folder_storage_config, protocol="s3")
+            adapter.isdir("s3://bucket/run/step-1")
+            adapter.isdir("/data/hf")
+            adapter.isdir("gs://bucket/hf")
+
+        folder_storage.isdir.assert_called_once_with(Path("bucket/run/step-1"))
+        local_storage.isdir.assert_called_once_with(Path("/data/hf"))
+        gcs_storage.isdir.assert_called_once_with(Path("bucket/hf"))
+        # The backend managers that load these paths get the same storage.
+        self.assertIs(
+            folder_storage_config, adapter.storage_config_for("s3://bucket/run")
+        )
+        self.assertEqual(
+            LocalFileSystemStorageConfig(), adapter.storage_config_for("/data/hf")
+        )
+        self.assertEqual(
+            FsspecStorageConfig(protocol="gs"),
+            adapter.storage_config_for("gs://bucket/hf"),
+        )
 
     def test_remote_folder_round_trip(self) -> None:
         """Save and resume through a URI folder with the real backend."""
@@ -368,50 +393,84 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
         manager.close()
 
-    def test_folder_and_initial_load_path_must_share_storage(self) -> None:
-        # A manager has one storage, so it cannot read from one and write to
-        # another.
-        for folder, initial_load_path in (
-            ("gs://bucket/checkpoint", "/data/pretrained"),
-            ("checkpoint", "gs://bucket/pretrained"),
-            ("gs://bucket/checkpoint", "s3://bucket/pretrained"),
-        ):
-            with self.subTest(folder=folder, initial_load_path=initial_load_path):
-                config = TorchCheckpointingManager.Config(
-                    folder=folder,
-                    keep_latest_k=0,
-                    initial_load_model_only=True,
-                    initial_load_path=initial_load_path,
-                )
-                with mock.patch.object(
-                    FsspecStorageConfig, "create_storage", return_value=mock.Mock()
-                ):
-                    with self.assertRaisesRegex(ValueError, "same storage"):
-                        self._build_manager(config)
+    def _memory_bucket(self) -> str:
+        memory_fs = fsspec.filesystem("memory")
+        bucket = f"/bucket-{uuid.uuid4().hex}"
+        self.addCleanup(
+            lambda: memory_fs.rm(bucket, recursive=True)
+            if memory_fs.exists(bucket)
+            else None
+        )
+        return bucket
 
-    def test_hf_assets_path_must_share_storage_with_folder(self) -> None:
-        # An HF initial load reads hf_assets_path through the checkpoint
-        # storage, so a mismatch fails at construction, before the model is
-        # built, rather than at load.
-        for base_folder, hf_assets_path in (
-            ("gs://bucket/dump", "/data/hf"),
-            ("/tmp", "gs://bucket/hf"),
-        ):
-            with self.subTest(base_folder=base_folder, hf_assets_path=hf_assets_path):
-                config = TorchCheckpointingManager.Config(
-                    keep_latest_k=0,
-                    initial_load_model_only=True,
-                    initial_load_in_hf=True,
-                )
-                with mock.patch.object(
-                    FsspecStorageConfig, "create_storage", return_value=mock.Mock()
-                ):
-                    with self.assertRaisesRegex(ValueError, "same storage"):
-                        self._build_manager(
-                            config,
-                            base_folder=base_folder,
-                            sd_adapter=_StateDictAdapter(hf_assets_path=hf_assets_path),
-                        )
+    def test_hf_initial_load_reads_local_assets_with_a_remote_folder(self) -> None:
+        """Fine-tune from HF weights on local disk while checkpointing remotely."""
+        with tempfile.TemporaryDirectory() as hf_assets_path:
+            expected_weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+            shard = "model-00001-of-00001.safetensors"
+            save_file(
+                {"hf_weight": expected_weight}, os.path.join(hf_assets_path, shard)
+            )
+            with open(
+                os.path.join(hf_assets_path, "model.safetensors.index.json"), "w"
+            ) as f:
+                json.dump({"weight_map": {"hf_weight": shard}}, f)
+            model = nn.Linear(2, 2, bias=False)
+            manager = TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+            ).build(
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                extra_states={"train_state": _Stateful("train")},
+                sd_adapter=_StateDictAdapter(hf_assets_path=hf_assets_path),
+                base_folder=f"memory://{self._memory_bucket()}",
+            )
+            try:
+                self.assertTrue(manager.load())
+            finally:
+                manager.close()
+
+            torch.testing.assert_close(model.weight.detach(), expected_weight)
+
+    def test_initial_load_path_on_other_storage_than_the_folder(self) -> None:
+        """Start from a local native checkpoint while checkpointing remotely."""
+
+        def build(model: nn.Module, base_folder: str, **overrides):
+            return TorchCheckpointingManager.Config(keep_latest_k=0, **overrides).build(
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                extra_states={"train_state": _Stateful("train")},
+                sd_adapter=None,
+                base_folder=base_folder,
+            )
+
+        with tempfile.TemporaryDirectory() as local_dump:
+            saved = nn.Linear(2, 2)
+            saver = build(saved, local_dump, initial_load_model_only=False)
+            try:
+                self.assertTrue(saver.save(curr_step=5, last_step=True))
+            finally:
+                saver.close()
+
+            restored = nn.Linear(2, 2)
+            loader = build(
+                restored,
+                f"memory://{self._memory_bucket()}",
+                initial_load_model_only=True,
+                initial_load_path=saver._create_last_step_id(5),
+            )
+            try:
+                self.assertTrue(loader.load())
+            finally:
+                loader.close()
+
+            torch.testing.assert_close(restored.weight, saved.weight)
 
     def test_remote_folder_hf_round_trip(self) -> None:
         """Export to HF and load it back on a remote folder with the real backend.
@@ -886,7 +945,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # run's pre-save retention deletes abandoned directories outright.
         manager = TorchCheckpointingManager.__new__(TorchCheckpointingManager)
         manager._storage = _BackendCheckpointStorage(
-            LocalFileSystemStorageConfig(use_direct_io=False).create_storage(),
+            LocalFileSystemStorageConfig(use_direct_io=False),
             protocol=None,
         )
 

@@ -96,8 +96,9 @@ checkpointer=TorchCheckpointingManager.Config(
 
 Interval saves, the final save, resume, `keep_latest_k` retention, Hugging Face export
 (`last_save_in_hf`), and Hugging Face load (`initial_load_in_hf`) all go through the
-remote store. `folder`, `initial_load_path`, and the `hf_assets_path` an HF initial load
-reads must all be on the same storage: all local, or all remote with the same protocol.
+remote store. `initial_load_path` and the `hf_assets_path` an HF initial load reads may be
+on other storage than `folder`, e.g. HF weights on local disk with checkpoints on `gs://`;
+each is read from the storage its own scheme names.
 
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
