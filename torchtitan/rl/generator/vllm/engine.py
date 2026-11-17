@@ -56,6 +56,7 @@ from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
+from torchtitan.rl.quantized_operands import OperandFormat
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -404,6 +405,9 @@ class VLLMEngine(GenerationEngine):
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
         return self._get_model().model_state_dict_loader.prefetched_model_state_dict
+
+    def receive_quantized_operands(self) -> dict[str, OperandFormat]:
+        return self._get_model().model_state_dict_loader.receive_quantized_operands()
 
     def add_requests(
         self, requests: list[EngineRequest]

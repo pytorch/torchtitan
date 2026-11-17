@@ -814,6 +814,8 @@ class Controller(Configurable):
                 vision_processor_config=config.vision_processor,
             )
 
+        if config.generator.receive_quantized_operands:
+            await actor_system.initialize_quantized_operands()
         if config.model_state_dict_transport is not None:
             with sl.log_trace_span("model_state_dict_transport_init"):
                 await actor_system.initialize_model_state_dict_transport(

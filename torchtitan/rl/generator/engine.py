@@ -11,12 +11,15 @@ from __future__ import annotations
 import abc
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+
+if TYPE_CHECKING:
+    from torchtitan.rl.quantized_operands import OperandFormat
 
 
 ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
@@ -81,6 +84,13 @@ class GenerationEngine(Configurable, abc.ABC):
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
+
+    @abc.abstractmethod
+    def receive_quantized_operands(self) -> dict[str, OperandFormat]:
+        """Have model state dict loads receive each quantized parameter as its quantized
+        operands from now on, and return each one's format by model state dict key (see
+        ``ModelStateDictLoader.receive_quantized_operands``). Call it before the first
+        prefetch."""
 
     @abc.abstractmethod
     def add_requests(

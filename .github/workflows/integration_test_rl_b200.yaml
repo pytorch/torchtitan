@@ -87,6 +87,10 @@ jobs:
             tests/rl/unit_tests/gpu/test_vllm_mla_backends.py \
             tests/rl/unit_tests/cpu/test_rl_dist_moe_recipe.py \
             -v
+          # Loads of quantized operands need expert parallelism: 2 GPUs.
+          torchrun --nproc-per-node=2 -m pytest \
+            tests/rl/unit_tests/gpu/test_generator_dist_moe_mxfp8.py::test_vllm_generator_loads_mxfp8_quantized_operands \
+            -v
 
       # Runs even if the unit tests failed, so one failure does not hide the other.
       - name: RL integration tests

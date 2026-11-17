@@ -17,7 +17,13 @@ import pytest
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import distribute_tensor, DTensor, Partial, Shard
+from torch.distributed.tensor import (
+    distribute_tensor,
+    DTensor,
+    Partial,
+    Replicate,
+    Shard,
+)
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -27,6 +33,9 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.rl import model_state_dict_transport as m
 from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
+from torchtitan.rl.quantized_operands import pack_quantized_operands
+
+from tests.rl.unit_tests.cpu.test_generator_model import RowQuantizedTensor
 
 
 class _FakeRemoteBuffer:
@@ -305,6 +314,81 @@ def test_no_reads(monkeypatch):
         [{"w": (((0, 0), (0, 3)), torch.float32)}],
     )
     assert out["w"].shape == (0, 3)
+
+
+def test_quantized_operands(monkeypatch):
+    """Trainer ranks that each quantize their own 2 of 8 experts send the packed rows of
+    the operands, as bytes, to generator ranks that each hold 4 experts: every generator
+    rank reads the rows of quantizing all 8 experts at once."""
+    formats = {"w": (RowQuantizedTensor, (torch.float32,))}
+    full = torch.randn(8, 4, 6)
+    expected = pack_quantized_operands({"w": full}, formats, dtype=torch.bfloat16)
+    trainer_shards = []
+    for (row, *_), shape in _boxes(full.shape, 4, 0):
+        packed = pack_quantized_operands(
+            {"w": full[row : row + shape[0]]}, formats, dtype=torch.bfloat16
+        )
+        trainer_shards.append(
+            {key: (rows, ((row, 0), tuple(rows.shape))) for key, rows in packed.items()}
+        )
+    outputs = _transfer(
+        monkeypatch,
+        trainer_shards,
+        [
+            {
+                key: (((4 * rank, 0), (4, rows.shape[1])), torch.uint8)
+                for key, rows in expected.items()
+            }
+            for rank in range(2)
+        ],
+        transfer_dtype=torch.bfloat16,
+        # As Trainer._preserve_dtype_keys: only parameters are cast.
+        preserve_dtype_keys=frozenset(expected),
+    )
+    for rank, out in enumerate(outputs):
+        for key, rows in expected.items():
+            assert out[key].equal(rows[4 * rank : 4 * rank + 4]), (rank, key)
+
+
+def test_quantized_operand_layout():
+    """A trainer rank's packed operand rows are DTensors with its expert box and
+    placements, which the transports read; a rank holding part of an expert raises."""
+    formats = {"w": (RowQuantizedTensor, (torch.float32,))}
+    dist.init_process_group("fake", rank=0, world_size=4, store=FakeStore())
+    try:
+        mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("edp_shard", "ep"))
+        # FSDP over EP on the expert dim, as on the routed experts' mesh.
+        experts = DTensor.from_local(
+            torch.randn(2, 4, 6),
+            mesh,
+            [_StridedShard(0, split_factor=2), Shard(0)],
+            shape=torch.Size((8, 4, 6)),
+            stride=(24, 6, 1),
+        )
+        (offset, *_), _ = m._global_offset_and_local_shape(experts)
+        packed = pack_quantized_operands({"w": experts}, formats, dtype=None)
+        assert {key: tuple(t.shape) for key, t in packed.items()} == {
+            "w.codes": (8, 24),
+            "w.scale": (8, 4),
+        }
+        for t in packed.values():
+            assert t.placements == experts.placements
+            assert m._global_offset_and_local_shape(t) == (
+                (offset, 0),
+                (2, t.shape[1]),
+            )
+
+        rows = DTensor.from_local(
+            torch.randn(8, 2, 6),
+            mesh,
+            [Shard(1), Replicate()],
+            shape=torch.Size((8, 4, 6)),
+            stride=(24, 6, 1),
+        )
+        with pytest.raises(ValueError, match="whole rows of dim 0"):
+            pack_quantized_operands({"w": rows}, formats, dtype=None)
+    finally:
+        dist.destroy_process_group()
 
 
 def test_shared_rank_layouts():

@@ -33,6 +33,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.quantized_operands import OperandFormat, pack_quantized_operands
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -143,6 +144,8 @@ class Trainer(Configurable):
         )
         # Set by `register_model_state_dict_source`; None pushes through TorchStore.
         self._model_state_dict_transport: ModelStateDictTransport | None = None
+        # Set by `register_quantized_operand_formats`.
+        self._quantized_operand_formats: dict[str, OperandFormat] = {}
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -466,7 +469,10 @@ class Trainer(Configurable):
 
         Every push carries the trainable parameters and the buffers. Generators load the
         frozen parameters from `generator.checkpointer`: for LoRA the base, so a push
-        carries only the adapters (`lora_a`, `lora_b`) and the buffers.
+        carries only the adapters (`lora_a`, `lora_b`) and the buffers. Parameters
+        the generators receive as quantized operands are quantized first, on the push
+        stream; their operands (about half the BF16 bytes for MXFP8) stay on the GPU
+        until the push ends.
 
         With a ``ModelStateDictTransport``, the push instead stages the tensors in
         its pinned staging buffer, which generators read directly; the same
@@ -537,9 +543,22 @@ class Trainer(Configurable):
             preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
         )
 
+    def register_quantized_operand_formats(
+        self, formats: dict[str, OperandFormat]
+    ) -> None:
+        """Send each parameter of ``formats`` as the quantized operands it holds in the
+        generators, quantized with its format there (see
+        ``Generator.Config.receive_quantized_operands``).
+
+        Args:
+            formats: ``Generator.quantized_operand_formats``.
+        """
+        self._quantized_operand_formats = formats
+
     def _trainable_model_state_dict(self) -> dict[str, torch.Tensor]:
         """Merge the state dicts of this rank's model parts, leaving out the parameters
-        that do not train.
+        that do not train, with each parameter registered by
+        ``register_quantized_operand_formats`` replaced by its quantized operands.
 
         Under PP each rank holds only its own stages, so every stage publishes
         a partial state dict.
@@ -550,29 +569,44 @@ class Trainer(Configurable):
             for name, param in model_part.named_parameters(remove_duplicate=False)
             if not param.requires_grad
         )
-        return {
+        model_state_dict = {
             name: tensor
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
             if canonical_fqn(name) not in frozen
         }
+        if not self._quantized_operand_formats:
+            return model_state_dict
+        # Quantizing reads the weights: on the push stream, after the optimizer step.
+        stream = self._push_model_state_dict_stream
+        with stream if stream is not None else nullcontext():
+            return pack_quantized_operands(
+                model_state_dict,
+                self._quantized_operand_formats,
+                dtype=self._transfer_dtype,
+            )
 
     def _preserve_dtype_keys(
         self, model_state_dict: dict[str, torch.Tensor]
     ) -> frozenset[str]:
-        """Return the `model_state_dict` keys sent in their own dtype: this rank's
-        buffers and `preserve_dtype_params`.
+        """Return the `model_state_dict` keys sent in their own dtype: all but the
+        parameters, except `preserve_dtype_params`. Buffers and quantized operands keep
+        theirs.
 
         Non-persistent buffers (e.g. RoPE caches) are not in the state dict.
         """
-        return frozenset(
+        cast = {
             canonical_fqn(name)
             for model_part in self.engine.model_parts
-            for name, _ in (
-                *model_part.named_buffers(),
-                *model_part.named_preserve_dtype_params(),
-            )
-        ).intersection(model_state_dict)
+            for name, _ in model_part.named_parameters(remove_duplicate=False)
+        } - {
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, _ in model_part.named_preserve_dtype_params()
+        }
+        return frozenset(
+            key for key in model_state_dict if canonical_fqn(key) not in cast
+        )
 
     async def initialize_torchstore_client(self) -> None:
         """Initialize this process as a TorchStore routing publisher."""

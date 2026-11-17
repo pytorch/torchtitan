@@ -20,6 +20,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.quantized_operands import OperandFormat
 from torchtitan.rl.rollout.types import Completion, Prompt
 
 
@@ -49,6 +50,10 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         await super().initialize_torchstore_client(requester_index)
+
+    @concurrent_endpoint
+    async def quantized_operand_formats(self) -> dict[str, OperandFormat]:
+        return await super().quantized_operand_formats()
 
     @concurrent_endpoint
     async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:

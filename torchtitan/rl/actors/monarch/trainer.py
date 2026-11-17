@@ -18,6 +18,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.quantized_operands import OperandFormat
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
@@ -39,6 +40,12 @@ class _TrainerActorEndpoints:
         return super().register_model_state_dict_source(
             config, generator_rank_layouts=generator_rank_layouts
         )
+
+    @concurrent_endpoint
+    async def register_quantized_operand_formats(
+        self, formats: dict[str, OperandFormat]
+    ) -> None:
+        super().register_quantized_operand_formats(formats)
 
     @concurrent_endpoint
     async def get_policy_version(self) -> int:

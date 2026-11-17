@@ -70,6 +70,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
+from torchtitan.rl.quantized_operands import OperandFormat
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +507,9 @@ class SGLangEngine(GenerationEngine):
     @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
         return self._get_model().model_state_dict_loader.prefetched_model_state_dict
+
+    def receive_quantized_operands(self) -> dict[str, OperandFormat]:
+        return self._get_model().model_state_dict_loader.receive_quantized_operands()
 
     def add_requests(
         self, requests: list[EngineRequest]

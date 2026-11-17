@@ -40,6 +40,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.quantized_operands import OperandFormat
 from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
@@ -184,6 +185,17 @@ class Generator(Configurable):
         A failed load leaves the weights partially loaded, so it stops the engine loop on every
         generator rank."""
 
+        receive_quantized_operands: bool = False
+        """Receive each parameter the model quantizes (e.g. MXFP8 Dist-MoE experts) as the
+        quantized operands its forward reads, quantized by the trainer, instead of in
+        ``precision.param_dtype``. A load copies them into the operands in place, without
+        reallocating, unsharding or re-quantizing the parameter, and MXFP8 moves half the bytes
+        of BF16. The operands are bitwise the ones a load re-quantizes otherwise. Needs a
+        format that implements ``_ShardedFSDPTensor._packed_operands``, whole rows of dim 0 of
+        each such parameter on every trainer and generator rank (e.g. whole experts), and its
+        own FSDP parameter group in the generator (e.g. routed experts under expert
+        parallelism). See ``torchtitan/rl/quantized_operands.py``."""
+
         def __post_init__(self):
             # The generator runs full expert parallelism: the engine forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -204,6 +216,13 @@ class Generator(Configurable):
                     f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
+            if (
+                self.receive_quantized_operands
+                and self.model_state_dict_load_mode != "cpu_prefetch"
+            ):
+                raise ValueError(
+                    'receive_quantized_operands requires model_state_dict_load_mode="cpu_prefetch"'
+                )
             if (
                 self.debug.batch_invariant
                 and not self.reset_kv_cache_on_model_state_dict_load
@@ -306,6 +325,11 @@ class Generator(Configurable):
                 f"({engine.data_parallel_rank})"
             )
 
+        self._quantized_operand_formats: dict[str, OperandFormat] = {}
+        if config.receive_quantized_operands:
+            self._quantized_operand_formats = self._engine_loop_thread.call(
+                engine.receive_quantized_operands
+            )
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
         # Set by `connect_model_state_dict_transport`; None reads from TorchStore.
         self._model_state_dict_transport: ModelStateDictTransport | None = None
@@ -462,6 +486,12 @@ class Generator(Configurable):
         """
         await ts.client(role=RankRole.REQUESTER, group=requester_index)
         self._torchstore_loop = asyncio.get_running_loop()
+
+    async def quantized_operand_formats(self) -> dict[str, OperandFormat]:
+        """Return the format of each parameter received as quantized operands, by model
+        state dict key, for the trainer to quantize it with; empty unless
+        ``Config.receive_quantized_operands``."""
+        return self._quantized_operand_formats
 
     async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:
         """Return this rank and the layout of its prefetched model state dict."""

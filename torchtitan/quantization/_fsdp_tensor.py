@@ -132,6 +132,15 @@ it would add a type that overrides nothing.
 So a format supplies a frozen dataclass of the tensors one unshard lifetime
 owns, and one method, ``_build_operands``. Everything else --
 flattening, refill, reshard, the SimpleFSDP bridge -- comes from here.
+
+A format may also implement ``_packed_operands``, which lets the RL trainer send
+the parameter to the generator as the operands themselves (see
+``Generator.Config.receive_quantized_operands``): the trainer quantizes its rows
+of the logical tensor with the generator's format, and the generator copies the
+bytes into its operands in place::
+
+    trainer: _build_operands(rows a:b) -> _packed_operands(.)[name]: bytes of rows a:b
+    generator:                            _packed_operands(operands)[name][a:b] <- bytes
 """
 
 from __future__ import annotations
@@ -346,6 +355,19 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
     ) -> Any:
         """Quantize ``logical_tensor``, into ``out``'s tensors when refilling."""
         raise NotImplementedError
+
+    def _packed_operands(self, operands: Any) -> dict[str, torch.Tensor]:
+        """Return views of the tensors of ``operands`` that carry them between processes.
+
+        Optional; formats that implement it can be sent as their operands. Each view
+        has the logical tensor's dim 0 as its dim 0 and holds, in each row, every
+        byte the operands keep for that row of the logical tensor: quantizing rows
+        ``a:b`` of the logical tensor alone gives rows ``a:b`` of every view of the
+        whole tensor's operands. Writing into a view writes the operands in place.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} operands cannot be sent as packed rows"
+        )
 
     def fsdp_should_release_all_gather_outputs_after_post_all_gather(self) -> bool:
         """Release the high-precision all-gather output after state construction."""
