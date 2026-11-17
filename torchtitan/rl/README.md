@@ -61,7 +61,7 @@ optimization, checkpointing, profiling, GC, SDC replay, and CUDA graphs.
 The distributed layer builds on two core components:
 
 - **[Monarch](https://github.com/meta-pytorch/monarch) as the controller:** orchestrates trainers and generators on separate GPU meshes with asynchronous communication.
-- **[TorchStore](https://github.com/meta-pytorch/torchstore) for model state dict transfer:** efficiently publishes the model state dict from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
+- **[TorchStore](https://github.com/meta-pytorch/torchstore) for model state dict transfer:** the trainer publishes its model state dict to `StorageVolume`s on the trainer hosts, and each generator reads it from there (shared memory on the same host, RDMA across hosts when available). Generators don't read the trainer's GPU memory directly (`direct_rdma=False`).
 
 ### Package organization
 
