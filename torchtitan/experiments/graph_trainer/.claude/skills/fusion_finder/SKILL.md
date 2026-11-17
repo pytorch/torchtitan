@@ -1,23 +1,25 @@
 ---
 name: fusion_finder
-description: Profile one GraphTrainer training step with every FX node labelled, attribute each GPU kernel to its node, and rank the memory-bound glue ops (norms, casts, RoPE, routing, permutes, residual adds) by time above their HBM roofline. Use when asked where a graph_trainer step spends GPU time per FX node, or which glue ops are worth fusing.
+description: Profile one GraphTrainer training step with every FX node labelled, attribute each GPU kernel to its node, group the memory-bound glue ops (norms, casts, RoPE, routing, permutes, residual adds) into fusion regions that one kernel could replace, and rank the regions by time above their HBM roofline. Use when asked where a graph_trainer step spends GPU time per FX node, or which glue ops are worth fusing.
 ---
 
 # Finding fusion opportunities in a GraphTrainer step
 
 Capture one training step as GraphTrainer runs it, with every FX node labelled in
-the profiler trace; attribute each GPU kernel to its node; compare each glue node
-with its HBM roofline. The scripts are in `scripts/` and write to one capture
-directory under `outputs/` (gitignored).
+the profiler trace; attribute each GPU kernel to its node; group the glue into
+fusion regions and rank them by time above their HBM roofline. The scripts are in
+`scripts/` and write to one capture directory under `outputs/` (gitignored).
 
 Terms:
 - **Glue:** a node that launches kernels and is not a GEMM, attention, Dist-MoE
-  fused op or collective.
+  fused op or collective (including the send-buffer pack of a bucketed collective).
 - **Phase:** `forward`, `recompute` (forward ops that `selective_activation_remat_pass`
   copies before their backward consumers, named `<node>_recomputed[_<n>]`) or `backward`.
-- **Ideal time:** bytes read (inputs, broadcast dims once) plus bytes written,
-  divided by the measured HBM bandwidth. **Gap:** measured kernel time minus
-  ideal time, at least 0.
+- **Ideal time** of a region instance: the bytes it reads from outside plus the
+  bytes it writes for outside, over the measured HBM bandwidth. **Gap:** measured
+  kernel time minus ideal time, at least 0.
+- **Region:** a set of glue nodes one kernel could run (see "How regions are
+  formed"). It usually repeats once per layer; each repetition is an **instance**.
 
 ## Workflow
 
@@ -61,30 +63,32 @@ PYTHONPATH=$SKILL:$OUT:. NGPU=8 LOCAL_RANK=0 CUDA_VISIBLE_DEVICES=<idle GPU> \
 
 Run on a GPU that no other process uses: contention changes the kernel times.
 
-**3. Roofline.** On an idle GPU of the same type (it can run during the capture,
-on another GPU):
+**3. Roofline.** For `regions.py`, on an idle GPU of the same type (it can run
+during the capture, on another GPU):
 
 ```bash
 CUDA_VISIBLE_DEVICES=<idle GPU> python $SKILL/measure_hbm_bandwidth.py $OUT
 ```
 
-**4. Node table.** `python $SKILL/node_table.py $OUT` (CPU only) prints the step
-budget and the glue ops furthest above their roofline, grouped by phase, module
-(layer index dropped) and op: the same op in every layer is one group, and a
-group is what one kernel would replace.
+**4. Node table.** `python $SKILL/node_table.py $OUT` (CPU only) attributes every
+kernel to its node and prints the step budget. Check `outside_graph_ms`: kernels
+launched outside every node label (optimizer, gradient clipping); most of the step
+should be inside the graph. `nodes_without_bytes` should be 0.
 
-Check `outside_graph_ms` in the budget: kernels launched outside every node label
-(optimizer, gradient clipping). Most of the step should be inside the graph.
+**5. Regions.** `python $SKILL/regions.py $OUT` (CPU only) prints the regions above
+the profit floor, by gap: instances, kernels per instance, phases, modules and ops.
+A region's gap is the most a kernel replacing it can save.
 
 ## Outputs
 
 | file | content |
 |---|---|
-| `graph.jsonl.gz` | one record per node of the graph that runs: `name`, `op`, `target`, `args`/`kwargs` (`{"node": name}` for node references), `val` (tensor shape, stride, dtype, device), `phase`, `module_fqn`, `src` (innermost frame outside PyTorch) |
+| `graph.jsonl.gz` | one record per node of the graph that runs: `name`, `op`, `target`, `args`/`kwargs` (`{"node": name}` for node references), `val` (tensor shape, stride, dtype, device), `phase`, `module_fqn`, `src` (innermost frame outside PyTorch), `code` (the node's line of FX code) |
 | `profile/iteration_10/rank0_trace.json` | the profiler trace of step 10 |
 | `hbm_bandwidth.json` | the device and its measured HBM bandwidth |
-| `node_table.csv` | per node, in graph order: phase, module, op, category, kernel time and count, bytes, ideal time, gap, source, kernel names |
-| `step_budget.json` | GPU window, busy and idle time, time by category, time outside the graph, total glue gap |
+| `node_table.csv` | per node, in graph order: phase, module, op, category, kernel time and count, output bytes, source, kernel names |
+| `step_budget.json` | GPU window, busy and idle time, time by category, time outside the graph, nodes with unresolved sizes |
+| `regions.json` | `profit_floor_ms` and every region by gap: `id`, `gap_ms`, `measured_ms`, `ideal_ms`, `instances`, `kernels_per_instance`, `phases`, `modules`, `ops`, `code` (the first instance's FX code, one line per node), and `members` (the node names of each instance) |
 
 ## How attribution works
 
@@ -92,8 +96,41 @@ Check `outside_graph_ms` in the budget: kernels launched outside every node labe
 A kernel maps to its CUDA launch call (same `correlation` id), and the launch to
 the innermost label enclosing it on the launching thread. Sizes that are symbols in
 the graph (unbacked sizes such as MoE routed rows) are resolved from the input
-sizes each label records; a glue node whose sizes stay unresolved has no bytes
-(`glue_nodes_without_bytes`).
+sizes each label records; a node whose sizes stay unresolved has no `out_bytes`
+(`nodes_without_bytes`), and `regions.py` counts it as 0 bytes.
+
+## How regions are formed
+
+Boundaries are the nodes a glue kernel cannot absorb: GEMMs, attention, Dist-MoE
+fused ops, collectives, and nodes whose output is not a GPU tensor (host values).
+An instance starts as one glue node and merges along glue-to-glue edges, in graph
+order, unless the merge would put a boundary on a path between two of its members.
+Views and allocations between glue nodes join too. So:
+
+- every glue node is in exactly one instance;
+- no path leaves an instance and comes back, so an instance can become one
+  `call_module` and one kernel can replace it.
+
+Forward glue never merges with recompute or backward glue: that edge is a saved
+activation, and fusing across it would move backward work into the forward pass.
+Recompute glue merges with the backward glue it feeds.
+
+Instances with the same members up to the layer index (op, phase, module with
+`layers.<N>` as `layers.*`, output shapes with symbolic sizes abstracted) are one
+region. Ideal time per instance: bytes of the inputs from outside (the views'
+bytes when only views read an input, e.g. one slice) plus bytes of the outputs used
+outside. The profit floor is max(0.5 ms, 0.05% of GPU busy time): the gaps of
+kernels written for regions track what they realize, so a region under it is not
+worth a kernel.
+
+Blind spots:
+- Packing into a collective's send buffer (FSDP bucket ops) is part of the
+  collective, so fusions into it are not found.
+- Horizontal fusion: independent ops with no edge between them (per-layer weight
+  casts) stay in separate regions.
+- An accumulator across layers (the aux loss sum) joins every layer's piece into one
+  instance, apart from the per-layer region.
+- Instances grow greedily; another partition of the same nodes can be valid too.
 
 ## Traps
 
