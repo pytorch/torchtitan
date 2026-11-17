@@ -20,10 +20,9 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.experiments.graph_trainer.substitute_kernels import (
+from torchtitan.experiments.graph_trainer.auto_fuser.substitute_kernels import (
     cache_keys,
     load_module,
-    register_kernel_store,
     substitute_with_kernels_pass,
 )
 from torchtitan.experiments.graph_trainer.tests import _substitute_kernels_ops
@@ -38,24 +37,6 @@ _lib.impl("neg", lambda x: -x, "CompositeExplicitAutograd")
 
 def _load_module(path):
     return load_module(path.read_text())
-
-
-class _MemoryKernelStore:
-    """In-memory ``memtest://<name>`` store; ``stores[name]`` maps path -> bytes."""
-
-    stores: dict[str, dict[str, bytes]] = {}
-
-    def __init__(self, location):
-        self.files = self.stores.setdefault(location, {})
-
-    def get(self, path):
-        return self.files.get(path)
-
-    def put(self, path, data):
-        self.files[path] = data
-
-
-register_kernel_store("memtest", _MemoryKernelStore)
 
 
 def _swiglu(x, w1, w2):
@@ -190,7 +171,7 @@ class TestSubstituteWithKernelsPass(TestCase):
         fake = _keys(_parent([_layer()], args, fake=True))
         self.assertEqual(real, fake)
 
-    def test_device_index_does_not_change_keys(self):
+    def test_device_index_does_not_change_keys_or_spec(self):
         # Every rank traces its regions on its own device; all ranks must find
         # the same kernels.
         def fn(x):
@@ -203,6 +184,20 @@ class TestSubstituteWithKernelsPass(TestCase):
             gm = make_fx(fn, tracing_mode="fake")(x)
             keys.append(cache_keys(gm, [x])[:2])
         self.assertEqual(keys[0], keys[1])
+
+        root = torch.nn.Module()
+        root.add_module("layer0", gm)
+        graph = fx.Graph()
+        arg = graph.placeholder("arg0")
+        arg.meta["val"] = x
+        call = graph.call_module("layer0", (arg,))
+        with x.fake_mode:
+            call.meta["val"] = gm(x)
+        graph.output(call)
+        substitute_with_kernels_pass(fx.GraphModule(root, graph), cache_dir=self.cache)
+        spec = json.loads(self._spec_text(*keys[1]))
+        self.assertEqual(spec["inputs"][0]["device"], "cuda")
+        self.assertEqual(spec["outputs"]["device"], "cuda")
 
     def test_symbolic_sizes_are_keyed_by_description(self):
         # A token dispatcher's routed-row count is a new unbacked symbol in every
@@ -703,48 +698,6 @@ def reference(in0, in1, in2):
         gm = substitute_with_kernels_pass(gm, cache_dir=self.cache)
         self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
         self.assertEqual(self._patterns(), [])
-
-    def test_registered_store_scheme_serves_cache_dir(self):
-        args = _inputs()
-        make_gm = lambda: _parent([_layer()], args)  # noqa: E731
-        ((l1, l2),) = _keys(make_gm())
-        files = _MemoryKernelStore.stores.setdefault("bucket/prefix", {})
-        files.clear()
-
-        gm = substitute_with_kernels_pass(
-            make_gm(), cache_dir="memtest://bucket/prefix"
-        )
-        self.assertEqual(len(gm.graph.find_nodes(op="call_module")), 1)
-        self.assertEqual(sorted(files), [f"{l1}/{l2}.py"])
-        self.assertEqual(self._patterns(), [])  # nothing written locally
-
-        files[f"{l1}/{l2}.py"] = (
-            b"import torch\n"
-            b"def run(x, w1, w2):\n"
-            b"    return torch.full((x.shape[0], w1.shape[1]), 5.0)\n"
-        )
-        gm = substitute_with_kernels_pass(
-            make_gm(), cache_dir="memtest://bucket/prefix"
-        )
-        self.assertEqual(gm(*args), torch.full((8, 16), 5.0))
-
-    def test_unknown_store_scheme_raises(self):
-        gm = _parent([_layer()], _inputs())
-        with self.assertRaisesRegex(ValueError, "no kernel store registered"):
-            substitute_with_kernels_pass(gm, cache_dir="nosuchscheme://x")
-
-    def test_manifold_cache_dir_requires_internal_pytorch(self):
-        try:
-            import torch._inductor.fb.remote_cache  # noqa: F401
-        except ImportError:
-            pass
-        else:
-            self.skipTest("internal PyTorch build: Manifold is available")
-        gm = _parent([_layer()], _inputs())
-        with self.assertRaisesRegex(ImportError, "requires an internal build"):
-            substitute_with_kernels_pass(
-                gm, cache_dir="manifold://torchtitan_kernel_cache/test"
-            )
 
     def test_non_graph_module_and_missing_meta_val_call_modules_are_skipped(self):
         args = _inputs()
