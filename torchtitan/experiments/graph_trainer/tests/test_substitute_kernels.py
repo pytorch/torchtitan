@@ -15,14 +15,15 @@ from pathlib import Path
 
 import torch
 import torch.fx as fx
+from torch._inductor.codecache import PyCodeCache
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx._graph_pickler import GraphPickler, Options
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.experiments.graph_trainer.auto_fuser.substitute_kernels import (
     cache_keys,
-    load_module,
     substitute_with_kernels_pass,
 )
 from torchtitan.experiments.graph_trainer.tests import _substitute_kernels_ops
@@ -36,7 +37,7 @@ _lib.impl("neg", lambda x: -x, "CompositeExplicitAutograd")
 
 
 def _load_module(path):
-    return load_module(path.read_text())
+    return PyCodeCache.load(path.read_text())
 
 
 def _swiglu(x, w1, w2):
@@ -137,26 +138,34 @@ class TestSubstituteWithKernelsPass(TestCase):
         imports = text[text.index("import json") : text.index("SPEC =")]
         return f"{imports.strip()}\n\n{text[text.index('def reference') : text.index('def impl')].strip()}"
 
+    def _run_script(self, script, args):
+        """Run ``script inputs.pt output.pt`` in a new interpreter; return the output."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs, output = Path(tmp) / "inputs.pt", Path(tmp) / "output.pt"
+            torch.save(args, inputs)
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.pathsep.join(
+                [str(_REPO_ROOT), env.get("PYTHONPATH", "")]
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script, str(inputs), str(output)],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return torch.load(output, weights_only=True)
+
     def _run_in_fresh_process(self, reference, args):
         """Run the specialization file ``reference`` on ``args`` in a new interpreter."""
-        inputs, output = self.cache / "inputs.pt", self.cache / "output.pt"
-        torch.save(args, inputs)
         script = (
-            "import importlib.util, torch\n"
+            "import importlib.util, sys, torch\n"
             f"spec = importlib.util.spec_from_file_location('ref', {str(reference)!r})\n"
             "ref = importlib.util.module_from_spec(spec)\n"
             "spec.loader.exec_module(ref)\n"
-            f"torch.save(ref.run(*torch.load({str(inputs)!r})), {str(output)!r})\n"
+            "torch.save(ref.run(*torch.load(sys.argv[1])), sys.argv[2])\n"
         )
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(_REPO_ROOT), env.get("PYTHONPATH", "")]
-        )
-        result = subprocess.run(
-            [sys.executable, "-c", script], env=env, capture_output=True, text=True
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return torch.load(output, weights_only=True)
+        return self._run_script(script, args)
 
     def test_renamed_identical_submodules_share_pattern_and_specialization(self):
         args = _inputs()
@@ -295,21 +304,41 @@ def reference(in0, in1, in2):
             f"    return torch.full((x.shape[0], w1.shape[1]), {value})\n"
         )
 
-    def test_hit_replaces_call_module_with_kernel_run(self):
-        args = _inputs()
-        gm = _parent([_layer(), _layer(name_suffix="_17")], args)
+    def _hit_gm(self, args, fake=False):
+        """Two identical layers whose specialization has a kernel returning 42."""
+        gm = _parent([_layer(), _layer(name_suffix="_17")], args, fake=fake)
         ((l1, l2), _) = _keys(gm)
         (self.cache / l1).mkdir()
         self._write_kernel(self.cache / l1 / f"{l2}.py", 42.0)
-        gm = substitute_with_kernels_pass(gm, cache_dir=self.cache)
+        return substitute_with_kernels_pass(gm, cache_dir=self.cache)
 
-        self.assertEqual(gm.graph.find_nodes(op="call_module"), [])
+    def test_hit_points_call_modules_at_one_kernel_module(self):
+        args = _inputs()
+        gm = self._hit_gm(args)
+
+        targets = {n.target for n in gm.graph.find_nodes(op="call_module")}
+        self.assertEqual(len(targets), 1)
+        self.assertNotIsInstance(gm.get_submodule(targets.pop()), fx.GraphModule)
         self.assertFalse(hasattr(gm, "layer0") or hasattr(gm, "layer1"))
         self.assertEqual(gm(*args), torch.full((8, 16), 42.0))
-        # The kernel file is imported once and shared by both layers.
-        targets = {n.target for n in gm.graph.nodes if n.op == "call_function"}
-        targets.discard(torch.ops.aten.add.Tensor)
-        self.assertEqual(len(targets), 1)
+
+    def test_hit_graph_round_trips_through_graph_pickler(self):
+        # Precompile pickles the graph (with fake meta vals) and loads it in
+        # another process.
+        args = _inputs()
+        gm = self._hit_gm(args, fake=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact = Path(tmp) / "gm.bin"
+            artifact.write_bytes(GraphPickler.dumps(gm, Options(ops_filter=None)))
+            script = (
+                "import sys, torch\n"
+                "from torch._subclasses.fake_tensor import FakeTensorMode\n"
+                "from torch.fx._graph_pickler import GraphPickler\n"
+                f"gm = GraphPickler.loads(open({str(artifact)!r}, 'rb').read(), FakeTensorMode())\n"
+                "gm.recompile()\n"
+                "torch.save(gm(*torch.load(sys.argv[1])), sys.argv[2])\n"
+            )
+            self.assertEqual(self._run_script(script, args), torch.full((8, 16), 42.0))
 
     def test_shape_and_dtype_change_specialization_not_pattern(self):
         layer = _layer()
@@ -548,6 +577,19 @@ def reference(in0, in1, in2):
             sys.modules.pop("sk_tmp_ops", None)
         self.assertNotEqual(before[0][0], after[0][0])
         self.assertEqual(before[0][1], after[0][1])
+
+    def test_higher_order_op_wrapping_an_op_is_not_cacheable(self):
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        out = graph.call_function(
+            torch.ops.higher_order.auto_functionalized,
+            (torch.ops.sk_test.scale.default,),
+            {"x": x, "s": 2.0},
+        )
+        graph.output(out)
+        gm = fx.GraphModule(torch.nn.Module(), graph)
+        with self.assertRaisesRegex(ValueError, "auto_functionalized wrapping an op"):
+            cache_keys(gm, [torch.randn(4)])
 
     def test_submodule_with_library_defined_op_is_skipped(self):
         args = _inputs()
