@@ -98,7 +98,7 @@ import warnings
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-# PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
+# Allocator defaults are set in torchtitan/rl/_env.py before torch is imported.
 # and in train.py; see the note there.
 import torch  # noqa: F401
 
