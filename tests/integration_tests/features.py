@@ -433,7 +433,11 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_remat = FullActivationRematConfig()
+    # Offloading covers ZBV's split input/weight backward. Each stage holds
+    # one or two blocks, so offload_last_block is needed to offload any.
+    config.activation_remat = FullActivationRematConfig(
+        offload_block_input=True, offload_last_block=True
+    )
     config.debug.deterministic = True
     config.debug.seed = 42
     return config

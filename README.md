@@ -137,6 +137,7 @@ the [model guide](torchtitan/models/README.md).
 
 **Memory and performance**
 - [Activation checkpointing](torchtitan/distributed/ACTIVATION_REMAT.md): full, selective, and regional
+- [Activation offloading](torchtitan/distributed/ACTIVATION_OFFLOAD.md) to CPU of the activations remat (activation checkpointing) retains
 - Regional `torch.compile` and CUDA graphs
 - [MXFP8](torchtitan/quantization/mxfp8/README.md) and [NVFP4](torchtitan/quantization/nvfp4/README.md) training
 - FlashAttention 3/4, FlexAttention, and varlen attention

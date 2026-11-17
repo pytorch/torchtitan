@@ -482,66 +482,6 @@ class TestRematRegions(unittest.TestCase):
                     expected_counts,
                 )
 
-    def test_saved_tensors_hooks_offload_block_input(self):
-        packed_kinds = {"layers.0": [], "layers.1": []}
-        num_offloaded = {"layers.0": 0, "layers.1": 0}
-        num_restored = {"layers.0": 0, "layers.1": 0}
-
-        def cpu_offload_hooks(module, base_fqn):
-            if base_fqn == "layers.1":
-                return None
-
-            def pack(tensor):
-                kind = remat.current_saved_tensor_info().kind
-                packed_kinds[base_fqn].append(kind)
-                if (
-                    kind is not remat.SavedTensorKind.CHECKPOINT_INPUT
-                    or not tensor.requires_grad
-                ):
-                    return tensor
-                num_offloaded[base_fqn] += 1
-                return tensor.device, tensor.detach().to("cpu", copy=True)
-
-            def unpack(packed):
-                if isinstance(packed, torch.Tensor):
-                    return packed
-                num_restored[base_fqn] += 1
-                device, cpu_tensor = packed
-                return cpu_tensor.to(device)
-
-            return pack, unpack
-
-        torch.manual_seed(42)
-        baseline = _TwoBlockRematModel()
-        remat_model = deepcopy(baseline)
-        ActivationRematConfig(save_regions=["attention.wo.linear"]).apply(
-            remat_model, saved_tensors_hooks=cpu_offload_hooks
-        )
-
-        x_TD = torch.randn(3, 4)
-        expected = _run_forward_backward(baseline, x_TD)
-        actual = _run_forward_backward(remat_model, x_TD)
-
-        torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
-        torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
-        for actual_grad, expected_grad in zip(actual[2], expected[2]):
-            torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
-
-        # The block input is offloaded and restored once. The saved wo output,
-        # read by the recomputed sum, reaches the same hook as a SAVE_OUTPUT
-        # and stays resident.
-        self.assertEqual(
-            packed_kinds["layers.0"],
-            [
-                remat.SavedTensorKind.CHECKPOINT_INPUT,
-                remat.SavedTensorKind.SAVE_OUTPUT,
-            ],
-        )
-        self.assertEqual(num_offloaded["layers.0"], 1)
-        self.assertEqual(num_restored["layers.0"], 1)
-        # A block whose hook getter returns None is left unhooked.
-        self.assertEqual(packed_kinds["layers.1"], [])
-
     def test_saved_projection_returning_a_view_reaches_its_bare_consumer(self):
         # MXFP8 linears return the unpadded slice of a padded output buffer.
         # Linear reshapes that view, and DenseFeedForward pins the reshape for the

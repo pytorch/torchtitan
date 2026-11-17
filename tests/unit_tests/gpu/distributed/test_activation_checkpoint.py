@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+import unittest.mock
 from copy import deepcopy
 
 import torch
@@ -285,6 +286,28 @@ class TestActivationCheckpointing(unittest.TestCase):
         ).apply(encoder, module_fqn="vision_encoder")
         _run_forward_backward(encoder, torch.randn(8, 32))
         self.assertEqual(_forward_counts(encoder), {"82": (1, 2, 1)})
+
+    def test_offloading_encoder_blocks_raises(self):
+        # The offloader hooks only the model part's own blocks.
+        with self.assertRaisesRegex(ValueError, "vision_encoder.layers.82"):
+            ActivationRematConfig(save_regions=["*"], offload_block_input=True).apply(
+                ToyModel(("82",)), module_fqn="vision_encoder"
+            )
+        # Offload set only on decoder blocks leaves encoder blocks alone.
+        ActivationRematConfig(
+            save_regions=["*"],
+            block_overrides=[
+                BlockRematOverride(blocks=["layers.82"], offload_block_input=True)
+            ],
+        ).apply(ToyModel(("82",)), module_fqn="vision_encoder")
+
+    def test_offloading_requires_cuda(self):
+        with unittest.mock.patch.object(
+            torch.accelerator, "current_accelerator", return_value=None
+        ), self.assertRaisesRegex(ValueError, "requires CUDA"):
+            ActivationRematConfig(save_regions=["*"], offload_block_input=True).apply(
+                ToyModel(("82",))
+            )
 
     def test_block_overrides_are_validated(self):
         for name, override_factory, message in (
