@@ -213,7 +213,7 @@ def _patch_vllm_all_reduce() -> None:
     The custom AR is also forced onto its registered=False path so CUDA graph
     capture works. registered=True records graph buffers and calls
     cudaIpcGetMemHandle on them, which fails for the expandable_segments (VMM)
-    memory the RL stack enables for Monarch RDMA. registered=False reduces via the
+    memory the RL stack enables (``rl/_env.py``). registered=False reduces via the
     init-time buffer_ptrs (raw cudaMalloc, IPC-able), records no graph buffers, at
     the cost of one staging copy per AR.
     """
