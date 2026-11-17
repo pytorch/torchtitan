@@ -229,8 +229,8 @@ def run_single_test(
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     # When running in parallel, pin each test to a disjoint subset of physical
-    # GPUs. Setting both CUDA_/HIP_VISIBLE_DEVICES makes this a no-op for the
-    # architecture that does not apply.
+    # GPUs. Setting CUDA_/HIP_VISIBLE_DEVICES and ZE_AFFINITY_MASK together
+    # makes this a no-op for the two architectures that do not apply.
     base_env = os.environ.copy()
     if gpu_ids is not None:
         visible = ",".join(map(str, gpu_ids))
@@ -542,9 +542,10 @@ def main():
         choices=["a10g", "h100", "b200", "mi350x", "pvc"],
         help=(
             "Specific GPU model, used to select the matching golden numerics "
-            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
-            "otherwise, so a caller can't silently resolve ROCm goldens "
-            "under an A10G path by omitting this flag."
+            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm, 'pvc' for "
+            "--gpu_arch_type=xpu, and 'a10g' otherwise, so a caller can't "
+            "silently resolve ROCm/XPU goldens under an A10G path by "
+            "omitting this flag."
         ),
     )
     parser.add_argument(

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Real PG (8 GPU) integration suite.
 #
-# Shared by the CUDA job in integration_test.yaml and the ROCm job in
-# integration_test_rocm.yaml. They cannot be one job because `uses:` is not
+# Shared by the CUDA job in integration_test.yaml, the ROCm job in
+# integration_test_rocm.yaml, and (once wired up) the XPU job in
+# integration_test_xpu.yaml. They cannot be one job because `uses:` is not
 # templatable and ROCm has to stay on linux_job_v2 -- v3 pulls from the private
 # ECR, which the ROCm runners cannot authenticate to.
 #
@@ -48,9 +49,12 @@ elif [[ "${GPU_ARCH_TYPE}" == "xpu" ]]; then
   GPU_ARCH="pvc"
   # expandable_segments is unsupported by the XPU allocator and SIGSEGVs at
   # startup; empty keeps run_train.sh from setting it.
+  # TODO(intel/torch-xpu-ops#4427): drop this override once XPU supports
+  # expandable_segments.
   export PYTORCH_ALLOC_CONF=""
   # The image's sccache (/opt/cache/bin) has no backend configured and breaks
-  # triton's JIT builds; point triton at the plain compilers (same as torchao).
+  # triton's JIT builds; point triton at the plain compilers (same workaround
+  # as torchao's ci_test_xpu.sh).
   export CC=/usr/bin/gcc CXX=/usr/bin/g++ SCCACHE_DISABLE=1
 fi
 
