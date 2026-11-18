@@ -20,6 +20,7 @@ from torch.distributed.checkpoint._consolidate_hf_safetensors import (
 )
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -28,7 +29,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.components.checkpointer.base import ModelWrapper
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.base.state_dict_adapter import StateDictAdapter
+from torchtitan.models.base.state_dict_adapter import stack_or_view, StateDictAdapter
 from torchtitan.models.deepseek_v3 import MODEL_FLAVORS as DEEPSEEK_V3_MODEL_FLAVORS
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.models.deepseek_v4 import (
@@ -504,6 +505,101 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 self.assertIsInstance(restored[key], DTensor)
                 self.assertEqual(restored[key].placements, weight.placements)
                 torch.testing.assert_close(restored[key], weight, rtol=0, atol=0)
+                self.assertTrue(_same_memory(restored[key], weight))
+
+    def test_hf_load_into_to_hf_rebuilds_parameters_as_views(self) -> None:
+        build_config, _ = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        config = build_config(
+            attn_backend="flex",
+            seq_len=128,
+            num_mtp_layers=1,
+            parallelism=ParallelismConfig(),
+        )
+        model = config.build()
+        model.init_states()
+        reference = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        exported = DeepSeekV3StateDictAdapter(config, hf_assets_path=None).to_hf(
+            reference
+        )
+        state_dict = model.state_dict()
+        for tensor in state_dict.values():
+            tensor.zero_()
+
+        adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
+        hf_state_dict = adapter.to_hf(state_dict)
+        # Stand in for the checkpoint load, which writes into to_hf's tensors.
+        for key, tensor in hf_state_dict.items():
+            tensor.copy_(exported[key])
+        native = adapter.from_hf(hf_state_dict)
+
+        self.assertEqual(native.keys(), state_dict.keys())
+        for key, tensor in state_dict.items():
+            with self.subTest(key=key):
+                self.assertTrue(_same_memory(native[key], tensor))
+                torch.testing.assert_close(tensor, reference[key], rtol=0, atol=0)
+
+
+def _same_memory(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether ``a`` and ``b`` view the same elements, so ``copy_`` between them is skipped."""
+    a = a.to_local() if isinstance(a, DTensor) else a
+    b = b.to_local() if isinstance(b, DTensor) else b
+    return (
+        a.untyped_storage().data_ptr() == b.untyped_storage().data_ptr()
+        and a.storage_offset() == b.storage_offset()
+        and a.stride() == b.stride()
+        and a.shape == b.shape
+    )
+
+
+class StackOrViewTest(unittest.TestCase):
+    def test_one_expert_comes_back_as_a_view_with_the_parameter_layout(self) -> None:
+        # A rank that holds one expert stacks a single tensor per projection.
+        base = torch.randn(1, 2, 3, 5)
+        first, second = base.unbind(1)
+        single = stack_or_view([first[0]])
+        torch.testing.assert_close(single, torch.stack([first[0]]), rtol=0, atol=0)
+        self.assertTrue(_same_memory(single, first[0].unsqueeze(0)))
+        stacked = stack_or_view([single, stack_or_view([second[0]])], dim=1)
+        self.assertTrue(_same_memory(stacked, base))
+
+    def test_dtensor_slices_keep_strided_shard_placements(self) -> None:
+        # Adapted from #5587: FSDP over TP on the rows of a stacked W13.
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+        self.addCleanup(dist.destroy_process_group)
+        mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp", "tp"))
+        placements = (_StridedShard(1, split_factor=2), Shard(1))
+        w13 = DTensor.from_local(
+            torch.randn(2, 2, 3),
+            mesh,
+            placements,
+            run_check=False,
+            shape=torch.Size((2, 8, 3)),
+            stride=(24, 3, 1),
+        )
+        stacked = stack_or_view(list(w13.unbind(0)))
+        self.assertEqual(stacked.placements, placements)
+        self.assertEqual(stacked.shape, w13.shape)
+        self.assertTrue(_same_memory(stacked, w13))
+        w13.copy_(stacked)
+
+    def test_stacks_tensors_that_are_not_evenly_spaced_slices(self) -> None:
+        base = torch.randn(6, 3)
+        cases = {
+            "separate storages": [torch.randn(3), torch.randn(3)],
+            "reversed order": [base[1], base[0]],
+            "uneven spacing": [base[0], base[1], base[3]],
+            "overlapping": [base.view(-1)[0:3], base.view(-1)[2:5]],
+        }
+        for name, tensors in cases.items():
+            with self.subTest(name):
+                stacked = stack_or_view(tensors)
+                torch.testing.assert_close(
+                    stacked, torch.stack(tensors), rtol=0, atol=0
+                )
+                self.assertNotEqual(
+                    stacked.untyped_storage().data_ptr(),
+                    tensors[0].untyped_storage().data_ptr(),
+                )
 
 
 class KimiK3StateDictAdapterTest(unittest.TestCase):
