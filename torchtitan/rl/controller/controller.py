@@ -147,7 +147,7 @@ _T = TypeVar("_T")
 async def _await_unless_failed(
     awaitable: Awaitable[_T], watched: asyncio.Task[Any] | None
 ) -> _T:
-    """Await ``awaitable``, but raise ``watched``'s error as soon as ``watched`` fails."""
+    """Await `awaitable`, but raise `watched`'s error as soon as `watched` fails."""
     task = asyncio.ensure_future(awaitable)
     if watched is not None:
         try:
