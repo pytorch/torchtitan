@@ -177,11 +177,10 @@ class RoutedExperts(Module):
                     hidden_RF,
                     offsets_E,
                     scores_R=metadata.scores_R,
-                    # BF16 output goes directly to saved combine. No replayed
-                    # consumer needs it, including under full remat.
-                    output_needed_for_recompute=(
-                        routed_input_RD.dtype != torch.bfloat16
-                    ),
+                    # TODO: Let remat skip unused W2: https://github.com/meta-pytorch/remat/issues/6
+                    recompute=False
+                    if routed_input_RD.dtype == torch.bfloat16
+                    else None,
                 )
             else:
                 routed_output_RD = self.w2(hidden_RF, offsets_E)
