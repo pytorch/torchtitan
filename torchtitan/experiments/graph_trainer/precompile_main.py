@@ -135,6 +135,9 @@ def _common_setup(config):
 
     # For aot_fx_trace, apply_compile inside model.parallelize is a no-op
     # (returns model unchanged), so we pass the real compile_config.
+    parallelize_kwargs = {}
+    if config.use_flex_shard_instead_simple_fsdp:
+        parallelize_kwargs["use_flex_shard_instead_simple_fsdp"] = True
     model = model.parallelize(
         parallelism_context=parallelism_context,
         precision=config.precision,
@@ -143,6 +146,7 @@ def _common_setup(config):
         compile_config=compile_config,
         activation_remat=config.activation_remat,
         dump_folder=config.dump_folder,
+        **parallelize_kwargs,
     )
 
     # CooR must be disabled during init_weights because DTensor RNG ops

@@ -95,6 +95,7 @@ def test_autoparallel_graph_pass_selection_uses_regular_memory_policy():
         state_fqns=[],
     )
     config = SimpleNamespace(
+        use_flex_shard_instead_simple_fsdp=False,
         compile=GraphTrainerCompileConfig(
             enable_autoparallel=True,
             enable_async_tensor_parallel=False,

@@ -39,6 +39,7 @@ class GraphTrainerModel:
         compile_config: GraphTrainerCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
+        use_flex_shard_instead_simple_fsdp: bool = False,
     ):
         del activation_remat
         # TODO: pass preserve_dtype_params to SimpleFSDP's mixed precision.
@@ -61,11 +62,20 @@ class GraphTrainerModel:
 
         annotate_graph_trainer_model(self)
         self._parallelize(parallelism_context)
-        model = apply_simple_fsdp(
-            self,
-            parallelism_context=parallelism_context,
-            precision=precision,
-        )
+        if use_flex_shard_instead_simple_fsdp:
+            from .flex_shard import apply_flex_shard
+
+            model = apply_flex_shard(
+                self,
+                parallelism_context=parallelism_context,
+                precision=precision,
+            )
+        else:
+            model = apply_simple_fsdp(
+                self,
+                parallelism_context=parallelism_context,
+                precision=precision,
+            )
         maybe_apply_ep_overlap_eager_chunking(model, compile_config)
         return apply_compile(
             model,

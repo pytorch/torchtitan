@@ -61,6 +61,48 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         torch.testing.assert_close(accumulator, 2 * (x0 + x1 + x2))
         torch.testing.assert_close(reduced, 3 * accumulator)
 
+    def test_last_graph_accumulates_after_gradient_buffer_is_written(self) -> None:
+        for select_view in (False, True):
+            with self.subTest(select_view=select_view):
+                self._check_written_buffer_accumulation(select_view=select_view)
+
+    def _check_written_buffer_accumulation(self, *, select_view: bool) -> None:
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = torch.empty(4, dtype=torch.float64)
+        buffer = graph.call_function(
+            torch.ops.aten.zeros.default,
+            args=([2, 2],),
+            kwargs={"dtype": torch.float64, "device": torch.device("cpu")},
+        )
+        buffer.meta["val"] = torch.empty(2, 2, dtype=torch.float64)
+        view = graph.call_function(torch.ops.aten.view.default, args=(buffer, [4]))
+        view.meta["val"] = torch.empty(4, dtype=torch.float64)
+        graph.call_function(torch.ops.aten.copy_.default, args=(view, x))
+        grad = buffer
+        if select_view:
+            grad = graph.call_function(
+                torch.ops.aten.view.default, args=(buffer, [2, 2])
+            )
+            grad.meta["val"] = buffer.meta["val"]
+        reduced = graph.call_function(torch.ops.aten.mul.Tensor, args=(grad, 3))
+        reduced.meta["val"] = torch.empty(2, 2, dtype=torch.float64)
+        graph.output((reduced,))
+        gm = fx.GraphModule(torch.nn.Module(), graph)
+        insert_graph_gradient_accumulation_before_reduction(
+            gm,
+            param_grad_output_names=(grad.name,),
+            reduce_grad_input_names=(grad.name,),
+            accumulators=(0,),
+            device=torch.device("cpu"),
+        )
+        previous = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float64)
+        current = torch.tensor([5.0, 6.0, 7.0, 8.0], dtype=torch.float64)
+        expected = previous + current.reshape(2, 2)
+        (result,) = gm(current, previous)
+        torch.testing.assert_close(previous, expected)
+        torch.testing.assert_close(result, 3 * expected)
+
 
 if __name__ == "__main__":
     unittest.main()

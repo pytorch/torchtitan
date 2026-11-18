@@ -100,6 +100,8 @@ class GraphTrainingEngine(TrainingEngine):
         # GraphTrainer to stop reading its compile config there first (apply_compile,
         # EP-overlap chunking, enable_autoparallel, GraphPP runtime).
         kwargs: dict[str, Any] = {"compile_config": self.config.compile}
+        if self.config.use_flex_shard_instead_simple_fsdp:
+            kwargs["use_flex_shard_instead_simple_fsdp"] = True
         # The PP path already receives ``training`` from the core pipeline call.
         if not self.parallelism_context.pp_enabled:
             kwargs["training"] = self.config.training
@@ -109,6 +111,13 @@ class GraphTrainingEngine(TrainingEngine):
         if self.config.parallelism.fsdp_defer_gradient_reduction:
             raise ValueError(
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
+            )
+
+        if self.config.use_flex_shard_instead_simple_fsdp:
+            from .flex_shard import FlexShardGradientClipper
+
+            self.optim.gradient_clipper = FlexShardGradientClipper(
+                self.config.optim.gradient_clipper,
             )
 
         if self.config.dist_moe_runtime is not None:
@@ -424,6 +433,9 @@ class GraphTrainer(Trainer):
 
         GraphTrainer requires ``model.local_compile.regions`` to be empty.
         """
+
+        use_flex_shard_instead_simple_fsdp: bool = False
+        """Use FlexShard instead of simple_fsdp for model parameter sharding."""
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)

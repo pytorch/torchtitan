@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib.util
 import inspect
 import operator
 import sys
@@ -164,6 +165,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
 
         def make_config(loss):
             return SimpleNamespace(
+                use_flex_shard_instead_simple_fsdp=False,
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
                 model=SimpleNamespace(
@@ -200,6 +202,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
 
     def test_hsdp_collective_reordering_precedes_bucketing(self) -> None:
         config = SimpleNamespace(
+            use_flex_shard_instead_simple_fsdp=False,
             compile=GraphTrainerCompileConfig(
                 disable_passes=["cuda_graph_pass"],
                 inductor_compilation="full",
@@ -276,6 +279,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
 
         def make_config(*, disable_accelerator_graphs):
             return SimpleNamespace(
+                use_flex_shard_instead_simple_fsdp=False,
                 compile=GraphTrainerCompileConfig(inductor_compilation="regional"),
                 loss=CrossEntropyLoss.Config(),
                 model=SimpleNamespace(
@@ -1169,6 +1173,95 @@ class TestReassignCollectivePgsPass(FSDPTest):
         self.assertNotEqual(fsdp_extra_pg, ep_extra_pg)
         self.assertEqual(self._count_ag_nodes_with_pg(gm, fsdp_extra_pg), 1)
         self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_extra_pg), 1)
+
+
+class TestFlexShardScheduling(TestCase):
+    """Guard marked buffer writes, repeated buckets, and dependency-safe overlap."""
+
+    def setUp(self):
+        super().setUp()
+        if importlib.util.find_spec("flex_shard") is None:
+            self.skipTest("FlexShard is not installed")
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            flex_shard_fsdp_scheduling,
+        )
+
+        self.schedule = flex_shard_fsdp_scheduling
+
+    def _bucket(self, graph, source, action, *, fqn="layer.weight", backward=False):
+        first_node = list(graph.nodes)[-1]
+        send = graph.call_function(torch.ops.aten.empty_like.default, (source,))
+        copy = graph.call_function(torch.ops.aten.copy_.default, (send, source))
+        collective = (
+            torch.ops._c10d_functional.all_gather_into_tensor.default
+            if action == "unshard"
+            else torch.ops._c10d_functional.reduce_scatter_tensor.default
+        )
+        args = (send, 2, "fsdp") if action == "unshard" else (send, "sum", 2, "fsdp")
+        launch = graph.call_function(collective, args)
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (launch,)
+        )
+        finish = graph.call_function(torch.ops.aten.clone.default, (wait,))
+        nodes = list(graph.nodes)
+        for node in nodes[nodes.index(first_node) + 1 :]:
+            node.meta["custom"] = {
+                "flex_shard_action": action,
+                "flex_shard_param_fqns": (fqn,),
+                "flex_shard_mesh_axis_names": ("fsdp",),
+                "flex_shard_phase": "prepare" if node in (send, copy) else "execute",
+            }
+            node.meta["autograd_backward"] = backward
+        return send, copy, launch, wait, finish
+
+    def test_moves_buffer_writes_with_launch_and_unpacking_with_wait(self):
+        for action in ("unshard", "reduce_grad"):
+            with self.subTest(action=action):
+                graph = torch.fx.Graph()
+                param = graph.placeholder("param")
+                first = self._bucket(graph, param, action, fqn="first.weight")
+                compute = graph.call_function(torch.ops.aten.sin.default, (param,))
+                second = self._bucket(graph, param, action, fqn="second.weight")
+                graph.output((first[-1], second[-1], compute))
+                gm = torch.fx.GraphModule({}, graph)
+                self.schedule(gm)
+                positions = {node: index for index, node in enumerate(graph.nodes)}
+                self.assertLess(positions[second[2]], positions[first[3]])
+                self.assertLess(positions[second[1]], positions[second[2]])
+                if action == "unshard":
+                    self.assertLess(positions[second[1]], positions[first[3]])
+                    self.assertLess(positions[first[4]], positions[compute])
+                else:
+                    self.assertLess(positions[compute], positions[first[3]])
+                    self.assertLess(positions[first[3]], positions[first[4]])
+
+    def test_repeated_bucket_uses_stay_within_forward_or_backward(self):
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        forward = [self._bucket(graph, param, "unshard") for _ in range(2)]
+        backward = [
+            self._bucket(graph, param, "unshard", backward=True) for _ in range(2)
+        ]
+        graph.output(tuple(bucket[-1] for bucket in forward + backward))
+        gm = torch.fx.GraphModule({}, graph)
+        self.schedule(gm)
+        nodes = list(graph.nodes)
+        self.assertLess(nodes.index(forward[1][2]), nodes.index(forward[0][3]))
+        self.assertLess(nodes.index(backward[1][2]), nodes.index(backward[0][3]))
+        self.assertLess(nodes.index(forward[1][3]), nodes.index(backward[0][2]))
+
+    def test_dependent_bucket_cannot_cross_previous_wait(self):
+        for action in ("unshard", "reduce_grad"):
+            with self.subTest(action=action):
+                graph = torch.fx.Graph()
+                param = graph.placeholder("param")
+                first = self._bucket(graph, param, action, fqn="first.weight")
+                second = self._bucket(graph, first[-1], action, fqn="second.weight")
+                graph.output(second[-1])
+                gm = torch.fx.GraphModule({}, graph)
+                before = list(graph.nodes)
+                self.schedule(gm)
+                self.assertEqual(list(graph.nodes), before)
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
@@ -3886,6 +3979,7 @@ class TestChunkPasses(TestCase):
             graph_state=GraphStateSpec(),
         )
         config = SimpleNamespace(
+            use_flex_shard_instead_simple_fsdp=False,
             model=SimpleNamespace(layers=[SimpleNamespace(feed_forward=None)]),
             parallelism=SimpleNamespace(
                 expert_parallel_degree=1,

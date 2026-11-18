@@ -689,6 +689,15 @@ def build_graph_trainer_b200_test_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2_flexshard
+            ],
+            test_descr="GraphTrainer BF16 Dist-MoE with FlexShard and EP",
+            test_name="graph_trainer_dist_moe_fsdp_ep_flex_shard",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
                 b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2
             ],
             test_descr="GraphPP MXFP8 Dist-MoE activation-slot reuse",

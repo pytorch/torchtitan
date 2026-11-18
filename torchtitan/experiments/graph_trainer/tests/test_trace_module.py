@@ -1600,12 +1600,15 @@ class TestMetadataPropagation(unittest.TestCase):
         bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 3))
         bwd.meta["seq_nr"] = 7
         bwd.meta["autograd_backward"] = True
+        fwd.meta["custom"]["flex_shard_action"] = "unshard"
+        bwd.meta["custom"] = {"flex_shard_action": "reduce_grad"}
         graph.output(bwd)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         _copy_fwd_metadata_to_bw_nodes(gm)
 
         self.assertEqual(bwd.meta["custom"].get("test_key"), "test_value")
+        self.assertEqual(bwd.meta["custom"]["flex_shard_action"], "reduce_grad")
 
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""

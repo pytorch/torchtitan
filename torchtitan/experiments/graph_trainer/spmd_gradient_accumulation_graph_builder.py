@@ -13,6 +13,7 @@ accumulators.
 from __future__ import annotations
 
 import dataclasses
+import functools
 from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, cast, TYPE_CHECKING
@@ -47,6 +48,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     extract_fsdp_unshard_graph,
     FSDPReduceGradExtraction,
     FSDPUnshardExtraction,
+    get_fsdp_graph_regions,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
@@ -533,11 +535,16 @@ def _extract_fwd_bwd_action_graphs(
     )
     num_param_grad_values: int = param_grad_values.num_flat_values
 
+    get_regions = functools.partial(
+        get_fsdp_graph_regions,
+        use_flex_shard=trainer_config.use_flex_shard_instead_simple_fsdp,
+    )
     reduce_grad_extraction: FSDPReduceGradExtraction = extract_fsdp_reduce_grad_graph(
         traced.gm,
         num_param_grads=num_param_grad_values,
         param_grad_output_start=1,
         mode="cut" if plan.split_fsdp_grad_reduction else "keep",
+        regions=(get_regions(traced.gm) if plan.split_fsdp_grad_reduction else None),
     )
     joint_input_names: tuple[str, ...] = placeholder_names(
         reduce_grad_extraction.compute_module
@@ -548,6 +555,10 @@ def _extract_fwd_bwd_action_graphs(
         input_names=joint_input_names,
         flat_input_indices=tuple(range(len(joint_input_names))),
         mode="cut" if plan.split_fsdp_param_unshard else "keep",
+        regions=get_regions(
+            reduce_grad_extraction.compute_module,
+            include_reduce_grad_inputs=False,
+        ),
     )
 
     repeated_computation_type = plan.repeated_computation_type
@@ -584,6 +595,7 @@ def _extract_fwd_bwd_action_graphs(
             input_names=last_input_names,
             flat_input_indices=tuple(range(len(last_input_names))),
             mode="cut" if plan.split_fsdp_param_unshard else "keep",
+            regions=get_regions(traced.gm, include_reduce_grad_inputs=False),
         )
         fwd_bwd_with_reduce_grad = last_unshard_extraction.compute_module
         call_specs[FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD] = _FwdBwdCallSpec(

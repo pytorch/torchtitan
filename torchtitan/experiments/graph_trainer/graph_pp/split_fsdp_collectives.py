@@ -44,6 +44,32 @@ FSDPExtractionMode = Literal["keep", "cut", "split"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class FSDPGraphRegions:
+    unshard_node_names: frozenset[str]
+    unshard_output_names: tuple[str, ...]
+    reduce_grad_node_names: frozenset[str]
+    reduce_grad_inputs: tuple[tuple[str, str], ...]
+
+
+def get_fsdp_graph_regions(
+    gm: fx.GraphModule,
+    *,
+    use_flex_shard: bool,
+    include_reduce_grad_inputs: bool = True,
+) -> FSDPGraphRegions | None:
+    """Return FlexShard regions, or None to use SimpleFSDP's pattern matching."""
+    if not use_flex_shard:
+        return None
+    from torchtitan.experiments.graph_trainer.flex_shard import (
+        get_flex_shard_graph_regions,
+    )
+
+    return get_flex_shard_graph_regions(
+        gm, include_reduce_grad_inputs=include_reduce_grad_inputs
+    )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class FSDPUnshardExtraction:
     """Graph extraction result for FSDP unshard collectives.
 
@@ -196,6 +222,7 @@ def extract_fsdp_unshard_graph(
     flat_input_indices: tuple[int, ...],
     side_effect_output_names: tuple[str, ...] = (),
     mode: FSDPExtractionMode = "split",
+    regions: FSDPGraphRegions | None = None,
 ) -> FSDPUnshardExtraction:
     """Extract FSDP parameter all-gather chains from a graph.
 
@@ -287,23 +314,27 @@ def extract_fsdp_unshard_graph(
 
     unshard_outputs: list[object] = []
     found_collective = False
-    outputs_by_param = find_fsdp_unshard_outputs_by_param(param_inputs)
-
-    for param_input in param_inputs:
-        param_unshard_outputs = outputs_by_param[param_input]
-        if not param_unshard_outputs:
-            unshard_outputs.append(param_input)
-            continue
-        if len(param_unshard_outputs) != 1:
-            raise ValueError(
-                "FSDP extraction expects one unshard chain per flat "
-                f"parameter placeholder after deduplication, but "
-                f"{param_input.name} has {len(param_unshard_outputs)}. "
-                "Run deduplicate_fsdp_unshard_chains_pass before extraction."
-            )
-        unshard_output = param_unshard_outputs[0]
-        found_collective = True
-        unshard_outputs.append(unshard_output)
+    if regions is not None:
+        nodes_by_name = {node.name: node for node in graph.nodes}
+        unshard_outputs = [nodes_by_name[name] for name in regions.unshard_output_names]
+        found_collective = bool(unshard_outputs)
+    else:
+        outputs_by_param = find_fsdp_unshard_outputs_by_param(param_inputs)
+        for param_input in param_inputs:
+            param_unshard_outputs = outputs_by_param[param_input]
+            if not param_unshard_outputs:
+                unshard_outputs.append(param_input)
+                continue
+            if len(param_unshard_outputs) != 1:
+                raise ValueError(
+                    "FSDP extraction expects one unshard chain per flat "
+                    f"parameter placeholder after deduplication, but "
+                    f"{param_input.name} has {len(param_unshard_outputs)}. "
+                    "Run deduplicate_fsdp_unshard_chains_pass before extraction."
+                )
+            unshard_output = param_unshard_outputs[0]
+            found_collective = True
+            unshard_outputs.append(unshard_output)
 
     if not found_collective:
         tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_unshard")
@@ -348,7 +379,19 @@ def extract_fsdp_unshard_graph(
             "unshard",
             ignore_must_be_in_fw_bw=True,
         )
-        unshard_node_names = {node.name for node in unshard_graph.nodes}
+        if regions is not None:
+            unshard_graph.eliminate_dead_code(
+                is_impure_node=lambda node: (
+                    node.op != "call_function"
+                    or node.name in regions.unshard_node_names
+                )
+                and node.is_impure()
+            )
+        unshard_node_names = (
+            regions.unshard_node_names
+            if regions is not None
+            else {node.name for node in unshard_graph.nodes}
+        )
         compute_outputs_and_descs = [
             (output, desc)
             for output, desc in zip(all_outputs, graph_output_descs, strict=True)
@@ -403,6 +446,7 @@ def extract_fsdp_reduce_grad_graph(
     num_param_grads: int,
     param_grad_output_start: int = 0,
     mode: FSDPExtractionMode = "split",
+    regions: FSDPGraphRegions | None = None,
 ) -> FSDPReduceGradExtraction:
     """Extract FSDP/DDP/HSDP reduce-grad epilogues from a graph.
 
@@ -479,8 +523,14 @@ def extract_fsdp_reduce_grad_graph(
     reduce_grad_inputs = []
     reduction_outputs = []
     found_collective = False
+    nodes_by_name = {node.name: node for node in graph.nodes}
+    annotated_inputs = dict(regions.reduce_grad_inputs) if regions is not None else {}
     for grad_output in grad_outputs:
-        reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
+        reduce_grad_input = (
+            nodes_by_name[annotated_inputs[grad_output.name]]
+            if isinstance(grad_output, fx.Node) and grad_output.name in annotated_inputs
+            else find_fsdp_reduce_grad_input(grad_output)
+        )
         if reduce_grad_input is not None:
             assert isinstance(grad_output, fx.Node)
             # For example, before extraction of fsdp reduce grad chain:
@@ -510,9 +560,14 @@ def extract_fsdp_reduce_grad_graph(
             reduce_grad_module=None,
             compute_output_names=output_names(graph_module),
             reduce_grad_input_names=(),
+            reduction_node_names=(
+                regions.reduce_grad_node_names if regions is not None else frozenset()
+            ),
         )
 
-    reduction_node_names = set()
+    reduction_node_names = (
+        set(regions.reduce_grad_node_names) if regions is not None else set()
+    )
     for grad_output, boundaries in reduction_outputs:
         pending = [grad_output]
         while pending:
@@ -572,6 +627,13 @@ def extract_fsdp_reduce_grad_graph(
             if mode == "split"
             else None
         )
+        if regions is not None and reduce_grad_graph is not None:
+            reduce_grad_graph.eliminate_dead_code(
+                is_impure_node=lambda node: (
+                    node.op != "call_function" or node.name in reduction_node_names
+                )
+                and node.is_impure()
+            )
 
     # FX preserves mutation-only tails during DCE. Remove the reduction tail
     # after its inputs become explicit outputs of the backward graph.

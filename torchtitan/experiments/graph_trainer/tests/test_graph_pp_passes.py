@@ -6,6 +6,7 @@
 
 import contextlib
 import functools
+import importlib.util
 import operator
 import unittest
 import warnings
@@ -64,6 +65,9 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     split_di_dw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
+from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+    FSDPGraphRegions,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
     flatten_graph_values,
@@ -2083,7 +2087,9 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                 ]
                 original_pass = passes[0]
                 if extract_unshard or extract_reduce_grad:
-                    bucketing_pass = _find_fsdp_bucketing_pass(passes)
+                    bucketing_pass = _find_fsdp_bucketing_pass(
+                        passes, joint_transformer_block_bucketing_reordering_pass
+                    )
                     self.assertIs(bucketing_pass, original_pass)
                     configured_pass = _configure_fsdp_bucketing_pass(
                         bucketing_pass,
@@ -2112,6 +2118,130 @@ class GraphPPActionBucketingTest(unittest.TestCase):
 
 
 class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
+    @unittest.skipUnless(
+        importlib.util.find_spec("flex_shard"), "FlexShard is not installed"
+    )
+    def test_native_singleton_bucket_keeps_per_microbatch_gradient_cast(self) -> None:
+        from flex_shard import (
+            FLEX_SHARD_META_ACTION,
+            FLEX_SHARD_META_MESH_AXIS_NAMES,
+            FLEX_SHARD_META_PARAM_FQNS,
+            FLEX_SHARD_META_PHASE,
+        )
+
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            get_flex_shard_graph_regions,
+        )
+
+        for communicates in (False, True):
+            with self.subTest(communicates=communicates):
+                graph = fx.Graph()
+                packed = graph.placeholder("packed")
+                packed.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+                if communicates:
+                    result = graph.call_function(
+                        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                        args=(packed, "sum", 2, _FAKE_PG),
+                    )
+                else:
+                    result = graph.call_function(
+                        torch.ops.aten.view.default, args=(packed, [4])
+                    )
+                result.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+                result.meta["custom"] = {
+                    FLEX_SHARD_META_ACTION: "reduce_grad",
+                    FLEX_SHARD_META_PHASE: "execute",
+                    FLEX_SHARD_META_PARAM_FQNS: ("experts.weight",),
+                    FLEX_SHARD_META_MESH_AXIS_NAMES: ("edp_shard",),
+                }
+                output = graph.call_function(
+                    torch.ops.aten._to_copy.default,
+                    args=(result,),
+                    kwargs={"dtype": torch.float32},
+                )
+                output.meta["val"] = torch.empty(4)
+                graph.output((output,))
+                gm = fx.GraphModule(torch.nn.Module(), graph)
+                regions = get_flex_shard_graph_regions(gm)
+                self.assertEqual(
+                    regions.reduce_grad_inputs,
+                    ((output.name, packed.name),) if communicates else (),
+                )
+                owned = get_flex_shard_graph_regions(
+                    gm, include_reduce_grad_inputs=False
+                )
+                self.assertEqual(
+                    owned.reduce_grad_node_names, frozenset((result.name,))
+                )
+
+    def test_bucket_split_preserves_packing_and_reduction_buffer_writes(self) -> None:
+        graph = fx.Graph()
+        x = graph.placeholder("x")
+        x.meta["val"] = torch.empty(4)
+        packed = graph.call_function(torch.ops.aten.empty_like.default, args=(x,))
+        packed.meta["val"] = x.meta["val"]
+        packing_view = graph.call_function(
+            torch.ops.aten.view.default, args=(packed, [4])
+        )
+        graph.call_function(torch.ops.aten.copy_.default, args=(packing_view, x))
+        execution_start = len(list(graph.nodes))
+        received = graph.call_function(
+            torch.ops.aten.empty_like.default, args=(packed,)
+        )
+        reduced = graph.call_function(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            args=(packed, "sum", 1, _FAKE_PG),
+        )
+        waited = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, args=(reduced,)
+        )
+        graph.call_function(torch.ops.aten.copy_.default, args=(received, waited))
+        outputs = tuple(
+            graph.call_function(
+                torch.ops.aten.slice.Tensor, args=(received, 0, start, start + 2)
+            )
+            for start in (0, 2)
+        )
+        for output in outputs:
+            output.meta["val"] = torch.empty(2)
+        execution_names = frozenset(
+            node.name for node in list(graph.nodes)[execution_start:]
+        )
+        graph.output(outputs)
+        gm = fx.GraphModule(torch.nn.Module(), graph)
+        split = extract_fsdp_reduce_grad_graph(
+            gm,
+            num_param_grads=2,
+            regions=FSDPGraphRegions(
+                unshard_node_names=frozenset(),
+                unshard_output_names=(),
+                reduce_grad_node_names=execution_names,
+                reduce_grad_inputs=tuple(
+                    (output.name, packed.name) for output in outputs
+                ),
+            ),
+        )
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected an extracted bucket reduction")
+        self.assertEqual(split.reduce_grad_input_names, (packed.name,))
+        current = torch.tensor([1.0, 2.0, 3.0, 4.0])
+        packed_outputs = _FakeCollectiveInterpreter(split.compute_module).run(current)
+        self.assertIs(packed_outputs[0], packed_outputs[1])
+        actual = _FakeCollectiveInterpreter(split.reduce_grad_module).run(
+            packed_outputs[0]
+        )
+        expected = _FakeCollectiveInterpreter(gm).run(current)
+        _assert_tensor_sequence_equal(self, actual, expected)
+        for module in (split.compute_module, split.reduce_grad_module):
+            self.assertEqual(
+                sum(
+                    node.target == torch.ops.aten.copy_.default
+                    for node in module.graph.nodes
+                ),
+                1,
+            )
+
     def test_forward_pattern_batch_lookup(self) -> None:
         gm = _make_forward_graph_with_unshard_and_replicated_param()
         deduplicate_fsdp_unshard_chains_pass(gm)

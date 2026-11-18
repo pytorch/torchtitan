@@ -27,6 +27,15 @@ def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Co
     )
 
 
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2_flexshard() -> (
+    Trainer.Config
+):
+    """Build the BF16 Dist-MoE FSDP2/EP2 recipe with FlexShard selected."""
+    config = graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2()
+    config.use_flex_shard_instead_simple_fsdp = True
+    return config
+
+
 def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> (
     Trainer.Config
 ):
