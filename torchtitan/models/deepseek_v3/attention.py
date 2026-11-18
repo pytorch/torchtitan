@@ -52,7 +52,7 @@ class DeepSeekMLAAttention(Attention):
         def softmax_scale(self) -> float:
             qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
             scale = qk_head_dim**-0.5
-            mscale = self.rope.qk_amplitude(mscale=self.mscale)
+            mscale = self.rope.attention_factor(mscale=self.mscale)
             return scale * mscale * mscale
 
         def __post_init__(self) -> None:

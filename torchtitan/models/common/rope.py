@@ -63,7 +63,7 @@ class Llama3ScalingConfig:
         )
         return torch.where(medium_F, scaled_F, inv_freq_F)
 
-    def qk_amplitude(self, *, mscale: float = 1.0) -> float:
+    def attention_factor(self, *, mscale: float = 1.0) -> float:
         """Llama 3 scaling does not change the attention score magnitude."""
         return 1.0
 
@@ -92,7 +92,7 @@ class YaRNScalingConfig:
             self.truncate,
         )
 
-    def qk_amplitude(self, *, mscale: float = 1.0) -> float:
+    def attention_factor(self, *, mscale: float = 1.0) -> float:
         """Per-Q/K magnitude factor applied by attention, not RoPE."""
         if self.factor <= 1.0:
             return 1.0
@@ -186,11 +186,11 @@ class RoPE(Module):
                 return _default_inv_freq(self.dim, self.theta)
             return self.scaling.inv_freq(self.dim, self.theta)
 
-        def qk_amplitude(self, *, mscale: float = 1.0) -> float:
+        def attention_factor(self, *, mscale: float = 1.0) -> float:
             """Return the magnitude factor used to scale attention scores."""
             if self.scaling is None:
                 return 1.0
-            return self.scaling.qk_amplitude(mscale=mscale)
+            return self.scaling.attention_factor(mscale=mscale)
 
     def __init__(self, config: Config):
         super().__init__()

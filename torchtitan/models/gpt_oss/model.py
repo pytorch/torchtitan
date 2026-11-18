@@ -69,7 +69,7 @@ class GptOssAttention(Attention):
         def softmax_scale(self) -> float:
             scale = 1.0 / math.sqrt(self.head_dim)
             # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
-            mscale = self.rope.qk_amplitude()
+            mscale = self.rope.attention_factor()
             scale *= mscale * mscale
             return scale
 
