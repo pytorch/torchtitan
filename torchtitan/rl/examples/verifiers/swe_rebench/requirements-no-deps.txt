@@ -1,0 +1,4 @@
+# prime-envs' SWE-rebench V2 taskset. It is not on PyPI and declares a newer
+# Verifiers than this example pins, so install it without its dependencies:
+#   GIT_LFS_SKIP_SMUDGE=1 pip install --no-deps -r requirements-no-deps.txt
+swerebench-v2 @ git+https://github.com/PrimeIntellect-ai/prime-envs.git@5c9530ccef3d1be3d88b9be2c63d17a80d2ca13b#subdirectory=environments/swe/swerebench_v2

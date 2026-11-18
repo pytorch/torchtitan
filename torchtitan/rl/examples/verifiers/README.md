@@ -12,8 +12,9 @@ The ownership boundary is:
 - The adapter converts samples and traces between the two systems.
 
 Reusable bridge code lives alongside this README. Each experiment has its own
-package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
-[`terminal_bench/`](./terminal_bench) (multi-turn terminal agent on Harbor tasks).
+package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math),
+[`terminal_bench/`](./terminal_bench) (multi-turn terminal agent on Harbor tasks) and
+[`swe_rebench/`](./swe_rebench) (coding agent on SWE-rebench V2.1 GitHub issues).
 
 ## Integration flow
 

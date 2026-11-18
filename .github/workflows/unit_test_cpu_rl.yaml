@@ -85,5 +85,9 @@ jobs:
         ' > "${RUNNER_TEMP}/nightly-constraints.txt"
         uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt \
           -r torchtitan/rl/examples/verifiers/terminal_bench/requirements.txt \
+          -r torchtitan/rl/examples/verifiers/swe_rebench/requirements.txt \
           --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
+        # prime-envs' SWE-rebench taskset declares a newer Verifiers than the pin above.
+        GIT_LFS_SKIP_SMUDGE=1 uv pip install --no-deps \
+          -r torchtitan/rl/examples/verifiers/swe_rebench/requirements-no-deps.txt
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
