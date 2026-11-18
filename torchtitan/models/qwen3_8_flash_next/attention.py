@@ -17,6 +17,7 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch.utils.checkpoint import checkpoint
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -121,11 +122,14 @@ class MRoPE(Qwen35MRoPE):
         return query_THF if key is None else (query_THF, rotate(key))
 
 
+@local_compile("indexer_scores", batch_invariant=True)
 def _selected_block_scores(query_QHK, key_GK, blocks_QB, *, scale):
     """Indexer logits of the selected blocks; -inf marks unused slots.
 
     One dense Q x G GEMM, then a gather. Gathering Q x B keys instead turns the
     backward into a scatter-add into key_GK, about 30x slower at T=4096.
+    Compiled, the fp32 Q x H x G scores are not written back for the ReLU,
+    head sum and gather.
     """
     scores_QHG = torch.einsum("qhk,gk->qhg", query_QHK, key_GK)
     scores_QG = scores_QHG.relu().sum(1) * scale
