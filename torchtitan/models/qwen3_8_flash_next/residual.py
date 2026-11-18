@@ -12,6 +12,7 @@ import torch
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 from torchtitan.models.common import Linear
 
@@ -59,10 +60,7 @@ class GatedResidual(Module):
         remat.recompute_needs_tensor(mix_TR)
         up_TC = self.input_mix_weight_up(mix_TR)
         remat.recompute_needs_tensor(up_TC)
-        read_TSD = up_TC.sigmoid().unflatten(-1, (self.num_streams, self.dim))
-        mixed_TD = (
-            read_TSD * x_norm_TC.unflatten(-1, (self.num_streams, self.dim))
-        ).mean(-2)
+        mixed_TD = _read_streams(up_TC, x_norm_TC, self.num_streams)
         if self.block_inject_weight is None:
             return mixed_TD
         inject_TS = self.block_inject_weight(x_norm_TC)
@@ -71,6 +69,16 @@ class GatedResidual(Module):
         return mixed_TD, x_TC, write_TS
 
 
+@local_compile("gated_residual", batch_invariant=True)
+def _read_streams(
+    read_logits_TC: torch.Tensor, x_norm_TC: torch.Tensor, num_streams: int
+) -> torch.Tensor:
+    """Average the streams weighted by their sigmoid read gates."""
+    read_TSD = read_logits_TC.sigmoid().unflatten(-1, (num_streams, -1))
+    return (read_TSD * x_norm_TC.unflatten(-1, (num_streams, -1))).mean(-2)
+
+
+@local_compile("gated_residual", batch_invariant=True)
 def add_residuals(
     update_TD: torch.Tensor, residual_TC: torch.Tensor, write_TS: torch.Tensor
 ) -> torch.Tensor:

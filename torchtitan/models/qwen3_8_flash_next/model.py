@@ -6,7 +6,7 @@
 
 """Qwen3.8-Flash-Next's hybrid multimodal decoder."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -16,6 +16,7 @@ import torch_remat as remat
 
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -163,6 +164,22 @@ class Qwen38FlashNextModel(Qwen35Model):
         num_streams: int
         hyper_connection_mixer: GatedResidual.Config
         norm: Identity.Config  # pyrefly: ignore [bad-override]
+        # Qwen3.5's regions plus the gated residual stream read and write.
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "gated_rmsnorm",
+                    "gdn_split_in_proj",
+                    "offset_rmsnorm",
+                    "partial_rope",
+                    "shared_expert_gate",
+                    "fp32_to_bf16_split",
+                    "gated_residual",
+                ]
+            )
+        )
 
         def __post_init__(self) -> None:
             super(Qwen38FlashNextModel.Config, self).__post_init__()
