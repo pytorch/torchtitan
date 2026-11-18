@@ -24,13 +24,13 @@ from torchtitan.components.data.multimodal.vision_processor import VisionProcess
 from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
 from torchtitan.rl.actors.monarch import rdma_object
 from torchtitan.rl.actors.monarch.rdma_object import _TensorRef, MonarchRDMAObject
-from torchtitan.rl.rollout.types import RolloutTurnID
-from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import (
+from torchtitan.rl.rdma_object import (
     _NUM_MICROBATCHES_READ_AHEAD,
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
+from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,

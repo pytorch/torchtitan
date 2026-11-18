@@ -22,6 +22,7 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.rdma_object import RDMAImageFiles
 from torchtitan.rl.rollout import Prompt, PromptImage, RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
@@ -285,7 +286,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 env=env,
-                image_files=worker.rdma_image_files(),
+                image_files=RDMAImageFiles(register_rdma_object=None, min_bytes=None),
                 sampling=SamplingConfig(),
                 group_id=0,
                 rollout_id=rollout_id,
@@ -348,7 +349,7 @@ def test_rollout_sends_and_records_prompt_images() -> None:
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             env=_ImageTokenEnv(),
-            image_files=worker.rdma_image_files(),
+            image_files=RDMAImageFiles(register_rdma_object=None, min_bytes=None),
             sampling=SamplingConfig(),
             group_id=0,
             rollout_id=0,
