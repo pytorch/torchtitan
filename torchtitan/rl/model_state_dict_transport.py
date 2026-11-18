@@ -132,8 +132,12 @@ class _DeltaPlan(NamedTuple):
     reads: list[tuple[Any, Any]]
     """(local view, remote buffer) per piece, to read the push whole."""
     windows: dict[int, list[tuple[int, torch.Tensor]]]
-    """The windows the pieces touch, in order, each with the (offset in the
-    window, prefetch buffer bytes) of every part of a piece in it."""
+    """The windows the pieces of non-resident keys touch, in order, each with the
+    (offset in the window, prefetch buffer bytes) of every part of a piece in
+    it."""
+    resident_windows: dict[int, list[tuple[int, str, int, int]]]
+    """The same for resident keys, which loads XOR on the GPU: the (offset in
+    the window, key, byte offset in the key's tensor, size) of every part."""
     staging_nbytes: int
     remote_buffer: Any
     """The delta buffer."""
@@ -554,6 +558,10 @@ class ModelStateDictTransport(Configurable):
         self._delta_plans: list[_DeltaPlan] = []
         self._receive: torch.Tensor | None = None
         self._version: int | None = None
+        # Generator: the keys loads XOR on the GPU (connect_generator), and the
+        # (plan, decodes) of the last read's windows that cover them.
+        self._resident_keys: frozenset[str] = frozenset()
+        self._resident_deltas: list[tuple[_DeltaPlan, list[tuple[int, int, int]]]] = []
         # Either side with XOR deltas: the GPU codec.
         self._codec: _DeltaCodec | None = None
 
@@ -749,6 +757,7 @@ class ModelStateDictTransport(Configurable):
         sources: list[TrainerSource],
         rank: int,
         generator_index: int,
+        resident_keys: frozenset[str] = frozenset(),
     ) -> None:
         """Register this generator rank's prefetch buffers, connect to every trainer
         rank and plan the reads.
@@ -760,13 +769,25 @@ class ModelStateDictTransport(Configurable):
             sources: Every trainer rank's ``register_trainer_source`` result.
             rank: This rank within its generator.
             generator_index: Index of this rank's generator.
+            resident_keys: Keys whose load destination keeps what the last load
+                wrote until the next load (e.g. quantized operands loaded in place),
+                all loaded by one ``copy_prefetched_`` call. With XOR deltas, that
+                call XORs them into the destination on the GPU, and their prefetch
+                buffers go stale until a push is read whole.
         """
+        self._resident_keys = resident_keys
         reads, packed = _plan_reads(
             sources,
             shard_layout(prefetched_model_state_dict),
             rank=rank,
             generator_index=generator_index,
         )
+        if packed_resident := sorted(packed.keys() & resident_keys):
+            # Their deltas are laid out like the prefetch buffers, not like the
+            # destination.
+            raise ValueError(
+                f"Resident keys must arrive in place, but {packed_resident} are packed"
+            )
         for source in sources:
             self._transport.connect(source.url)
         locals_ = {
@@ -818,6 +839,9 @@ class ModelStateDictTransport(Configurable):
         )
         source_reads: list[list[tuple[Any, Any]]] = [[] for _ in sources]
         windows: list[dict[int, list[tuple[int, torch.Tensor]]]] = [{} for _ in sources]
+        resident_windows: list[dict[int, list[tuple[int, str, int, int]]]] = [
+            {} for _ in sources
+        ]
         for r, pair in zip(reads, self._reads, strict=True):
             source_reads[r.source].append(pair)
             view = locals_[r.key].view(torch.uint8)
@@ -829,21 +853,29 @@ class ModelStateDictTransport(Configurable):
             ):
                 lo = max(r.byte_offset, w * _DELTA_WINDOW_NBYTES)
                 hi = min(end, (w + 1) * _DELTA_WINDOW_NBYTES)
-                windows[r.source].setdefault(w, []).append(
-                    (
-                        lo - w * _DELTA_WINDOW_NBYTES,
-                        view[lo - r.byte_offset : hi - r.byte_offset],
+                start = lo - w * _DELTA_WINDOW_NBYTES
+                if r.key in self._resident_keys:
+                    resident_windows[r.source].setdefault(w, []).append(
+                        (
+                            start,
+                            r.key,
+                            r.local_byte_offset + lo - r.byte_offset,
+                            hi - lo,
+                        )
                     )
-                )
+                else:
+                    windows[r.source].setdefault(w, []).append(
+                        (start, view[lo - r.byte_offset : hi - r.byte_offset])
+                    )
         # Receive buffer: per source, its header, then room for its windows'
         # compressed bytes up to the trainer's own limit (_DELTA_MIN_RATIO).
         sizes = []
-        for source, source_windows in zip(sources, windows):
+        for source, cpu_windows, gpu_windows in zip(sources, windows, resident_windows):
             staging_nbytes = source.delta.staging_nbytes
             covered = sum(
                 min((w + 1) * _DELTA_WINDOW_NBYTES, staging_nbytes)
                 - w * _DELTA_WINDOW_NBYTES
-                for w in source_windows
+                for w in cpu_windows.keys() | gpu_windows.keys()
             )
             sizes.append(
                 (
@@ -859,6 +891,7 @@ class ModelStateDictTransport(Configurable):
                 _DeltaPlan(
                     reads=source_reads[s],
                     windows=dict(sorted(windows[s].items())),
+                    resident_windows=dict(sorted(resident_windows[s].items())),
                     staging_nbytes=source.delta.staging_nbytes,
                     remote_buffer=source.delta.remote_buffer,
                     header=self._receive[offset : offset + header_nbytes].view(
@@ -891,9 +924,11 @@ class ModelStateDictTransport(Configurable):
         """Fill the prefetch buffers from the trainer's staging buffers.
 
         With XOR deltas, read each trainer rank's header first. If the prefetch
-        buffers hold the push before this one and every trainer rank encoded a
-        delta that fits the receive buffer, read the compressed windows covering
-        this rank's pieces and XOR them in; otherwise read every piece whole.
+        buffers (and resident keys' destinations) hold the push before this one and
+        every trainer rank encoded a delta that fits the receive buffer, read the
+        compressed windows covering this rank's pieces and XOR them into the
+        prefetch buffers, leaving resident keys to ``copy_prefetched_``; otherwise
+        read every piece whole.
 
         A timeout leaves the transfers in flight: the prefetch buffers are
         undefined and the job must restart.
@@ -910,17 +945,26 @@ class ModelStateDictTransport(Configurable):
         planned = [
             (plan, *self._plan_delta_reads(plan, version))
             for plan in self._delta_plans
-            if plan.windows
+            if plan.windows or plan.resident_windows
         ]
+        # One trainer rank without a usable delta reads the push whole: a resident
+        # key's prefetch buffer is stale, so its pieces cannot mix the two.
         whole = any(decodes is None for _, _, decodes in planned)
         transfers = self._reads if whole else [t for _, ts, _ in planned for t in ts]
         await self._transfer(transfers)
         read_s = time.perf_counter() - start_s
+        self._resident_deltas = []
         delta_nbytes = 0
         if not whole and planned:
-            deltas = [(plan, decodes) for plan, _, decodes in planned]
-            delta_nbytes = sum(n for _, decodes in deltas for _, _, n in decodes)
-            await asyncio.to_thread(self._apply_deltas, deltas)
+            deltas = []
+            for plan, _, decodes in planned:
+                delta_nbytes += sum(n for _, _, n in decodes)
+                if cpu := [d for d in decodes if d[0] in plan.windows]:
+                    deltas.append((plan, cpu))
+                if gpu := [d for d in decodes if d[0] in plan.resident_windows]:
+                    self._resident_deltas.append((plan, gpu))
+            if deltas:
+                await asyncio.to_thread(self._apply_deltas, deltas)
         self._version = version
         logger.info(
             f"Pull of push {version}: "
@@ -939,7 +983,8 @@ class ModelStateDictTransport(Configurable):
             return [], None
         num_windows = len(_delta_windows(plan.staging_nbytes))
         table = plan.header[2 : 2 + 2 * num_windows].view(-1, 2).tolist()
-        if sum(table[w][1] for w in plan.windows) > plan.receive_capacity:
+        windows = sorted(plan.windows.keys() | plan.resident_windows.keys())
+        if sum(table[w][1] for w in windows) > plan.receive_capacity:
             return [], None
         header_nbytes = plan.header.numel() * plan.header.itemsize
         # Windows are encoded back to back, so consecutive ones are one read.
@@ -947,7 +992,7 @@ class ModelStateDictTransport(Configurable):
         decodes = []
         offset = plan.receive_offset
         previous = None
-        for w in plan.windows:
+        for w in windows:
             start, nbytes = table[w]
             if previous == w - 1:
                 runs[-1][2] += nbytes
@@ -1028,10 +1073,19 @@ class ModelStateDictTransport(Configurable):
 
     def copy_prefetched_(self, state_dict: dict[str, torch.Tensor]) -> Iterable[str]:
         """Copy ``state_dict`` in place from the prefetch buffers, unpacking packed
-        keys. Returns its keys."""
+        keys; or, for resident keys after a delta read, XOR the delta into them on
+        the GPU. Returns its keys."""
         unpacked = False
+        resident = {k: t for k, t in state_dict.items() if k in self._resident_keys}
+        if resident and self._resident_deltas:
+            assert (
+                resident.keys() == self._resident_keys
+            ), "resident keys load in one call"
+            self._apply_resident_deltas(resident)
         with torch.no_grad():
             for key, tensor in state_dict.items():
+                if key in resident and self._resident_deltas:
+                    continue
                 pieces = self._packed.get(key)
                 if pieces is None:
                     tensor.copy_(self._prefetched[key])
@@ -1044,4 +1098,51 @@ class ModelStateDictTransport(Configurable):
         # the prefetch buffers.
         if unpacked and torch.accelerator.is_available():
             torch.accelerator.current_stream().synchronize()
+        if resident:
+            self._resident_deltas = []
         return state_dict.keys()
+
+    def _apply_resident_deltas(self, targets: dict[str, torch.Tensor]) -> None:
+        """Decompress the windows of the last read that cover resident keys and XOR
+        them into ``targets``, which hold the push before it, on the GPU."""
+        codec = self._codec
+        receive = self._receive
+        assert codec is not None and receive is not None
+        start_s = time.perf_counter()
+        jobs = [
+            (plan, w, offset, nbytes)
+            for plan, decodes in self._resident_deltas
+            for w, offset, nbytes in decodes
+        ]
+        views = {k: _local(t).view(-1).view(torch.uint8) for k, t in targets.items()}
+        # The caller's queued work, e.g. the last forward, may still read the
+        # targets.
+        caller = torch.cuda.current_stream(codec.device)
+        with codec.on_stream(), torch.no_grad():
+            codec.stream.wait_stream(caller)
+            compressed_scratch = torch.empty(
+                max(nbytes for *_, nbytes in jobs),
+                dtype=torch.uint8,
+                device=codec.device,
+            )
+            xor_scratch = torch.empty(
+                _DELTA_WINDOW_NBYTES, dtype=torch.uint8, device=codec.device
+            )
+            for plan, w, offset, nbytes in jobs:
+                size = (
+                    min((w + 1) * _DELTA_WINDOW_NBYTES, plan.staging_nbytes)
+                    - w * _DELTA_WINDOW_NBYTES
+                )
+                compressed = compressed_scratch[:nbytes]
+                compressed.copy_(receive[offset : offset + nbytes], non_blocking=True)
+                xor = xor_scratch[:size]
+                codec.decode(compressed, xor)
+                for start, key, byte_offset, n in plan.resident_windows[w]:
+                    views[key][byte_offset : byte_offset + n].bitwise_xor_(
+                        xor[start : start + n]
+                    )
+            codec.stream.synchronize()
+        logger.info(
+            f"XORed push {self._version} into {len(targets)} resident tensors on "
+            f"the GPU in {time.perf_counter() - start_s:.3f} s"
+        )

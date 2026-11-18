@@ -119,6 +119,13 @@ it covers, XOR, and copy them back, pipelined the same way. Otherwise read
 every piece whole: the first pull, after a missed push, or when a delta is too
 large.
 
+Resident keys (`connect_generator(..., resident_keys=...)`) are keys whose load
+destination keeps what the last load wrote, such as the quantized expert
+operands of a generator that sets `receive_quantized_operands`. Their windows
+skip the prefetch buffers: `read` keeps them compressed, and `copy_prefetched_`
+decompresses them on the GPU and XORs them into the destination tensors in
+place. A push read whole loads them from the prefetch buffers as usual.
+
 The delta trades network bytes for local copies: per push, each trainer rank
 moves its staging buffer over PCIe three more times (two H2D, one D2H),
 overlapped with forward/backward, and each generator rank moves its pieces H2D
@@ -146,7 +153,8 @@ decoding.
    raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
    restart the job. With XOR deltas, it then applies them.
 4. Load: the generator copies its weights from the prefetch buffers, unpacking
-   packed keys (`copy_prefetched_`).
+   packed keys, and XORs resident keys' deltas into them in place
+   (`copy_prefetched_`).
 
 The controller finishes pull N before push N+1, so a single staging buffer is
 enough.

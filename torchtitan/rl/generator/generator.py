@@ -512,6 +512,14 @@ class Generator(Configurable):
             sources=trainer_sources,
             rank=self._rank,
             generator_index=generator_index,
+            # Quantized operands load in place, in one fetch, and keep their bytes
+            # between loads (ModelStateDictLoader.receive_quantized_operands); their
+            # keys are "<parameter key>.<operand>".
+            resident_keys=frozenset(
+                key
+                for key in self._prefetched_model_state_dict
+                if key.rsplit(".", 1)[0] in self._quantized_operand_formats
+            ),
         )
 
     @sl.log_trace_span("load_model_state_dict")

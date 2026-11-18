@@ -84,11 +84,13 @@ def small_windows(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("num_replicas", [1, 2])
-def test_xor_delta_pushes(monkeypatch, small_windows, num_replicas):
-    """Trainer FSDP 2 on dim 0 (HSDP with two replicas: each piece staged twice),
-    generator TP 2 on dim 1 (packed pieces), BF16 and FP32 keys. Each push
-    changes a few elements of the trainer's FP32 weights."""
+@pytest.mark.parametrize("num_replicas,resident", [(1, False), (2, True)])
+def test_xor_delta_pushes(monkeypatch, small_windows, num_replicas, resident):
+    """Trainer FSDP 2 on dim 0 (HSDP with two replicas: each piece staged twice);
+    generator TP 2 on dim 1 (packed pieces) for BF16 ``w`` and FP32 ``bias``, and
+    split on dim 0 like experts for FP32 ``e``, which loads XOR in place on the
+    GPU when resident. Each push changes a few elements of the trainer's FP32
+    weights."""
     boxes = {}
     monkeypatch.setattr(
         m, "_global_offset_and_local_shape", lambda tensor: boxes[id(tensor)]
@@ -104,12 +106,14 @@ def test_xor_delta_pushes(monkeypatch, small_windows, num_replicas):
     config = ModelStateDictTransport.Config(xor_delta_codec="zstd")
     device = torch.device("cuda", torch.cuda.current_device())
     generator = torch.Generator(device=device).manual_seed(0)
-    shapes = {"w": (512, 256), "bias": (512, 4)}
+    shapes = {"w": (512, 256), "bias": (512, 4), "e": (512, 64)}
+    # Generator split dim per key.
+    split = {"w": 1, "bias": 1, "e": 0}
     full = {
         key: torch.randn(shape, device=device, generator=generator)
         for key, shape in shapes.items()
     }
-    dtypes = {"w": torch.bfloat16, "bias": torch.float32}
+    dtypes = {"w": torch.bfloat16, "bias": torch.float32, "e": torch.float32}
 
     trainer_sds = []
     for rank in range(2 * num_replicas):
@@ -124,8 +128,9 @@ def test_xor_delta_pushes(monkeypatch, small_windows, num_replicas):
     for rank in range(2):
         sd = {}
         for key, shape in shapes.items():
-            offset = (0, rank * shape[1] // 2)
-            box_shape = (shape[0], shape[1] // 2)
+            d = split[key]
+            offset = tuple(rank * n // 2 if i == d else 0 for i, n in enumerate(shape))
+            box_shape = tuple(n // 2 if i == d else n for i, n in enumerate(shape))
             sd[key] = torch.zeros(box_shape, dtype=dtypes[key], pin_memory=True)
             boxes[id(sd[key])] = (offset, box_shape)
         generator_sds.append(sd)
@@ -139,15 +144,26 @@ def test_xor_delta_pushes(monkeypatch, small_windows, num_replicas):
                 sd,
                 generator_rank_layouts=rank_layouts,
                 transfer_dtype=torch.bfloat16,
-                preserve_dtype_keys=frozenset({"bias"}),
+                preserve_dtype_keys=frozenset({"bias", "e"}),
             )
         )
         trainers.append(trainer)
     generators = []
     for rank, sd in enumerate(generator_sds):
         transport = ModelStateDictTransport(config)
-        transport.connect_generator(sd, sources=sources, rank=rank, generator_index=0)
+        transport.connect_generator(
+            sd,
+            sources=sources,
+            rank=rank,
+            generator_index=0,
+            resident_keys=frozenset({"e"}) if resident else frozenset(),
+        )
         generators.append(transport)
+    # Load destinations, kept across loads as a resident key's must be.
+    loaded_sds = [
+        {key: torch.empty_like(t, device=device) for key, t in sd.items()}
+        for sd in generator_sds
+    ]
 
     def push_and_pull(trainer_sds):
         for trainer, sd in zip(trainers, trainer_sds):
@@ -161,13 +177,15 @@ def test_xor_delta_pushes(monkeypatch, small_windows, num_replicas):
             before = generator_transport.bytes_read
             asyncio.run(transport.read())
             read.append(generator_transport.bytes_read - before)
-        for rank, (transport, sd) in enumerate(zip(generators, generator_sds)):
-            loaded = {key: torch.empty_like(t, device=device) for key, t in sd.items()}
+        for rank, (transport, loaded) in enumerate(zip(generators, loaded_sds)):
             transport.copy_prefetched_(loaded)
             for key, tensor in loaded.items():
-                expected = full[key][
-                    :, _index((0, rank * shapes[key][1] // 2), tensor.shape)[1]
-                ]
+                d = split[key]
+                index = tuple(
+                    slice(rank * n, (rank + 1) * n) if i == d else slice(None)
+                    for i, n in enumerate(tensor.shape)
+                )
+                expected = full[key][index]
                 torch.testing.assert_close(
                     tensor, expected.to(dtypes[key]), rtol=0, atol=0
                 )
