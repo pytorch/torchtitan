@@ -381,47 +381,6 @@ class TestFluxCpSharding(unittest.TestCase):
 
 
 class TestDecoderCpSharding(unittest.TestCase):
-    def test_forwards_selected_load_balancer_capacity_to_linear_metadata(self):
-        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
-
-        metadata = object()
-        permutation = torch.arange(1024).unsqueeze(0)
-        load_balancer = mock.Mock(max_num_fragments=2)
-        load_balancer.generate_permutation.return_value = permutation
-        model = SimpleNamespace(
-            config=SimpleNamespace(
-                first_full_attention=SimpleNamespace(
-                    inner_attention=AllGatherKVFlexInnerAttention.Config()
-                )
-            )
-        )
-        inputs = {
-            "input": torch.arange(1024),
-            "attention_metadata": {ContextParallelInnerKDA: metadata},
-        }
-        with mock.patch.object(
-            HeadTailCPLoadBalancer.Config,
-            "build",
-            return_value=load_balancer,
-        ), mock.patch.object(
-            ContextParallelInnerKDA, "prepare_cp_metadata"
-        ) as prepare, mock.patch.object(
-            context_parallel, "shard_tensors", return_value=inputs
-        ):
-            Decoder._cp_shard(
-                cast(Any, model),
-                inputs,
-                input_shardings=decoder_input_sharding(),
-                parallelism_context=mock.Mock(),
-                parallelism=ParallelismConfig(
-                    context_parallel_degree=2,
-                    context_parallel_load_balancer=HeadTailCPLoadBalancer.Config(),
-                ),
-            )
-        prepare.assert_called_once_with(
-            metadata, permutation=permutation, max_num_fragments=2
-        )
-
     def test_dispatches_linear_cp_metadata_and_leaves_non_cp_metadata_unchanged(self):
         from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
@@ -451,9 +410,7 @@ class TestDecoderCpSharding(unittest.TestCase):
                             context_parallel_load_balancer=None,
                         ),
                     )
-                prepare.assert_called_once_with(
-                    global_metadata, permutation=None, max_num_fragments=1
-                )
+                prepare.assert_called_once_with(global_metadata, permutation=None)
                 metadata = input_dict["attention_metadata"]
                 self.assertIs(metadata[backend], local_metadata)
                 self.assertIs(metadata[FlexInnerAttention], global_metadata)
@@ -583,9 +540,7 @@ class TestDecoderCpSharding(unittest.TestCase):
                         )
 
                     build_load_balancer.assert_not_called()
-                    prepare_metadata.assert_called_once_with(
-                        metadata, permutation=None, max_num_fragments=1
-                    )
+                    prepare_metadata.assert_called_once_with(metadata, permutation=None)
                     self.assertIsNone(shard_tensors.call_args.kwargs["permutation"])
                     warn.assert_called_once()
                     self.assertIn("no full attention", warn.call_args.args[1])
@@ -1017,14 +972,11 @@ class TestUlysses(unittest.TestCase):
         for backend in (UlyssesInnerKDA, UlyssesInnerGDN):
             with self.subTest(backend=backend):
                 self.assertIs(
-                    backend.prepare_cp_metadata(
-                        metadata, permutation=None, max_num_fragments=1
-                    ),
-                    metadata,
+                    backend.prepare_cp_metadata(metadata, permutation=None), metadata
                 )
                 permutation = torch.tensor([[0, 4, 5, 1, 2, 3]])
                 local_metadata = backend.prepare_cp_metadata(
-                    metadata, permutation=permutation, max_num_fragments=1
+                    metadata, permutation=permutation
                 )
                 self.assertIsInstance(local_metadata, UlyssesLinearAttentionMetadata)
                 self.assertIs(local_metadata.varlen, metadata.varlen)
@@ -1047,9 +999,7 @@ class TestUlysses(unittest.TestCase):
             for permutation in (torch.arange(8), torch.arange(8).view(2, 4)):
                 with self.subTest(backend=backend, shape=permutation.shape):
                     with self.assertRaisesRegex(ValueError, "packed-token permutation"):
-                        backend.prepare_cp_metadata(
-                            metadata, permutation=permutation, max_num_fragments=1
-                        )
+                        backend.prepare_cp_metadata(metadata, permutation=permutation)
 
     def test_linear_attention_config(self):
         for family, backend in (

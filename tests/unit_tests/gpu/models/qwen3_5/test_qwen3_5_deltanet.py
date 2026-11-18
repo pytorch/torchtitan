@@ -206,7 +206,6 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
             metadata = ContextParallelInnerGDN.prepare_cp_metadata(
                 attention_metadata,
                 permutation=None,
-                max_num_fragments=1,
             )
 
         self.assertIs(metadata.cp_routing, routing)

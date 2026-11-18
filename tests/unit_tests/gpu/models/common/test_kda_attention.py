@@ -120,7 +120,6 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
             kda_metadata = ContextParallelInnerKDA.prepare_cp_metadata(
                 attention_metadata,
                 permutation=permutation,
-                max_num_fragments=2,
             )
 
         self.assertIs(kda_metadata.cp_routing, routing)

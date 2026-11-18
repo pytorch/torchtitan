@@ -74,7 +74,6 @@ class TestLinearAttentionMetadataPytree(unittest.TestCase):
                 backend.prepare_cp_metadata(
                     _linear_metadata(layout),
                     permutation=torch.tensor(permutation),
-                    max_num_fragments=1,
                 )
                 for layout, permutation in zip(layouts, permutations, strict=True)
             ]
@@ -120,6 +119,7 @@ def _assert_active_routing(routing, compact):
 def test_routing_preserves_global_capacity_and_active_entries(cp_rank, permuted):
     """Padded document capacity keeps changing local document cuts replayable."""
     permutation = torch.tensor([[0, 1, 6, 7, 2, 3, 4, 5]]) if permuted else None
+    # Head-tail gives each rank at most a head and a tail chunk.
     max_num_fragments = 2 if permuted else 1
     fragments = get_token_fragments(8, cp_size=2, permutation=permutation)
     shapes = []
@@ -142,7 +142,6 @@ def test_routing_preserves_global_capacity_and_active_entries(cp_rank, permuted)
             result = ContextParallelInnerKDA.prepare_cp_metadata(
                 metadata,
                 permutation=permutation,
-                max_num_fragments=max_num_fragments,
             )
             routing = result.cp_routing
             compact = ContextParallelRouting.from_fragments(

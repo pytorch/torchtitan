@@ -109,13 +109,10 @@ def prepare_cp_linear_attention_metadata(
     attention_metadata: LinearAttentionMetadata,
     *,
     permutation: torch.Tensor | None,
-    max_num_fragments: int,
     family: str,
 ) -> ContextParallelLinearAttentionMetadata:
     """Build rank-local routing from global linear-attention sequence metadata.
 
-    ``max_num_fragments`` bounds token ranges per rank for any batch; with
-    padded document offsets it keeps routing shapes fixed across batches.
     ``family`` names the attention (e.g. "KDA") in error messages.
     """
     if attention_metadata.varlen is None:
@@ -136,6 +133,10 @@ def prepare_cp_linear_attention_metadata(
             f"{family} metadata preparation requires an active multi-rank CP "
             "mesh axis."
         )
+    # Upper bound on token ranges per rank, so routing shapes stay fixed across
+    # batches: contiguous sharding gives one range, head-tail gives a head and a
+    # tail chunk. PTRR is rejected for linear attention at config time.
+    max_num_fragments = 1 if permutation is None else 2
     # Each fragment boundary can split one document into two subsequences.
     max_subsequences = len(cu_seqlens_global) - 1 + max_num_fragments - 1
     routing = ContextParallelRouting.from_fragments(

@@ -48,10 +48,8 @@ class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-        max_num_fragments: int,
     ) -> LinearAttentionMetadata:
         """Prepare Ulysses GDN metadata in original token order."""
-        del max_num_fragments
         return prepare_ulysses_linear_attention_metadata(
             attention_metadata, permutation=permutation
         )
@@ -169,14 +167,10 @@ class ContextParallelInnerGDN(
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-        max_num_fragments: int,
     ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global Gated DeltaNet sequence metadata."""
         return prepare_cp_linear_attention_metadata(
-            attention_metadata,
-            permutation=permutation,
-            max_num_fragments=max_num_fragments,
-            family="Gated DeltaNet",
+            attention_metadata, permutation=permutation, family="Gated DeltaNet"
         )
 
     def forward(
