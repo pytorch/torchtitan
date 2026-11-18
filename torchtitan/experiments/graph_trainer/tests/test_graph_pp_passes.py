@@ -325,6 +325,33 @@ def _assert_tensor_sequence_equal(
 
 
 class GraphPPPartitionTest(unittest.TestCase):
+    def test_mutation_alias_bases_follow_returned_in_place_and_out_tensors(self):
+        def step(x, y, out):
+            added = torch.ops.aten.add_.Tensor(x, y)
+            copied = torch.ops.aten.copy_.default(added, y)
+            viewed = torch.ops.aten.view.default(copied, [-1])
+            result = torch.ops.aten.add.out(x, y, out=out)
+            selected = torch.ops.aten.unbind.int(copied, 0)[0]
+            ambiguous = torch.ops.aten.append.t([x, y], out)[0]
+            return (
+                viewed,
+                result,
+                torch.ops.aten.clone.default(result),
+                selected,
+                ambiguous,
+            )
+
+        gm = fx.symbolic_trace(step)
+        placeholders = {
+            node.name: node for node in gm.graph.find_nodes(op="placeholder")
+        }
+        views, result, clone, selected, ambiguous = list(gm.graph.nodes)[-1].args[0]
+        self.assertIs(base_tensor_for_mutation_target(views), placeholders["x"])
+        self.assertIs(base_tensor_for_mutation_target(result), placeholders["out"])
+        self.assertIs(base_tensor_for_mutation_target(clone), clone)
+        self.assertIs(base_tensor_for_mutation_target(selected), placeholders["x"])
+        self.assertIs(base_tensor_for_mutation_target(ambiguous), ambiguous)
+
     def test_mutation_targets_follow_operator_schema(self) -> None:
         def mutation_step(
             x: torch.Tensor,

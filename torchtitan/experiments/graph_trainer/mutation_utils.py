@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 """Helpers for reasoning about schema-declared tensor mutations in FX graphs."""
 
+import operator
 from typing import Any
 
 import torch.fx as fx
@@ -158,12 +159,20 @@ def base_tensor_for_mutation_target(node: fx.Node) -> fx.Node:
             output
     """
 
-    while (
-        node.op == "call_function"
-        and hasattr(node.target, "is_view")
-        and node.target.is_view
-    ):
-        schema, bound_arguments = _schema_and_bound_arguments(node)
+    while node.op == "call_function":
+        schema_node = node
+        if node.target is operator.getitem and isinstance(node.args[0], fx.Node):
+            producer = node.args[0]
+            producer_schema, _ = _schema_and_bound_arguments(producer)
+            if (
+                producer_schema is None
+                or len(producer_schema.returns) != 1
+                or producer_schema.returns[0].alias_info is None
+                or producer_schema.returns[0].type.kind() != "ListType"
+            ):
+                break
+            schema_node = producer
+        schema, bound_arguments = _schema_and_bound_arguments(schema_node)
         if schema is None or len(schema.returns) != 1:
             break
         return_alias = schema.returns[0].alias_info
@@ -178,7 +187,12 @@ def base_tensor_for_mutation_target(node: fx.Node) -> fx.Node:
             argument_aliases = set(argument_alias.before_set) | set(
                 argument_alias.after_set
             )
-            if return_aliases.isdisjoint(argument_aliases):
+            aliases_tensor_list = (
+                not return_aliases
+                and schema.returns[0].type.kind() == "ListType"
+                and "*" in argument_alias.after_set
+            )
+            if return_aliases.isdisjoint(argument_aliases) and not aliases_tensor_list:
                 continue
             alias_sources.extend(
                 leaf
