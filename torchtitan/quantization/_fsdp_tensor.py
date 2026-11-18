@@ -155,6 +155,7 @@ __all__: list[str] = []
 # survive them so the parameter keeps its identity across FSDP bookkeeping.
 _FSDP_SHARDED_OPS = {
     torch.ops.aten.empty_like.default,
+    torch.ops.aten.new_empty.default,
     torch.ops.aten.new_zeros.default,
     torch.ops.aten.slice.Tensor,
     torch.ops.aten.copy_.default,
