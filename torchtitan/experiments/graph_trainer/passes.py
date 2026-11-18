@@ -166,6 +166,22 @@ def resolve_registered_graph_passes(pass_names: list[str]) -> list[Callable]:
     return passes
 
 
+def construct_mandatory_normalization_passes(*, use_flex_shard: bool) -> list[Callable]:
+    passes = [eliminate_dead_code_pass, canonicalize_graph_pass]
+    if use_flex_shard:
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_unshard_pass,
+            fold_flex_shard_gradient_casts_pass,
+        )
+
+        passes.extend(
+            [deduplicate_flex_shard_unshard_pass, fold_flex_shard_gradient_casts_pass]
+        )
+    else:
+        passes.append(deduplicate_fsdp_unshard_chains_pass)
+    return passes
+
+
 def compile_time_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
@@ -242,19 +258,10 @@ def compile_time_passes(
 
     passes = construct_mandatory_graph_passes()
     if include_mandatory_normalization:
-        deduplication = deduplicate_fsdp_unshard_chains_pass
-        if config.use_flex_shard_instead_simple_fsdp:
-            from torchtitan.experiments.graph_trainer.flex_shard import (
-                deduplicate_flex_shard_unshard_pass,
-            )
-
-            deduplication = deduplicate_flex_shard_unshard_pass
         passes.extend(
-            [
-                eliminate_dead_code_pass,
-                canonicalize_graph_pass,
-                deduplication,
-            ]
+            construct_mandatory_normalization_passes(
+                use_flex_shard=config.use_flex_shard_instead_simple_fsdp
+            )
         )
     ep_overlap_module_fqn: str | None = None
     if ep_overlap_enabled:

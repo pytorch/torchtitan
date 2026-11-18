@@ -1192,10 +1192,180 @@ class TestFlexShardScheduling(TestCase):
         from torchtitan.experiments.graph_trainer.flex_shard import (
             deduplicate_flex_shard_unshard_pass,
             flex_shard_fsdp_scheduling,
+            fold_flex_shard_gradient_casts_pass,
         )
 
         self.deduplicate = deduplicate_flex_shard_unshard_pass
         self.schedule = flex_shard_fsdp_scheduling
+        self.fold_gradient_casts = fold_flex_shard_gradient_casts_pass
+
+    def test_folds_lossless_upcasts_into_annotated_gradient_packing(self):
+        for dtype in (torch.bfloat16, torch.float16):
+            with self.subTest(dtype=dtype):
+
+                def pack(grad):
+                    out = torch.empty(2, 4, dtype=torch.float32)
+                    torch.ops.fsdp.chunk_cat_mixed_dtype(
+                        [grad.to(torch.float32)],
+                        0,
+                        2,
+                        out=out,
+                        num_leading_dims=[0],
+                    )
+                    return out
+
+                grad = torch.randn(4, 2, dtype=dtype)
+                gm = make_fx(pack)(grad)
+                packing = next(
+                    node
+                    for node in gm.graph.nodes
+                    if node.target is torch.ops.fsdp.chunk_cat_mixed_dtype.default
+                )
+                packing.meta["custom"] = {
+                    "flex_shard_action": "reduce_grad",
+                    "flex_shard_phase": "prepare",
+                }
+                expected = gm(grad)
+                self.fold_gradient_casts(gm)
+                self.assertEqual(gm(grad), expected, atol=0, rtol=0)
+                self.assertEqual(packing.args[0][0].op, "placeholder")
+                self.assertFalse(
+                    any(
+                        node.target is torch.ops.aten._to_copy.default
+                        for node in gm.graph.nodes
+                    )
+                )
+
+    def test_preserves_rounding_shared_casts_and_unannotated_packing(self):
+        for case in ("rounding", "shared", "unannotated", "wrong_phase"):
+            with self.subTest(case=case):
+
+                def pack(grad):
+                    cast = grad.to(torch.float32)
+                    out = torch.empty(2, 4, dtype=torch.float32)
+                    torch.ops.fsdp.chunk_cat_mixed_dtype(
+                        [cast], 0, 2, out=out, num_leading_dims=[0]
+                    )
+                    return (out, cast.square()) if case == "shared" else out
+
+                grad = torch.randn(
+                    4, 2, dtype=torch.float64 if case == "rounding" else torch.bfloat16
+                )
+                gm = make_fx(pack)(grad)
+                packing = next(
+                    node
+                    for node in gm.graph.nodes
+                    if node.target is torch.ops.fsdp.chunk_cat_mixed_dtype.default
+                )
+                if case != "unannotated":
+                    packing.meta["custom"] = {
+                        "flex_shard_action": "reduce_grad",
+                        "flex_shard_phase": "execute"
+                        if case == "wrong_phase"
+                        else "prepare",
+                    }
+                cast = packing.args[0][0]
+                expected = gm(grad)
+                self.fold_gradient_casts(gm)
+                self.assertIs(packing.args[0][0], cast)
+                self.assertEqual(gm(grad), expected, atol=0, rtol=0)
+
+    def test_preserves_gradient_read_before_alias_mutation(self):
+        def pack(grad):
+            cast = grad.to(torch.float32)
+            grad.view(-1).add_(1)
+            out = torch.empty(2, 4, dtype=torch.float32)
+            torch.ops.fsdp.chunk_cat_mixed_dtype(
+                [cast], 0, 2, out=out, num_leading_dims=[0]
+            )
+            return out
+
+        grad = torch.arange(8, dtype=torch.bfloat16).view(4, 2)
+        gm = make_fx(pack)(grad.clone())
+        packing = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.fsdp.chunk_cat_mixed_dtype.default
+        )
+        packing.meta["custom"] = {
+            "flex_shard_action": "reduce_grad",
+            "flex_shard_phase": "prepare",
+        }
+        cast = packing.args[0][0]
+        self.fold_gradient_casts(gm)
+        self.assertIs(packing.args[0][0], cast)
+        self.assertEqual(gm(grad.clone()), grad.float().view(2, 4), atol=0, rtol=0)
+
+    def test_preserves_upcast_of_mutating_operation_result(self):
+        def pack(grad):
+            cast = grad.add_(0).to(torch.float32)
+            grad.add_(1)
+            out = torch.empty(2, 4, dtype=torch.float32)
+            torch.ops.fsdp.chunk_cat_mixed_dtype([cast], 0, 2, out=out)
+            return out
+
+        grad = torch.arange(8, dtype=torch.bfloat16).view(4, 2)
+        gm = make_fx(pack)(grad.clone())
+        packing = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.fsdp.chunk_cat_mixed_dtype.default
+        )
+        packing.meta["custom"] = {
+            "flex_shard_action": "reduce_grad",
+            "flex_shard_phase": "prepare",
+        }
+        cast = packing.args[0][0]
+        self.fold_gradient_casts(gm)
+        self.assertIs(packing.args[0][0], cast)
+        self.assertEqual(gm(grad.clone()), grad.float().view(2, 4), atol=0, rtol=0)
+
+    def test_preserves_packing_source_that_aliases_its_output(self):
+        def pack(out):
+            grad = out.view(torch.bfloat16)[:8].view(4, 2)
+            cast = grad.to(torch.float32)
+            torch.ops.fsdp.chunk_cat_mixed_dtype([cast], 0, 2, out=out.view(2, 4))
+            return out
+
+        out = torch.arange(8, dtype=torch.float32)
+        gm = make_fx(pack)(out.clone())
+        packing = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.fsdp.chunk_cat_mixed_dtype.default
+        )
+        packing.meta["custom"] = {
+            "flex_shard_action": "reduce_grad",
+            "flex_shard_phase": "prepare",
+        }
+        cast = packing.args[0][0]
+        self.fold_gradient_casts(gm)
+        self.assertIs(packing.args[0][0], cast)
+        self.assertEqual(gm(out.clone()), pack(out.clone()), atol=0, rtol=0)
+
+    def test_preserves_gradient_read_through_aliased_tensor_list(self):
+        def pack(grad):
+            cast = grad.unbind(0)[0].to(torch.float32)
+            grad.add_(1)
+            out = torch.empty(2, 2, dtype=torch.float32)
+            torch.ops.fsdp.chunk_cat_mixed_dtype([cast], 0, 2, out=out)
+            return out
+
+        grad = torch.arange(8, dtype=torch.bfloat16).view(2, 4)
+        gm = make_fx(pack)(grad.clone())
+        packing = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.fsdp.chunk_cat_mixed_dtype.default
+        )
+        packing.meta["custom"] = {
+            "flex_shard_action": "reduce_grad",
+            "flex_shard_phase": "prepare",
+        }
+        cast = packing.args[0][0]
+        self.fold_gradient_casts(gm)
+        self.assertIs(packing.args[0][0], cast)
+        self.assertEqual(gm(grad.clone()), grad[0].float().view(2, 2), atol=0, rtol=0)
 
     def _bucket(self, graph, source, action, *, fqn="layer.weight", backward=False):
         first_node = list(graph.nodes)[-1]
@@ -1265,7 +1435,7 @@ class TestFlexShardScheduling(TestCase):
                 if mutation in ("input", "output"):
                     target = sibling if mutation == "input" else first[-1]
                     alias = graph.call_function(torch.ops.aten.alias.default, (target,))
-                    alias.meta["val"] = target.meta["val"].view_as(target.meta["val"])
+                    alias.meta["val"] = torch.empty_like(target.meta["val"])
                     write = graph.call_function(torch.ops.aten.zero_.default, (alias,))
                     write.meta["val"] = alias.meta["val"]
                 second = self._bucket(graph, param, "unshard")
@@ -1328,6 +1498,7 @@ class TestFlexShardScheduling(TestCase):
                 before = list(graph.nodes)
                 self.schedule(gm)
                 self.assertEqual(list(graph.nodes), before)
+
 
 class TestFlexShardGradientClipper(TestCase):
     def setUp(self):
@@ -1432,7 +1603,6 @@ class TestFlexShardGradientClipper(TestCase):
         with torch.no_grad():
             self.assertEqual(view.to_local().untyped_storage().nbytes(), 0)
         self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
-
 
 
 class TestFsdpDenseSchedulerPass(TestCase):

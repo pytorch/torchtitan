@@ -50,11 +50,9 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
-    canonicalize_graph_pass,
     compile_time_passes,
     construct_mandatory_graph_passes,
-    deduplicate_fsdp_unshard_chains_pass,
-    eliminate_dead_code_pass,
+    construct_mandatory_normalization_passes,
     final_inductor_compile_passes,
 )
 from torchtitan.models.base.model import BaseModel
@@ -305,21 +303,12 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     PagedStashManager.get_instance().current_stage_index = stage.stage_index
 
     compile_config: GraphTrainerCompileConfig = config.compile
-    deduplication = deduplicate_fsdp_unshard_chains_pass
-    if config.use_flex_shard_instead_simple_fsdp:
-        from torchtitan.experiments.graph_trainer.flex_shard import (
-            deduplicate_flex_shard_unshard_pass,
-        )
-
-        deduplication = deduplicate_flex_shard_unshard_pass
     traced.gm = apply_graph_passes(
         traced.gm,
         traced.example_inputs,
-        [
-            eliminate_dead_code_pass,
-            canonicalize_graph_pass,
-            deduplication,
-        ],
+        construct_mandatory_normalization_passes(
+            use_flex_shard=config.use_flex_shard_instead_simple_fsdp
+        ),
         compile_config=compile_config,
         respect_disable_passes=False,
     )

@@ -46,7 +46,10 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     FSDPGraphRegions,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import graph_outputs
-from torchtitan.experiments.graph_trainer.mutation_utils import mutation_target_nodes
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_target_nodes,
+)
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
@@ -266,6 +269,84 @@ def _collect_bucket_regions(graph: fx.Graph):
     return buckets
 
 
+def fold_flex_shard_gradient_casts_pass(
+    gm: fx.GraphModule, example_inputs: tuple | None = None
+) -> fx.GraphModule:
+    del example_inputs
+    for module in gm.modules():
+        if not isinstance(module, fx.GraphModule):
+            continue
+        folded = 0
+        positions = {node: index for index, node in enumerate(module.graph.nodes)}
+        writes = [
+            (
+                positions[node],
+                frozenset(
+                    value.untyped_storage()
+                    for target in mutation_target_nodes(node)
+                    for value in tree_leaves(target.meta.get("val"))
+                    if isinstance(value, torch.Tensor)
+                ),
+                frozenset(
+                    base_tensor_for_mutation_target(target)
+                    for target in mutation_target_nodes(node)
+                ),
+            )
+            for node in module.graph.nodes
+        ]
+        for node in module.graph.nodes:
+            if (
+                node.target is not torch.ops.fsdp.chunk_cat_mixed_dtype.default
+                or node.meta.get("custom", {}).get(FLEX_SHARD_META_ACTION)
+                != "reduce_grad"
+                or node.meta["custom"].get(FLEX_SHARD_META_PHASE) != "prepare"
+            ):
+                continue
+            output = node.kwargs["out"].meta["val"]
+            if output.dtype != torch.float32:
+                continue
+            tensors = list(node.args[0])
+            for index, cast in enumerate(tensors):
+                if (
+                    cast.target is not torch.ops.aten._to_copy.default
+                    or len(cast.users) != 1
+                ):
+                    continue
+                source = cast.args[0]
+                before, after = source.meta["val"], cast.meta["val"]
+                base = base_tensor_for_mutation_target(source)
+                schema = getattr(base.target, "_schema", None)
+                if (
+                    before.dtype not in (torch.bfloat16, torch.float16)
+                    or after.dtype != output.dtype
+                    or before.device != after.device
+                    or before.layout != after.layout
+                    or before.stride() != after.stride()
+                    or base.target is operator.getitem
+                    or (
+                        schema is not None
+                        and any(
+                            result.alias_info is not None for result in schema.returns
+                        )
+                    )
+                    or any(
+                        positions[cast] < position <= positions[node]
+                        and (before.untyped_storage() in storages or base in bases)
+                        for position, storages, bases in writes
+                    )
+                ):
+                    continue
+                tensors[index] = source
+                folded += 1
+            node.args = (tensors, *node.args[1:])
+        if folded:
+            module.graph.eliminate_dead_code()
+            module.graph.lint()
+            module.recompile()
+            logger.info("Folded %s gradient upcasts into FlexShard packing", folded)
+    return gm
+
+
 def deduplicate_flex_shard_unshard_pass(
     gm: fx.GraphModule, example_inputs: tuple | None = None
 ) -> fx.GraphModule:
@@ -281,14 +362,16 @@ def deduplicate_flex_shard_unshard_pass(
         if not isinstance(module, fx.GraphModule):
             continue
         graph = module.graph
-        storages = {
-            node: frozenset(
+        storages = {}
+        for node in graph.nodes:
+            storages[node] = frozenset(
                 value.untyped_storage()
                 for value in tree_leaves(node.meta.get("val"))
                 if isinstance(value, torch.Tensor)
             )
-            for node in graph.nodes
-        }
+            base = base_tensor_for_mutation_target(node)
+            if base is not node:
+                storages[node] |= storages[base]
         writes = {
             node: set().union(
                 *(storages[target] for target in mutation_target_nodes(node))
