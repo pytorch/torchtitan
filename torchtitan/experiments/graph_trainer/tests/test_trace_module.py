@@ -444,6 +444,34 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         accumulate_param_grads_([param], [graph_grad.view_as(graph_grad)])
         self.assertTrue(torch.equal(param.grad, torch.tensor([1.0, 2.0])))
 
+    def test_accumulate_param_grads_deduplicates_tied_gradient_views(self):
+        for clone_grads in (False, True):
+            with self.subTest(clone_grads=clone_grads):
+                param = nn.Parameter(torch.zeros(2, 3))
+                param.grad = torch.full_like(param, 5.0)
+                other_param = nn.Parameter(torch.zeros_like(param))
+                graph_grad = torch.arange(6.0).reshape(3, 2).t()
+                other_grad = torch.full_like(param, 2.0)
+
+                accumulate_param_grads_(
+                    [param, param, param, param, other_param],
+                    [
+                        graph_grad,
+                        graph_grad.view_as(graph_grad),
+                        other_grad,
+                        graph_grad.view_as(graph_grad),
+                        graph_grad,
+                    ],
+                    clone_grads_to_initialize_param_grad=clone_grads,
+                )
+                self.assertTrue(torch.equal(param.grad, 5.0 + graph_grad + other_grad))
+                self.assertTrue(torch.equal(other_param.grad, graph_grad))
+
+                accumulate_param_grads_([param, param], [graph_grad, graph_grad])
+                self.assertTrue(
+                    torch.equal(param.grad, 5.0 + 2 * graph_grad + other_grad)
+                )
+
 
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
     def _trace_mark_dynamic_value_range(self, *, min_value=None, max_value=None):

@@ -314,9 +314,14 @@ def accumulate_param_grads_(
         clone_grads_to_initialize_param_grad: Whether to initialize empty
             ``param.grad`` fields with clones instead of input aliases.
     """
+    sources: dict[int, list[torch.Tensor]] = {}
     for param, grad in zip(params, grads, strict=True):
         if grad is None:
             continue
+        param_sources = sources.setdefault(id(param), [])
+        if any(_is_same_tensor_view(source, grad) for source in param_sources):
+            continue
+        param_sources.append(grad)
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
         if param.grad is None:
             param.grad = grad.clone() if clone_grads_to_initialize_param_grad else grad
