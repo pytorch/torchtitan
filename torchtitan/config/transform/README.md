@@ -192,7 +192,8 @@ requirements.
 
 See [Configuration validation](../README.md#validation) for where validation
 belongs. `apply_transforms` validates the final trainer config after the last
-transform. The trainer validates it again after command-line overrides.
+transform. `ConfigLoader.load` validates again after launch options, and
+`apply_overrides` validates again after registered overrides.
 
 `__post_init__` also runs when a config is constructed. Set related training
 options before calling `apply_transforms`. It can then validate the final

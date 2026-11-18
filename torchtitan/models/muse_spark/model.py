@@ -18,26 +18,26 @@ from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
+    invariant_to_replicate,
+    spmd_dense_sp_enabled,
     spmd_local_context,
 )
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     FlexAttentionMetadata,
     GQAttention,
+    QKVLinear,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.flops import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
@@ -82,6 +82,71 @@ def build_dummy_audio_inputs(
     return waveforms_SC, waveform_padded_lengths_N
 
 
+class MuseSparkQKVLinear(Module):
+    """Fused q/k/v projection that returns the packed ``wqkv`` output.
+
+    ``MuseSparkAttention`` splits it inside its compiled q/k region, so the head copies fuse
+    into the q/k norms. The Config subclasses ``QKVLinear.Config``: the HF state-dict adapter
+    and the quantization transform find fused projections by that type.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QKVLinear.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__()
+        if config.n_heads % config.n_kv_heads != 0:
+            raise ValueError(
+                f"n_heads ({config.n_heads}) must be divisible by "
+                f"n_kv_heads ({config.n_kv_heads}) for fused QKV"
+            )
+        self.wqkv = config.wqkv.build()
+        self.head_dim = config.head_dim
+        self.heads_per_kv = config.n_heads // config.n_kv_heads
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        qkv = self.wqkv(x_TD)
+        # The split in MuseSparkAttention._prepare_query_key_value copies qkv with bare ops.
+        remat.recompute_needs_tensor(qkv)
+        return qkv
+
+
+@spmd.local_map(
+    out_types=(
+        (
+            {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+            spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        ),
+    )
+    * 3
+)
+def _split_qkv(
+    qkv: torch.Tensor, *, heads_per_kv: int, head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split the packed ``wqkv`` output into contiguous q, k and v, as ``QKVLinear`` does."""
+    # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim], R = heads_per_kv + 2.
+    # Use -1 for n_kv_heads so TP sharding is handled automatically.
+    num_tokens = qkv.shape[0]
+    with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
+        qkv = qkv.view(num_tokens, -1, heads_per_kv + 2, head_dim)
+        if spmd.is_type_checking():
+            spmd.assert_type(
+                qkv,
+                spmd.V,
+                spmd.PartitionSpec(("dp", "cp"), "tp", None, None),
+            )
+
+    local_num_tokens = qkv.shape[0]
+    xq, xk, xv = torch.split(qkv, [heads_per_kv, 1, 1], dim=-2)
+    # vLLM attention/KV-cache kernels read contiguous head-major memory.
+    return (
+        xq.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xk.reshape(local_num_tokens, -1, head_dim).contiguous(),
+        xv.reshape(local_num_tokens, -1, head_dim).contiguous(),
+    )
+
+
 class MuseSparkAttention(GQAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(GQAttention.Config):
@@ -119,13 +184,12 @@ class MuseSparkAttention(GQAttention):
         attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        query_TNH, key_TKH, value_TKH = self.qkv_linear(x_TD)
+        qkv = self.qkv_linear(x_TD)
         output_gate_TO = None
         if self.output_gate is not None:
             output_gate_TO = self.output_gate(x_TD)
 
-        remat.recompute_needs_tensor(query_TNH, key_TKH)
-        query_TNH, key_TKH = self._prepare_query_and_key(query_TNH, key_TKH, positions)
+        query_TNH, key_TKH, value_TKH = self._prepare_query_key_value(qkv, positions)
 
         output_TNH = remat.region(
             self.inner_attention,
@@ -155,17 +219,24 @@ class MuseSparkAttention(GQAttention):
         recompile_limit=16,
         options={"triton.autotune_pointwise": False},
     )
-    def _prepare_query_and_key(
+    def _prepare_query_key_value(
         self,
-        query_TNH: torch.Tensor,
-        key_TKH: torch.Tensor,
+        qkv: torch.Tensor,
         positions: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the query and key as attention reads them. Each step runs only if configured.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split qkv and return q, k, v as attention reads them. Steps after the split run only if configured.
 
-        query: q_norm -> * scale_query_by -> * position temperature -> RoPE
-        key:   k_norm -> RoPE
+        query: split -> q_norm -> * scale_query_by -> * position temperature -> RoPE
+        key:   split -> k_norm -> RoPE
+        value: split
         """
+        # The q/k copies fuse into the norms, and the norm backward writes the qkv grad
+        # directly.
+        query_TNH, key_TKH, value_TKH = _split_qkv(
+            qkv,
+            heads_per_kv=self.qkv_linear.heads_per_kv,
+            head_dim=self.qkv_linear.head_dim,
+        )
         if self.q_norm is not None or self.k_norm is not None:
             if self.q_norm is None or self.k_norm is None:
                 raise ValueError("MuseSparkAttention needs both q_norm and k_norm.")
@@ -188,7 +259,7 @@ class MuseSparkAttention(GQAttention):
 
         if self.rope is not None:
             query_TNH, key_TKH = self.rope(query_TNH, key_TKH, positions)
-        return query_TNH, key_TKH
+        return query_TNH, key_TKH, value_TKH
 
     @local_compile("muse_spark_attention_output", batch_invariant=False)
     def _flatten_attention_output(
@@ -214,14 +285,27 @@ class MuseSparkRMSNorm(RMSNorm):
     def __init__(self, config: Config):
         super().__init__(config)
         self.gain_center = config.gain_center
+        # Compiled code reads gain_center from this tensor, so every graph takes it as an
+        # input and saves the same tensors. A float is baked into layer 0's graph, and remat
+        # recompute of layer 0 can run layer 1's graph, which saves different tensors
+        # (CheckpointError). Eager keeps the float: SPMD typechecking rejects untyped tensors.
+        # TODO(pytorch/pytorch#166926): drop the copy once recompute reuses the forward's graph.
+        self._gain_center_tensor = torch.tensor(
+            config.gain_center, dtype=torch.float32, device="cpu"
+        )
 
     def _get_effective_weight(self) -> torch.Tensor | None:
         if self.weight is None:
             return None
+        if torch.compiler.is_compiling():
+            return self.weight + self._gain_center_tensor
         return self.weight + self.gain_center
 
-    # Limit 16, not the default 8: all residual-stream norms share this region and use 12 graphs.
-    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=16)
+    # Limit 32, not the default 8: all residual-stream norms share this region. Pretraining uses 12
+    # graphs (weight or none, 8192- or 4096-wide weight, FSDP-wrapped or plain). An RL trainer adds a
+    # no_grad log-prob pass and micro-batches of varying token counts: 22 graphs measured on Muse Spark
+    # with the dapo_math recipe's LoRA setup, so 16 fails the first training step (fullgraph=True).
+    @local_compile("muse_spark_rmsnorm", batch_invariant=False, recompile_limit=32)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         input_dtype = input.dtype
         effective_weight_D = self._get_effective_weight()
@@ -296,7 +380,7 @@ class MuseSparkNormPreservingResidualConnection(Module):
 class MuseSparkEmbeddingWithNorm(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        embedding: Embedding.Config
+        embedding: VocabParallelEmbedding.Config
         norm: MuseSparkRMSNorm.Config | None = None
         multiplier: float = 1.0
 
@@ -400,16 +484,13 @@ class MuseSparkTransformerBlock(TransformerBlock):
         return self.ffn_residual(stream_TD, ffn_branch_TD)
 
 
-class MuseSparkModel(MultimodalModel):
+class MuseSparkModel(Decoder):
+    """Muse Spark language model.
+
+    ``MuseSparkMultimodalModel`` adds the vision and audio encoders.
+    """
+
     state_dict_adapter_cls = MuseSparkStateDictAdapter
-    multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
-    pipeline_first_stage_module_fqns = (
-        "vision_encoder",
-        "vision_adapter",
-        "vision_projection",
-        "audio_encoder",
-        "perception_emb_norm",
-    )
 
     @classmethod
     def _register_optimizer_hooks(
@@ -420,29 +501,14 @@ class MuseSparkModel(MultimodalModel):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MultimodalModel.Config):
-        """Configure stage modalities consistently across ranks.
-
-        ``dataset_modalities`` is the union of modalities the current dataset can
-        supply, shared across ranks. Listed encoders always run, using dummy
-        inputs when locally absent, even on steps with no media on any rank.
-        Static participation and zero-valued dependencies keep FSDP all-gathers
-        and reduce-scatters aligned without a media-presence collective.
-        Unlisted encoders are skipped but retained in checkpoints.
-
-        TODO: Build only required encoders once checkpoint saving can preserve
-        weights for omitted encoders. Model-only loading supports omitted
-        encoders, but saving without an encoder drops its weights from subsequent
-        checkpoints. A decoder-only fine-tune would therefore lose pretrained
-        encoder weights needed for a later multimodal fine-tune.
-        """
-
+    class Config(Decoder.Config):
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
                 regions=[
                     "loss",
                     "fused_binary_activation",
                     "fp32_to_bf16_split",
+                    "moe_masked_output_postprocess",
                     "rope",
                     "muse_spark_attention_output",
                     "muse_spark_attention_qk",
@@ -455,10 +521,96 @@ class MuseSparkModel(MultimodalModel):
         )
         # pyrefly: ignore [bad-override]
         tok_embeddings: MuseSparkEmbeddingWithNorm.Config
+        # pyrefly: ignore [bad-override]
         layers: list[MuseSparkTransformerBlock.Config]
         residual_dtype: torch.dtype = torch.float32
         final_norm_input_dtype: torch.dtype | None = None
-        dataset_modalities: tuple[Literal["vision", "audio"], ...] = ()
+
+        def __post_init__(self) -> None:
+            super(MuseSparkModel.Config, self).__post_init__()
+            if self.enable_weight_tying:
+                raise ValueError(
+                    "Muse Spark does not support token embedding weight tying"
+                )
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.residual_dtype = config.residual_dtype
+        self.final_norm_input_dtype = config.final_norm_input_dtype
+
+    def forward_embeddings(
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`Decoder.forward_embeddings` with Muse Spark's residual and final-norm dtypes."""
+        hidden_TD = h.to(self.residual_dtype)
+
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
+        for layer in self.layers.values():
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(type(layer.attention.inner_attention))
+            )
+            hidden_TD = layer(
+                hidden_TD,
+                layer_attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
+
+        if self.norm is not None:
+            final_norm_input_dtype = (
+                self.final_norm_input_dtype
+                if self.final_norm_input_dtype is not None
+                else torch.bfloat16
+            )
+            hidden_TD = self._pre_lm_head_norm_and_gather(
+                hidden_TD.to(final_norm_input_dtype)
+            ).to(torch.bfloat16)
+
+        if self._skip_lm_head:
+            return hidden_TD
+        lm_head = self.lm_head
+        if lm_head is None:
+            return hidden_TD
+        return lm_head(hidden_TD.to(lm_head.weight.dtype))
+
+
+class MuseSparkMultimodalModel(MuseSparkModel, MultimodalModel):
+    """Muse Spark with its vision and audio encoders.
+
+    ``dataset_modalities`` is the union of modalities the current dataset can
+    supply, shared across ranks; it lists at least one (text-only training uses
+    ``MuseSparkModel``). Listed encoders always run, using dummy inputs when
+    locally absent, even on steps with no media on any rank. Static
+    participation and zero-valued dependencies keep FSDP all-gathers and
+    reduce-scatters aligned without a media-presence collective. Unlisted
+    encoders are skipped but retained in checkpoints.
+    """
+
+    multimodal_encoder_fqns = ("vision_encoder", "audio_encoder")
+
+    pipeline_first_stage_module_fqns = (
+        "vision_encoder",
+        "vision_adapter",
+        "vision_projection",
+        "audio_encoder",
+        "perception_emb_norm",
+    )
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MuseSparkModel.Config, MultimodalModel.Config):
+        dataset_modalities: tuple[Literal["vision", "audio"], ...]
         audio_encoder: MuseSparkAudioEncoder.Config | None = None
         vision_encoder: NaViTEncoder.Config | None = None
         vision_adapter: MuseSparkNaViTAdapter.Config | None = None
@@ -466,10 +618,11 @@ class MuseSparkModel(MultimodalModel):
         perception_emb_norm: MuseSparkRMSNorm.Config | None = None
 
         def __post_init__(self) -> None:
-            MultimodalModel.Config.__post_init__(self)
-            if self.enable_weight_tying:
+            super(MuseSparkMultimodalModel.Config, self).__post_init__()
+            if not self.dataset_modalities:
                 raise ValueError(
-                    "Muse Spark does not support token embedding weight tying"
+                    "dataset_modalities must list at least one modality; use "
+                    "MuseSparkModel (a text-only flavor) for text-only training."
                 )
             encoders = {"vision": self.vision_encoder, "audio": self.audio_encoder}
             for modality in self.dataset_modalities:
@@ -480,45 +633,59 @@ class MuseSparkModel(MultimodalModel):
                         f"dataset_modalities requires a configured {modality}_encoder"
                     )
 
-        def get_nparams_and_flops(
+        def build_flops_estimator(
             self,
-            model: nn.Module,
+            model: Module,
+            *,
             seq_len: int,
-        ) -> tuple[int, int]:
-            # Perception modules run per image or audio clip rather than per
-            # text token, so this remains a decoder-only MFU estimate.
-            muse_model = cast("MuseSparkModel", model)
-            nparams, active_nparams = get_nparams_and_active_nparams(
-                model,
-                modules_excluded_from_active_params=(
-                    muse_model.vision_encoder,
-                    muse_model.vision_adapter,
-                    muse_model.vision_projection,
-                    muse_model.perception_emb_norm,
-                    muse_model.audio_encoder,
-                ),
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
+
+            model = cast(MuseSparkMultimodalModel, model)
+            vision_outputs = (
+                model.vision_adapter,
+                model.vision_projection,
+                model.perception_emb_norm,
             )
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=attention.window_size,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
+            base_estimate = super(
+                MuseSparkMultimodalModel.Config, self
+            ).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_submodules=(*vision_outputs, *excluded_submodules),
+            )
+            vision_config = self.vision_encoder
+            vision_output_flops = sum(
+                active_parameter_flops_per_token(module)
+                for module in vision_outputs
+                if module is not None
+            )
+            audio_config = self.audio_encoder
+            audio_output_flops = (
+                active_parameter_flops_per_token(model.perception_emb_norm)
+                if model.perception_emb_norm is not None
+                else 0
+            )
+
+            def estimate(input_dict) -> int:
+                flops = base_estimate(input_dict)
+                if vision_config is not None:
+                    flops += (
+                        vision_config.get_num_output_tokens(input_dict)
+                        * vision_output_flops
+                    )
+                if audio_config is not None:
+                    flops += (
+                        audio_config.get_num_output_tokens(input_dict)
+                        * audio_output_flops
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.residual_dtype = config.residual_dtype
-        self.final_norm_input_dtype = config.final_norm_input_dtype
         self.vision_encoder: NaViTEncoder | None = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
@@ -546,7 +713,6 @@ class MuseSparkModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
@@ -559,11 +725,13 @@ class MuseSparkModel(MultimodalModel):
         loss_kwargs = batch.pop("loss_kwargs", {})
         special_tokens = batch.get("special_tokens")
         for input_name, placeholder_key, bank_indices_name in (
-            ("pixel_values", "image_id", "image_bank_indices_T"),
-            ("pixel_values_videos", "video_id", "video_bank_indices_T"),
+            ("pixel_values", "image_id", "image_vision_bank_indices_T"),
+            ("pixel_values_videos", "video_id", "video_vision_bank_indices_T"),
             ("waveforms", "audio_id", "audio_bank_indices_T"),
         ):
-            if batch.get(input_name) is None:
+            # RL microbatches provide the bank rows: several placeholder runs (the
+            # samples of a GRPO group) can share one encoded image.
+            if batch.get(input_name) is None or bank_indices_name in batch:
                 continue
             if special_tokens is None or placeholder_key not in special_tokens:
                 raise ValueError(
@@ -584,7 +752,6 @@ class MuseSparkModel(MultimodalModel):
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
             )
 
         perception_input_sharding = multimodal_input_sharding()
@@ -600,8 +767,8 @@ class MuseSparkModel(MultimodalModel):
             enable_sp=parallelism.enable_sequence_parallel
         )
         for bank_indices_name in (
-            "image_bank_indices_T",
-            "video_bank_indices_T",
+            "image_vision_bank_indices_T",
+            "video_vision_bank_indices_T",
             "audio_bank_indices_T",
         ):
             input_sharding[bank_indices_name] = bank_indices_placement
@@ -617,8 +784,8 @@ class MuseSparkModel(MultimodalModel):
         if parallelism.enable_sequence_parallel and parallelism_context.tp_enabled:
             tp_group = parallelism_context.get_dense_tp_mesh().get_group()
             for bank_indices_name in (
-                "image_bank_indices_T",
-                "video_bank_indices_T",
+                "image_vision_bank_indices_T",
+                "video_vision_bank_indices_T",
                 "audio_bank_indices_T",
             ):
                 if bank_indices_name in batch:
@@ -655,14 +822,45 @@ class MuseSparkModel(MultimodalModel):
         assert vision_projection is not None and perception_emb_norm is not None
         tok_embeddings = self.tok_embeddings
         assert tok_embeddings is not None
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
         vision_features_TO = vision_adapter(
-            vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3)
+            invariant_to_replicate(
+                vision_encoder(pixel_values_TP, grid_thw=grid_thw_I3),
+                MeshAxisName.CP,
+            )
         )
-        vision_embeds_TD = (
-            perception_emb_norm(vision_projection(vision_features_TO))
-            * tok_embeddings.multiplier
+        vision_embeds_TD = perception_emb_norm(vision_projection(vision_features_TO))
+        if spmd_dense_sp_enabled():
+            # Each rank selects vision rows for its own token shard.
+            vision_embeds_TD = invariant_to_replicate(vision_embeds_TD, MeshAxisName.TP)
+        return vision_embeds_TD * tok_embeddings.multiplier
+
+    def get_vision_embeds(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        grid_thw: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the vision tower, adapter and projection; return packed embeddings with
+        token counts.
+
+        Args:
+            pixel_values: Packed patches ``(total_num_patches, patch_dim)``.
+            grid_thw: Grid dimensions ``(num_items, 3)`` for ``[t, h, w]``.
+
+        Returns:
+            vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
+            num_tokens_per_item: ``(num_items,)`` token count per item.
+        """
+        vision_encoder = self.vision_encoder
+        if vision_encoder is None:
+            raise ValueError("Vision inputs were provided without a vision encoder.")
+        vision_embeds = self._get_visual_bank(
+            pixel_values_TP=pixel_values, grid_thw_I3=grid_thw
         )
-        return vision_embeds_TD
+        num_tokens_per_item = grid_thw.prod(-1) // vision_encoder.downsample_factor**2
+        return vision_embeds, num_tokens_per_item
 
     def _get_audio_bank(
         self,
@@ -680,10 +878,14 @@ class MuseSparkModel(MultimodalModel):
             waveforms_SC,
             waveform_padded_lengths_N=waveform_padded_lengths_N,
         )
-        audio_embeds_TD = (
-            perception_emb_norm(audio_features_TD) * tok_embeddings.multiplier
-        )
-        return audio_embeds_TD
+        # The encoder output is CP-invariant; each CP rank consumes it for its own
+        # token shard, so its gradient is summed across CP.
+        audio_features_TD = invariant_to_replicate(audio_features_TD, MeshAxisName.CP)
+        audio_embeds_TD = perception_emb_norm(audio_features_TD)
+        if spmd_dense_sp_enabled():
+            # Each rank selects audio rows for its own token shard.
+            audio_embeds_TD = invariant_to_replicate(audio_embeds_TD, MeshAxisName.TP)
+        return audio_embeds_TD * tok_embeddings.multiplier
 
     def _prepare_visual_embeds(
         self,
@@ -693,8 +895,8 @@ class MuseSparkModel(MultimodalModel):
         grid_thw: torch.Tensor | None,
         pixel_values_videos: torch.Tensor | None,
         grid_thw_videos: torch.Tensor | None,
-        image_bank_indices_T: torch.Tensor | None,
-        video_bank_indices_T: torch.Tensor | None,
+        image_vision_bank_indices_T: torch.Tensor | None,
+        video_vision_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Pack images and videos into one forward and fuse their output banks."""
         vision_encoder = self.vision_encoder
@@ -702,8 +904,8 @@ class MuseSparkModel(MultimodalModel):
         # Each set of indices refers to its own image or video bank.
         vision_inputs: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
         for pixels_TP, grid_I3, indices_T in (
-            (pixel_values, grid_thw, image_bank_indices_T),
-            (pixel_values_videos, grid_thw_videos, video_bank_indices_T),
+            (pixel_values, grid_thw, image_vision_bank_indices_T),
+            (pixel_values_videos, grid_thw_videos, video_vision_bank_indices_T),
         ):
             if pixels_TP is not None:
                 assert grid_I3 is not None and indices_T is not None
@@ -757,7 +959,9 @@ class MuseSparkModel(MultimodalModel):
     ) -> torch.Tensor:
         is_dummy = waveforms is None
         if waveforms is None:
-            audio_config = cast(MuseSparkModel.Config, self.config).audio_encoder
+            audio_config = cast(
+                MuseSparkMultimodalModel.Config, self.config
+            ).audio_encoder
             assert audio_config is not None
             waveforms, waveform_padded_lengths = build_dummy_audio_inputs(
                 patch_size=audio_config.patch_size,
@@ -788,13 +992,13 @@ class MuseSparkModel(MultimodalModel):
         grid_thw_videos: torch.Tensor | None,
         waveforms: torch.Tensor | None,
         waveform_padded_lengths: torch.Tensor | None,
-        image_bank_indices_T: torch.Tensor | None,
-        video_bank_indices_T: torch.Tensor | None,
+        image_vision_bank_indices_T: torch.Tensor | None,
+        video_vision_bank_indices_T: torch.Tensor | None,
         audio_bank_indices_T: torch.Tensor | None,
     ) -> torch.Tensor:
         """Fuse active perception banks, using dummies for absent local inputs."""
         dataset_modalities = cast(
-            "MuseSparkModel.Config", self.config
+            "MuseSparkMultimodalModel.Config", self.config
         ).dataset_modalities
         if (
             pixel_values is not None or pixel_values_videos is not None
@@ -811,8 +1015,8 @@ class MuseSparkModel(MultimodalModel):
                 grid_thw=grid_thw,
                 pixel_values_videos=pixel_values_videos,
                 grid_thw_videos=grid_thw_videos,
-                image_bank_indices_T=image_bank_indices_T,
-                video_bank_indices_T=video_bank_indices_T,
+                image_vision_bank_indices_T=image_vision_bank_indices_T,
+                video_vision_bank_indices_T=video_vision_bank_indices_T,
             )
 
         if "audio" in dataset_modalities:
@@ -840,8 +1044,8 @@ class MuseSparkModel(MultimodalModel):
         waveforms: torch.Tensor | None = None,
         waveform_lengths: torch.Tensor | None = None,
         waveform_padded_lengths: torch.Tensor | None = None,
-        image_bank_indices_T: torch.Tensor | None = None,
-        video_bank_indices_T: torch.Tensor | None = None,
+        image_vision_bank_indices_T: torch.Tensor | None = None,
+        video_vision_bank_indices_T: torch.Tensor | None = None,
         audio_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del waveform_lengths
@@ -856,46 +1060,16 @@ class MuseSparkModel(MultimodalModel):
                     grid_thw_videos=grid_thw_videos,
                     waveforms=waveforms,
                     waveform_padded_lengths=waveform_padded_lengths,
-                    image_bank_indices_T=image_bank_indices_T,
-                    video_bank_indices_T=video_bank_indices_T,
+                    image_vision_bank_indices_T=image_vision_bank_indices_T,
+                    video_vision_bank_indices_T=video_vision_bank_indices_T,
                     audio_bank_indices_T=audio_bank_indices_T,
                 )
         else:
             hidden_TD = tokens
-
-        hidden_TD = hidden_TD.to(self.residual_dtype)
-
-        with spmd.no_typecheck():
-            aux_loss_denominator = (
-                None if aux_loss_denominators is None else aux_loss_denominators[0]
-            )
-        for layer in self.layers.values():
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(type(layer.attention.inner_attention))
-            )
-            hidden_TD = layer(
-                hidden_TD,
-                layer_attention_metadata,
-                positions,
-                padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
-            )
-
-        if self.norm is not None:
-            final_norm_input_dtype = (
-                self.final_norm_input_dtype
-                if self.final_norm_input_dtype is not None
-                else torch.bfloat16
-            )
-            hidden_TD = self.norm(hidden_TD.to(final_norm_input_dtype)).to(
-                torch.bfloat16
-            )
-
-        if self._skip_lm_head:
-            return hidden_TD
-        lm_head = self.lm_head
-        if lm_head is None:
-            return hidden_TD
-        return lm_head(hidden_TD.to(lm_head.weight.dtype))
+        return self.forward_embeddings(
+            hidden_TD,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )

@@ -15,7 +15,12 @@ pytest.importorskip("fla")
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.qwen3_5 import build_model_config, MODEL_FLAVORS, Qwen35Model
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    MODEL_FLAVORS,
+    Qwen35Model,
+    Qwen35MultimodalModel,
+)
 from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.models.qwen3_8 import build_model_config as build_qwen3_8_model_config
 
@@ -35,7 +40,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     config = cast(
         Qwen35Model.Config,
         build_model_config(
-            "debugmodel_moe",
+            "debugmodel_moe_mm",
             parallelism=ParallelismConfig(
                 enable_sequence_parallel=enable_sp,
                 expert_parallel_degree=2 if enable_ep else 1,
@@ -56,48 +61,49 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     )
 
     assert shared_experts.sharding_config is not None
-    assert shared_experts.sharding_config.in_src_shardings is not None
-    assert shared_experts.sharding_config.in_dst_shardings is None
+    assert shared_experts.sharding_config.input_shardings is not None
     assert shared_experts.w13.sharding_config is not None
-    assert shared_experts.w13.sharding_config.in_src_shardings is not None
+    assert shared_experts.w13.sharding_config.input_shardings is not None
     assert shared_experts.gate.sharding_config is not None
-    assert shared_experts.gate.sharding_config.in_src_shardings is not None
+    assert shared_experts.gate.sharding_config.input_shardings is not None
     assert shared_experts.w2.sharding_config is not None
 
-    projection_input = shared_experts.w13.sharding_config.in_src_shardings["input"]
-    assert shared_experts.gate.sharding_config.in_src_shardings["input"] == (
+    projection_input = shared_experts.w13.sharding_config.input_shardings["input"]
+    assert shared_experts.gate.sharding_config.input_shardings["input"] == (
         projection_input
     )
-    assert shared_experts.w2.sharding_config.out_src_shardings is not None
-    assert _per_axis_types(shared_experts.w2.sharding_config.out_src_shardings)[
+    assert shared_experts.w2.sharding_config.output_shardings is not None
+    assert _per_axis_types(shared_experts.w2.sharding_config.output_shardings)[
         MeshAxisName.TP
     ] == (spmd.S(0) if enable_sp else spmd.P)
     assert (
-        shared_experts.w2.sharding_config.out_src_shardings
-        == shared_experts.sharding_config.out_src_shardings
+        shared_experts.w2.sharding_config.output_shardings
+        == shared_experts.sharding_config.output_shardings
     )
-    assert shared_experts.w2.sharding_config.out_dst_shardings is None
 
 
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     import spmd_types as spmd
     from spmd_types import SpmdType
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.linear import Linear
-    from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+    from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 
     config = cast(
-        Qwen35Model.Config,
-        build_model_config("debugmodel", parallelism=ParallelismConfig()),
+        Qwen35MultimodalModel.Config,
+        build_model_config("debugmodel_mm", parallelism=ParallelismConfig()),
     )
     vision_encoder = config.vision_encoder
-    assert vision_encoder is not None
 
-    assert type(vision_encoder.block.mlp.fc1) is Linear.Config
-    assert type(vision_encoder.block.mlp.fc2) is InvariantRowParallelLinear.Config
-    assert type(vision_encoder.block.attn.proj) is InvariantRowParallelLinear.Config
-    assert type(vision_encoder.merger.fc1) is Linear.Config
-    assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
+    assert type(vision_encoder.block.mlp.fc1) is ColumnParallelLinear.Config
+    assert type(vision_encoder.block.mlp.fc2) is RowParallelLinear.Config
+    assert type(vision_encoder.block.attn.proj) is RowParallelLinear.Config
+    assert type(vision_encoder.merger.fc1) is ColumnParallelLinear.Config
+    assert type(vision_encoder.merger.fc2) is RowParallelLinear.Config
+
+    # The column projections replicate their input themselves.
+    for projection in (vision_encoder.block.mlp.fc1, vision_encoder.merger.fc1):
+        sharding = projection.sharding_config
+        assert sharding is not None
 
     for projection in (
         vision_encoder.block.mlp.fc2,
@@ -106,8 +112,7 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     ):
         sharding = projection.sharding_config
         assert sharding is not None
-        assert sharding.out_dst_shardings is None
-        output_layout = sharding.out_src_shardings
+        output_layout = sharding.output_shardings
         assert isinstance(output_layout, SpmdType)
         assert output_layout.local_type[MeshAxisName.CP] == spmd.R
         assert output_layout.local_type[MeshAxisName.TP] == spmd.I
@@ -120,7 +125,7 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
     config = cast(
         Qwen35Model.Config,
         build_model_config(
-            "debugmodel",
+            "debugmodel_mm",
             parallelism=ParallelismConfig(enable_sequence_parallel=enable_sp),
         ),
     )
@@ -136,8 +141,8 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
         assert attention.sharding_config is not None
         assert output_projection.sharding_config is not None
         assert (
-            attention.sharding_config.out_src_shardings
-            == output_projection.sharding_config.out_src_shardings
+            attention.sharding_config.output_shardings
+            == output_projection.sharding_config.output_shardings
         )
 
 
@@ -156,10 +161,10 @@ class _RecordingVisionEncoder(nn.Module):
         return self.patch_embed(pixel_values)
 
 
-def _small_qwen35_model() -> Qwen35Model:
+def _small_qwen35_model() -> Qwen35MultimodalModel:
     config = cast(
-        Qwen35Model.Config,
-        build_model_config("debugmodel", seq_len=8, parallelism=ParallelismConfig()),
+        Qwen35MultimodalModel.Config,
+        build_model_config("debugmodel_mm", seq_len=8, parallelism=ParallelismConfig()),
     )
     config = replace(
         config,
@@ -167,7 +172,6 @@ def _small_qwen35_model() -> Qwen35Model:
         tok_embeddings=replace(config.tok_embeddings, num_embeddings=8),
         lm_head=replace(config.lm_head, out_features=8),
         layers=[],
-        vision_encoder=None,
     )
     model = config.build()
     model.init_states()
@@ -180,15 +184,25 @@ def _small_qwen35_model() -> Qwen35Model:
 def test_qwen35_registry_keeps_released_flavors() -> None:
     assert set(MODEL_FLAVORS) == {
         "debugmodel",
+        "debugmodel_mm",
         "debugmodel_moe",
+        "debugmodel_moe_mm",
         "0.8B",
+        "0.8B_mm",
         "2B",
+        "2B_mm",
         "4B",
+        "4B_mm",
         "9B",
+        "9B_mm",
         "27B",
+        "27B_mm",
         "35B-A3B",
+        "35B-A3B_mm",
         "122B-A10B",
+        "122B-A10B_mm",
         "397B-A17B",
+        "397B-A17B_mm",
     }
 
 

@@ -50,28 +50,22 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
     # HuggingFace permutation function (exact copy from their conversion script)
     @dtensor_safe
-    def _permute(self, w, n_heads_arg, dim1=None, dim2=None):
-        if dim1 is None:
-            dim1 = w.shape[0]
-        if dim2 is None:
-            dim2 = w.shape[1]
+    def _permute(self, w, n_heads_arg):
+        rows, cols = w.shape
         return (
-            w.view(n_heads_arg, dim1 // n_heads_arg // 2, 2, dim2)
+            w.view(n_heads_arg, rows // n_heads_arg // 2, 2, cols)
             .transpose(1, 2)
-            .reshape(dim1, dim2)
+            .reshape(rows, cols)
             .clone()
         )
 
     @dtensor_safe
-    def _reverse_permute(self, w, n_heads_arg, dim1=None, dim2=None):
-        if dim1 is None:
-            dim1 = w.shape[0]
-        if dim2 is None:
-            dim2 = w.shape[1]
+    def _reverse_permute(self, w, n_heads_arg):
+        rows, cols = w.shape
         return (
-            w.view(n_heads_arg, 2, dim1 // n_heads_arg // 2, dim2)
+            w.view(n_heads_arg, 2, rows // n_heads_arg // 2, cols)
             .transpose(1, 2)
-            .reshape(dim1, dim2)
+            .reshape(rows, cols)
         )
 
     def to_hf(
@@ -87,8 +81,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
-        dim = self.model_config.dim  # pyrefly: ignore [missing-attribute]
-        head_dim = attn.head_dim or dim // n_heads
         hf_state_dict = {}
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items() if v is not None}
@@ -107,8 +99,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 if abstract_key == "layers.{}.attention.qkv_linear.wq.weight":
                     value = self._permute(value, n_heads)
                 if abstract_key == "layers.{}.attention.qkv_linear.wk.weight":
-                    key_value_dim = head_dim * n_kv_heads
-                    value = self._permute(value, n_kv_heads, key_value_dim, dim)
+                    value = self._permute(value, n_kv_heads)
 
                 new_key = new_key.format(layer_num)
             else:
@@ -143,8 +134,6 @@ class Llama3StateDictAdapter(StateDictAdapter):
         attn = self.model_config.layers[0].attention
         n_heads = attn.n_heads
         n_kv_heads = attn.n_kv_heads if attn.n_kv_heads is not None else n_heads
-        dim = self.model_config.dim  # pyrefly: ignore [missing-attribute]
-        head_dim = attn.head_dim or dim // n_heads
         state_dict = {}
 
         for key, value in hf_state_dict.items():
@@ -157,8 +146,7 @@ class Llama3StateDictAdapter(StateDictAdapter):
                 if abstract_key == "model.layers.{}.self_attn.q_proj.weight":
                     value = self._reverse_permute(value, n_heads)
                 if abstract_key == "model.layers.{}.self_attn.k_proj.weight":
-                    key_value_dim = head_dim * n_kv_heads
-                    value = self._reverse_permute(value, n_kv_heads, key_value_dim, dim)
+                    value = self._reverse_permute(value, n_kv_heads)
 
                 new_key = self.from_hf_map[abstract_key]
                 if new_key is None:

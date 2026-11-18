@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_remat import ActivationRematConfig
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.base.module import Module
 
@@ -23,6 +24,121 @@ __all__ = [
     "validate_context_parallel",
     "validate_model_training_config",
 ]
+
+
+def _collect_model_layouts(
+    model: Module.Config,
+) -> list[tuple[str, str, set[MeshAxisName]]]:
+    """Collect every SPMD layout declared by the model's sharding configs.
+
+    Returns ``(fqn, field, axes)`` triples, where ``fqn`` mirrors the module
+    FQN ``build()`` would produce and ``field`` names the ShardingConfig
+    field holding the layout.
+    """
+    from torchtitan.distributed.spmd_types import spmd_axes
+    from torchtitan.models.base.module import Module
+
+    layouts = []
+    # recurse=True: the root config itself is a Module.Config, and the
+    # default stops descending into a matching subtree.
+    for fqn, cfg, _, _ in model.traverse(Module.Config, recurse=True):
+        sharding = cfg.sharding_config
+        if sharding is None:
+            continue
+        fields = [
+            (f"state_shardings[{key}]", layout)
+            for key, layout in sharding.state_shardings.items()
+        ]
+        if sharding.input_shardings is not None:
+            fields.extend(
+                (f"input_shardings[{key}]", layout)
+                for key, layout in sharding.input_shardings.items()
+            )
+        output = sharding.output_shardings
+        if output is not None:
+            fields.extend(
+                (f"output_shardings[{i}]", layout)
+                for i, layout in enumerate(
+                    output if isinstance(output, tuple) else (output,)
+                )
+            )
+        for field, layout in fields:
+            layouts.append((fqn, field, set(spmd_axes(layout))))
+    return layouts
+
+
+def _validate_declared_parallel_axes(
+    model: Module.Config, parallelism: ParallelismConfig
+) -> None:
+    """Reject parallelism degrees the model cannot run.
+
+    The check runs per layout, not over the union of all layouts: a layout
+    that never mentions an axis is replicated over that axis, so a model
+    that is only partly sharded must not pass.
+
+    Dense and sparse layouts get different treatment. When
+    ``expert_parallel_degree > 1``, layouts on ``routed_experts``
+    submodules (``w13``, ``w2``, postprocess, and Dist-MoE children)
+    live in the sparse ``{dp_replicate, edp_shard, ep}`` region.
+    When EP is off, those weights use the dense mesh, so they are
+    checked as dense layouts. Activation contracts on the
+    ``routed_experts`` container and all other modules always use the
+    dense ``{dp, cp, tp}`` mesh. For each enabled degree in that
+    region, every layout must name the axis explicitly.
+
+    A config built with ``expert_parallel_degree == 1`` gets dense expert
+    weight placements, so validating it at ``expert_parallel_degree > 1``
+    fails here instead of silently ignoring the EP degree at runtime.
+    """
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+    from torchtitan.models.common.moe import MoE
+
+    p = parallelism
+    model_name = type(model).__qualname__
+    # degree != 1 also covers dp_shard == -1.
+    dense_required = [
+        axis
+        for axis, degree in (
+            (MeshAxisName.TP, p.tensor_parallel_degree),
+            (MeshAxisName.CP, p.context_parallel_degree),
+            (MeshAxisName.DP_REPLICATE, p.data_parallel_replicate_degree),
+            (MeshAxisName.DP_SHARD, p.data_parallel_shard_degree),
+        )
+        if degree != 1
+    ]
+    # The sparse region and the MoE check come from the same traversal, so
+    # Dist-MoE (which swaps the routed_experts config type) is covered too.
+    sparse_prefixes = tuple(
+        f"{fqn}.routed_experts." if fqn else "routed_experts."
+        for fqn, _, _, _ in model.traverse(MoE.Config)
+    )
+    sparse_required = []
+    if p.expert_parallel_degree > 1:
+        if not sparse_prefixes:
+            raise ValueError(
+                f"{model_name} has no routed experts; set "
+                "parallelism.expert_parallel_degree to 1 (got "
+                f"{p.expert_parallel_degree})."
+            )
+        # The mesh keeps edp_shard alive whenever EP is enabled.
+        sparse_required = [MeshAxisName.EP, MeshAxisName.EDP_SHARD]
+        if p.data_parallel_replicate_degree > 1:
+            sparse_required.append(MeshAxisName.DP_REPLICATE)
+
+    for fqn, field, axes in _collect_model_layouts(model):
+        if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
+            required = sparse_required
+        else:
+            required = dense_required
+            if MeshAxisName.DP in axes:  # logical dp folds dp_replicate and dp_shard
+                axes = axes | {MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD}
+        for axis in required:
+            if axis not in axes:
+                raise ValueError(
+                    f"{model_name} declares no '{axis.value}' sharding in "
+                    f"{fqn} ({field}), but that mesh axis is active. Set its "
+                    "parallelism degree to 1, or declare the axis on that layout."
+                )
 
 
 def validate_model_training_config(
@@ -45,17 +161,7 @@ def validate_model_training_config(
         LocalTokenDispatcher,
     )
 
-    model_context_length = getattr(model, "max_context_length", None)
-    if (
-        model_context_length is not None
-        and training.max_context_length != model_context_length
-    ):
-        raise ValueError(
-            "training.max_context_length must equal model.max_context_length; "
-            f"got {training.max_context_length} and {model_context_length}. "
-            "Choose the training length when constructing the model config so "
-            "the data path, RoPE cache, and inference engine stay aligned."
-        )
+    _validate_declared_parallel_axes(model, parallelism)
 
     if isinstance(model, Decoder.Config):
         if model.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:

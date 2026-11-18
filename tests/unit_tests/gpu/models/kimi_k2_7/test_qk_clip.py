@@ -290,6 +290,8 @@ class QKClipDistributedTest(DTensorTestBase):
         Building the replicated scales with ``distribute_tensor`` instead of
         ``from_local`` would broadcast once per weight per step, so this asserts
         the packed maxima all-reduce is the only collective ``qk_clip`` issues.
+        The head count is not a multiple of the shard count, so ``Shard(0)``
+        splits a head across ranks.
         """
         mesh = init_device_mesh(
             self.device_type,
@@ -297,7 +299,7 @@ class QKClipDistributedTest(DTensorTestBase):
             mesh_dim_names=("dp_shard",),
         )
         device = torch.device(self.device_type, self.rank)
-        num_heads = self.world_size
+        num_heads = self.world_size + 1
         qk_nope_head_dim, qk_rope_head_dim, v_head_dim, in_features = 2, 1, 2, 2
         num_layers = 4
 
@@ -329,8 +331,10 @@ class QKClipDistributedTest(DTensorTestBase):
             attention.inner_attention.wkv_b = weight_module(
                 num_heads * (qk_nope_head_dim + v_head_dim)
             )
+            # Head h has max logit 400 * 4**h, so a head given another head's
+            # scale fails the value check below.
             attention.inner_attention.inner_attention.max_attention_logits_H.append(
-                torch.full((num_heads,), 400.0, device=device)
+                400.0 * 4.0 ** torch.arange(num_heads, device=device)
             )
             model.add_module(f"layer_{layer_id}", attention)
 
@@ -344,3 +348,20 @@ class QKClipDistributedTest(DTensorTestBase):
         # One packed MAX all-reduce covers every layer and head; the 8 weights
         # this model clips must add nothing on top of it.
         self.assertEqual(total, 1, f"expected one collective, got {collectives}")
+        # Head h gets the scale 100 / (400 * 4**h) = 4**-(h + 1), and
+        # alpha = 0.5 makes its NoPE scale 2**-(h + 1).
+        q_row_scales, kv_row_scales = [], []
+        for h in range(num_heads):
+            q_row_scales += [2.0 ** -(h + 1)] * qk_nope_head_dim
+            q_row_scales += [4.0 ** -(h + 1)] * qk_rope_head_dim
+            kv_row_scales += [2.0 ** -(h + 1)] * qk_nope_head_dim + [1.0] * v_head_dim
+        for weight, row_scales in (
+            (attention.wq_b.weight, q_row_scales),
+            (attention.inner_attention.wkv_b.weight, kv_row_scales),
+        ):
+            torch.testing.assert_close(
+                weight.full_tensor(),
+                torch.tensor(row_scales, device=device)[:, None].expand(
+                    -1, in_features
+                ),
+            )

@@ -23,8 +23,10 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
+from torchtitan.components.checkpointer.utils import canonical_fqn
 
 from torchtitan.config import CallableFunction, Configurable
+from torchtitan.models.base.module import Module
 from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -155,6 +157,32 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
 
+def export_state_dict(
+    state_dict: dict[str, Any], *, dtype: torch.dtype, model_parts: list[nn.Module]
+) -> dict[str, Any]:
+    """Cast the floating-point tensors of a model state dict to ``dtype``.
+
+    Parameters of ``model_parts`` listed in ``preserve_dtype_params`` are never
+    cast to a lower precision. Model parts that are not a ``Module`` list none.
+    """
+    preserve_dtype_keys = {
+        canonical_fqn(key)
+        for model in model_parts
+        if isinstance(model, Module)
+        for key, _ in model.named_preserve_dtype_params()
+    }
+    exported = {}
+    for key, value in state_dict.items():
+        if isinstance(value, torch.Tensor) and value.is_floating_point():
+            value = value.to(
+                torch.promote_types(value.dtype, dtype)
+                if key in preserve_dtype_keys
+                else dtype
+            )
+        exported[key] = value
+    return exported
+
+
 @runtime_checkable
 class CheckpointStorage(Protocol):
     """The path operations a checkpoint manager needs from its storage.
@@ -234,6 +262,24 @@ class BaseCheckpointManager(Configurable, ABC):
             raise ValueError(
                 "extra_states contains checkpoint-manager-owned keys: "
                 f"{sorted(collisions)}"
+            )
+
+    @staticmethod
+    def _validate_hf_export(
+        model_parts: list[nn.Module], *, last_save_in_hf: bool
+    ) -> None:
+        """Reject an HF export of a model with frozen parameters, e.g. a LoRA model.
+
+        State dict adapters do not map LoRA adapters to HF keys, so the export would
+        hold only the base weights.
+        """
+        # TODO: export LoRA adapters in PEFT format.
+        if last_save_in_hf and any(
+            not p.requires_grad for part in model_parts for p in part.parameters()
+        ):
+            raise ValueError(
+                "checkpointer.last_save_in_hf does not support models with frozen "
+                "parameters (e.g. LoRA) yet: the export would drop the LoRA adapters."
             )
 
     @torch.no_grad()

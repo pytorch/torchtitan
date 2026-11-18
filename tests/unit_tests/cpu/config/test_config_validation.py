@@ -9,16 +9,21 @@ from unittest import mock
 
 import pytest
 
+from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.validator import Validator
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.validation import validate_model_training_config
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
+from torchtitan_recipes.data import c4_document_capacity
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
+from torchtitan_recipes.tests.models.flux import flux_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
@@ -41,8 +46,11 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_microbatch_per_dp_rank=0)
     with pytest.raises(ValueError, match="must be -1 or greater than 0"):
         TrainingConfig(num_tokens_per_train_step=0)
-    with pytest.raises(ValueError, match="must be greater than 0"):
-        TrainingConfig(max_context_length=0)
+
+
+def test_precision_rejects_bf16_storage_with_fp32_compute() -> None:
+    with pytest.raises(ValueError, match="fp32 compute needs fp32 parameters"):
+        PrecisionConfig(dtype="bfloat16", param_dtype="float32")
 
 
 def test_per_group_accelerator_graph_config_restrictions() -> None:
@@ -114,6 +122,25 @@ def test_graph_trainer_rejects_per_group_accelerator_graphs() -> None:
         )
 
 
+def test_seed_checkpoint_requires_a_saving_checkpointer() -> None:
+    config = llama3_debugmodel()
+    config.create_seed_checkpoint = True
+    config.checkpointer = None
+    with pytest.raises(
+        ValueError, match="create_seed_checkpoint requires a checkpointer"
+    ):
+        config.__post_init__()
+
+    config.checkpointer = CheckpointManager.Config(load_only=True)
+    with pytest.raises(
+        ValueError, match="create_seed_checkpoint requires a checkpointer"
+    ):
+        config.__post_init__()
+
+    config.checkpointer = CheckpointManager.Config()
+    config.__post_init__()
+
+
 def test_accelerator_graphs_allow_pipeline_validation() -> None:
     config = llama3_debugmodel()
     config.parallelism.pipeline_parallel_degree = 2
@@ -125,8 +152,18 @@ def test_accelerator_graphs_allow_pipeline_validation() -> None:
 
 
 def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
-    config = deepseek_v3_debugmodel()
-    config.parallelism.expert_parallel_degree = 2
+    # Build with the parallelism being validated: the MoE sharding (in
+    # particular the routed-expert EP placements) is derived at build time
+    # and must not be patched afterwards.
+    config = deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    # The builder disables accelerator graphs for EP > 1; this test needs
+    # them on to exercise the dispatcher check.
+    config.training.disable_accelerator_graphs = False
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="without CPU synchronization"
@@ -136,7 +173,6 @@ def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
 
 def test_accelerator_graphs_allow_nonblocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
-    config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True):
         config.__post_init__()
@@ -146,11 +182,64 @@ def test_accelerator_graphs_reject_blocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
     for _, dispatcher, _, _ in config.model.traverse(HybridEPTokenDispatcher.Config):
         dispatcher.non_blocking_capacity_factor = None
-    config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="non_blocking_capacity_factor"
     ):
+        config.__post_init__()
+
+
+def test_ep_off_built_moe_rejects_ep_gt1() -> None:
+    # A MoE config built with expert_parallel_degree == 1 gets dense
+    # routed-expert weight placements; validating it at EP > 1 must raise
+    # instead of silently ignoring the EP degree.
+    config = deepseek_v3_debugmodel()
+    with pytest.raises(ValueError, match="declares no 'ep' sharding"):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(expert_parallel_degree=2),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+
+def test_ep_off_routed_experts_checked_as_dense() -> None:
+    # When EP is off, routed-expert weights live on the dense mesh, so a
+    # layout under <moe>.routed_experts. that omits an active dense axis
+    # must raise (the same silently-replicated gap this check closes
+    # everywhere else).
+    import spmd_types as spmd
+
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+    from torchtitan.models.common.moe import MoE
+
+    config = deepseek_v3_debugmodel()
+    _, moe_cfg, _, _ = next(iter(config.model.traverse(MoE.Config)))
+    sharding = moe_cfg.routed_experts.w13.sharding_config
+    assert sharding is not None
+    # w13.weight is 3-D; the validator only reads the named axes.
+    sharding.state_shardings["weight"] = spmd.SpmdType(
+        {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+        partition_spec=spmd.PartitionSpec(None, None, None),
+    )
+    with pytest.raises(ValueError, match="declares no 'tp' sharding"):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(tensor_parallel_degree=2),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+
+def test_flux_pipeline_parallel_degree_gt1_raises() -> None:
+    config = flux_debugmodel()
+    config.parallelism.pipeline_parallel_degree = 2
+
+    with pytest.raises(ValueError, match="does not support pipeline parallelism"):
         config.__post_init__()
 
 
@@ -220,10 +309,10 @@ def test_varlen_accelerator_graphs_require_document_bound() -> None:
 def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
     with pytest.raises(ValueError, match="distinct_seed_mesh_axes"):
         TrainingEngine.Config(
-            training=TrainingConfig(enable_cpu_offload=True),
+            parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         )
 
     TrainingEngine.Config(
-        training=TrainingConfig(enable_cpu_offload=True),
+        parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
     )

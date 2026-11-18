@@ -6,7 +6,6 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
@@ -14,6 +13,10 @@ import torch.nn as nn
 from spmd_types.checker import typecheck
 from torch.nn.attention.flex_attention import create_mask
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.vision_processor import (
+    PixelBudgetResize,
+    VisionProcessor,
+)
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.models.common.linear import Linear
@@ -27,13 +30,13 @@ from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import create_block_diagonal_mask
 from torchtitan.models.kimi_k2_7.model import KimiK25Model
 from torchtitan.models.kimi_k2_7.vision_encoder import (
-    _compute_2d_rope_cache as _compute_kimi_2d_rope_cache,
+    _compute_2d_positions as _compute_kimi_2d_positions,
     _compute_learned_pos_embeds as _compute_kimi_learned_pos_embeds,
     _tpool_patch_merger,
 )
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
 from torchtitan.models.qwen3_5.vision_encoder import (
-    _compute_2d_rope_cache,
+    _compute_2d_positions,
     _compute_learned_pos_embeds,
     PatchMerger,
 )
@@ -118,7 +121,7 @@ class TestPackedVision(unittest.TestCase):
                 self.num_calls += 1
                 return self.patch_embed(pixel_values)
 
-        for model_type in (KimiK25Model, KimiK3Model):
+        for model_type in (KimiK25Model, KimiK3MultimodalModel):
             with self.subTest(model_type=model_type.__name__):
                 model = model_type.__new__(model_type)
                 nn.Module.__init__(model)
@@ -151,12 +154,9 @@ class TestPackedVision(unittest.TestCase):
             num_tokens_per_microbatch=8,
             max_context_length=4,
             num_mtp_layers=0,
+            vision_processor=None,
         )
-        collator = MultiModalCollator.Config(
-            patch_size=1,
-            temporal_patch_size=1,
-            spatial_merge_size=1,
-        ).build(context=context)
+        collator = MultiModalCollator.Config().build(context=context)
         batch = [
             {
                 "input_ids": torch.tensor([1, 2, 3, 4, 5]),
@@ -184,12 +184,9 @@ class TestPackedVision(unittest.TestCase):
             num_tokens_per_microbatch=10,
             max_context_length=4,
             num_mtp_layers=0,
+            vision_processor=None,
         )
-        collator = MultiModalCollator.Config(
-            patch_size=1,
-            temporal_patch_size=1,
-            spatial_merge_size=1,
-        ).build(context=context)
+        collator = MultiModalCollator.Config().build(context=context)
         batch = [
             {
                 "input_ids": torch.tensor([1, 2, 3]),
@@ -207,45 +204,28 @@ class TestPackedVision(unittest.TestCase):
         # The tail is padding regardless of how its positions were filled in.
         torch.testing.assert_close(padding_mask, torch.tensor([False] * 3 + [True] * 7))
 
-    def test_collator_concatenates_patches(self) -> None:
-        patches_0 = torch.arange(12).view(3, 4)
-        patches_1 = torch.arange(8).view(2, 4) + 20
-        grid_0 = torch.tensor([1, 1, 3])
-        grid_1 = torch.tensor([1, 1, 2])
-        tokenizer = type("Tokenizer", (), {"pad_id": 99})()
-        context = SimpleNamespace(
-            tokenizer=tokenizer,
-            num_tokens_per_microbatch=8,
-            max_context_length=4,
-            num_mtp_layers=0,
-        )
-        collator = MultiModalCollator.Config(
-            patch_size=1,
-            temporal_patch_size=1,
-            spatial_merge_size=1,
-        ).build(context=context)
-
-        with patch(
-            "torchtitan.components.data.multimodal.mm_collator.vision_to_patches",
-            side_effect=[(patches_0, grid_0), (patches_1, grid_1)],
-        ):
-            packed, grids = collator.collate_images([torch.empty(0), torch.empty(0)])
-
-        torch.testing.assert_close(packed, torch.cat([patches_0, patches_1]))
-        torch.testing.assert_close(grids, torch.stack([grid_0, grid_1]))
-
     def test_collator_counts_partial_temporal_patch(self) -> None:
-        collator = MultiModalCollator.Config(
-            max_images_per_microbatch=1,
+        resize = PixelBudgetResize.Config(min_pixels=65_536, max_pixels=16_777_216)
+        vision_processor = VisionProcessor.Config(
+            patch_size=1,
             temporal_patch_size=2,
-        ).build(
+            spatial_merge_size=1,
+            image_mean=(0.5, 0.5, 0.5),
+            image_std=(0.5, 0.5, 0.5),
+            resize=resize,
+            patch_order="block",
+            video_resize=resize,
+        ).build()
+        collator = MultiModalCollator.Config(max_images_per_microbatch=1).build(
             context=SimpleNamespace(
                 tokenizer=None,
                 num_tokens_per_microbatch=0,
                 max_context_length=0,
                 num_mtp_layers=0,
+                vision_processor=vision_processor,
             )
         )
+        # Three frames at two frames per temporal patch are two vision entries.
         batch = [{"pixel_values_videos": [torch.empty(3, 1, 1, 1)]}]
 
         with self.assertRaisesRegex(ValueError, "2 vision entries"):
@@ -284,15 +264,16 @@ class TestPackedVision(unittest.TestCase):
             spatial_merge_size=1,
             dim=4,
         )
-        rope_cache = _compute_2d_rope_cache(
-            torch.randn(2, 2),
+        positions = _compute_2d_positions(
             grids,
             spatial_merge_size=1,
-            head_dim=8,
+            device=torch.device("cpu"),
         )
 
         self.assertEqual(learned_pos.shape, (12, 4))
-        self.assertEqual(rope_cache.shape, (12, 1, 16))
+        torch.testing.assert_close(
+            positions, torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]]).repeat(3, 1)
+        )
 
     def test_qwen_patch_merger_keeps_packed_order(self) -> None:
         merger = PatchMerger(
@@ -319,10 +300,12 @@ class TestPackedVision(unittest.TestCase):
         learned_pos = _compute_kimi_learned_pos_embeds(
             torch.randn(2, 2, 4), grids, interpolation_mode="bicubic"
         )
-        rope_cache = _compute_kimi_2d_rope_cache(torch.randn(2, 2), grids, head_dim=8)
+        positions = _compute_kimi_2d_positions(grids, device=torch.device("cpu"))
 
         self.assertEqual(learned_pos.shape, (12, 4))
-        self.assertEqual(rope_cache.shape, (12, 1, 4))
+        torch.testing.assert_close(
+            positions, torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]]).repeat(3, 1)
+        )
 
     def test_kimi_temporal_pool_and_spatial_merge_are_packed(self) -> None:
         hidden_TD = torch.arange(12, dtype=torch.float32).view(12, 1)
@@ -349,6 +332,8 @@ class TestPackedVision(unittest.TestCase):
         torch.testing.assert_close(result_TD[:2], vision_TD[:2])
         torch.testing.assert_close(result_TD[3:], vision_TD[2:])
         torch.testing.assert_close(result_TD[2], torch.zeros(2))
+        # The input can alias a no-op TP gather's input, so it is not written.
+        torch.testing.assert_close(inputs_TD, torch.zeros(5, 2))
 
     def test_gather_vision_embeds_uses_packed_bank_indices(self) -> None:
         inputs_TD = torch.tensor(

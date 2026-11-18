@@ -270,8 +270,8 @@ def derive(
 
     Example::
 
-        @override(target=RoPE.Config)
-        def triton_rope(cfg: RoPE.Config) -> TritonRoPE.Config:
+        @override(target=ComplexRoPE.Config)
+        def triton_rope(cfg: ComplexRoPE.Config) -> TritonRoPE.Config:
             return derive(cfg, TritonRoPE.Config, block_size=128)
     """
     if not (isinstance(target_cls, type) and is_dataclass(target_cls)):
@@ -502,6 +502,9 @@ def apply_overrides(
             f"whose `target` and `fqns` match nodes in the config tree."
         )
 
+    # Replacements are assigned after construction, so the first __post_init__
+    # did not see them. Configs with nothing to check inherit the base no-op.
+    config_root.__post_init__()
     return replacements
 
 

@@ -7,7 +7,7 @@
 """Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels,
+# B = batch, T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # S = state slots, W = convolution kernel width, G = key-head groups.
 
@@ -81,9 +81,11 @@ def _causal_conv1d_varlen(
 
 
 @torch.library.custom_op(
-    "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
+    "torchtitan::batch_invariant_recurrent_gdn_fwd",
+    mutates_args=(),
+    device_types="cuda",
 )
-def _recurrent_gdn_fwd(
+def _batch_invariant_recurrent_gdn_fwd(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -132,13 +134,14 @@ def _recurrent_gdn_fwd(
         scale=q_BTHK.shape[-1] ** -0.5,
         state_indices=state_indices,
         has_initial_state=has_initial_state,
-        autotune=False,
+        # The scan otherwise picks its arithmetic from the batch shape.
+        kernel_options={"batch_invariant": True, "autotune": False},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
 
-@_recurrent_gdn_fwd.register_fake
-def _recurrent_gdn_fwd_fake(
+@_batch_invariant_recurrent_gdn_fwd.register_fake
+def _batch_invariant_recurrent_gdn_fwd_fake(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -163,11 +166,11 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             inputs[2],
             inputs[3],
             inputs[4],
@@ -176,16 +179,16 @@ def _chunk_gdn_gradients(
             impl="fused",
         )
         grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
-            output, inputs, grad_output
+            output_BTHV, inputs, grad_output
         )
         return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
-def _recurrent_gdn_setup_context(ctx, inputs, output) -> None:
+def _batch_invariant_recurrent_gdn_setup_context(ctx, inputs, output) -> None:
     ctx.save_for_backward(*inputs)
 
 
-def _recurrent_gdn_backward(ctx, grad_output):
+def _batch_invariant_recurrent_gdn_backward(ctx, grad_output):
     q, k, v, g, beta, cu_seqlens = ctx.saved_tensors
     grads = _chunk_gdn_gradients(
         grad_output,
@@ -199,24 +202,13 @@ def _recurrent_gdn_backward(ctx, grad_output):
     return (*grads, None)
 
 
-_recurrent_gdn_fwd.register_autograd(
-    _recurrent_gdn_backward, setup_context=_recurrent_gdn_setup_context
+_batch_invariant_recurrent_gdn_fwd.register_autograd(
+    _batch_invariant_recurrent_gdn_backward,
+    setup_context=_batch_invariant_recurrent_gdn_setup_context,
 )
 
 
-@spmd.local_map(
-    # split_sizes is a list of six ints.
-    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
-    out_types=(
-        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
-        spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
-        spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
-        spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
-        spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
-    ),
-)
-@local_compile("gdn_split_in_proj", batch_invariant=True)
-def _split_in_proj(
+def _split_grouped_in_proj(
     projected_TC: torch.Tensor,
     split_sizes: list[int],
     value_head_dim: int,
@@ -247,6 +239,59 @@ def _split_in_proj(
         b.flatten(1).contiguous(),
         gate_THV.contiguous(),
     )
+
+
+# Two compiles of the same split under one region name, with different Inductor options;
+# separate functions, so each gets its own graph cache and recompile limit.
+# Training: the backward cats six gradients (q, k, v, z, a, b) into the grouped layout.
+# Both cat limits at 0 make Inductor copy each piece into its slice, not one kernel that
+# picks a source per element; combo_kernels launches the remaining copies as one kernel.
+@local_compile(
+    "gdn_split_in_proj",
+    batch_invariant=True,
+    options={
+        "max_pointwise_cat_inputs": 0,
+        "max_complex_pointwise_cat_inputs": 0,
+        "combo_kernels": True,
+    },
+)
+def _split_in_proj_with_grad(
+    projected_TC: torch.Tensor, split_sizes: list[int], value_head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _split_grouped_in_proj(projected_TC, split_sizes, value_head_dim)
+
+
+# No backward (generator, no_grad): the q|k|v cat and the a, b, gate copies run as one
+# combo kernel. Per-input cat copies would add launches, which dominate at decode sizes.
+@local_compile(
+    "gdn_split_in_proj", batch_invariant=True, options={"combo_kernels": True}
+)
+def _split_in_proj_no_grad(
+    projected_TC: torch.Tensor, split_sizes: list[int], value_head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _split_grouped_in_proj(projected_TC, split_sizes, value_head_dim)
+
+
+@spmd.local_map(
+    # split_sizes is a list of six ints.
+    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
+    out_types=(
+        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
+    ),
+)
+def _split_in_proj(
+    projected_TC: torch.Tensor,
+    split_sizes: list[int],
+    value_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run ``_split_grouped_in_proj`` compiled for training if a backward will run."""
+    if projected_TC.requires_grad:
+        return _split_in_proj_with_grad(projected_TC, split_sizes, value_head_dim)
+    return _split_in_proj_no_grad(projected_TC, split_sizes, value_head_dim)
 
 
 class GDNKernel(Module):
@@ -283,7 +328,7 @@ class GDNKernel(Module):
         beta_BTH = beta_TH.unsqueeze(0)
 
         if is_in_batch_invariant_mode() and cu_seqlens is not None:
-            return _recurrent_gdn_fwd(
+            return _batch_invariant_recurrent_gdn_fwd(
                 xq_BTHK,
                 xk_BTHK,
                 xv_BTHV,
@@ -292,11 +337,11 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        normalized_q = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             xv_BTHV,
             g_BTH,
             beta_BTH,
@@ -305,7 +350,7 @@ class GDNKernel(Module):
             impl="fused",
             kernel_options=chunk_kernel_options(xq_BTHK),
         )
-        return output.squeeze(0)
+        return output_BTHV.squeeze(0)
 
 
 class InnerGDN(InnerAttention):
@@ -527,6 +572,8 @@ class GDN(LinearAttention):
         # Query/key heads; n_heads counts value heads.
         n_key_heads: int
         conv_kernel_size: int = 4
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
 
         # Sub-module configs
         # One projection for q, k, v, z, a and b, with rows grouped by key head
@@ -556,6 +603,11 @@ class GDN(LinearAttention):
 
         def __post_init__(self):
             LinearAttention.Config.__post_init__(self)
+            # Before the modulo: 0 raises ZeroDivisionError, and 4 % -2 == 0.
+            if self.n_key_heads < 1:
+                raise ValueError(
+                    f"n_key_heads must be positive, got {self.n_key_heads}"
+                )
             if self.n_heads % self.n_key_heads != 0:
                 raise ValueError(
                     f"n_heads ({self.n_heads}) must be divisible by "
@@ -567,6 +619,15 @@ class GDN(LinearAttention):
                     f"in_proj.out_features ({self.in_proj.out_features}) must be "
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
+
+        def flops_per_token(self, seq_len: int) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            return delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.key_head_dim,
+                v_head_dim=self.value_head_dim,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

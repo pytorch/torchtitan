@@ -45,6 +45,9 @@ class Configurable:
 
         _owner: ClassVar[type | None] = None
 
+        def __post_init__(self) -> None:
+            """Validate this config. A second call must leave a valid config unchanged."""
+
         def to_dict(self) -> dict:
             """Serialize config to a plain dict (recursing into nested configs)."""
 

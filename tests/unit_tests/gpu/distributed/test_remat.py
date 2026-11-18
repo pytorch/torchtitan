@@ -306,14 +306,6 @@ def _vision_inner_attention(
     return q_THDh + k_THDh + v_THDh
 
 
-def _vision_identity_rope(
-    q_THDh: torch.Tensor,
-    k_THDh: torch.Tensor,
-    rope_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return q_THDh, k_THDh
-
-
 class _CountingVisionAttention(VisionAttention):
     """Use VisionAttention.forward unchanged with counted region bodies."""
 
@@ -324,7 +316,8 @@ class _CountingVisionAttention(VisionAttention):
         self.wk = _CountingLinear(_linear_config(4, 4))
         self.wv = _CountingLinear(_linear_config(4, 4))
         self.proj = _CountingLinear(_linear_config(4, 4))
-        self.flex_attention = _CountingOp(_vision_inner_attention)
+        self.rope = None
+        self.inner_attention = _CountingOp(_vision_inner_attention)
 
 
 class _CountingVisionBlock(VisionTransformerBlock):
@@ -351,8 +344,9 @@ class _VisionRematModel(Module):
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.layers["0"](
             x_TD,
-            rope_cache=x_TD.new_empty(0),
-            rope_apply=_vision_identity_rope,
+            positions=torch.zeros(
+                x_TD.shape[0], 2, device=x_TD.device, dtype=torch.long
+            ),
             attention_mask=None,  # pyrefly: ignore [bad-argument-type]
         ).sum()
 
@@ -1049,11 +1043,17 @@ class TestRematRegions(unittest.TestCase):
                         output = model(x_TD)
                     output.backward()
 
+                region_names = (
+                    ("grouped_mm", "bias_add")
+                    if isinstance(config.w13, GptOssGroupedLinear.Config)
+                    else ("grouped_mm",)
+                )
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
                     [
-                        "routed_experts.w13.grouped_mm",
-                        "routed_experts.w2.grouped_mm",
+                        f"routed_experts.{projection}.{name}"
+                        for projection in ("w13", "w2")
+                        for name in region_names
                     ],
                 )
                 self.assertIsNotNone(x_TD.grad)
@@ -1092,7 +1092,7 @@ class TestRematRegions(unittest.TestCase):
                         block.attn.wq.num_forwards,
                         block.attn.wk.num_forwards,
                         block.attn.wv.num_forwards,
-                        block.attn.flex_attention.num_forwards,
+                        block.attn.inner_attention.num_forwards,
                         block.attn.proj.num_forwards,
                         block.mlp.linear_fc1.num_forwards,
                         block.mlp.linear_fc2.num_forwards,

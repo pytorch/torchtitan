@@ -24,7 +24,7 @@ import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
-from torchtitan.config.configs import TrainingConfig
+from torchtitan.config.configs import PrecisionConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
@@ -69,7 +69,9 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
     )
 
 
-def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
+def _lora_dist_moe_config(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts.Config:
     stock = _stock_config()
     base_config = cast(
         DistMoeRoutedExperts.Config,
@@ -77,12 +79,16 @@ def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
     )
     return cast(
         DistMoeRoutedExperts.Config,
-        LoRATransform(rank=8, alpha=16.0).transform(base_config),
+        LoRATransform(
+            rank=8, alpha=16.0, expert_adapter_layout=expert_adapter_layout
+        ).transform(base_config),
     )
 
 
-def _build_lora_dist_moe() -> DistMoeRoutedExperts:
-    module = _lora_dist_moe_config().build()
+def _build_lora_dist_moe(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts:
+    module = _lora_dist_moe_config(expert_adapter_layout).build()
     module.init_states()
     return cast(DistMoeRoutedExperts, module)
 
@@ -238,8 +244,6 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
             accelerator_graph_per_microbatch_group=False,
             disable_accelerator_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
             preprocess_microbatch_groups_lazily=False,
         ),
         parallelism=SimpleNamespace(
@@ -451,8 +455,28 @@ def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
     torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
 
 
+def test_shared_outer_lora_dist_moe_weight_operands_broadcast_the_shared_factor() -> None:
+    """W13 shares A and W2 shares B; the materialized operands expand them over the experts."""
+    module = _build_lora_dist_moe("shared_outer")
+    _fill_lora_dist_moe_operands(module)
+    assert module.w13.lora_a.weight.shape == (8, 32)
+    assert module.w13.lora_b.weight.shape == (4, 2, 64, 8)
+    assert module.w2.lora_a.weight.shape == (4, 8, 64)
+    assert module.w2.lora_b.weight.shape == (32, 8)
+
+    actual_w13_EFD, actual_w2_EDF = module._weight_operands()
+    expected_w13_EFD = module.w13.weight.flatten(1, 2) + 2.0 * torch.einsum(
+        "efl,li->efi", module.w13.lora_b.weight.flatten(1, 2), module.w13.lora_a.weight
+    )
+    expected_w2_EDF = module.w2.weight + 2.0 * torch.einsum(
+        "dl,elf->edf", module.w2.lora_b.weight, module.w2.lora_a.weight
+    )
+    torch.testing.assert_close(actual_w13_EFD, expected_w13_EFD)
+    torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
+
+
 def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
-    """Local materialization gives every adapter a finite nonzero gradient."""
+    """Every adapter gets a finite nonzero gradient equal to torch.baddbmm's."""
     module = _build_lora_dist_moe()
     with torch.no_grad():
         module.w13.lora_a.weight.fill_(0.25)
@@ -473,6 +497,28 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
         w2_EDF.numel(),
         dtype=w2_EDF.dtype,
     ).reshape_as(w2_EDF)
+    adapter_names = (
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
+    )
+    adapters = [module.get_parameter(name) for name in adapter_names]
+    w13, w2 = module.w13, module.w2
+    expected_w13_EFD = torch.baddbmm(
+        w13.weight.flatten(1, 2),
+        w13.lora_b.weight.flatten(1, -2),
+        w13.lora_a.weight,
+        alpha=w13._lora_scaling,
+    )
+    expected_w2_EDF = torch.baddbmm(
+        w2.weight, w2.lora_b.weight, w2.lora_a.weight, alpha=w2._lora_scaling
+    )
+    expected_gradients = torch.autograd.grad(
+        (expected_w13_EFD, expected_w2_EDF),
+        adapters,
+        (w13_gradient_EFD, w2_gradient_EDF),
+    )
     torch.autograd.backward(
         (w13_EFD, w2_EDF),
         (w13_gradient_EFD, w2_gradient_EDF),
@@ -480,16 +526,14 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
 
     assert module.w13.weight.grad is None
     assert module.w2.weight.grad is None
-    for name in (
-        "w13.lora_a.weight",
-        "w13.lora_b.weight",
-        "w2.lora_a.weight",
-        "w2.lora_b.weight",
+    for name, adapter, expected in zip(
+        adapter_names, adapters, expected_gradients, strict=True
     ):
-        gradient = module.get_parameter(name).grad
-        assert gradient is not None
+        gradient = adapter.grad
+        assert gradient is not None, name
         assert torch.isfinite(gradient).all()
         assert torch.count_nonzero(gradient) == gradient.numel()
+        torch.testing.assert_close(gradient, expected)
 
 
 def test_dist_moe_lora_rejects_inplace_wgrad() -> None:
@@ -964,11 +1008,11 @@ def test_runtime_config_rejects_invalid_values(kwargs, error_type, message) -> N
 
 def test_runtime_config_requires_bfloat16_unsharded_parameters() -> None:
     """Dist-MoE rejects FSDP mixed-precision parameter dtypes it cannot consume."""
-    with pytest.raises(ValueError, match="mixed_precision_param='bfloat16'"):
-        TrainingEngine.Config(
-            dist_moe_runtime=DistMoeRuntime.Config(),
-            training=TrainingConfig(mixed_precision_param="float32"),
-        )
+    config = deepseek_v3_debugmodel()
+    config.dist_moe_runtime = DistMoeRuntime.Config()
+    config.precision = PrecisionConfig(param_dtype="float32")
+    with pytest.raises(ValueError, match="param_dtype='bfloat16'"):
+        config.__post_init__()
 
 
 @pytest.mark.parametrize(
@@ -995,7 +1039,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert isinstance(runtime, DistMoeRuntime.Config)
     assert runtime.vmm_capacity_factor is None
     assert runtime.scratch_capacity_factor == scratch_capacity_factor
-    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.precision.reduce_dtype == "bfloat16"
     assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert all(
         isinstance(
@@ -1053,7 +1097,7 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     assert isinstance(runtime, DistMoeRuntime.Config)
     assert runtime.vmm_capacity_factor is None
     assert runtime.scratch_capacity_factor == scratch_capacity_factor
-    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.precision.reduce_dtype == "bfloat16"
     assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert "lm_head" in linears
     assert config.dataloader.max_num_documents == max_documents
@@ -1075,13 +1119,13 @@ def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> 
     assert config.parallelism.data_parallel_shard_degree == dp_degree
     assert config.parallelism.expert_parallel_degree == 64
     assert config.parallelism.num_pp_microbatches == num_microbatches
-    assert config.training.max_context_length == 4096
+    assert config.model.max_context_length == 4096
     assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
     assert config.training.num_tokens_per_train_step % 4096 == 0
     assert config.training.num_tokens_per_train_step // 4096 == 15360
-    assert config.training.dtype == "float32"
-    assert config.training.mixed_precision_param == "bfloat16"
-    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.precision.dtype == "float32"
+    assert config.precision.param_dtype == "bfloat16"
+    assert config.precision.reduce_dtype == "bfloat16"
     assert config.activation_remat is None
     assert isinstance(config.loss, CrossEntropyLoss.Config)
     assert config.override.imports == [

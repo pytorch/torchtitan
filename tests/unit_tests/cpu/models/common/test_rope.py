@@ -22,10 +22,54 @@ from torchtitan.models.common.rope import (
     _maybe_check_max_pos,
     _yarn_inv_freq,
     ComplexRoPE,
+    ComplexVisionRoPE,
     CosSinRoPE,
+    CosSinVisionRoPE,
     RoPE,
+    YaRNScalingConfig,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
+
+
+def test_vision_rope_matches_prepared_cache():
+    torch.manual_seed(42)
+    positions = torch.tensor([[1, 2], [3, 4], [7, 1]])
+    query = torch.randn(3, 2, 16, requires_grad=True)
+    key = torch.randn_like(query, requires_grad=True)
+    grad_outputs = (torch.randn_like(query), torch.randn_like(key))
+    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, 8, 2).float() / 8))
+    row, col = positions[:, :1] * inv_freq, positions[:, 1:] * inv_freq
+    interleaved = torch.stack((col, row), dim=-1).flatten(-2)
+    concatenated = torch.cat((col, row), dim=-1)
+    rotate_half = torch.cat((row, col, row, col), dim=-1)
+    for rope_config, cache in (
+        (
+            ComplexVisionRoPE.Config(
+                dim=16, max_context_length=8, pair_layout="interleaved"
+            ),
+            torch.polar(torch.ones_like(interleaved), interleaved),
+        ),
+        (
+            ComplexVisionRoPE.Config(
+                dim=16, max_context_length=8, pair_layout="concatenated"
+            ),
+            torch.polar(torch.ones_like(concatenated), concatenated),
+        ),
+        (
+            CosSinVisionRoPE.Config(dim=16, max_context_length=8),
+            torch.cat((rotate_half.cos(), rotate_half.sin()), -1),
+        ),
+    ):
+        rope = rope_config.build()
+        expected = rope.apply_rotary_emb(query, key, cache.unsqueeze(1))
+        actual = rope(query, key, positions)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, (query, key), grad_outputs),
+            torch.autograd.grad(expected, (query, key), grad_outputs),
+            rtol=0,
+            atol=0,
+        )
 
 
 class TestApplyRotaryEmbCosSin(unittest.TestCase):
@@ -265,9 +309,7 @@ class TestYaRNScaling(unittest.TestCase):
         yarn = ComplexRoPE.Config(
             dim=64,
             max_context_length=2048,
-            scaling="yarn",
-            rope_factor=40.0,
-            original_seq_len=4096,
+            scaling=YaRNScalingConfig(factor=40.0, original_seq_len=4096),
         ).build()
         unscaled = ComplexRoPE.Config(dim=64, max_context_length=2048).build()
 
@@ -286,18 +328,23 @@ class TestYaRNScaling(unittest.TestCase):
         )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, DeepSeekMLAAttention.Config)
+        assert isinstance(attention_config.rope.scaling, YaRNScalingConfig)
         attention_config.rope = dataclasses.replace(
             attention_config.rope,
-            max_context_length=attention_config.rope.original_seq_len // 2,
+            max_context_length=attention_config.rope.scaling.original_seq_len // 2,
         )
         attention = attention_config.build()
 
         expected_mscale = (
-            0.1 * attention_config.mscale * math.log(attention_config.rope.rope_factor)
+            0.1
+            * attention_config.mscale
+            * math.log(attention_config.rope.scaling.factor)
             + 1.0
         )
-        expected_softmax_scale = attention.qk_head_dim**-0.5 * expected_mscale**2
-        self.assertAlmostEqual(attention.softmax_scale, expected_softmax_scale)
+        expected_softmax_scale = (
+            attention.qk_head_dim**-0.5 * expected_mscale * expected_mscale
+        )
+        self.assertEqual(attention.softmax_scale, expected_softmax_scale)
 
 
 class TestPerLayerRoPECache(unittest.TestCase):
@@ -360,6 +407,17 @@ class TestPerLayerRoPECache(unittest.TestCase):
             len({id(rope_cfg) for rope_cfg in layer_rope_cfgs}),
             len(layer_rope_cfgs),
         )
+
+
+class TestRoPEBufferDtypeGuard(unittest.TestCase):
+    def test_cache_values_survive_rejected_cast(self):
+        for cls in (ComplexRoPE, CosSinRoPE):
+            with self.subTest(rope=cls.__name__):
+                rope = cls.Config(dim=8, max_context_length=16).build()
+                expected = rope.cache.clone()
+                with self.assertRaises(ValueError):
+                    rope.to(torch.bfloat16)
+                torch.testing.assert_close(rope.cache, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

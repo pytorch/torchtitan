@@ -9,35 +9,47 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.math_utils import round_up
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
 
-from torchtitan.rl.generator.vllm.linear_attention import (
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
-    """Keep native FULL descriptors distinct for packed linear attention and fused decode.
+    """Give decode batches their own FULL graphs, apart from prefill and mixed batches.
 
-    Currently installed only for TorchTitan's Attention Gym linear attention
-    backends (GDN/KDA).
-    vLLM at c6fa1f0 erases the uniform-decode discriminator in FULL mode:
-    four one-token decodes collide with one four-token prefill. Attention Gym's
-    different numerical paths need distinct keys. Delegate decode keys to the
-    native FULL_DECODE_ONLY dispatcher until upstream supports FULL decode
-    specialization; native capture, replay and graph ownership stay intact.
-    The single-token key also covers fresh requests: initialization is GPU mask
-    data, not another dispatch key or a reason to switch to packed arithmetic.
+    vLLM at 9f03b51 keys plain FULL graphs by token count only: four one-token
+    decodes replay the mixed-batch graph captured with ``max_query_len = 4``.
+    Decode needs its own graph:
+      - Attention Gym linear attention (GDN/KDA) runs different decode kernels.
+        Fresh requests stay on the single-token key and kernels: their zero
+        initial state is a GPU mask.
+      - FA4 sizes its grid from ``max_query_len``: decode attention runs 1.3-2.0x
+        longer from 32 sequences at head dim 64 and from 64 at head dim 128
+        (GB300, 16-token pages).
+
+    Uniform-decode batch in FULL mode:
+      num_tokens <= max_decode_capture_size              -> decode graph
+      larger (DP padding, or a capture-size gap)         -> mixed graph, as in stock FULL
+      larger, batch-invariant, eager allowed             -> eager on the decode kernels
+
+    Decode keys come from the native FULL_DECODE_ONLY dispatcher; native capture,
+    replay and graph ownership stay intact.
 
     This costs one additional graph capture per decode-specialized batch size
-    and additional memory for the expanded graph pool.
+    (83 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
+    keeps them out of vLLM's graph-memory estimate.
+
+    TODO: drop this class once vLLM captures FULL decode graphs next to FULL mixed
+    graphs without piecewise compilation.
     """
 
     def initialize_cudagraph_keys(
@@ -49,9 +61,13 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
             self.decode_dispatcher.initialize_cudagraph_keys(
                 CUDAGraphMode.FULL_DECODE_ONLY, uniform_decode_query_len
             )
+            self.max_decode_capture_size = 0
             for mode, descriptors in self.decode_dispatcher.get_capture_descs():
                 for descriptor in descriptors:
                     self.add_cudagraph_key(mode, descriptor)
+                    self.max_decode_capture_size = max(
+                        self.max_decode_capture_size, descriptor.num_tokens
+                    )
 
     def dispatch(
         self,
@@ -68,7 +84,13 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
             and self.cudagraph_mode == CUDAGraphMode.FULL
             and uniform_decode
         ):
-            dispatch = self.decode_dispatcher.dispatch
+            if num_tokens <= self.max_decode_capture_size:
+                dispatch = self.decode_dispatcher.dispatch
+            elif is_in_batch_invariant_mode() and (
+                not valid_modes or CUDAGraphMode.NONE in valid_modes
+            ):
+                # GDN/KDA's packed kernels in the mixed graph don't match decode bitwise.
+                return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
         return dispatch(
             num_tokens,
             uniform_decode,
@@ -80,18 +102,62 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner with sequence-parallel padding and linear attention (GDN/KDA) decode specialization."""
+    """V1 runner with sequence-parallel padding and FULL-graph decode specialization."""
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
-        if any(
-            layer.get_attn_backend() is TorchTitanLinearAttentionBackend
-            for layer in get_layers_from_vllm_config(
-                self.vllm_config, MambaBase
-            ).values()
+        assert not self.cudagraph_dispatcher.keys_initialized
+        self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
+
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        *args,
+        uniform_decode: bool = False,
+        profile_seq_lens: int | None = None,
+        **kwargs,
+    ):
+        """Keep each request of a mixed capture dummy within ``max_model_len``.
+
+        vLLM gives every request of a mixed dummy batch a sequence length equal to the
+        whole batch. A real step that size packs several requests, each at most
+        ``max_model_len`` long, so the captured graph replays them correctly.
+
+            max_model_len=1024, capture 2048 tokens as 8 requests of 256
+            vLLM: each seq_len 2048 -> reads 128 KV pages from a 64-page row
+            here: each seq_len 1024 -> reads its 64 pages
+        """
+        # TODO: drop once vLLM caps the dummy's seq_lens at max_model_len in _dummy_run.
+        if (
+            profile_seq_lens is None
+            and not uniform_decode
+            and num_tokens > self.max_model_len
         ):
-            assert not self.cudagraph_dispatcher.keys_initialized
-            self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
+            profile_seq_lens = self.max_model_len
+        return super()._dummy_run(
+            num_tokens,
+            *args,
+            uniform_decode=uniform_decode,
+            profile_seq_lens=profile_seq_lens,
+            **kwargs,
+        )
+
+    def initialize_kv_cache(
+        self, kv_cache_config, is_profiling: bool = False, **kwargs
+    ):
+        super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
+        # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph
+        # like the second largest (a mixed graph). Decode graphs take far less (Qwen3-8B TP2:
+        # 11 decode graphs added 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
+        # these profiling keys afterwards; the real call rebuilds them, decode keys included
+        # (test_generator_dp_cudagraph.py checks a decode graph still replays).
+        # TODO: drop once vLLM's estimate charges decode graphs at their own size.
+        dispatcher = self.cudagraph_dispatcher
+        if is_profiling and dispatcher.cudagraph_mode == CUDAGraphMode.FULL:
+            keys = dispatcher.cudagraph_keys
+            keys[CUDAGraphMode.FULL] = {
+                key for key in keys[CUDAGraphMode.FULL] if not key.uniform
+            }
 
     def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
         """Tell the model how many of this step's tokens are real, before padding.

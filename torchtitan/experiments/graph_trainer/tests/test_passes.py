@@ -29,7 +29,7 @@ from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
@@ -834,7 +834,7 @@ class TestHSDPGradCollectiveReorderingPass(FSDPTest):
         model = apply_simple_fsdp(
             model,
             parallelism_context=parallelism_context,
-            training=TrainingConfig(mixed_precision_param="float32"),
+            precision=PrecisionConfig(param_dtype="float32"),
         )
         torch.manual_seed(42 + self.rank)
         inputs = torch.randn(4, 16, device="cuda")
@@ -6556,6 +6556,26 @@ class TestEliminateDeadCodePass(TestCase):
 class TestIsFullCudaGraphCompatible(TestCase):
     """Pure-CPU tests for the per-node CUDA-graph-safety predicate and the
     whole-graph gate built on it."""
+
+    def test_hybridep_autograd_setup_keeps_cuda_graph_compatible(self):
+        from torchtitan.distributed.deepep import hybridep  # noqa: F401
+
+        def forward(x, expert_ids, scores):
+            hidden, routed_scores, _, handle_id = torch.ops.hybridep.dispatch(
+                x, expert_ids, scores, 8, 2, "ep", True, 1.0, None
+            )
+            return torch.ops.hybridep.combine(
+                hidden * routed_scores[:, None], handle_id, 64, None
+            )
+
+        # Trace autograd setup too: a CPU-only handle lookup here would disable
+        # whole-graph capture even though the communication kernels are safe.
+        with torch._subclasses.FakeTensorMode():
+            x = torch.empty(64, 256, device="cuda", requires_grad=True)
+            expert_ids = torch.empty(64, 2, device="cuda", dtype=torch.int64)
+            scores = torch.empty(64, 2, device="cuda", requires_grad=True)
+            gm = make_fx(forward)(x, expert_ids, scores)
+        self.assertTrue(is_cuda_graph_fully_compatible(gm))
 
     def test_clean_graph_is_cuda_graph_fully_compatible(self):
         g = torch.fx.Graph()

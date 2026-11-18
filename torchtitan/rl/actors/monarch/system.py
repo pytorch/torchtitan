@@ -17,11 +17,13 @@ import torchstore as ts
 from monarch.actor import ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
     compute_generator_world_size,
     compute_trainer_world_size,
+    generator_role_names,
     HostMeshes,
     shutdown,
     spawn_cpu_procs,
@@ -34,7 +36,11 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    shared_rank_layouts,
+)
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
@@ -47,14 +53,15 @@ class MonarchActorSystem(ActorSystem):
 
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
-    launcher passes in. ``generator_env`` adds environment variables to the
-    generator procs. The router, the batcher and the rollout worker pool get CPU
-    procs on this host.
+    launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
+    ``launcher/base.py``, with the hosts of a submitted job). The router, the
+    batcher and the rollout worker pool get CPU procs on this host.
 
-    Example:
-        # A launcher that allocates its own hosts (e.g. from a Slurm job)
-        actor_system = config.actor_system.build(host_meshes=host_meshes)
-        await config.build().setup_async(actor_system=actor_system)
+    Example: a ``Controller`` subclass that allocated its hosts as
+    ``self.host_meshes``::
+
+        async def _build_actor_system(self) -> MonarchActorSystem:
+            return self.config.actor_system.build(host_meshes=self.host_meshes)
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -66,11 +73,9 @@ class MonarchActorSystem(ActorSystem):
         config: Config,
         *,
         host_meshes: HostMeshes | None = None,
-        generator_env: dict[str, str] | None = None,
     ):
         self.config = config
         self._host_meshes = host_meshes
-        self._generator_env = generator_env
         self._trainer_mesh: ProcMesh | None = None
         self._generator_meshes: list[ProcMesh] = []
         self._router_mesh: ProcMesh | None = None
@@ -91,7 +96,6 @@ class MonarchActorSystem(ActorSystem):
             compute_generator_world_size(generator_parallelism),
             host_meshes=self._host_meshes,
             num_generators=num_generators,
-            generator_env=self._generator_env,
         )
         # One process, so the router is a singleton and every caller reaches
         # it with `call_one`. It gets its own mesh rather than sharing the
@@ -148,10 +152,8 @@ class MonarchActorSystem(ActorSystem):
         **generator_kwargs: Any,
     ) -> Any:
         assert self._router_mesh is not None, "provision before spawning"
-        for idx, generator_mesh in enumerate(self._generator_meshes):
-            actor_name = (
-                "generator" if len(self._generator_meshes) == 1 else f"generator_{idx}"
-            )
+        actor_names = generator_role_names(len(self._generator_meshes))
+        for actor_name, generator_mesh in zip(actor_names, self._generator_meshes):
             generator = generator_mesh.spawn(
                 actor_name, GeneratorActor, generator_config, **generator_kwargs
             )
@@ -173,14 +175,21 @@ class MonarchActorSystem(ActorSystem):
         return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
 
     async def spawn_rollout_workers(
-        self, config: RolloutWorker.Config, *, num_workers: int, num_threads: int
+        self,
+        config: BaseRolloutWorker.Config,
+        *,
+        num_workers: int,
+        num_threads: int,
+        **kwargs: Any,
     ) -> Any:
         self._rollout_worker_mesh = spawn_cpu_procs(num_workers)
         return self._rollout_worker_mesh.spawn(
             "rollout_worker",
             RolloutWorkerActor,
             worker_config=config,
+            worker_kwargs=kwargs,
             num_threads=num_threads,
+            structured_logger_init_fn=sl.get_structured_logger_subprocess_init_fn(),
         )
 
     async def stop_rollout_workers(self) -> None:
@@ -209,6 +218,37 @@ class MonarchActorSystem(ActorSystem):
                 )
                 for requester_index, generator in enumerate(self._generators)
             ),
+        )
+
+    async def initialize_model_state_dict_transport(
+        self, config: ModelStateDictTransport.Config
+    ) -> None:
+        assert self._trainer is not None, "spawn the trainer first"
+        results = await asyncio.gather(
+            *(
+                generator.all_ranks.model_state_dict_layout.call()
+                for generator in self._generators
+            )
+        )
+        generator_rank_layouts = shared_rank_layouts(
+            [list(r.values()) for r in results]
+        )
+        trainer_sources = list(
+            (
+                await self._trainer.register_model_state_dict_source.call(
+                    config, generator_rank_layouts=generator_rank_layouts
+                )
+            ).values()
+        )
+        await asyncio.gather(
+            *(
+                generator.all_ranks.connect_model_state_dict_transport.call(
+                    config,
+                    trainer_sources=trainer_sources,
+                    generator_index=generator_index,
+                )
+                for generator_index, generator in enumerate(self._generators)
+            )
         )
 
     async def stop(self) -> None:

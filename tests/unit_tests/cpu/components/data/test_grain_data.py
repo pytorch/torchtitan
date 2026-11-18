@@ -205,8 +205,7 @@ def test_hugging_face_streaming_source_shards_and_restores(tmp_path):
         )
         rank_rows.append([row["id"] for row in dataset])
 
-    assert set(rank_rows[0]).isdisjoint(rank_rows[1])
-    assert set(rank_rows[0]) | set(rank_rows[1]) == set(range(10))
+    assert rank_rows == [[0, 2, 4, 6, 8], [1, 3, 5, 7, 9]]
 
     iterator = iter(
         config.build().build_iter_dataset(
@@ -308,12 +307,31 @@ def test_hf_resume_mid_second_epoch():
 @pytest.mark.parametrize("shuffle", [False, True])
 @pytest.mark.parametrize("num_consumed", [4, 16, 20])
 def test_hf_cursor_state_after_restore(shuffle, num_consumed):
-    original = _HuggingFaceCursorIterator(
-        _hf_sharded_rows(), repeat=True, shuffle=shuffle
-    )
-    restored = _HuggingFaceCursorIterator(
-        _hf_sharded_rows(), repeat=True, shuffle=shuffle
-    )
+    """States saved after a restore resume to the same rows as the original's.
+
+    The states are compared by the rows they resume to, not by their bytes. As
+    of datasets 5.2, the first read after ``load_state_dict`` makes
+    ``RebatchedArrowExamplesIterable`` load ``previous_state`` into its child
+    iterable, which re-initializes the child's state dict. The
+    ``examples_iterable`` entry of its own state then stops tracking the child
+    (stale ``shard_idx``), while resume reads ``previous_state``.
+    """
+
+    def cursor():
+        return _HuggingFaceCursorIterator(
+            _hf_sharded_rows(), repeat=True, shuffle=shuffle
+        )
+
+    def resumed_rows(state):
+        iterator = cursor()
+        try:
+            iterator.set_state(state)
+            return [next(iterator) for _ in range(16)]
+        finally:
+            iterator.close()
+
+    original = cursor()
+    restored = cursor()
     try:
         for _ in range(num_consumed):
             next(original)
@@ -323,7 +341,9 @@ def test_hf_cursor_state_after_restore(shuffle, num_consumed):
         assert restored.get_state() == state
         for _ in range(4):
             assert next(restored) == next(original)
-            assert restored.get_state() == original.get_state()
+            assert resumed_rows(restored.get_state()) == resumed_rows(
+                original.get_state()
+            )
     finally:
         original.close()
         restored.close()
@@ -484,29 +504,6 @@ def test_hf_explicit_fields_are_passed_to_load_dataset(
         streaming=streaming,
         token="secret",
     )
-
-
-@pytest.mark.parametrize(
-    "source_type", [HuggingFaceRandomAccessSource, HuggingFaceStreamingSource]
-)
-def test_hf_lineage_fields_are_serialized(source_type):
-    config = GrainDataLoader.Config(
-        dataset=SingleDatasetConfig(
-            source=source_type.Config(
-                path="owner/dataset",
-                name="configuration",
-                split="validation",
-                revision="abc123",
-            )
-        )
-    )
-
-    source = config.to_dict()["dataset"]["source"]
-
-    assert source["path"] == "owner/dataset"
-    assert source["name"] == "configuration"
-    assert source["split"] == "validation"
-    assert source["revision"] == "abc123"
 
 
 @pytest.mark.parametrize(

@@ -22,7 +22,6 @@ from torchtitan.config.transform import (
 from torchtitan.models.common import (
     ComplexRoPE,
     DenseFeedForward,
-    Embedding,
     FeedForward,
     HiMidLoLinear,
     LimitedSwiGLU,
@@ -32,6 +31,7 @@ from torchtitan.models.common import (
     RoPE,
     RowParallelLinear,
     SqrtSoftplus,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -45,7 +45,6 @@ from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_state_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
@@ -57,6 +56,7 @@ from torchtitan.models.common.moe.sharding import (
     router_gate_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.common.rope import YaRNScalingConfig
 
 from .attention import (
     CompressedSparseAttention,
@@ -381,6 +381,7 @@ def _make_v4_attn_config(
             out_features=n_heads,
             bias=False,
             param_init=_LINEAR_INIT,
+            preserve_dtype_params=("weight",),
             sharding_config=attn_sink_sharding_config(),
         ),
         compressor=compressor_cfg,
@@ -771,17 +772,12 @@ def _debugmodel(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
-        scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=4.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=4.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -823,7 +819,7 @@ def _debugmodel(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -835,7 +831,7 @@ def _debugmodel(
             normalized_shape=dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -918,17 +914,12 @@ def _deepseek_v4_flash(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
-        scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=16.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -971,7 +962,7 @@ def _deepseek_v4_flash(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -983,7 +974,7 @@ def _deepseek_v4_flash(
             normalized_shape=dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -1066,17 +1057,12 @@ def _deepseek_v4_pro(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=10000.0,
-        scaling="none",
     )
     rope_compress = ComplexRoPE.Config(
         dim=rope_head_dim,
         max_context_length=seq_len,
         theta=compress_rope_theta,
-        scaling="yarn",
-        rope_factor=16.0,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        original_seq_len=original_seq_len,
+        scaling=YaRNScalingConfig(factor=16.0, original_seq_len=original_seq_len),
     )
 
     layers = _build_v4_layers(
@@ -1119,7 +1105,7 @@ def _deepseek_v4_pro(
         dim=dim,
         vocab_size=vocab_size,
         norm_eps=norm_eps,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -1131,7 +1117,7 @@ def _deepseek_v4_pro(
             normalized_shape=dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),

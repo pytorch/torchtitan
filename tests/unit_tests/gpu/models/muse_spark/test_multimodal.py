@@ -45,8 +45,8 @@ def test_dummy_media_preserves_text_and_runs_backward():
         grid_thw_videos=None,
         waveforms=None,
         waveform_padded_lengths=None,
-        image_bank_indices_T=None,
-        video_bank_indices_T=None,
+        image_vision_bank_indices_T=None,
+        video_vision_bank_indices_T=None,
         audio_bank_indices_T=None,
     )
     torch.testing.assert_close(result, hidden, rtol=0, atol=0)

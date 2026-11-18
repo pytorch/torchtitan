@@ -7,13 +7,12 @@
 """Model config transforms."""
 
 import copy
-import inspect
 import unittest
 from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
@@ -61,7 +60,6 @@ from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
 
 def _llama3_cp_ready():
@@ -73,7 +71,6 @@ def _llama3_cp_ready():
         "debugmodel", attn_backend="flex", seq_len=512, parallelism=ParallelismConfig()
     )
     config.parallelism.context_parallel_degree = 2
-    config.training.max_context_length = 512
     return config
 
 
@@ -182,15 +179,6 @@ class TestConvertConfigType(unittest.TestCase):
         existing = AllGatherKVFlexInnerAttention.Config()
         with self.assertRaisesRegex(ValueError, "must inherit"):
             convert_config_type(existing, FlexInnerAttention)
-
-
-class TestPublicApi(unittest.TestCase):
-    def test_relation_graph_is_not_caller_configurable(self):
-        self.assertNotIn("relations", inspect.signature(apply_transforms).parameters)
-        self.assertNotIn(
-            "relations",
-            inspect.signature(transform_model_config_).parameters,
-        )
 
 
 class TestOrdering(unittest.TestCase):
@@ -559,10 +547,10 @@ class TestTransformModel(unittest.TestCase):
     def test_transforms_nested_kda_backend(self):
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
         from torchtitan.models.common.attention.kda import InnerKDA, KDA
-        from torchtitan.models.kimi_k3 import build_model_config
+        from torchtitan.models.kimi_k3 import build_model_config, KimiK3MultimodalModel
 
         model = build_model_config(
-            "debugmodel",
+            "debugmodel_mm",
             attn_backend="flex",
             seq_len=128,
             parallelism=ParallelismConfig(),
@@ -575,7 +563,7 @@ class TestTransformModel(unittest.TestCase):
             }
         ).transform(model)
 
-        assert model.vision_encoder is not None
+        assert isinstance(model, KimiK3MultimodalModel.Config)
         self.assertIsInstance(
             model.vision_encoder.block.attn.inner_attention,
             FlexInnerAttention.Config,
@@ -821,19 +809,6 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         self.assertIs(type(transformed.w13), _ConvertedLinear.Config)
         self.assertIs(type(transformed.w2), AsyncRowParallelLinear.Config)
-
-    def test_async_transform_skips_invariant_row_parallel_linear(self):
-        config = InvariantRowParallelLinear.Config(
-            in_features=4,
-            out_features=4,
-            bias=True,
-        )
-
-        transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
-        ).transform(config)
-
-        self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
 
     def test_async_transform_conflicts_with_lora(self):
         config = self._model_config()

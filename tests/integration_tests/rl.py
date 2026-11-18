@@ -83,10 +83,11 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             #   run 2: trainer TP=2 (DP=1) + 1 generator (TP=4); resume from the
             #          step-2 checkpoint and train through step 4.
             # This covers (1) trainer DCP checkpoint resharding (DP->TP),
-            # (2) trainer->generator TorchStore resharding, and (3) the
-            # multi-generator vs single-generator paths. The second run errors
-            # if resume is broken. lr_scheduler.total_steps is pinned so the LR
-            # is identical across save/load.
+            # (2) trainer->generator resharding with ModelStateDictTransport
+            # (run 1) and TorchStore (run 2), and (3) the multi-generator vs
+            # single-generator paths. The second run errors if resume is
+            # broken. lr_scheduler.total_steps is pinned so the LR is identical
+            # across save/load.
             configs=[rl_grpo_checkpoint_save, rl_grpo_checkpoint_resume],
             test_descr="RL GRPO checkpoint save + resume (resharding)",
             test_name="rl_grpo_checkpoint_resume",
@@ -114,7 +115,7 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
 
 
 def build_h100_rl_test_list() -> list[IntegrationTestDefinition]:
-    """Build RL integration tests for Attention Gym KDA and vLLM's native MLA, which require SM90+."""
+    """Build RL integration tests for Attention Gym KDA and MLA decode, which require SM90+."""
     return [
         _rl_test(
             configs=[rl_grpo_kimi_k3_debug_batch_invariant],

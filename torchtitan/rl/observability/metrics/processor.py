@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 
 import math
-import os
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -20,11 +19,7 @@ from typing import Any
 from torchtitan.config import Configurable
 from torchtitan.observability.logging import warn_once
 
-from torchtitan.observability.metrics import (
-    BaseLogger as MetricBackend,
-    TensorBoardLogger,
-    WandBLogger,
-)
+from torchtitan.observability.metrics import BaseLogger as MetricBackend
 
 from .console import log_to_console
 from .types import Metric, MetricValue
@@ -47,10 +42,10 @@ class MetricsProcessor(Configurable):
     backend logging behavior while RL retains controller-side aggregation.
 
     Args:
-        config: MetricsProcessor.Config with backend toggles and the
+        config: MetricsProcessor.Config with backend configs and the
             train/validation console allow lists.
-        log_dir: Filesystem directory required when enable_wandb or
-            enable_tensorboard is true; backends write under it.
+        log_dir: Filesystem directory required when loggers are configured;
+            backends write under it.
         job_config: Full training job config snapshot, forwarded to
             experiment-tracking backends (W&B) as run metadata.
     """
@@ -96,15 +91,8 @@ class MetricsProcessor(Configurable):
         """Same as console_log_keys_train but used when
         MetricsProcessor.log is called with is_validation=True."""
 
-        enable_wandb: bool = False
-        """Log metrics to Weights & Biases."""
-
-        enable_tensorboard: bool = False
-        """Log metrics to TensorBoard. Writes under log_dir."""
-
-        wandb_project: str = "titan_rl"
-        """W&B project name. Written to WANDB_PROJECT env var via
-        setdefault, so a user-set env var takes precedence."""
+        loggers: list[MetricBackend.Config] = field(default_factory=list)
+        """Metric exporters, built in list order. An empty list disables export."""
 
     def __init__(
         self,
@@ -115,15 +103,12 @@ class MetricsProcessor(Configurable):
     ) -> None:
         self.config = config
         self._backends: list[MetricBackend] = []
-        if (config.enable_wandb or config.enable_tensorboard) and log_dir is None:
-            raise ValueError(
-                "log_dir is required when enable_wandb or enable_tensorboard is True"
+        if config.loggers and log_dir is None:
+            raise ValueError("log_dir is required when metrics.loggers is non-empty")
+        for logger_config in config.loggers:
+            self._backends.append(
+                logger_config.build(log_dir=log_dir, config_dict=job_config, tag=None)
             )
-        if config.enable_wandb:
-            os.environ.setdefault("WANDB_PROJECT", config.wandb_project)
-            self._backends.append(WandBLogger(log_dir=log_dir, config_dict=job_config))
-        if config.enable_tensorboard:
-            self._backends.append(TensorBoardLogger(log_dir=log_dir))
 
     @classmethod
     def _aggregate_metrics(cls, metrics: Iterable[Metric]) -> dict[str, float]:

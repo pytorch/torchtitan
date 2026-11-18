@@ -1,0 +1,30 @@
+# One top-level key per hardware backend; its value lists the test names skipped
+# on that backend. Keys align with utils.device_type, except that cuda and rocm
+# are distinguished with torch.version.hip.
+
+rocm = [
+  "sdc_replay_accelerator_graph",
+  "sdc_replay_mismatch",
+  "fsdp_pp_deferred_gradient_reduction",
+  "pp_max_outstanding_sends",
+  "fsdp_pp_optimizer_accelerator_graph",
+  "fsdp_optimizer_accelerator_graph",
+  "cp_ulysses_varlen",
+  "fsdp+cp_ulysses_varlen",
+  "fsdp+tp+cp_ulysses_varlen",
+  "fsdp+cp+varlen_attn",
+  "fsdp_per_group_accelerator_graph",
+  "shared_eval_accelerator_graph",
+  "fsdp_deferred_gradient_reduction",
+  "fsdp+varlen_attn+per_op_sac",
+  "deepseek_v3_fused_mla_swiglu_fsdp+ep",
+  "deepseek_v4_fsdp+tp+ep+pp",               # Sparse attention / indexer kernels are CUDA-only and unvalidated on ROCm.
+  "deepseek_v4_dist_muon_fsdp+ep",           # Sparse attention / indexer kernels are CUDA-only and unvalidated on ROCm.
+  "qwen3_5_moe_fsdp+tp+ep+pp",               # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
+  "qwen3_5_moe_fsdp+tp+ep",                  # short_conv's CuTe/CUTLASS kernel (attn_gym) is CUDA-only.
+  "qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
+  "fsdp_symm_mem",
+  "fsdp+hybridep",                           # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
+  "dist_gemm",                               # symmetric memory is CUDA-only.
+  "qwen3_fsdp+deepep",
+]

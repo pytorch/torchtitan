@@ -134,13 +134,13 @@ def build_trainer_model(
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
     ):
         model = model_config.build()
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
-        training=trainer_config.training,
+        precision=config.precision,
         parallelism=parallelism,
         local_compile=model_config.local_compile,
         activation_remat=trainer_config.activation_remat,
@@ -211,10 +211,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
             # The v2 logprob Triton kernel bypasses the aten overrides. Apply the
             # same generator-side patch the production Generator does.
             from torchtitan.rl.generator.vllm.batch_invariance import (
-                force_logprobs_fn_for_batch_invariance,
+                force_trainer_logprobs_for_batch_invariance,
             )
 
-            force_logprobs_fn_for_batch_invariance()
+            force_trainer_logprobs_for_batch_invariance()
         backend_enum = AttentionBackendEnum.CUSTOM
 
     _set_generator_determinism(gen_config.debug)
@@ -226,7 +226,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         # Build the model config from torchtitan's model config via the custom
         # parser registered by register_to_vllm, instead of reading config.json.
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=gen_config.model_dtype,
+        dtype=config.precision.param_dtype,
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
         enable_expert_parallel=enable_ep,
@@ -245,20 +245,12 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
-    # Mirror Controller.setup_async for a single engine: derive from active rollout concurrency
-    # (the active-buffer capacity num_group_workers, or the validation pass).
-    async_loop = config.async_loop
-    gen_dp = max(gen_config.parallelism.data_parallel_degree, 1)
-    num_group_workers = async_loop.max_active_rollout_groups
-    rollout_concurrency = max(
-        num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.steps,
-    )
-    max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
+    max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_model_len=gen_config.model.max_context_length,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
@@ -275,10 +267,13 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
 
     wrapper = engine.model_executor.driver_worker.get_model()
     trainer_sd = trainer_model.state_dict()
-    # As a model state dict load: fill the pinned CPU copy, then load it with load_state_dict.
-    vllm_sd = wrapper._prefetched_model_state_dict
+    # As a model state dict load: fill the pinned CPU copy, then load from it.
+    vllm_sd = wrapper.model_state_dict_loader.prefetched_model_state_dict
 
     trainer_buffers = {name for name, _ in trainer_model.named_buffers()}
+    trainer_preserve_dtype_params = {
+        name for name, _ in trainer_model.named_preserve_dtype_params()
+    }
     missing = []
     for name, vparam in vllm_sd.items():
         tparam = trainer_sd.get(name)
@@ -287,10 +282,12 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             continue
         full = tparam.full_tensor() if isinstance(tparam, DTensor) else tparam
         # Weight sync over RDMA copies bytes, so the receive dtype is what the trainer sends:
-        # parameters in the generator dtype, buffers in their own.
-        sent_dtype = (
-            full.dtype if name in trainer_buffers else engine.model_config.dtype
-        )
+        # parameters in the generator dtype (precision.param_dtype), buffers and
+        # preserve_dtype_params in their own.
+        if name in trainer_buffers or name in trainer_preserve_dtype_params:
+            sent_dtype = full.dtype
+        else:
+            sent_dtype = engine.model_config.dtype
         assert vparam.dtype == sent_dtype, (name, vparam.dtype, sent_dtype)
         with torch.inference_mode():
             if isinstance(vparam, DTensor):
@@ -300,7 +297,13 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    wrapper.load_state_dict(vllm_sd)
+    def fetch(state_dict: dict[str, torch.Tensor]) -> list[str]:
+        with torch.no_grad():
+            for key, tensor in state_dict.items():
+                tensor.copy_(vllm_sd[key])
+        return list(state_dict)
+
+    wrapper.model_state_dict_loader.load(fetch)
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -543,7 +546,7 @@ _FILLER_TEXT = (
 )
 
 
-def _make_prompt_tokens(batch_size, prompt_length, tokenizer):
+def make_prompt_tokens(batch_size, prompt_length, tokenizer):
     """Create token ID sequences of the given prompt_length.
 
     For batch_size > 1, varies lengths across the batch (first seq at max,
@@ -657,7 +660,9 @@ class BitwiseParityTestBase(unittest.TestCase):
         register_to_vllm(
             config.generator.model,
             parallelism=config.generator.parallelism,
+            precision=config.precision,
             checkpointer_config=generator_checkpointer,
+            model_state_dict_load_mode="cpu_prefetch",
         )
 
         # Test runs trainer and generator in the same process, so limit
@@ -682,7 +687,7 @@ class BitwiseParityTestBase(unittest.TestCase):
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
         tokenizer = cls.engine.get_tokenizer()
-        cls.prompt_ids = _make_prompt_tokens(
+        cls.prompt_ids = make_prompt_tokens(
             cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
         )
 
@@ -881,7 +886,7 @@ class TestBitwiseParityQwen35Varlen(BitwiseParityTestBase):
     min_world_size = 2
 
 
-def _qwen3_5_debug_bitwise_config() -> Controller.Config:
+def qwen3_5_debug_bitwise_config() -> Controller.Config:
     """Build a two-GPU random-weight Qwen3.5 parity configuration."""
     config = rl_grpo_qwen3_5_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -898,7 +903,7 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     """Qwen3.5 GDN parity with random weights and matched TP=2."""
 
     __test__ = True
-    config_fn = staticmethod(_qwen3_5_debug_bitwise_config)
+    config_fn = staticmethod(qwen3_5_debug_bitwise_config)
     attn_backend = "varlen"
     min_world_size = 2
     sync_weights_from_trainer = True
@@ -909,6 +914,62 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""
         self._check_vllm_prefill_and_decode_batch_invariance()
+
+    def test_reload_after_generate(self):
+        """Reload changed weights after generation has replayed the captured graphs."""
+        engine = self.engine
+
+        def reload() -> None:
+            _sync_trainer_weights_to_vllm(self.model, engine)
+            # As the generator does after a load: drop KV computed with the old weights.
+            engine.reset_prefix_cache(reset_running_requests=True)
+
+        vllm_generate(engine, self.prompt_ids, self.MAX_GEN_TOKENS)
+        before_lps = vllm_prefill(engine, self.prompt_ids)
+        params = list(self.model.parameters())
+        originals = [p.detach().clone() for p in params]
+        # Every rank runs every collective before rank 0 asserts, so a mismatch
+        # fails instead of hanging the other rank.
+        try:
+            with torch.no_grad():
+                for p in params:
+                    p.mul_(0.5)
+            reload()
+            with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+                trainer_lps = compute_trainer_prefill_logprobs(
+                    self.model,
+                    self.prompt_ids,
+                    self.device,
+                    attn_backend=self.attn_backend,
+                )
+            vllm_lps = vllm_prefill(engine, self.prompt_ids)
+            gen_ids, decode_lps = vllm_generate(
+                engine, self.prompt_ids, self.MAX_GEN_TOKENS
+            )
+            prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompt_ids, gen_ids)
+        finally:
+            with torch.no_grad():
+                for p, original in zip(params, originals):
+                    p.copy_(original)
+            reload()
+
+        if dist.get_rank() == 0:
+            self.assertNotEqual(before_lps[0], vllm_lps[0])
+            for i in range(len(self.prompt_ids)):
+                self._assert_logprobs_equal(
+                    f"seq {i}: Trainer prefill vs vLLM prefill after reload",
+                    trainer_lps[i],
+                    vllm_lps[i],
+                    "Trainer",
+                    "vLLM",
+                )
+                self._assert_logprobs_equal(
+                    f"seq {i}: vLLM decode vs 2nd-pass prefill after reload",
+                    decode_lps[i],
+                    prefill_2nd_lps[i],
+                    "Decode",
+                    "2ndPrefill",
+                )
 
 
 @unittest.skipUnless(
@@ -928,7 +989,7 @@ class KimiK3BitwiseParityTestBase(BitwiseParityTestBase):
         cls.model.train()
 
 
-def _kimi_k3_debug_bitwise_config() -> Controller.Config:
+def kimi_k3_debug_bitwise_config() -> Controller.Config:
     """Build a one-GPU random-weight Kimi K3 parity configuration."""
     config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
     config.trainer = dataclasses.replace(
@@ -945,7 +1006,7 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     """Kimi K3 KDA/MLA parity with random weights and matched TP=1."""
 
     __test__ = True
-    config_fn = staticmethod(_kimi_k3_debug_bitwise_config)
+    config_fn = staticmethod(kimi_k3_debug_bitwise_config)
     attn_backend = "varlen"
     sync_weights_from_trainer = True
     BATCH_SIZE = 3

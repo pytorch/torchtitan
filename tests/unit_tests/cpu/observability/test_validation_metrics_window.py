@@ -30,7 +30,7 @@ def test_validation_is_measured_on_its_own_window(monkeypatch) -> None:
     processor = object.__new__(MetricsProcessor)
     processor.parallelism_context = SimpleNamespace(non_data_parallel_size=1)
     processor.color = NoColor()
-    processor.logger = SimpleNamespace(log=lambda m, step: logged.update(m))
+    processor.loggers = [SimpleNamespace(log=lambda m, step: logged.update(m))]
     processor.device_memory_monitor = _FakeMemoryMonitor()
     # 50 s of training (and checkpointing) since the last training log.
     processor.ntokens_since_last_log = 5000

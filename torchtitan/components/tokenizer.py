@@ -426,13 +426,27 @@ class HuggingFaceTokenizer(BaseTokenizer):
             if config_add_eos is not None:
                 self.default_add_eos = bool(config_add_eos)
 
+    def apply_chat_template(
+        self, messages: Sequence[Mapping[str, Any]], **kwargs
+    ) -> str:
+        """Render messages with this tokenizer's BOS and EOS strings.
+
+        Jinja renders a missing ``bos_token`` or ``eos_token`` as an empty
+        string, which drops the special tokens from templates that reference
+        them. Pass ``""`` when a token is unset. Caller-supplied kwargs win.
+        """
+        kwargs.setdefault("bos_token", self.bos_token or "")
+        kwargs.setdefault("eos_token", self.eos_token or "")
+        return super().apply_chat_template(messages, **kwargs)
+
     def encode(self, *args, **kwargs) -> list[int]:
         """
         Encode text into token IDs with BOS/EOS handling.
 
         Args:
             text (str): The text to encode
-            add_bos (bool): Whether to add BOS token
+            add_bos (bool): Whether to add a BOS token. Skipped if text
+                already starts with bos_token.
             add_eos (bool): Whether to add EOS token
 
         Returns:
@@ -443,6 +457,11 @@ class HuggingFaceTokenizer(BaseTokenizer):
             text = args[0]
         else:
             text = kwargs.get("text", "")
+
+        # Chat templates such as Llama 3 render bos_token into the text.
+        # ChatProcessor still passes add_bos=True; do not insert a second BOS.
+        if self.bos_token and text.startswith(self.bos_token):
+            kwargs["add_bos"] = False
 
         add_bos = kwargs.get("add_bos", self.default_add_bos or self.hf_adds_bos)
         add_eos = kwargs.get("add_eos", self.default_add_eos or self.hf_adds_eos)

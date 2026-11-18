@@ -24,8 +24,8 @@ class FakeModel(BaseModel):
     class Config(BaseModel.Config):
         hidden: int = 8
 
-        def get_nparams_and_flops(self, model, seq_len):
-            return 0, 0
+        def build_flops_estimator(self, model, *, seq_len):
+            return lambda input_dict: 0
 
     def __init__(self, config: Config):
         super().__init__()
@@ -61,7 +61,7 @@ def test_build_model_config_returns_model_config() -> None:
 
 
 def test_optimizer_hook_is_owned_by_model_class() -> None:
-    model = FakeModel.Config().build()
+    model = FakeModel.Config(max_context_length=8).build()
     model_parts = [model]
     optimizers = OptimizersContainer.Config(
         optimizers=[

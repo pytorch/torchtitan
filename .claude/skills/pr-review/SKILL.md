@@ -137,6 +137,14 @@ Do this before any line-level review. Answer, with evidence:
    Could a flag be removed, a case banned, a hook avoided, a test folded in?
 6. **Value**: for a new feature or option, is there evidence it matters (users,
    papers, tech reports, measured perf)? See `CONTRIBUTING.md#proof-of-value`.
+7. **One-sided design**: is the optimization or feature added to one side only
+   (RL generator but not trainer, inference but not training, one model or
+   backend)? Why isn't it native to the shared module? Write out the shared
+   version and list what it would delete. Count the workaround machinery the
+   one-sided version needs: private upstream APIs, storage tricks
+   (`free_storage`, aliasing FSDP-owned tensors), refresh/sync hooks, copies kept
+   in step with the originals, and "nothing may touch X between Y and Z"
+   ordering invariants. Each one is evidence for the shared design.
 
 Gate outcomes:
 - **The PR shouldn't exist** (problem not real, torchtitan shouldn't own it,
@@ -153,6 +161,12 @@ Gate outcomes:
 - **A general fix triggered by a model bug** (e.g. a mechanism patched because one
   model has parameters that never get gradients): judge the general fix on its
   own, and also flag the model-level problem as a follow-up.
+- **A one-sided design whose shared version would delete workaround machinery**
+  (question 7): that is the lead must-fix, with verdict **Request changes** (or
+  **Needs discussion** if the shared version has a real cost the maintainers must
+  weigh). Ask the author to either build the shared version or explain in the
+  PR why it can't work. Never downgrade it to a TODO, a follow-up, or a
+  should-consider because the one-sided version works and is measured faster.
 
 ### Step 3: Deep review
 Go through every changed line against [review-checklist.md](review-checklist.md).
@@ -254,7 +268,7 @@ the human-written summary, or misstates the code, say so as the first must-fix
 item.
 
 Verdict rules (match how maintainers use them):
-- **Approve**: the gate passed, every changed file was reviewed, and any
+- **Approve**: the gate passed (including question 7), every changed file was reviewed, and any
   remaining items are small, local, unambiguous edits the author can make without
   another review (delete a test, move a file, rename, add a TODO or comment). List
   them under "Must fix" and start the verdict line with "Approve -- please address
@@ -288,16 +302,27 @@ grouped together. Use the pending-review tools (`mcp__github__*`):
    - On a re-review, don't re-comment on issues that are still open; list them in
      the body as "still open". Comment inline only on new problems.
 3. `submit_pending_pull_request_review(..., event, body)` with the review body
-   from "Output Format" and the event mapped from the verdict: `APPROVE`,
-   `REQUEST_CHANGES`, or `COMMENT` (for Needs discussion, and when you were asked
-   a question or to review someone's review rather than for a full review).
+   from "Output Format" and the event from the verdict line (below).
 
-Fallback, only if the pending-review tools are unavailable or keep failing:
+With no inline comments, `create_and_submit_pull_request_review(owner="pytorch",
+repo="torchtitan", pullNumber=N, event, body)` posts the review in one call.
+
+**The event always matches the verdict line**, in every mode (full review,
+review again, review my review, a question): `APPROVE` for Approve,
+`REQUEST_CHANGES` for Request changes, `COMMENT` for Needs discussion. Use
+`COMMENT` without a verdict only for an answer that takes no position on whether
+the PR can merge. A `REQUEST_CHANGES` from this bot keeps blocking the PR until
+the bot submits `APPROVE` or a maintainer dismisses it, so a body that says the
+PR is now approvable must be submitted as `APPROVE`.
+
+Fallback, only if the review tools are unavailable or keep failing:
 delete any pending review you created, post each inline comment with
 `mcp__github_inline_comment__create_inline_comment` (always `confirmed: true`;
 unconfirmed calls are posted unfiltered after the session, so never call it to
 test it), then post the body with `gh pr review <N> --approve|--request-changes|--comment
---body-file <file>`. Never post the same finding through both paths.
+--body-file review_body.md`, with the same event rule. Write the body file in the
+working directory (writes elsewhere, e.g. `/tmp`, are denied) and never commit
+it. Never post the same finding through both paths.
 
 Finally, replace the content of your tracking comment with one line: the verdict
 and a link to the review. Don't repeat the summary there.

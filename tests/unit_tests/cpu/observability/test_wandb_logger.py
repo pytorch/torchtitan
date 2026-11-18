@@ -30,6 +30,6 @@ def test_wandb_run_tags_are_split(tmp_path, monkeypatch, env_value, expected):
     else:
         monkeypatch.setenv("WANDB_RUN_TAGS", env_value)
 
-    WandBLogger(log_dir=str(tmp_path))
+    WandBLogger.Config().build(log_dir=str(tmp_path))
 
     assert fake_wandb.init.call_args.kwargs["tags"] == expected

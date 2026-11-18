@@ -31,6 +31,11 @@ look for them in added lines with a quick search of the diff.
   consumer needs a named user ("mind providing motivation / use cases?").
 - [ ] **Alternatives.** Is there a simpler design? Write it out with its approximate
   size. Prefer composing features independently over coupling them.
+- [ ] **One-sided design.** Added to the RL generator but not the trainer, to
+  inference but not training, or to one model/backend? "Why not make it native?"
+  If the shared version would delete workaround machinery (private upstream
+  APIs, `free_storage` or aliasing of FSDP-owned tensors, refresh hooks, copies
+  kept in sync, ordering invariants), that blocks the PR; it is not a TODO.
 
 ## 2. Complexity and Minimalism
 
