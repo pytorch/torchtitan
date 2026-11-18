@@ -9,13 +9,9 @@
 Shape suffixes:
 - T = packed patch tokens
 - D = vision hidden dimension
-- Dh = attention head dimension
 - M = packed merged tokens
 - K = merged feature dimension
 - C = two spatial coordinates (row, column)
-- P = cached coordinate positions
-- F = rotary frequencies per coordinate (head_dim / 4)
-- R = combined spatial frequencies (head_dim / 2)
 - H = patch merge block rows
 - W = patch merge block columns
 - S = patches per side of a merge block

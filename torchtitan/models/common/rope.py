@@ -452,10 +452,6 @@ class ComplexVisionRoPE(RoPE):
                     "ComplexVisionRoPE does not support frequency scaling."
                 )
 
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.pair_layout = config.pair_layout
-
     @staticmethod
     def apply_rotary_emb(
         query: torch.Tensor,
@@ -487,9 +483,11 @@ class ComplexVisionRoPE(RoPE):
     ) -> torch.Tensor:
         """Gather per-token rotation coefficients for ``(T, 2)`` coordinates."""
         assert positions is not None
+        cfg = self.config
+        assert isinstance(cfg, ComplexVisionRoPE.Config)
         _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         row_TF2, col_TF2 = torch.view_as_real(self.cache)[positions].unbind(1)
-        if self.pair_layout == "interleaved":
+        if cfg.pair_layout == "interleaved":
             rotation_TR2 = torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3, -2)
         else:
             rotation_TR2 = torch.cat((col_TF2, row_TF2), dim=-2)

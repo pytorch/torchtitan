@@ -723,6 +723,7 @@ def muse_spark_navit_encoder_config(
                 rope=(
                     ComplexVisionRoPE.Config(
                         dim=head_dim,
+                        # One side may hold all merged tokens; positions are 1-based.
                         max_context_length=max_image_tokens * downsample_factor + 1,
                         theta=rope_theta,
                         pair_layout="concatenated",
