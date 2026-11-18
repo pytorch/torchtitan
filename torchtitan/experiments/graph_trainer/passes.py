@@ -246,13 +246,15 @@ def compile_time_passes(
             [
                 eliminate_dead_code_pass,
                 canonicalize_graph_pass,
-                deduplicate_fsdp_unshard_chains_pass,
+                functools.partial(
+                    deduplicate_fsdp_unshard_chains_pass,
+                    use_flex_shard=config.use_flex_shard_instead_simple_fsdp,
+                ),
             ]
         )
     ep_overlap_module_fqn: str | None = None
     if ep_overlap_enabled:
         _, ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
-
     passes.extend(
         [
             functools.partial(
@@ -328,17 +330,24 @@ def compile_time_passes(
 
     if config.compile.enable_fsdp_ag_rs_overlap:
         passes.append(reassign_collective_pgs_pass)
-    passes.append(
-        functools.partial(
-            joint_transformer_block_bucketing_reordering_pass,
-            module_bucket_plans=module_bucket_plans,
-            # FSDP2 packs buckets in managed parameter order. The traced state
-            # FQNs preserve that registration order, unlike graph execution order.
-            fsdp_param_module_order=get_fsdp_param_module_order(
-                traced_result.state_fqns
-            ),
+    if config.use_flex_shard_instead_simple_fsdp:
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            flex_shard_fsdp_scheduling,
         )
-    )
+
+        passes.append(functools.partial(flex_shard_fsdp_scheduling))
+    else:
+        passes.append(
+            functools.partial(
+                joint_transformer_block_bucketing_reordering_pass,
+                module_bucket_plans=module_bucket_plans,
+                # FSDP2 packs buckets in managed parameter order. The traced state
+                # FQNs preserve that registration order, unlike graph execution order.
+                fsdp_param_module_order=get_fsdp_param_module_order(
+                    traced_result.state_fqns
+                ),
+            )
+        )
 
     if ep_overlap_enabled:
         assert ep_overlap_module_fqn is not None

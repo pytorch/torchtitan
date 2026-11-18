@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.partition import (
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
     extract_fsdp_reduce_grad_graph,
     extract_fsdp_unshard_graph,
+    get_fsdp_graph_regions,
     remove_fsdp_reduction_tail,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
@@ -1011,6 +1012,10 @@ def _build_stage_graphs(
         num_fwd_outputs=num_fwd_output_values,
         backward_only_input_indices=backward_only_indices,
     )
+    get_regions = functools.partial(
+        get_fsdp_graph_regions,
+        use_flex_shard=config.use_flex_shard_instead_simple_fsdp,
+    )
     fsdp_fw = extract_fsdp_unshard_graph(
         fw_module,
         num_params=num_state_param_values,
@@ -1018,19 +1023,21 @@ def _build_stage_graphs(
         flat_input_indices=partition_meta.fwd_flat_input_indices,
         side_effect_output_names=partition_meta.fwd_side_effect_output_names,
         mode="split" if extract_fsdp_param_unshard else "keep",
+        regions=get_regions(fw_module, include_reduce_grad_inputs=False),
     )
     partition_meta = dataclasses.replace(
         partition_meta,
-        fwd_side_effect_output_names=tuple(
-            name
-            for name in partition_meta.fwd_side_effect_output_names
-            if name in fsdp_fw.compute_output_names
-        ),
+        fwd_side_effect_output_names=fsdp_fw.compute_output_names[
+            partition_meta.num_fwd_user_outputs + partition_meta.num_saved_for_backward :
+        ],
     )
     fsdp_bw = extract_fsdp_reduce_grad_graph(
         bw_module,
         num_param_grads=num_param_grad_values,
         mode="split" if extract_fsdp_grad_reduction else "keep",
+        regions=get_regions(
+            bw_module, include_reduce_grad_inputs=extract_fsdp_grad_reduction
+        ),
     )
     remove_fsdp_reduction_tail(
         fsdp_fw.compute_module,

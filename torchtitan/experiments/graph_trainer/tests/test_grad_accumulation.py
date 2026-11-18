@@ -21,7 +21,13 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         graph = fx.Graph()
         x = graph.placeholder("x")
         x.meta["val"] = torch.empty(2, dtype=torch.float64)
-        grad = graph.call_function(torch.ops.aten.mul.Tensor, args=(x, 2))
+        computed = graph.call_function(torch.ops.aten.mul.Tensor, args=(x, 2))
+        buffer = graph.call_function(torch.ops.aten.zeros_like.default, args=(x,))
+        # The gradient view exists before its None-returning buffer writer.
+        grad = graph.call_function(torch.ops.aten.view.default, args=(buffer, [2]))
+        graph.call_function(
+            torch.ops.aten._foreach_copy_.default, args=([grad], [computed])
+        )
         grad.meta["val"] = torch.empty(2, dtype=torch.float64)
         result = grad
         if reduce:

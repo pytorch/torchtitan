@@ -83,10 +83,8 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     is_getitem_node,
-    node_closure,
     node_order,
     output_names,
-    placeholder_dependencies,
     placeholder_names,
     unique_in_order,
 )
@@ -95,6 +93,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     is_mutation_node,
+    mutation_deps,
     mutation_target_nodes,
 )
 
@@ -247,6 +246,56 @@ def _invalid_backward_only_value_names(
     )
 
 
+def _node_closure_with_mutations(
+    values: Iterable[object], *, forward_only: bool = False
+) -> set[fx.Node]:
+    """Return roots, value dependencies, and writes through aliases before each read.
+
+    INPUT: values=[result]
+        source = placeholder("source")
+        buffer = empty(...)
+        alias = view(buffer, ...)
+        write = _foreach_copy_([alias], [source])  # Returns None; no edge to result.
+        result = sin(alias)                      # Requested root reads the buffer.
+        later_write = zero_(buffer)              # After the read; excluded.
+        unrelated = cos(source)                  # No dependency path; excluded.
+
+    OUTPUT: closure members shown in graph order; returned as a set.
+        source = placeholder("source")           # Needed by the included write.
+        buffer = empty(...)
+        alias = view(buffer, ...)
+        write = _foreach_copy_([alias], [source])  # Included through buffer aliasing.
+        result = sin(alias)
+
+    Roots are read at graph end; dependencies are read at their users.
+    With forward_only=True, skip writers tagged autograd_backward.
+    """
+    roots = [value for value in values if isinstance(value, fx.Node)]
+    if not roots:
+        return set()
+    order = node_order(roots[0].graph)
+    writers = mutation_deps(roots[0].graph)
+    pending = [(node, len(order)) for node in roots]
+    seen = set()
+    closure = set()
+    while pending:
+        node, read_position = pending.pop()
+        if (node, read_position) in seen:
+            continue
+        seen.add((node, read_position))
+        for writer in writers.get(base_tensor_for_mutation_target(node), ()):
+            if order[writer] < read_position and not (
+                forward_only and writer.meta.get("autograd_backward", False)
+            ):
+                pending.append((writer, order[writer]))
+        if node not in closure:
+            closure.add(node)
+            pending.extend(
+                (dependency, order[node]) for dependency in node.all_input_nodes
+            )
+    return closure
+
+
 def _saved_values_for_backward(
     joint: fx.GraphModule,
     *,
@@ -261,13 +310,13 @@ def _saved_values_for_backward(
     covers values used by both forward and backward: the forward callable
     returns them once, and the PP runtime passes them to backward later.
     """
-    forward_nodes = node_closure(fwd_outputs)
-    backward_nodes = node_closure(bwd_outputs)
+    forward_nodes = _node_closure_with_mutations(fwd_outputs, forward_only=True)
+    backward_nodes = _node_closure_with_mutations(bwd_outputs)
     saved: list[fx.Node] = []
     for node in joint.graph.nodes:
         if node not in forward_nodes or node.name in backward_only_names:
             continue
-        if any(
+        if node in bwd_outputs or any(
             user in backward_nodes and user not in forward_nodes for user in node.users
         ):
             saved.append(node)
@@ -278,9 +327,8 @@ def _forward_mutations_to_materialize(
     joint: fx.GraphModule,
     *,
     fwd_outputs: Sequence[object],
-    bwd_outputs: Sequence[object],
     backward_only_names: set[str],
-) -> tuple[list[fx.Node], list[fx.Node]]:
+) -> list[fx.Node]:
     """Find forward-side mutations that must execute in the forward callable.
 
     Chunked loss traces populate the hidden-state gradient accumulator with
@@ -299,16 +347,14 @@ def _forward_mutations_to_materialize(
     order = node_order(joint.graph)
     fwd_output_nodes = [value for value in fwd_outputs if isinstance(value, fx.Node)]
     if not fwd_output_nodes:
-        return [], []
+        return []
     fwd_output_barrier = max(order[node] for node in fwd_output_nodes)
-    backward_nodes = node_closure(bwd_outputs)
-    saved_mutation_bases: list[fx.Node] = []
     mutation_outputs: list[fx.Node] = []
 
     for node in joint.graph.nodes:
         if (
             order[node] > fwd_output_barrier
-            or node in backward_nodes
+            or node.meta.get("autograd_backward", False)
             or not is_mutation_node(node)
         ):
             continue
@@ -320,13 +366,7 @@ def _forward_mutations_to_materialize(
                     "Forward mutation cannot target a backward-only input: "
                     f"mutation={node.name}, target={mutated_base.name}"
                 )
-            if mutated_base.op != "placeholder" and mutated_base in backward_nodes:
-                saved_mutation_bases.append(mutated_base)
-
-    return (
-        unique_in_order(saved_mutation_bases),
-        unique_in_order(mutation_outputs),
-    )
+    return unique_in_order(mutation_outputs)
 
 
 def _backward_passthrough_placeholders(
@@ -345,9 +385,11 @@ def _backward_passthrough_placeholders(
     will not select them; they still must be available to the extracted
     backward graph.
     """
-    backward_nodes = node_closure(bwd_outputs)
+    backward_nodes = _node_closure_with_mutations(bwd_outputs)
     placeholders = list(joint.graph.find_nodes(op="placeholder"))
-    backward_placeholders = placeholder_dependencies(bwd_outputs)
+    backward_placeholders = {
+        node for node in backward_nodes if node.op == "placeholder"
+    }
     backward_placeholders.update(
         param
         for param, outputs in find_fsdp_unshard_outputs_by_param(placeholders).items()
@@ -379,7 +421,7 @@ def _flatten_saved_values_for_backward(
     through getitem chains, save those getitem leaves directly.
     """
 
-    backward_nodes = node_closure(bwd_outputs)
+    backward_nodes = _node_closure_with_mutations(bwd_outputs)
     order = node_order(joint.graph)
 
     def flatten_if_backward_uses_items(node: fx.Node) -> list[fx.Node]:
@@ -410,7 +452,7 @@ def _forward_inputs_from_outputs(
 ) -> list[fx.Node]:
     """Select forward placeholders and reject backward-only dependencies."""
 
-    fw_input_set = placeholder_dependencies(fw_outputs)
+    fw_input_set = _node_closure_with_mutations(fw_outputs, forward_only=True)
     invalid_names = sorted(
         node.name for node in fw_input_set if node.name in backward_only_names
     )
@@ -434,7 +476,7 @@ def _backward_grad_inputs_from_schedule(
     full traced input list.
     """
 
-    bwd_input_set = placeholder_dependencies(bwd_outputs)
+    bwd_input_set = _node_closure_with_mutations(bwd_outputs)
     backward_grad_inputs = [
         node for node in backward_only_inputs if node in bwd_input_set
     ]
@@ -533,10 +575,9 @@ def partition_joint_graph(
     # 1. Include forward mutations in dependency analysis. Mutation ordering
     # is not represented by normal dataflow when a later node reads the mutated
     # buffer instead of the mutation's return value.
-    (mutation_saved_values, fwd_mutation_outputs,) = _forward_mutations_to_materialize(
+    fwd_mutation_outputs = _forward_mutations_to_materialize(
         joint,
         fwd_outputs=fwd_outputs,
-        bwd_outputs=bwd_outputs,
         backward_only_names=backward_only_names,
     )
 
@@ -558,7 +599,7 @@ def partition_joint_graph(
     )
 
     # 4. Preserve mutated bases consumed by backward.
-    saved_values = unique_in_order([*saved_values, *mutation_saved_values])
+    saved_values = unique_in_order(saved_values)
     invalid_saved_names = _invalid_backward_only_value_names(
         saved_values,
         backward_only_names,

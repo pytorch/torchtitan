@@ -59,6 +59,8 @@ from torchtitan.models.base.model import BaseModel
 
 
 if TYPE_CHECKING:
+    from flex_shard import PlacementFn
+
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
@@ -794,6 +796,8 @@ def graph_pipeline_llm(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
+    use_flex_shard_instead_simple_fsdp: bool = False,
+    flex_shard_placement_fn: "PlacementFn | None" = None,
 ) -> tuple[GraphRuntime, list[BaseModel], bool, bool]:
     """Build a GraphPP pipeline schedule for GraphTrainer.
 
@@ -852,6 +856,8 @@ def graph_pipeline_llm(
             compile_config=compile_config,
             activation_remat=activation_remat,
             dump_folder=dump_folder,
+            use_flex_shard_instead_simple_fsdp=use_flex_shard_instead_simple_fsdp,
+            flex_shard_placement_fn=flex_shard_placement_fn,
         )
         logger.info(
             "PP rank %s is building GraphPP stage_idx %s with modules %s",
@@ -880,9 +886,23 @@ def graph_pipeline_llm(
             compile=compile_config,
             parallelism=parallelism,
             model=model_config,
+            use_flex_shard_instead_simple_fsdp=use_flex_shard_instead_simple_fsdp,
         ),
         loss_fn=loss_fn,
     )
+
+    if use_flex_shard_instead_simple_fsdp:
+        from flex_shard.flex_shard.flex_shard import FlexShardModule
+
+        def _cleanup_native_metadata_state() -> None:
+            for model_part in model_parts:
+                cast(FlexShardModule, model_part).reshard()
+                for parameter in model_part.parameters():
+                    parameter.grad = None
+
+        graph_runtime.register_post_metadata_inference_cleanup(
+            _cleanup_native_metadata_state
+        )
 
     return (
         graph_runtime,
