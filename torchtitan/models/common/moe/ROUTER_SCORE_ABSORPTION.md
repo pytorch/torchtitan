@@ -2,9 +2,7 @@
 
 [`RoutedExperts`](moe.py) absorbs DeepEP and HybridEP router scores into W2's
 input when `output_postprocess` is absent. Local and AllToAll keep post-expert
-scoring; Dist-MoE owns its compute and communication optimizations. This extends
-the DeepEP optimization from [#5543](https://github.com/pytorch/torchtitan/pull/5543)
-to HybridEP through shared `EPDispatchMetadata.scores_R`.
+scoring; Dist-MoE owns its compute and communication optimizations.
 
 `R` is the number of routed rows on this rank, `D` the model dimension, `F` the
 expert intermediate dimension, and `E` the number of local experts. Dispatch
@@ -93,58 +91,13 @@ it instead retains the routing indices needed by unpermute backward: `R`
 int64 indices occupy `8R` bytes, or 256 KiB at `R = 32768`. This counts index
 storage, not the opaque DeepEP handle or other retained tensors.
 
+HybridEP also saves its complete combine region; backward uses the forward
+dispatch handle instead of W2's output.
+
 Scores are supplied by replayed dispatch/permutation or retained dispatch
-outputs. The optimized combine does not consume scores. For native BF16 experts
-without output postprocessing or a real output dtype cast, W2 is always saved:
-its backward needs its input and weights, but no replayed consumer needs its
-output. The GPT-OSS bias addition follows the same decision. Replaying even a
-cheap bias addition after a saved matmul would retain the matmul's full routed
-output; saving both avoids this dependency.
-
-A real output dtype conversion or postprocess still consumes W2's output, so
-those paths retain the configured policy. Quantized and LoRA implementations
-also retain their policy because their backward can save internal activations.
-
-### Full rematerialization
-
-Full remat skips native W2's forward replay automatically in the absorbed BF16
-path while replaying the other policy-controlled regions:
-
-```python
-from torchtitan.distributed.activation_remat import FullActivationRematConfig
-
-config.activation_remat = FullActivationRematConfig()
-```
-
-Replay still rebuilds W2's scored input, and its input-gradient and
-weight-gradient GEMMs still run. The GPT-OSS bias addition is also saved.
-Neither scoring nor saved combine requires retaining W2's output.
-For bias-free experts, each skipped forward replay avoids approximately
-`2 * R * F * D` FLOPs, including any routed padding rows in `R`.
-`DefaultActivationRematConfig` already saves W2. With BF16 compute weights, the
-native saved projection does not retain a weight cast; stored FP32 weights can
-instead keep a BF16 cast copy for backward. Compare saved-tensor reports and
-profile GEMM counts for the selected implementation rather than inferring total
-memory savings from the policy name.
-
-## HybridEP dispatch and combine
-
-HybridEP returns its permuted FP32 scores explicitly with dispatched rows.
-The same W2-input and GPT-OSS bias scaling above applies; with postprocessing,
-the shared expert path scores after that postprocess. Combine accepts weighted
-rows and never multiplies scores a second time. Blocking and nonblocking modes
-use the same scoring contract, including aligned padding and capacity-limited
-dispatch. Absorption does not change capacity sizing or restore dropped tokens.
-
-HybridEP combine is always a SAVE region, including its fused unpermutation.
-Its backward needs the opaque forward dispatch handle, not the expert output.
-That handle retains routing maps, so this is not the DeepEP `8R`-byte index-only
-storage example above. Dispatch still follows `ep_communication`: integer
-prefix scans reproduce row positions on replay, keeping rebuilt activations
-and scores aligned with the forward handle used by saved combine. Backward
-communication still runs; only forward combine replay is skipped.
-
-The earlier HybridEP path cast router scores to the activation dtype before
-post-W2 multiplication. The current path keeps scores in FP32 until the product
-is cast back. Both this precision change and moving multiplication across W2
-can change BF16 outputs and gradients; this is not a bitwise-preserving change.
+outputs. Combine does not consume scores. For native BF16 experts without
+output postprocessing or an output dtype conversion, W2 and its GPT-OSS bias
+addition are saved even under FullAC. This skips forward replay without
+retaining W2's output; both gradient GEMMs still run. Quantized and LoRA
+projections, output postprocessing, and dtype conversions retain their
+configured remat policy.

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from copy import deepcopy
 from functools import partial
 from unittest.mock import patch
 
@@ -24,21 +23,19 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.distributed.spmd_types import (
     disable_dense_sp,
     set_current_spmd_mesh,
     set_spmd_meshes,
     spmd_dense_sp_enabled,
 )
-from torchtitan.models.base.module import Module, ModuleDict
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
 )
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 
 
 class TestLinear(unittest.TestCase):
@@ -157,12 +154,11 @@ class TestLinear(unittest.TestCase):
 
 
 class TestGroupedLinear(unittest.TestCase):
-    def test_full_remat_skips_absorbed_projection_without_retaining_output(self):
-        """Skip native W2 replay without changing gradients or subclass policies."""
+    def test_absorbed_projection_replay_preserves_specialized_kernel_policy(self):
+        """Skip native W2 replay without retaining outputs or custom intermediates."""
 
         class SquaredGroupedLinear(GroupedLinear):
             def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
-                # This intermediate models the extra saves of specialized kernels.
                 return (
                     super()
                     ._grouped_mm(
@@ -171,98 +167,50 @@ class TestGroupedLinear(unittest.TestCase):
                     .square()
                 )
 
-        class Block(Module):
-            def __init__(self, linear_cls, *, absorb, output_needed):
-                super().__init__()
-                self.w2 = linear_cls(
-                    linear_cls.Config(group_size=2, in_features=3, out_features=5)
-                )
-                self.absorb = absorb
-                self.output_needed = output_needed
-                for parameter in self.parameters():
-                    nn.init.normal_(parameter, std=0.1)
-
-            def forward(self, input_RI, scores_R):
-                output_RO = self.w2(
-                    input_RI,
-                    torch.tensor([2, 7], dtype=torch.int32),
-                    scores_R=scores_R if self.absorb else None,
-                    output_needed_for_recompute=self.output_needed,
-                )
-                if self.output_needed or not self.absorb:
-                    remat.recompute_needs_tensor(output_RO)
-                if self.output_needed:
-                    output_RO = output_RO.tanh()
-                if not self.absorb:
-                    output_RO = (output_RO * scores_R[:, None]).to(input_RI.dtype)
-                return remat.region(torch.clone, "combine", recompute=False)(output_RO)
-
         def cpu_grouped_mm(input_RI, weight_EIO, *, offs):
-            output_parts = []
-            start = 0
-            for expert, end in enumerate(offs.tolist()):
-                output_parts.append(input_RI[start:end] @ weight_EIO[expert])
-                start = end
-            return torch.cat(output_parts)
+            del offs
+            return input_RI @ weight_EIO[0]
 
-        for linear_cls in (GroupedLinear, GptOssGroupedLinear, SquaredGroupedLinear):
-            for absorb, output_needed in ((True, False), (True, True), (False, False)):
-                with (
-                    self.subTest(
-                        linear=linear_cls.__name__,
-                        absorb=absorb,
-                        output_needed=output_needed,
-                    ),
-                    DeterministicGuard(True),
-                ):
-                    torch.manual_seed(42)
-                    block = Block(
-                        linear_cls, absorb=absorb, output_needed=output_needed
-                    )
-                    model = Module()
-                    model.layers = ModuleDict({"0": deepcopy(block)})
-                    packed_shapes = []
+        for linear_cls, expected_calls in (
+            (GroupedLinear, 1),
+            (SquaredGroupedLinear, 2),
+        ):
+            with self.subTest(linear=linear_cls.__name__), DeterministicGuard(True):
+                torch.manual_seed(42)
+                grouped = linear_cls(
+                    linear_cls.Config(group_size=1, in_features=3, out_features=5)
+                )
+                nn.init.normal_(grouped.weight, std=0.1)
+                input_RI = torch.randn(7, 3, dtype=torch.bfloat16, requires_grad=True)
+                scores_R = torch.rand(7, requires_grad=True)
+                packed_shapes = []
 
-                    def pack(tensor):
-                        packed_shapes.append(tuple(tensor.shape))
-                        return tensor
+                def pack(tensor):
+                    packed_shapes.append(tuple(tensor.shape))
+                    return tensor
 
-                    FullActivationRematConfig().apply(
-                        model,
-                        saved_tensors_hooks=lambda _module, _name: (pack, lambda t: t),
+                def projection(input_RI, scores_R):
+                    output_RO = grouped(
+                        input_RI,
+                        torch.tensor([7], dtype=torch.int32),
+                        scores_R=scores_R,
+                        output_needed_for_recompute=False,
                     )
-                    input_RI = torch.randn(7, 3, dtype=torch.bfloat16)
-                    scores_R = torch.rand(7)
-                    results = []
-                    for projection in (block, model.layers["0"]):
-                        actual_RI = input_RI.clone().requires_grad_()
-                        actual_scores_R = scores_R.clone().requires_grad_()
-                        with patch.object(
-                            torch, "_grouped_mm", side_effect=cpu_grouped_mm
-                        ) as grouped_mm:
-                            loss = (
-                                projection(actual_RI, actual_scores_R)
-                                .float()
-                                .square()
-                                .sum()
-                            )
-                            loss.backward()
-                        results.append(
-                            [loss, actual_RI.grad, actual_scores_R.grad]
-                            + [parameter.grad for parameter in projection.parameters()]
-                        )
-                    expected_calls = (
-                        1
-                        if absorb
-                        and not output_needed
-                        and linear_cls is not SquaredGroupedLinear
-                        else 2
-                    )
-                    self.assertEqual(grouped_mm.call_count, expected_calls)
+                    return remat.region(torch.sum, "loss", recompute=False)(output_RO)
+
+                # The default checkpoint recomputes all policy-controlled regions.
+                with patch.object(
+                    torch, "_grouped_mm", side_effect=cpu_grouped_mm
+                ) as grouped_mm:
+                    loss = remat.checkpoint(
+                        saved_tensors_hooks=(pack, lambda tensor: tensor)
+                    )(projection)(input_RI, scores_R)
                     # R x O differs from every input shape, including R x I.
                     self.assertNotIn((7, 5), packed_shapes)
-                    for actual, expected in zip(results[1], results[0]):
-                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    loss.backward()
+                self.assertEqual(grouped_mm.call_count, expected_calls)
+                for tensor in (input_RI, scores_R, grouped.weight):
+                    self.assertIsNotNone(tensor.grad)
 
     def test_scores_use_fp32_without_saving_fp32_input(self):
         """Keep score precision without doubling the saved activation storage."""

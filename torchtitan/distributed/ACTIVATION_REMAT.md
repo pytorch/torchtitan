@@ -328,17 +328,12 @@ communication regions:
   and the expert-major permute; `combine` covers the unpermute, the combine
   all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
   dispatchers instead declare `ep_communication.dispatch` and
-  `ep_communication.combine`. Dispatch follows `ep_communication`; combine is
-  always saved, including local unpermutation, and receives weighted expert
-  outputs. A replay must receive tokens in the forward's order, so DeepEP uses
-  a deterministic buffer, adding a sort per dispatch. HybridEP derives row
-  positions from integer prefix scans, preserving alignment with the forward
-  dispatch handle used by saved combine. `FullActivationRematConfig` replays
-  dispatch for both backends, but never their combine regions. With router-score
-  absorption, native BF16 W2 and its bias addition are always saved when no
-  output postprocess or real output dtype cast needs their output. Full remat
-  then skips W2's forward replay without keeping that routed output. Quantized
-  and LoRA projections retain their configured policy.
+  `ep_communication.combine`. Dispatch follows `ep_communication`; combine,
+  including local unpermutation, is always saved. Full remat replays dispatch
+  for both backends. DeepEP uses deterministic receive ordering, adding a sort;
+  HybridEP derives token positions from prefix scans. See
+  [router-score absorption](../models/common/moe/ROUTER_SCORE_ABSORPTION.md)
+  for W2 replay conditions.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
