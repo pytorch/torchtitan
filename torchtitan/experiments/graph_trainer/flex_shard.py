@@ -30,6 +30,10 @@ from flex_shard.custom_placements.shard import Shard
 from flex_shard.layout_adapters.spmd_types import spmd_types_to_global_layout
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard as DTensorShard
+from torch.distributed.tensor.placement_types import (
+    _StridedShard,
+    Placement as DTensorPlacement,
+)
 
 from torchtitan.components.optim import GradientClipper
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
@@ -70,6 +74,21 @@ def apply_flex_shard(
         reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
     )
     shard_placements = linear_param_shard_placements(model)
+    if parallelism_context.ep_enabled:
+        assert expert_mesh is not None
+        for module in model.modules():
+            if not isinstance(module, MoE):
+                continue
+            experts = module.routed_experts
+            if expert_mesh.size() * parallelism_context.ep <= experts.w13.group_size:
+                for param in experts.parameters():
+                    shard_placements.pop(param, None)
+            else:
+                shard_placements.update(
+                    linear_param_shard_placements(
+                        experts, include_unstacked_grouped=True
+                    )
+                )
 
     def placement_fn(named_params, mesh):
         del mesh
@@ -145,8 +164,11 @@ def _init_dtensor_param(param, *, layout, init_fn, parallelism_context):
     )
     mesh = get_mesh(param)
     assert mesh is not None
-    placements = [DTensorShard(p.dim) for p in get_placements(param)]
+    placements: list[DTensorPlacement] = [
+        DTensorShard(p.dim) for p in get_placements(param)
+    ]
     if outer_mesh is not None:
+        outer_placements = []
         for axis in outer_mesh.mesh_dim_names:
             axis_type = layout.local_type[axis]
             if layout.partition_spec is not None:
@@ -154,7 +176,17 @@ def _init_dtensor_param(param, *, layout, init_fn, parallelism_context):
                     axes = entry if isinstance(entry, tuple) else (entry,)
                     if axis in axes:
                         axis_type = spmd.S(dim)
-            placements.append(spmd.spmd_type_to_dtensor_placement(axis_type))
+            outer_placements.append(spmd.spmd_type_to_dtensor_placement(axis_type))
+        for index, placement in enumerate(placements):
+            split_factor = 1
+            for axis_index, outer_placement in enumerate(outer_placements):
+                if outer_placement.is_shard(placement.dim):
+                    split_factor *= outer_mesh.size(axis_index)
+            if split_factor > 1:
+                placements[index] = _StridedShard(
+                    placement.dim, split_factor=split_factor
+                )
+        placements.extend(outer_placements)
         mesh = DeviceMesh._concatenate([mesh, outer_mesh])
     param._graph_trainer_dtensor_param = torch.nn.Parameter(
         DTensor.from_local(param.detach(), mesh, tuple(placements), run_check=False),
