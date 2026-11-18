@@ -114,7 +114,18 @@ async def run_grader(
 ) -> dict:
     """Run a task's grader on a test log, as V2.1's tests/test.sh does, and return
     its report: `resolved`, `parsed_counts`, and `fail_to_pass` and `pass_to_pass`
-    mapping each expected test name to whether it passed."""
+    mapping each expected test name to whether it passed.
+
+    What is specific to SWE-rebench V2.1: each task ships tests/grade.py, a
+    standalone script that SWE-rebench-V2's lib/harbor_tasks generates for the
+    task's log parser (there are 32 parsers). Its command line is
+    ``grade.py CONFIG LOG REPORT``: CONFIG is a JSON file with the FAIL_TO_PASS and
+    PASS_TO_PASS lists, LOG the test command's output, and REPORT where it writes
+    the report above. It exits 0 when the task is resolved, else 1. It imports only
+    the standard library, so V2.1 runs it with ``-I -S`` (no environment variables,
+    user or site packages), and so does this function. The script takes file
+    paths, so the inputs go to a temporary directory, one per call.
+    """
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         (root / "grade.py").write_text(grader_source)
@@ -123,6 +134,8 @@ async def run_grader(
         )
         (root / "test_output.log").write_bytes(test_log.encode(errors="replace"))
         report_path = root / "report.json"
+        # Runs in its own process: the grader is code from the dataset, and a crash
+        # or hang there must not take down the env-server worker.
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-I",
