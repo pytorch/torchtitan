@@ -18,6 +18,7 @@ from torchtitan.distributed.accelerator_graph import (
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
     wrap_with_accelerator_graph,
 )
+from torchtitan.distributed.flex_shard_fsdp import flex_shard_reduce_meshes
 from torchtitan.tools.utils import device_module, device_type
 
 from .ema import EMA
@@ -47,18 +48,25 @@ class GradientClipper(Configurable):
     ) -> torch.Tensor:
         """Clip gradients with ``dist_utils.clip_grad_norm_``.
 
-        Use ``foreach=True``, and the PP mesh and whether FlexShard sharded the
-        parameters from ``parallelism_context``.
+        Use ``foreach=True``, and the PP mesh, whether FlexShard sharded the
+        parameters and, if it did, the meshes to reduce their grad norms over
+        from ``parallelism_context``.
         Return the pre-clip global L2 norm as a local zero-dimensional tensor
         with an equivalent value on every rank. Preserve non-finite values and
         do not reuse the returned norm as the clip coefficient or scratch.
         """
+        flex_shard_enabled = parallelism_context.flex_shard_enabled
         return dist_utils.clip_grad_norm_(
             parameters,
             max_norm,
             foreach=True,
             pp_mesh=parallelism_context.get_optional_mesh("pp"),
-            flex_shard_enabled=parallelism_context.flex_shard_enabled,
+            flex_shard_enabled=flex_shard_enabled,
+            flex_shard_reduce_meshes=(
+                flex_shard_reduce_meshes(parallelism_context)
+                if flex_shard_enabled
+                else None
+            ),
         )
 
 
