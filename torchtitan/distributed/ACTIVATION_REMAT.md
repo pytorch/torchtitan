@@ -67,9 +67,43 @@ ActivationRematConfig(
 )
 ```
 
-The same policy currently applies to every transformer block. Wildcards such
-as `attention.*` are supported. Unmatched patterns are currently ignored;
-validation must eventually account for regions across all pipeline stages.
+Wildcards such as `attention.*` are supported. Unmatched patterns are
+currently ignored; validation must eventually account for regions across all
+pipeline stages.
+
+### Per-block policies
+
+The policy applies to every transformer block unless `block_overrides`
+changes it for selected blocks. A uniform policy pays the same price in every
+block: if recomputing one expensive region in two blocks is enough to fit,
+the uniform choice is to recompute it in all of them. An override names
+blocks and replaces `save_regions` and/or `recompute_regions` for them; a
+field it leaves `None` keeps the base value:
+
+```python
+ActivationRematConfig(
+    save_regions=["*"],
+    block_overrides=[
+        # Recompute the attention core only in the first two blocks.
+        BlockRematOverride(
+            blocks=["layers.0", "layers.1"],
+            recompute_regions=["attention.inner_attention"],
+        ),
+    ],
+)
+```
+
+Block names are exact FQNs in the original model: `layers.<id>` for decoder
+blocks and `<encoder>.layers.<id>` (e.g. `vision_encoder.layers.3`) for
+encoder blocks, which `apply(encoder, module_fqn="vision_encoder")` matches
+against. Pipeline splitting keeps original layer ids, so an override follows
+its block to whichever stage holds it. Malformed names, empty overrides and a
+block named by two overrides raise at config time; a name the model lacks is
+not detected, since each pipeline stage holds only some blocks. Within a
+block's result, `recompute_regions` still wins over `save_regions`, so an
+override that sets only `save_regions` cannot retain a region the base
+recomputes; override `recompute_regions` too. The fixed presets reject
+overrides; use `ActivationRematConfig` to customize them.
 
 ## Saved-tensor hooks
 
