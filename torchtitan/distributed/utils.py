@@ -11,7 +11,7 @@ import math
 import os
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -637,6 +637,7 @@ def clip_grad_norm_(
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
     flex_shard_enabled: bool = False,
+    flex_shard_reduce_meshes: Mapping[DeviceMesh, DeviceMesh] | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -671,6 +672,10 @@ def clip_grad_norm_(
         flex_shard_enabled: Whether FlexShard sharded the parameters
             (``parallelism.fsdp_backend=FlexShardConfig()``), so their gradients
             are plain local shards over their buckets' meshes.
+        flex_shard_reduce_meshes: With FlexShard, the mesh to reduce the grad
+            norm over for the parameters of the buckets on each mesh it has, as
+            ``flex_shard_reduce_meshes`` returns. Other buckets reduce over
+            their own mesh.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
@@ -710,8 +715,9 @@ def clip_grad_norm_(
     # on a PP rank without gradients.
     for mesh, params in params_by_mesh.items() or [(None, [])]:
         if flex_shard_enabled and mesh is not None:
+            reduce_mesh = (flex_shard_reduce_meshes or {}).get(mesh, mesh)
             norm = flex_shard_grad_norm(
-                params, mesh, norm_type, error_if_nonfinite, foreach
+                params, reduce_mesh, norm_type, error_if_nonfinite, foreach
             )
         else:
             norm = torch.nn.utils.get_total_norm(
