@@ -54,11 +54,14 @@ class _Actor:
         self.release_sessions = _Endpoint()
 
 
-def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
+def _router(
+    actors, *, strategy=None, hot_swap=False, pull_timeout_s=None
+) -> InterGeneratorRouter:
     return InterGeneratorRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
+            pull_timeout_s=pull_timeout_s,
         ),
         generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
     )
@@ -392,5 +395,37 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
         router = _router(actors)
 
         await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
+
+    asyncio.run(_run())
+
+
+def test_pull_names_the_generators_that_miss_its_timeout():
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1", wait_pull=True)]
+        router = _router(actors, pull_timeout_s=0.05)
+
+        with pytest.raises(
+            TimeoutError, match=r"Generators \[1\] did not load policy version 4"
+        ):
+            await asyncio.wait_for(router.pull_model_state_dict(4), timeout=5.0)
+
+        assert [h.draining for h in router._generators] == [False, False]
+
+    asyncio.run(_run())
+
+
+def test_cancelling_a_pull_cancels_every_generator_pull():
+    async def _run():
+        actors = [_Actor("gen0", wait_pull=True), _Actor("gen1", wait_pull=True)]
+        router = _router(actors)
+        pull = asyncio.create_task(router.pull_model_state_dict(4))
+        await asyncio.gather(*(a.load_model_state_dict.started.wait() for a in actors))
+        assert [h.draining for h in router._generators] == [True, True]
+
+        pull.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pull, timeout=5.0)
+
+        assert [h.draining for h in router._generators] == [False, False]
 
     asyncio.run(_run())

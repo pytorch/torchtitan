@@ -102,6 +102,10 @@ class InterGeneratorRouter(Configurable):
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
 
+        pull_timeout_s: float | None = None
+        """Seconds a model state dict pull may take before it fails and names the generators
+        that have not loaded it. None waits without a limit."""
+
     def __init__(
         self,
         config: Config,
@@ -202,7 +206,9 @@ class InterGeneratorRouter(Configurable):
             policy_version: Trainer policy version whose state dict to pull.
         """
 
-        async def _pull_one(h: _GeneratorHandle) -> None:
+        loaded = [False] * len(self._generators)
+
+        async def _pull_one(index: int, h: _GeneratorHandle) -> None:
             # Transfer over RDMA while the generator remains available. A no-op
             # with model_state_dict_load_mode="gpu_fetch", where the load does it.
             await h.actor.prefetch_model_state_dict.call()
@@ -214,6 +220,7 @@ class InterGeneratorRouter(Configurable):
                 )
             finally:
                 h.draining = False
+            loaded[index] = True
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during model state dict loads, but that's not a priority
@@ -221,7 +228,23 @@ class InterGeneratorRouter(Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        timeout = self._config.pull_timeout_s
+        deadline = asyncio.timeout(timeout)
+        try:
+            async with deadline:
+                await asyncio.gather(
+                    *[_pull_one(index, h) for index, h in enumerate(self._generators)]
+                )
+        except TimeoutError:
+            # A generator's own TimeoutError propagates unchanged.
+            if not deadline.expired():
+                raise
+            # Stops only the router's waits: a late generator's prefetch or load keeps running.
+            late = [index for index, ok in enumerate(loaded) if not ok]
+            raise TimeoutError(
+                f"Generators {late} did not load policy version {policy_version} within "
+                f"pull_timeout_s={timeout}s. Check their engine loops or raise pull_timeout_s."
+            ) from None
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""
