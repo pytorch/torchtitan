@@ -100,6 +100,8 @@ uv pip install --no-deps \
 # come with vllm.
 uv pip install --no-deps "mooncake-transfer-engine-cuda13==0.3.14" \
   "nixl==1.5.0" "nixl-cu13==1.5.0"
+# nvCOMP, for ModelStateDictTransport XOR deltas (xor_delta_codec).
+uv pip install "nvidia-nvcomp-cu13==6.0.0.12" "nvidia-libnvcomp-cu13==6.0.0.12"
 
 if [[ "$flash_attn" == "auto" ]]; then
   flash_attn=$(python - <<'PY'

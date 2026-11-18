@@ -485,6 +485,7 @@ class Trainer(Configurable):
             # Generators read the staging buffer outside stream order.
             if stream is not None:
                 await asyncio.to_thread(stream.synchronize)
+            await transport.finish_stage()
             return
         model_state_dict = self._trainable_model_state_dict()
         await asyncio.to_thread(
