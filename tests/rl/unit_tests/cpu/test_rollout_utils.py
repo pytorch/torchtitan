@@ -480,6 +480,30 @@ def test_build_from_group_skips_an_unscored_rollout_but_trains_its_siblings() ->
     assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1, 2]
 
 
+def test_build_from_group_drops_a_group_left_with_one_rollout() -> None:
+    # 1 of 2 siblings raised: the one left has advantage 0, so the group teaches nothing.
+    failed = Rollout(group_id=_GROUP_ID, rollout_id=0, status=RolloutStatus.ERROR_INFRA)
+    left = _scored_rollout(
+        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+        reward=1.0,
+        advantage=0.0,
+    )
+    left.rollout_id = 1
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[failed, left])
+        )
+    )
+
+    assert group.training_samples == []
+    assert "training_sample_builder/num_groups_dropped_zero_std" in [
+        metric.key for metric in group.metrics
+    ]
+
+
 def test_group_filters_preserve_group_id_for_commit() -> None:
     builder = TrainingSampleBuilder.Config().build()
 

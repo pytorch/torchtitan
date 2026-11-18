@@ -197,20 +197,6 @@ class TrainingSampleBuilder(Configurable):
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
-        # Untrainable: any sibling with no completion tokens -> drop the whole group
-        if any(
-            not any(len(turn.completion_token_ids) > 0 for turn in rollout.turns)
-            for rollout in rollout_group.rollouts
-        ):
-            metrics.append(
-                m.Metric(
-                    "training_sample_builder/num_groups_dropped_untrainable", m.Sum(1.0)
-                )
-            )
-            return TrainingSampleGroup(
-                group_id=rollout_group.group_id, training_samples=[], metrics=metrics
-            )
-
         # Zero-std reward: no learning signal across siblings. A group of N > 1 left with one scored
         # rollout counts too: its advantage is 0.
         rewards = [rollout.reward for rollout in rollouts_to_train]
