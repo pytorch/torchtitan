@@ -152,12 +152,8 @@ async def _await_unless_failed(
     if watched is not None:
         try:
             await asyncio.wait({task, watched}, return_when=asyncio.FIRST_COMPLETED)
-            if (
-                watched.done()
-                and not watched.cancelled()
-                and watched.exception() is not None
-            ):
-                await watched
+            if watched.done():
+                watched.result()
         except BaseException:
             task.cancel()
             raise
@@ -632,6 +628,8 @@ class Controller(Configurable):
         # One task per validation that runs beside training (all its prompts), from its start until
         # `_log_ended_validations` logs its metrics once or drops it.
         self._validation_tasks: list[asyncio.Task[list[m.Metric]]] = []
+        # The trainer loop's in-flight push and pull, which run()'s teardown cancels.
+        self._weight_sync_tasks: list[asyncio.Task[float]] = []
         # A validation that came due but hasn't started: it waits for the running one
         # (`defer_new_if_not_finished`).
         self._has_pending_validation = False
@@ -1055,8 +1053,6 @@ class Controller(Configurable):
         )
 
         # trainer_loop
-        # The controller's tasks for the trainer loop's in-flight push and pull, which the teardown below cancels.
-        self._weight_sync_tasks: list[asyncio.Task[float]] = []
         trainer_task = asyncio.create_task(
             self._trainer_loop(
                 training_batch_queue, num_training_steps=num_training_steps

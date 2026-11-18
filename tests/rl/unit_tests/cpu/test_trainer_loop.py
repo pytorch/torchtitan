@@ -95,6 +95,7 @@ def _controller(
     controller.start_step = 0
     controller._trainer_policy_version = 0
     controller._validation_tasks = []
+    controller._weight_sync_tasks = []
     controller._has_pending_validation = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
@@ -301,3 +302,32 @@ def test_pull_failure_during_forward_backward_fails_the_step_before_it_commits()
         _run(controller, num_training_steps=2)
 
     assert "fwd_bwd 2" in events and "optim 2" not in events
+
+
+def test_failed_step_hands_its_in_flight_pull_to_run_for_teardown() -> None:
+    pull_started = asyncio.Event()
+
+    async def hanging_pull():
+        pull_started.set()
+        await asyncio.Event().wait()
+
+    async def failing_forward_backward(step):
+        if step == 2:
+            await pull_started.wait()
+            raise RuntimeError("forward/backward failed")
+
+    controller = _controller(
+        [], on_pull=hanging_pull, on_forward_backward=failing_forward_backward
+    )
+    controller.config.async_loop.num_training_steps = 2
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="forward/backward failed"):
+            await asyncio.wait_for(
+                controller._trainer_loop(_batch_queue(2), num_training_steps=2),
+                timeout=10,
+            )
+        push, pull = controller._weight_sync_tasks
+        assert push.done() and not pull.done()
+
+    asyncio.run(run())

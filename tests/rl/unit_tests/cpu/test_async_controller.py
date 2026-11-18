@@ -837,6 +837,7 @@ def _run_with_generator_watcher(
     )
     controller.start_step = 0
     controller._validation_tasks = []
+    controller._weight_sync_tasks = []
     controller._has_pending_validation = False
     controller.metrics_processor = Mock()
     controller.trainer = None
@@ -983,6 +984,7 @@ def test_validation_schedule(
         )
     )
     controller._validation_tasks = []
+    controller._weight_sync_tasks = []
     controller._has_pending_validation = False
     controller.validate = validate
     controller.metrics_processor = Mock()
