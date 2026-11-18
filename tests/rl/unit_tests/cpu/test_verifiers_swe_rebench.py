@@ -141,8 +141,9 @@ def test_training_and_validation_never_share_a_project(tmp_path) -> None:
 
     training = _load(tmp_path, partition="train")
     validation = _load(tmp_path, partition="validation")
-    assert validation and projects(training).isdisjoint(projects(validation))
-    assert len(training) + len(validation) == 30
+    assert projects(training).isdisjoint(projects(validation))
+    # 10% of the 10 projects: one project, with its 3 tasks.
+    assert (len(projects(validation)), len(validation), len(training)) == (1, 3, 27)
     assert "weak" not in {task.data.name for task in training + validation}
     assert project_name("old-owner/Repo-3") == project_name("owner/repo-3")
 

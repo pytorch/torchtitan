@@ -100,15 +100,18 @@ A task can score differently here than under V2.1's own `tests/test.sh`:
   with a fixed `PATH` that puts `/opt/conda/bin` before `/usr/local/bin`, so in images
   that install the project under `/usr/local`, a test that starts `python` gets conda's
   interpreter instead.
-- **Parser.** V2.1 grades with each task's `tests/grade.py` (parser audit of 2026-10-29),
-  which also reads pytest's verbose `name PASSED` lines and fails a test if any line
-  fails it. prime-envs uses its copy of SWE-rebench V2's log parsers from 2026-04, which
-  reads only lines that start with a status, cuts the name at the first space and keeps
-  the last status. An expected name with a space (`test_x[a b]`) never matches here: 78
-  of the 3990 tasks have one, so they can never be fully resolved.
-- **Patches.** V2.1 refreshes the git index, skips archives and files that already match,
-  and finally applies what it can (`--reject`). prime-envs tries `git apply --3way`, then
-  `patch --fuzz=5`.
+- **Parser.** V2.1 grades with each task's `tests/grade.py` (parser audit of 2026-10-29).
+  It also reads pytest's verbose `name PASSED` lines, fails a test if any line fails it,
+  and replaces volatile parts of test names with placeholders (`/tmp/<tmp>`,
+  `localhost:<port>`, ...) before matching; some expected names in `config.json` carry
+  those placeholders. prime-envs uses its copy of SWE-rebench V2's log parsers from
+  2026-04, which reads only lines that start with a status, cuts the name at the first
+  space, keeps the last status and strips only timing suffixes. An expected name with a
+  space or a placeholder never matches here: 190 of the 3990 tasks have one, so they can
+  never be fully resolved.
+- **Patches.** Before applying a patch, V2.1 refreshes the git index and skips archives
+  and new files that already match; prime-envs tries `git apply --3way`, then
+  `patch --fuzz=5`. In both, a test patch that does not apply scores 0.
 - **Timeout.** V2.1 caps the test command at 1800 s and grades the partial log. Here the
   recipe's scoring timeout (2400 s, V2.1's verifier timeout) bounds restoring the test
   files, applying the test patch and running the tests together; a timeout errors the
