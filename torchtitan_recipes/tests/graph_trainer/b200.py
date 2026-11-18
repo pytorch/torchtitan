@@ -6,6 +6,7 @@
 
 """GraphTrainer Dist-MoE configurations for the B200 test lane."""
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -27,6 +28,19 @@ def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Co
     )
 
 
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2_flexshard() -> (
+    Trainer.Config
+):
+    """Build the BF16 Dist-MoE FSDP2/EP2 recipe with FlexShard selected."""
+    from torchtitan.experiments.graph_trainer.flex_shard import (
+        GraphTrainerFlexShardBackend,
+    )
+
+    config = graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2()
+    config.parallelism.fsdp_backend = GraphTrainerFlexShardBackend.Config()
+    return config
+
+
 def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> (
     Trainer.Config
 ):
@@ -44,3 +58,29 @@ def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> (
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 4
     return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp4_ep2_flexshard_block() -> (
+    Trainer.Config
+):
+    from torchtitan.experiments.graph_trainer.flex_shard import (
+        configure_flex_shard_mxfp8_blocks,
+    )
+
+    from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
+        graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8,
+    )
+
+    config = graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8(
+        seq_len=128,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=4, expert_parallel_degree=2
+        ),
+    )
+    config.dist_moe_runtime.scratch_capacity_factor = 2.0
+    config.training.num_tokens_per_microbatch_per_dp_rank = 128
+    config.training.steps = 10
+    config.checkpointer = None
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return configure_flex_shard_mxfp8_blocks(config)

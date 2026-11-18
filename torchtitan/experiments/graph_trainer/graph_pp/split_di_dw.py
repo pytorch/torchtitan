@@ -24,6 +24,7 @@ from torch.fx.experimental.symbolic_shapes import (
 
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+    eliminate_dead_code_with_region_effects,
     is_fake_tensor_node,
     output_names,
     placeholder_names,
@@ -297,6 +298,11 @@ def split_di_dw_graph(
         dw_output_descs,
         "bw_dw",
         ignore_must_be_in_fw_bw=True,
+    )
+    di_node_names = {node.name for node in bw_di_graph.nodes}
+    eliminate_dead_code_with_region_effects(
+        bw_dw_graph,
+        region_node_names={node.name for node in bw_dw_graph.nodes} - di_node_names,
     )
     _add_symint_live_in_uses(bw_dw_graph)
     bw_di_module = _make_graph_module(bw_gm, bw_di_graph)

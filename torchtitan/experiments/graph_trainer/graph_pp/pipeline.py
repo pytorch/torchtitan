@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     SPMDGradientAccumulationConfig,
 )
+from torchtitan.experiments.graph_trainer.fsdp_patterns import uses_flex_shard
 from torchtitan.experiments.graph_trainer.graph_builder import (
     GraphExecutionPlan,
     GraphTrainerStageGraphProvider,
@@ -883,6 +884,19 @@ def graph_pipeline_llm(
         ),
         loss_fn=loss_fn,
     )
+
+    if uses_flex_shard(parallelism):
+        from flex_shard import FlexShardModule
+
+        def _cleanup_native_metadata_state() -> None:
+            for model_part in model_parts:
+                cast(FlexShardModule, model_part).reshard()
+                for parameter in model_part.parameters():
+                    parameter.grad = None
+
+        graph_runtime.register_post_metadata_inference_cleanup(
+            _cleanup_native_metadata_state
+        )
 
     return (
         graph_runtime,

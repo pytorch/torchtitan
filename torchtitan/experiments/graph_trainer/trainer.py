@@ -39,7 +39,6 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import LossAndMetrics, TrainingEngine
 
-
 logger = logging.getLogger(__name__)
 
 

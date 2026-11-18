@@ -4,15 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib.util
 import inspect
 import operator
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from copy import deepcopy
 from types import SimpleNamespace
+from typing import Literal
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
+import torch.fx as fx
 from torch._decomp import get_decompositions
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
@@ -33,6 +38,7 @@ from torchtitan.config import PrecisionConfig, TrainingConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
     _EP_TOKEN_COUNT_SYNC,
@@ -103,6 +109,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
 from torchtitan.experiments.graph_trainer.passes import (
+    apply_graph_passes,
     compile_time_passes,
     selective_activation_remat_pass,
 )
@@ -1169,6 +1176,682 @@ class TestReassignCollectivePgsPass(FSDPTest):
         self.assertNotEqual(fsdp_extra_pg, ep_extra_pg)
         self.assertEqual(self._count_ag_nodes_with_pg(gm, fsdp_extra_pg), 1)
         self.assertEqual(self._count_ep_a2a_nodes_with_pg(gm, ep_extra_pg), 1)
+
+
+class TestFlexShardParameterInitialization(TestCase):
+    def test_skip_initializer_preserves_block_sharded_parameter(self) -> None:
+        if importlib.util.find_spec("flex_shard") is None:
+            self.skipTest("FlexShard is not installed")
+        import spmd_types as spmd
+        from flex_shard import BucketSpec
+        from flex_shard.custom_placements.block_shard import BlockShard
+        from flex_shard.flex_shard.bucket_storage import ShardedBucketStorage
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            _init_flex_shard_param,
+        )
+        from torchtitan.models.common.param_init import skip_param_init
+
+        with tempfile.TemporaryDirectory() as directory:
+            dist.init_process_group(
+                "gloo", init_method=f"file://{directory}/store", rank=0, world_size=1
+            )
+            try:
+                mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+                model = torch.nn.Linear(4, 4, bias=False)
+                placements = {"weight": (BlockShard((1,)),)}
+                storage = ShardedBucketStorage.from_bucket(
+                    model,
+                    list(model.named_parameters()),
+                    placements,
+                    mesh=mesh,
+                    device=torch.device("cpu"),
+                    bucket_spec=BucketSpec(
+                        ["weight"],
+                        mesh=mesh,
+                        placement_fn=lambda params, mesh: placements,
+                    ),
+                )
+                info = storage.param_infos["weight"]
+                expected = model.weight.detach().clone()
+                with patch.object(
+                    torch.Tensor,
+                    "new_empty",
+                    lambda tensor, shape: torch.full(
+                        shape, float("nan"), dtype=tensor.dtype, device=tensor.device
+                    ),
+                ):
+                    _init_flex_shard_param(
+                        model.weight,
+                        use_global_init=True,
+                        layout=spmd.SpmdType({}),
+                        global_layout=info.placement.global_layout(info, 0, 1),
+                        init_fn=skip_param_init,
+                        parallelism_context=SimpleNamespace(
+                            get_optional_mesh=lambda axis: None
+                        ),
+                    )
+                torch.testing.assert_close(model.weight, expected, rtol=0, atol=0)
+            finally:
+                dist.destroy_process_group()
+
+
+class TestFlexShardCustomPlacementTracing(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    @skip_if_lt_x_gpu(2)
+    def test_mixed_placements_trace_remat_and_overlap(self) -> None:
+        """Guard native mixed storage through tracing and annotation-based passes."""
+        if importlib.util.find_spec("flex_shard") is None:
+            self.skipTest("FlexShard is not installed")
+        from flex_shard import (
+            BucketSpec,
+            flex_shard,
+            FLEX_SHARD_META_ACTION,
+            FLEX_SHARD_META_MESH_AXIS_NAMES,
+            FLEX_SHARD_META_PARAM_FQNS,
+            FLEX_SHARD_META_PHASE,
+            MixedPrecisionPolicy,
+        )
+        from flex_shard.dist_muon.placement import make_mixed_placement_fn
+        from torch.distributed.device_mesh import init_device_mesh
+
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_unshard_pass,
+            flex_shard_fsdp_scheduling,
+        )
+
+        class Model(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.layers = torch.nn.ModuleList(
+                    torch.nn.Sequential(
+                        torch.nn.Linear(8, 8),
+                        torch.nn.ReLU(),
+                        torch.nn.Linear(8, 8),
+                    )
+                    for _ in range(2)
+                )
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                for layer in self.layers:
+                    x = layer(x)
+                return x
+
+        torch.manual_seed(42)
+        device = torch.accelerator.current_device_index()
+        model = Model().to(device)
+        annotate_module_fqns(model)
+        mesh = init_device_mesh(
+            next(model.parameters()).device.type,
+            (self.world_size,),
+            mesh_dim_names=("fsdp",),
+        )
+        named_params = list(model.named_parameters())
+        placement_fn = make_mixed_placement_fn(
+            owned_rank_by_fqn={
+                fqn: int(fqn.split(".")[2]) // 2
+                for fqn, _ in named_params
+                if fqn.endswith("bias")
+            },
+            blocks_per_rank_by_fqn={
+                fqn: (1, 3) for fqn, _ in named_params if fqn.endswith("weight")
+            },
+        )
+        flex_shard(
+            model,
+            buckets=[
+                BucketSpec(
+                    [f"layers.{layer_id}.*"],
+                    mesh=mesh,
+                    placement_fn=placement_fn,
+                    mp_policy=MixedPrecisionPolicy(
+                        param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16
+                    ),
+                    reshard_after_forward=False,
+                )
+                for layer_id in range(2)
+            ],
+        )
+        bucket_fqns = {
+            tuple(storage.param_infos) for storage in model.sharded_bucket_storages
+        }
+        torch.manual_seed(42 + self.rank)
+        inputs = torch.randn(4, 8, device=device, dtype=torch.bfloat16)
+
+        def _forward_backward(x) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+            params = tuple(model.parameters())
+            loss = model(x).float().square().sum()
+            return loss, torch.autograd.grad(loss, params)
+
+        def _eager_forward_backward(x) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+            model.zero_grad(set_to_none=True)
+            loss = model(x).float().square().sum()
+            loss.backward()
+            return loss.detach(), tuple(
+                param.grad.detach().clone() for param in model.parameters()
+            )
+
+        with torch.compiler.config.patch(compile_on_one_rank=True):
+            traced = minimal_fx_tracer(_forward_backward, module=model)(inputs)
+        expected = _eager_forward_backward(inputs)
+        self.assertEqual(
+            run_traced(traced, module=model)(inputs), expected, atol=0, rtol=0
+        )
+        c10d = torch.ops._c10d_functional
+        actions = {
+            c10d.all_gather_into_tensor.default: "unshard",
+            c10d.reduce_scatter_tensor.default: "reduce_grad",
+        }
+
+        def _collect_launches() -> defaultdict[
+            tuple[Literal["unshard", "reduce_grad"], bool], list[fx.Node]
+        ]:
+            launches = defaultdict(list)
+            phases = defaultdict(set)
+            for node in traced.gm.graph.nodes:
+                custom = node.meta.get("custom", {})
+                action = custom.get(FLEX_SHARD_META_ACTION)
+                if action in actions.values() and node.op != "placeholder":
+                    phases[action].add(custom[FLEX_SHARD_META_PHASE])
+                if node.target not in (*actions, c10d.wait_tensor.default):
+                    continue
+                self.assertIn(custom[FLEX_SHARD_META_PARAM_FQNS], bucket_fqns)
+                self.assertEqual(custom[FLEX_SHARD_META_MESH_AXIS_NAMES], ("fsdp",))
+                self.assertEqual(custom[FLEX_SHARD_META_PHASE], "execute")
+                if node.target in actions:
+                    self.assertEqual(action, actions[node.target])
+                    launches[action, node.meta.get("autograd_backward", False)].append(
+                        node
+                    )
+            self.assertEqual(
+                dict(phases),
+                {
+                    action: {"prepare", "execute", "finish"}
+                    for action in actions.values()
+                },
+            )
+            return launches
+
+        self.assertEqual(
+            {key: len(nodes) for key, nodes in _collect_launches().items()},
+            {("unshard", False): 2, ("reduce_grad", True): 2},
+        )
+        apply_graph_passes(
+            traced.gm,
+            traced.example_inputs,
+            [canonicalize_graph_pass, deduplicate_flex_shard_unshard_pass],
+        )
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="full"),
+            parallelism=ParallelismConfig(
+                fsdp_reshard_after_forward="always",
+                fsdp_backend=FlexShardBackend.Config(),
+            ),
+        )
+        tag_with_memory_policy_pass(traced.gm, config=config)
+        apply_graph_passes(
+            traced.gm,
+            traced.example_inputs,
+            [
+                selective_activation_remat_pass,
+                flex_shard_fsdp_scheduling,
+            ],
+        )
+        launches = _collect_launches()
+        self.assertEqual(len(launches["unshard", False]), 2)
+        self.assertEqual(len(launches["reduce_grad", True]), 2)
+        positions = {node: index for index, node in enumerate(traced.gm.graph.nodes)}
+        for first, second in launches.values():
+            wait = next(
+                user for user in first.users if user.target is c10d.wait_tensor.default
+            )
+            self.assertLess(positions[second], positions[wait])
+        self.assertEqual(
+            run_traced(traced, module=model)(inputs), expected, atol=0, rtol=0
+        )
+        with torch.no_grad():
+            for param in model.parameters():
+                param.mul_(0.5)
+        changed_expected = _eager_forward_backward(inputs)
+        self.assertNotEqual(changed_expected[0], expected[0])
+        self.assertEqual(
+            run_traced(traced, module=model)(inputs), changed_expected, atol=0, rtol=0
+        )
+        traced.gm.graph.lint()
+
+
+class TestFlexShardScheduling(TestCase):
+    """Guard marked buffer writes, repeated buckets, and dependency-safe overlap."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        if importlib.util.find_spec("flex_shard") is None:
+            self.skipTest("FlexShard is not installed")
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_unshard_pass,
+            flex_shard_fsdp_scheduling,
+            mark_flex_shard_unshard_recompute_regions_pass,
+        )
+
+        self.deduplicate = deduplicate_flex_shard_unshard_pass
+        self.schedule = flex_shard_fsdp_scheduling
+        self.mark_recompute_regions = mark_flex_shard_unshard_recompute_regions_pass
+
+    def _remat_bucket_graph(
+        self,
+    ) -> tuple[fx.GraphModule, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        graph = torch.fx.Graph()
+        param, x, grad = [graph.placeholder(name) for name in ("param", "x", "grad")]
+        gathered = graph.call_function(torch.ops.aten.cat.default, ([param, param],))
+        buffer = graph.call_function(torch.ops.aten.empty_like.default, (gathered,))
+        weight = graph.call_function(torch.ops.aten.view.default, (buffer, (4, 2)))
+        copy = graph.call_function(
+            torch.ops.aten._foreach_copy_.default, ([buffer], [gathered])
+        )
+        for node in (gathered, buffer, weight, copy):
+            node.meta["custom"] = {
+                "flex_shard_action": "unshard",
+                "flex_shard_param_fqns": ("layers.0.weight",),
+                "flex_shard_mesh_axis_names": ("fsdp",),
+                "flex_shard_phase": "prepare"
+                if node in (gathered, buffer)
+                else "execute",
+            }
+        forward_weight = graph.call_function(torch.ops.aten.alias.default, (weight,))
+        forward = graph.call_function(torch.ops.aten.mm.default, (x, forward_weight))
+        transpose = graph.call_function(torch.ops.aten.t.default, (weight,))
+        backward = graph.call_function(torch.ops.aten.mm.default, (grad, transpose))
+        for node in (forward_weight, forward, transpose, backward):
+            node.meta["custom"] = {"module_fqn": "layers.0"}
+        transpose.meta["autograd_backward"] = backward.meta["autograd_backward"] = True
+        graph.output((forward, backward))
+        gm = torch.fx.GraphModule({}, graph)
+        inputs = (torch.randn(2, 2), torch.randn(3, 4), torch.randn(3, 2))
+        with torch._subclasses.FakeTensorMode() as mode:
+            FakeTensorProp(gm, mode=mode).propagate(*inputs)
+        return gm, inputs
+
+    def test_rematerializes_fresh_unshard_buffers(self) -> None:
+        gm, inputs = self._remat_bucket_graph()
+        gather = gm.graph.find_nodes(
+            op="call_function", target=torch.ops.aten.cat.default
+        )[0]
+        gm.mesh_device = torch.device("cpu")
+        with gm.graph.inserting_before(gather):
+            mesh_device = gm.graph.create_node("get_attr", "mesh_device")
+            size = gm.graph.call_function(
+                torch.ops.aten.sym_size.int, (gather.all_input_nodes[0], 0)
+            )
+        for node in (mesh_device, size):
+            node.meta["custom"] = dict(
+                gather.meta["custom"], flex_shard_phase="prepare"
+            )
+        allocation = gm.graph.find_nodes(
+            op="call_function", target=torch.ops.aten.empty_like.default
+        )[0]
+        allocation.kwargs = dict(allocation.kwargs, device=mesh_device)
+        output = gm.graph.find_nodes(op="output")[0]
+        # Shared device/shape queries must not pin one bucket for another layer.
+        with gm.graph.inserting_before(output):
+            shared_query_user = gm.graph.call_function(
+                torch.ops.aten.zeros.default, ((size,),), {"device": mesh_device}
+            )
+        shared_query_user.meta["custom"] = {"module_fqn": "layers.1"}
+        output.args = ((*output.args[0], shared_query_user),)
+        gm.recompile()
+        with torch._subclasses.FakeTensorMode() as mode:
+            FakeTensorProp(gm, mode=mode).propagate(*inputs)
+        expected = gm(*inputs)
+        policy_fn = _make_full_memory_policy()
+        self.mark_recompute_regions(gm, policy_fn=policy_fn)
+        forward_alias = gm.graph.find_nodes(
+            op="call_function", target=torch.ops.aten.alias.default
+        )[0]
+        self.assertNotIn("flex_shard_action", forward_alias.meta["custom"])
+        self.assertNotIn("recompute_region", forward_alias.meta)
+        tag_sac_policy(gm, policy_fn=policy_fn)
+        selective_activation_remat_pass(gm)
+        self.assertEqual(gm(*inputs), expected)
+        gathers = list(
+            gm.graph.find_nodes(op="call_function", target=torch.ops.aten.cat.default)
+        )
+        self.assertEqual(len(gathers), 2)
+        self.assertEqual(
+            [n.meta.get("autograd_backward", False) for n in gathers], [False, True]
+        )
+        self.assertEqual(
+            [n.meta["custom"]["module_fqn"] for n in gathers], ["layers.0", "layers.0"]
+        )
+        self.assertIsNot(
+            gathers[0].meta["val"].untyped_storage(),
+            gathers[1].meta["val"].untyped_storage(),
+        )
+        gm.graph.lint()
+
+    def test_memory_policies_preserve_keep_unshard(self) -> None:
+        for memory_policy, policy, pp_degree, expected_gathers in (
+            (memory_policy, policy, pp_degree, expected_gathers)
+            for memory_policy in ("default", "full", "eager")
+            for policy, pp_degree, expected_gathers in (
+                ("never", 1, 1),
+                ("default", 2, 1),
+                ("default", 1, 2),
+            )
+        ):
+            with self.subTest(
+                memory_policy=memory_policy, policy=policy, pp_degree=pp_degree
+            ):
+                gm, inputs = self._remat_bucket_graph()
+                expected = gm(*inputs)
+                config = SimpleNamespace(
+                    compile=GraphTrainerCompileConfig(memory_policy=memory_policy),
+                    parallelism=SimpleNamespace(
+                        fsdp_reshard_after_forward=policy,
+                        pipeline_parallel_degree=pp_degree,
+                        fsdp_backend=FlexShardBackend.Config(),
+                    ),
+                )
+                tag_with_memory_policy_pass(gm, config=config)
+                self.assertEqual(
+                    len(
+                        {
+                            node.meta["recompute_region"]
+                            for node in gm.graph.nodes
+                            if "recompute_region" in node.meta
+                        }
+                    ),
+                    1,
+                )
+                selective_activation_remat_pass(gm)
+                self.assertEqual(gm(*inputs), expected, atol=0, rtol=0)
+                self.assertEqual(
+                    len(
+                        gm.graph.find_nodes(
+                            op="call_function", target=torch.ops.aten.cat.default
+                        )
+                    ),
+                    expected_gathers,
+                )
+
+    def test_unshard_remat_preserves_mutations_and_explicit_saves(self) -> None:
+        for change in (
+            "input",
+            "output",
+            "internal_input",
+            "alias",
+            "save",
+            "owner_save",
+            "effect",
+        ):
+            with self.subTest(change=change):
+                gm, inputs = self._remat_bucket_graph()
+                nodes = {n.target: n for n in gm.graph.nodes}
+                view = nodes[torch.ops.aten.view.default]
+                param = nodes["param"]
+                if change in ("input", "output", "internal_input"):
+                    anchor = (
+                        view
+                        if change == "internal_input"
+                        else nodes[torch.ops.aten.t.default]
+                    )
+                    target = view if change == "output" else param
+                    with gm.graph.inserting_before(anchor):
+                        update = gm.graph.call_function(
+                            torch.ops.aten.zero_.default, (target,)
+                        )
+                    if change == "internal_input":
+                        update.meta["custom"] = dict(view.meta["custom"])
+                elif change == "alias":
+                    view.args = (param, (2, 2))
+                    inputs = (inputs[0], torch.randn(3, 2), inputs[2])
+                elif change == "effect":
+                    with gm.graph.inserting_before(view):
+                        effect = gm.graph.call_function(
+                            torch.ops.torchtitan_graph_trainer_test.ordered_identity.default,
+                            (nodes[torch.ops.aten.empty_like.default],),
+                        )
+                    effect.meta["custom"] = dict(view.meta["custom"])
+                gm.recompile()
+                with torch._subclasses.FakeTensorMode() as mode:
+                    FakeTensorProp(gm, mode=mode).propagate(*inputs)
+                full_policy = _make_full_memory_policy(
+                    "layers.*::aten.cat.default" if change == "owner_save" else ""
+                )
+                policy_fn = (
+                    lambda node: CheckpointPolicy.MUST_SAVE
+                    if change == "save" and node is nodes[torch.ops.aten.cat.default]
+                    else full_policy(node)
+                )
+                self.mark_recompute_regions(gm, policy_fn=policy_fn)
+                self.assertFalse(
+                    any("recompute_region" in n.meta for n in gm.graph.nodes)
+                )
+
+    def _bucket(
+        self, graph, source, action, *, fqn="layer.weight", backward=False
+    ) -> tuple[fx.Node, fx.Node, fx.Node, fx.Node, fx.Node]:
+        first_node = list(graph.nodes)[-1]
+        send = graph.call_function(torch.ops.aten.empty_like.default, (source,))
+        copy = graph.call_function(torch.ops.aten.copy_.default, (send, source))
+        collective = (
+            torch.ops._c10d_functional.all_gather_into_tensor.default
+            if action == "unshard"
+            else torch.ops._c10d_functional.reduce_scatter_tensor.default
+        )
+        args = (send, 2, "fsdp") if action == "unshard" else (send, "sum", 2, "fsdp")
+        launch = graph.call_function(collective, args)
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default, (launch,)
+        )
+        finish = graph.call_function(torch.ops.aten.clone.default, (wait,))
+        nodes = list(graph.nodes)
+        for node in nodes[nodes.index(first_node) + 1 :]:
+            node.meta["custom"] = {
+                "flex_shard_action": action,
+                "flex_shard_param_fqns": (fqn,),
+                "flex_shard_mesh_axis_names": ("fsdp",),
+                "flex_shard_phase": (
+                    "prepare"
+                    if node in (send, copy)
+                    else "finish"
+                    if node is finish
+                    else "execute"
+                ),
+            }
+            node.meta["autograd_backward"] = backward
+        return send, copy, launch, wait, finish
+
+    def _bucket_values(self, bucket) -> None:
+        send, copy, launch, wait, finish = bucket
+        send.meta["val"] = torch.empty(4)
+        copy.meta["val"] = send.meta["val"]
+        launch.meta["val"] = torch.empty(8)
+        wait.meta["val"] = launch.meta["val"]
+        finish.meta["val"] = torch.empty(8)
+
+    def test_deduplicates_forward_but_preserves_backward_reductions(self) -> None:
+        for mutation in (None, "input", "output", "chunk"):
+            with self.subTest(mutation=mutation):
+                graph = torch.fx.Graph()
+                param = graph.placeholder("param")
+                sibling = graph.placeholder("sibling")
+                storage = torch.empty(8)
+                param.meta["val"], sibling.meta["val"] = storage[:4], storage[4:]
+                first = self._bucket(graph, param, "unshard")
+                self._bucket_values(first)
+                if mutation in ("input", "output"):
+                    target = sibling if mutation == "input" else first[-1]
+                    alias = graph.call_function(torch.ops.aten.alias.default, (target,))
+                    alias.meta["val"] = target.meta["val"]
+                    graph.call_function(torch.ops.aten.zero_.default, (alias,))
+                second = self._bucket(graph, param, "unshard")
+                backward = [
+                    self._bucket(graph, param, "reduce_grad", backward=True)
+                    for _ in range(2)
+                ]
+                for bucket in (second, *backward):
+                    self._bucket_values(bucket)
+                if mutation == "chunk":
+                    for index, bucket in enumerate((first, second)):
+                        for node in bucket:
+                            node.meta["chunk_id"] = index
+                graph.output(tuple(bucket[-1] for bucket in (first, second, *backward)))
+                gm = torch.fx.GraphModule({}, graph)
+                self.deduplicate(gm)
+                self.assertEqual(second[2] in graph.nodes, mutation is not None)
+                for bucket in (first, *backward):
+                    self.assertIn(bucket[2], graph.nodes)
+                outputs = list(graph.nodes)[-1].args[0]
+                self.assertEqual(outputs[0] is outputs[1], mutation is None)
+
+    def test_moves_buffer_writes_with_launch_and_unpacking_with_wait(self) -> None:
+        for action in ("unshard", "reduce_grad"):
+            with self.subTest(action=action):
+                graph = torch.fx.Graph()
+                param = graph.placeholder("param")
+                groups = []
+                for backward in (False, True):
+                    first = self._bucket(graph, param, action, backward=backward)
+                    compute = graph.call_function(torch.ops.aten.sin.default, (param,))
+                    second = self._bucket(graph, param, action, backward=backward)
+                    groups.append((first, compute, second))
+                graph.output(
+                    tuple(
+                        bucket[-1]
+                        for first, _, second in groups
+                        for bucket in (first, second)
+                    )
+                )
+                gm = torch.fx.GraphModule({}, graph)
+                self.schedule(gm)
+                positions = {node: index for index, node in enumerate(graph.nodes)}
+                for first, compute, second in groups:
+                    self.assertLess(positions[second[1]], positions[second[2]])
+                    self.assertLess(positions[second[2]], positions[first[3]])
+                    if action == "unshard":
+                        self.assertLess(positions[first[4]], positions[compute])
+                    else:
+                        self.assertLess(positions[compute], positions[first[3]])
+                        self.assertLess(positions[first[3]], positions[first[4]])
+                self.assertLess(positions[groups[0][2][3]], positions[groups[1][0][2]])
+
+    def test_reduce_scatter_wait_moves_with_gradient_cast(self) -> None:
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        first = self._bucket(graph, param, "reduce_grad", fqn="first.weight")
+        cast = graph.call_function(
+            torch.ops.aten._to_copy.default,
+            (first[-1],),
+            {"dtype": torch.float32},
+        )
+        alias = graph.call_function(torch.ops.aten.alias.default, (cast,))
+        view = graph.call_function(torch.ops.aten.view.default, (alias, (8,)))
+        for node in (alias, view):
+            node.meta["custom"] = {"module_fqn": "loss"}
+        cast.meta["custom"] = {
+            **first[-1].meta["custom"],
+            "flex_shard_phase": "finish",
+        }
+        compute = graph.call_function(torch.ops.aten.sin.default, (param,))
+        second = self._bucket(graph, compute, "reduce_grad", fqn="second.weight")
+        graph.output((view, second[-1]))
+        gm = torch.fx.GraphModule({}, graph)
+        self.schedule(gm)
+        positions = {node: index for index, node in enumerate(graph.nodes)}
+        self.assertLess(positions[compute], positions[second[2]])
+        self.assertLess(positions[second[2]], positions[first[3]])
+        self.assertLess(positions[first[-1]], positions[cast])
+        self.assertLess(positions[cast], positions[alias])
+        self.assertLess(positions[alias], positions[view])
+        self.assertEqual(alias.meta["custom"]["module_fqn"], "loss")
+        graph.lint()
+
+    def test_dependent_bucket_cannot_cross_previous_wait(self) -> None:
+        for action in ("unshard", "reduce_grad"):
+            with self.subTest(action=action):
+                graph = torch.fx.Graph()
+                param = graph.placeholder("param")
+                first = self._bucket(graph, param, action, fqn="first.weight")
+                second = self._bucket(graph, first[-1], action, fqn="second.weight")
+                graph.output(second[-1])
+                gm = torch.fx.GraphModule({}, graph)
+                before = list(graph.nodes)
+                self.schedule(gm)
+                self.assertEqual(list(graph.nodes), before)
+
+    def test_scheduling_preserves_reads_and_writes_through_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as rendezvous:
+            dist.init_process_group(
+                "gloo",
+                init_method=f"file://{rendezvous}/rendezvous",
+                rank=0,
+                world_size=1,
+            )
+            try:
+                for action in ("unshard", "reduce_grad"):
+                    for alias_kind in ("view", "storage"):
+                        with self.subTest(action=action, alias_kind=alias_kind):
+                            graph = torch.fx.Graph()
+                            x0 = graph.placeholder("x0")
+                            x1 = graph.placeholder("x1")
+                            out = graph.placeholder("out")
+                            sibling = graph.placeholder("sibling")
+                            source = x1 if action == "unshard" else out
+                            source.meta["val"] = torch.empty(4)
+                            sibling.meta["val"] = source.meta["val"]
+                            alias = (
+                                graph.call_function(
+                                    torch.ops.aten.view.default, (source, [4])
+                                )
+                                if alias_kind == "view"
+                                else sibling
+                            )
+                            first = self._bucket(graph, x0, action, fqn="first.weight")
+                            if action == "unshard":
+                                graph.call_function(
+                                    torch.ops.aten.add_.Tensor, (alias, 1)
+                                )
+                                read = first[-1]
+                            else:
+                                copy = graph.call_function(
+                                    torch.ops.aten.copy_.default, (out, first[-1])
+                                )
+                                copy.meta = dict(first[-1].meta)
+                                read = graph.call_function(
+                                    torch.ops.aten.clone.default, (alias,)
+                                )
+                            second = self._bucket(
+                                graph, x1, action, fqn="second.weight"
+                            )
+                            for bucket in (first, second):
+                                launch = bucket[2]
+                                launch.args = (
+                                    (bucket[0], 1, dist.group.WORLD.group_name)
+                                    if action == "unshard"
+                                    else (
+                                        bucket[0],
+                                        "sum",
+                                        1,
+                                        dist.group.WORLD.group_name,
+                                    )
+                                )
+                            graph.output((read, second[-1]))
+                            gm = torch.fx.GraphModule({}, graph)
+
+                            def _inputs() -> list[torch.Tensor]:
+                                values = [torch.ones(4), torch.zeros(4), torch.zeros(4)]
+                                values.append(values[1 if action == "unshard" else 2])
+                                return values
+
+                            expected = gm(*_inputs())
+                            self.schedule(gm)
+                            self.assertEqual(gm(*_inputs()), expected, atol=0, rtol=0)
+            finally:
+                dist.destroy_process_group()
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
@@ -2647,6 +3330,32 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(mutations, [update])
 
+        for policy_fn in (_make_default_memory_policy(), _make_full_memory_policy()):
+            with self.subTest(policy_fn=policy_fn):
+                graph = torch.fx.Graph()
+                x = graph.placeholder("x")
+                buffer = graph.call_function(torch.ops.aten.zeros_like.default, (x,))
+                target = graph.call_function(
+                    torch.ops.aten.view.default, (buffer, [2, 2])
+                )
+                source = graph.call_function(torch.ops.aten.view.default, (x, [2, 2]))
+                writer = graph.call_function(
+                    torch.ops.aten._foreach_copy_.default, ([target], [source])
+                )
+                writer.meta["custom"] = {_MODULE_FQN: "loss"}
+                fwd = graph.call_function(torch.ops.aten.sin.default, (buffer,))
+                bwd = graph.call_function(torch.ops.aten.mul.Tensor, (fwd, x))
+                bwd.meta["autograd_backward"] = True
+                graph.output(bwd)
+                gm = torch.fx.GraphModule({}, graph)
+                inputs = torch.arange(1.0, 5.0)
+                expected = gm(inputs)
+                tag_sac_policy(gm, policy_fn=policy_fn)
+                selective_activation_remat_pass(gm)
+                for node in (buffer, target):
+                    self.assertEqual(node.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+                self.assertEqual(gm(inputs), expected, atol=0, rtol=0)
+
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
         gm = self._build_gm(
@@ -3060,12 +3769,13 @@ class TestFullMemoryPolicy(TestCase):
             layer_fqns=["layers.3.feed_forward.router.gate"],
         )
         config = SimpleNamespace(
+            parallelism=ParallelismConfig(),
             compile=GraphTrainerCompileConfig(
                 memory_policy="full",
                 full_recompute_save_ops=(
                     "layers.*.feed_forward.router.gate :: aten.mm.default"
                 ),
-            )
+            ),
         )
 
         tag_with_memory_policy_pass(gm, config=config)
@@ -6153,20 +6863,30 @@ class TestSelectiveActivationRematPass(TestCase):
         inp2 = graph.placeholder("inp2")
         a = graph.call_function(torch.ops.aten.clone.default, args=(inp1,))
         b = graph.call_function(torch.ops.aten.clone.default, args=(inp2,))
-        bwd_loss = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
+        # The early loss backward also consumes the layer's forward value.
+        bwd_loss = graph.call_function(torch.ops.aten.add.Tensor, args=(a, b))
         sep = graph.call_function(torch.ops.aten.neg.default, args=(inp1,))
         bwd_layer = graph.call_function(torch.ops.aten.mul.Tensor, args=(b, b))
-        graph.output((bwd_loss, sep, bwd_layer))
+        grad_add = graph.call_function(
+            torch.ops.aten.add.Tensor, args=(bwd_loss, bwd_layer)
+        )
+        graph.output((bwd_loss, sep, bwd_layer, grad_add))
         for node in (a, b):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
         bwd_loss.meta["autograd_backward"] = True
         bwd_loss.meta["custom"] = {"module_fqn": "loss"}
         bwd_layer.meta["autograd_backward"] = True
         bwd_layer.meta["custom"] = {"module_fqn": "layers.0.attention"}
+        grad_add.meta["autograd_backward"] = True
+        grad_add.meta["custom"] = {"module_fqn": "loss"}
         a_name, b_name = a.name, b.name
 
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        inputs = (torch.randn(4), torch.randn(4))
+        expected = gm(*inputs)
         result = selective_activation_remat_pass(gm)
+        result.graph.lint()
+        self.assertEqual(result(*inputs), expected, atol=0, rtol=0)
 
         nodes = list(result.graph.nodes)
         node_names = [n.name for n in nodes]
@@ -6175,12 +6895,13 @@ class TestSelectiveActivationRematPass(TestCase):
         self.assertEqual(dups, {b_name + "_recomputed"})
         for inp in bwd_layer.all_input_nodes:
             self.assertEqual(inp.name, b_name + "_recomputed")
-        self.assertNotIn(b_name, node_names)
+        self.assertIn(b_name, node_names)
         # The loss region is untouched: its recompute input stays and is still
         # read directly (not remat'd, not erased).
         self.assertIn(a_name, node_names)
-        for inp in bwd_loss.all_input_nodes:
-            self.assertEqual(inp.name, a_name)
+        self.assertEqual(
+            [inp.name for inp in bwd_loss.all_input_nodes], [a_name, b_name]
+        )
 
     def test_multiple_model_layer_regions_recompute_errors(self):
         # Two disjoint *model-layer* backward regions that both need remat is

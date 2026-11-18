@@ -3,12 +3,162 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
-"""Helpers for reasoning about schema-declared tensor mutations in FX graphs."""
+"""Helpers for reasoning about tensor storage and schema-declared FX mutations."""
 
-from typing import Any
+from collections.abc import Hashable, Iterable, Mapping, Sequence, Set
+from typing import Any, TypeVar
 
+import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
+
+
+_Identity = TypeVar("_Identity", bound=Hashable)
+
+
+def tensor_storages(graph: fx.Graph) -> dict[fx.Node, frozenset[torch.UntypedStorage]]:
+    """Map each node to the tensor storages in its existing value metadata."""
+    return {
+        node: frozenset(
+            value.untyped_storage()
+            for value in pytree.tree_leaves(node.meta.get("val"))
+            if isinstance(value, torch.Tensor)
+        )
+        for node in graph.nodes
+    }
+
+
+def mutation_write_sets(
+    graph: fx.Graph, aliases: Mapping[fx.Node, Set[_Identity]]
+) -> dict[fx.Node, set[_Identity]]:
+    """Map each node to the supplied identities written by mutable arguments."""
+    return {
+        node: set().union(*(aliases[target] for target in mutation_target_nodes(node)))
+        for node in graph.nodes
+    }
+
+
+def can_swap_a_and_b_read_write_check(
+    *,
+    reads_a: Set[_Identity],
+    writes_a: Set[_Identity],
+    reads_b: Set[_Identity],
+    writes_b: Set[_Identity],
+) -> bool:
+    """Return whether A and B can swap without read/write conflicts."""
+    # weight = buffer.view(...)  # Shares storage with buffer.
+    # copy_(buffer, source)      # A writes that storage.
+    # linear(x, weight)          # B reads it, so A and B cannot swap.
+    return not (writes_a & (reads_b | writes_b) or writes_b & reads_a)
+
+
+def _try_move_nodes(
+    nodes: Sequence[fx.Node],
+    anchor: fx.Node,
+    *,
+    reads: Mapping[fx.Node, Set[_Identity]],
+    writes: Mapping[fx.Node, Set[_Identity]],
+    before: bool,
+) -> bool:
+    graph_nodes = tuple(anchor.graph.nodes)
+    positions = {node: index for index, node in enumerate(graph_nodes)}
+    moving = set(nodes)
+    moving_reads = set().union(*(reads[node] for node in nodes))
+    moving_writes = set().union(*(writes[node] for node in nodes))
+    first = min(positions[anchor], *(positions[node] for node in nodes))
+    last = max(positions[anchor], *(positions[node] for node in nodes))
+    # FX value edges miss dependencies through aliases. Crossing a write
+    # could change an input; crossing a read could expose an unfinished output.
+    if not all(
+        can_swap_a_and_b_read_write_check(
+            reads_a=moving_reads,
+            writes_a=moving_writes,
+            reads_b=reads[node],
+            writes_b=writes[node],
+        )
+        for node in graph_nodes[first : last + 1]
+        if node not in moving
+    ):
+        return False
+    if before:
+        if any(
+            positions[dependency] >= positions[anchor]
+            for node in nodes
+            for dependency in node.all_input_nodes
+            if dependency not in moving
+        ):
+            return False
+        for node in nodes:
+            anchor.prepend(node)
+    else:
+        if any(
+            positions[user] <= positions[anchor]
+            for node in nodes
+            for user in node.users
+            if user not in moving
+        ):
+            return False
+        for node in reversed(nodes):
+            anchor.append(node)
+    return True
+
+
+def try_move_nodes_before(
+    nodes: Sequence[fx.Node],
+    anchor: fx.Node,
+    *,
+    reads: Mapping[fx.Node, Set[_Identity]],
+    writes: Mapping[fx.Node, Set[_Identity]],
+) -> bool:
+    """Hoist a node group before anchor while preserving its internal order.
+
+    Nodes must be nonempty, in graph order, and after anchor in the same graph.
+    Return False without graph changes if FX or supplied mutation dependencies
+    block the move. Read/write maps stay valid; node positions refresh per call.
+
+    INPUT:
+        wait0
+        compute0
+        prepare1
+        launch1
+
+    OUTPUT when movement is allowed:
+        prepare1  # Move the full preparation group with its launch.
+        launch1
+        wait0
+        compute0
+    """
+    return _try_move_nodes(nodes, anchor, reads=reads, writes=writes, before=True)
+
+
+def try_move_nodes_after(
+    nodes: Sequence[fx.Node],
+    anchor: fx.Node,
+    *,
+    reads: Mapping[fx.Node, Set[_Identity]],
+    writes: Mapping[fx.Node, Set[_Identity]],
+) -> bool:
+    """Sink a node group after anchor while preserving its internal order.
+
+    Nodes must be nonempty, in graph order, and before anchor in the same graph.
+    Return False without graph changes if FX or supplied mutation dependencies
+    block the move. Read/write maps stay valid; node positions refresh per call.
+
+    INPUT:
+        launch0
+        wait0
+        unpack0
+        backward1
+        launch1
+
+    OUTPUT when movement is allowed:
+        launch0
+        backward1
+        launch1
+        wait0    # Delay completion together with its output assembly.
+        unpack0
+    """
+    return _try_move_nodes(nodes, anchor, reads=reads, writes=writes, before=False)
 
 
 def _schema_and_bound_arguments(
@@ -192,6 +342,14 @@ def base_tensor_for_mutation_target(node: fx.Node) -> fx.Node:
     return node
 
 
+def mutation_target_bases(node: fx.Node) -> list[fx.Node]:
+    """Return alias bases of writable arguments in target order, including duplicates."""
+    return [
+        base_tensor_for_mutation_target(target)
+        for target in mutation_target_nodes(node)
+    ]
+
+
 def mutation_deps(graph: fx.Graph) -> dict[fx.Node, list[fx.Node]]:
     """Map each mutated alias base to its mutation nodes in graph order.
 
@@ -210,7 +368,59 @@ def mutation_deps(graph: fx.Graph) -> dict[fx.Node, list[fx.Node]]:
 
     mutation_deps: dict[fx.Node, list[fx.Node]] = {}
     for node in graph.nodes:
-        for target in mutation_target_nodes(node):
-            base = base_tensor_for_mutation_target(target)
+        for base in mutation_target_bases(node):
             mutation_deps.setdefault(base, []).append(node)
     return mutation_deps
+
+
+def node_closure_with_mutations(
+    values: Iterable[object], *, forward_only: bool = False
+) -> set[fx.Node]:
+    """Return roots, value dependencies, and writes through aliases before each read.
+
+    INPUT: values=[result]
+        source = placeholder("source")
+        buffer = empty(...)
+        alias = view(buffer, ...)
+        write = _foreach_copy_([alias], [source])  # Returns None; no edge to result.
+        result = sin(alias)                      # Requested root reads the buffer.
+        later_write = zero_(buffer)              # After the read; excluded.
+        unrelated = cos(source)                  # No dependency path; excluded.
+
+    OUTPUT: closure members shown in graph order; returned as a set.
+        source = placeholder("source")           # Needed by the included write.
+        buffer = empty(...)
+        alias = view(buffer, ...)
+        write = _foreach_copy_([alias], [source])  # Included through buffer aliasing.
+        result = sin(alias)
+
+    Roots are read at graph end; dependencies are read at their users.
+    With forward_only=True, skip writers tagged autograd_backward.
+    """
+    roots = [value for value in values if isinstance(value, fx.Node)]
+    if not roots:
+        return set()
+    graph = roots[0].graph
+    node_positions = {node: index for index, node in enumerate(graph.nodes)}
+    writers_by_base = mutation_deps(graph)
+    graph_end_position = len(node_positions)
+    pending_reads = [(root, graph_end_position) for root in roots]
+    visited_reads = set()
+    closure = set()
+    while pending_reads:
+        node, read_position = pending_reads.pop()
+        if (node, read_position) in visited_reads:
+            continue
+        visited_reads.add((node, read_position))
+        for writer in writers_by_base.get(base_tensor_for_mutation_target(node), ()):
+            if node_positions[writer] < read_position and not (
+                forward_only and writer.meta.get("autograd_backward", False)
+            ):
+                pending_reads.append((writer, node_positions[writer]))
+        if node not in closure:
+            closure.add(node)
+            pending_reads.extend(
+                (dependency, node_positions[node])
+                for dependency in node.all_input_nodes
+            )
+    return closure

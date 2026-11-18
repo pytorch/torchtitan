@@ -1,0 +1,1 @@
+flex-shard @ git+https://github.com/meta-pytorch/flex_shard@bf65f3808dc11b00244c2b544d352bdce3f1d586
