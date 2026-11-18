@@ -1,3 +1,5 @@
-# Install alongside torchtitan/rl/requirements.txt, then requirements-no-deps.txt.
+# Verifiers runs the agent and the grading; harbor provides the CLI that downloads the
+# V2.1 dataset. Install alongside torchtitan/rl/requirements.txt, then
+# requirements-no-deps.txt.
 verifiers==0.4.0
 harbor==0.24.0

@@ -69,6 +69,7 @@ from torchtitan.rl.routing.strategies import (
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
+from verifiers.v1.configs.env import TimeoutConfig as EnvTimeoutConfig
 from verifiers.v1.harnesses import BashHarnessConfig
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
@@ -112,16 +113,23 @@ def _swe_rebench_rollouter_config(
         verifiers_env_server=VerifiersEnvServer.Config(
             # The rollouter fills in the training taskset.
             environment=vf.SingleAgentEnvConfig(
+                # Seconds. Bounds the whole rollout, including pulling the task image,
+                # which no agent stage timeout covers: the stages below plus 3000 s.
+                timeout=EnvTimeoutConfig(episode=21600),
                 agent=vf.AgentConfig(
                     # Verifiers 0.4.0's bash harness summarizes the history by default
-                    # when the context nears its limit. Off: the episode ends at the
-                    # limit instead; compaction has not been tried with TitanRL.
+                    # when the context nears its limit. Off, so an episode ends at the
+                    # context limit instead.
+                    # TODO: enable compaction after testing that TitanRL trains on
+                    #   summarized histories.
                     harness=BashHarnessConfig(compaction=None),
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
-                    # Seconds. setup covers pulling the task image. scoring covers
-                    # restoring and applying the test patch and running the tests;
-                    # V2.1's own verifier allows 2400 s, its test command 1800 s.
+                    # Seconds. rollout is generous because the agent's model calls
+                    # share the generators with every rollout in flight; V2.1's own
+                    # agent limit is 3000 s. scoring covers restoring and applying
+                    # the test patch and running the tests; V2.1's own verifier
+                    # allows 2400 s, its test command 1800 s.
                     timeout=AgentTimeoutConfig(
                         setup=1500, rollout=14400, finalize=300, scoring=2400
                     ),

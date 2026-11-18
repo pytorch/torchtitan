@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CPU checks for the SWE-rebench V2.1 Verifiers example and recipes."""
+"""CPU checks for the SWE-rebench V2.1 Verifiers example and its recipe."""
 
 import asyncio
 import json
@@ -27,6 +27,7 @@ from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.swe_rebench.taskset import (
     ANSWER_KEY_DIR,
     BASE_COMMIT_KEY,
+    project_name,
     read_task_directory,
     SWERebenchV21Task,
     SWERebenchV21TaskConfig,
@@ -35,10 +36,15 @@ from torchtitan.rl.examples.verifiers.swe_rebench.taskset import (
 )
 from verifiers.v1.runtimes import ProgramResult
 from verifiers.v1.serve import env_config_data
+from verifiers.v1.state import state_cls
+from verifiers.v1.trace import Trace, TraceTask
 
 FAIL_TO_PASS = ["tests/test_app.py::test_fix"]
 PASS_TO_PASS = ["tests/test_app.py::test_old_a", "tests/test_app.py::test_old_b"]
 RESOURCES = vf.TaskResources(cpu=1, memory=1, disk=1)
+# Patches to files with CRLF line endings, as some V2.1 repositories have.
+TEST_PATCH = "diff --git a/tests/test_app.py b/tests/test_app.py\n-old\r\n+new\r\n"
+GOLD_PATCH = "diff --git a/app.py b/app.py\n-old\r\n+new\r\n"
 
 
 def _write_task(
@@ -48,6 +54,8 @@ def _write_task(
     repo: str = "owner/app",
     quality_flags: tuple[str, ...] = (),
     log_parser: str = "parse_log_pytest",
+    fail_to_pass: list[str] = FAIL_TO_PASS,
+    pass_to_pass: list[str] = PASS_TO_PASS,
 ) -> Path:
     """Write one task directory laid out like SWE-rebench V2.1's Harbor export."""
     task_dir = root / name
@@ -78,10 +86,10 @@ docker_image = "docker.io/swerebenchv2/app:1-abc@sha256:0123"
         'cd "$WORKDIR"\n'
     )
     (task_dir / "tests" / "config.json").write_text(
-        json.dumps({"FAIL_TO_PASS": FAIL_TO_PASS, "PASS_TO_PASS": PASS_TO_PASS})
+        json.dumps({"FAIL_TO_PASS": fail_to_pass, "PASS_TO_PASS": pass_to_pass})
     )
-    (task_dir / "tests" / "test.patch").write_text("diff --git a/tests/test_app.py\n")
-    (task_dir / "solution" / "gold.patch").write_text("diff --git a/app.py\n")
+    (task_dir / "tests" / "test.patch").write_bytes(TEST_PATCH.encode())
+    (task_dir / "solution" / "gold.patch").write_bytes(GOLD_PATCH.encode())
     return task_dir
 
 
@@ -97,8 +105,8 @@ def test_a_task_directory_becomes_a_prime_envs_task(tmp_path) -> None:
         "log_parser": "parse_log_pytest",
     }
     assert (data.fail_to_pass, data.pass_to_pass) == (FAIL_TO_PASS, PASS_TO_PASS)
-    assert data.test_patch.startswith("diff --git a/tests/")
-    assert data.gold_patch.startswith("diff --git a/app.py")
+    # Byte for byte: a patch that lost its "\r" no longer applies.
+    assert (data.test_patch, data.gold_patch) == (TEST_PATCH, GOLD_PATCH)
     # V2.1 has no base commit; setup reads it from the image.
     assert data.base_commit == ""
 
@@ -119,7 +127,7 @@ def _load(root: Path, **options) -> list[SWERebenchV21Task]:
 def test_training_and_validation_never_share_a_project(tmp_path) -> None:
     for index in range(20):
         _write_task(tmp_path, f"t-{index}", repo=f"owner/repo-{index % 10}")
-    # The same project under its owner before a rename.
+    # The same ten projects under a former owner, capitalized differently.
     for index in range(10):
         _write_task(tmp_path, f"renamed-{index}", repo=f"old-owner/Repo-{index}")
     _write_task(tmp_path, "weak", repo="owner/repo-0", quality_flags=("weak_f2p",))
@@ -136,7 +144,7 @@ def test_training_and_validation_never_share_a_project(tmp_path) -> None:
     assert validation and projects(training).isdisjoint(projects(validation))
     assert len(training) + len(validation) == 30
     assert "weak" not in {task.data.name for task in training + validation}
-    assert [task.data.idx for task in training] == list(range(len(training)))
+    assert project_name("old-owner/Repo-3") == project_name("owner/repo-3")
 
 
 class _ScriptedRuntime:
@@ -218,10 +226,53 @@ def test_scoring_restores_tests_from_the_recorded_commit(
     assert restore_env["base"] == BASE_AT_SETUP
     assert trace.metrics == {
         "resolved": 0.0,
-        "f2p_fraction": 1.0,
-        "p2p_fraction": 0.5,
+        "fail_to_pass_fraction": 1.0,
+        "pass_to_pass_fraction": 0.5,
         "parsed_tests": 3.0,
     }
+
+
+@pytest.mark.parametrize(
+    ("pass_to_pass", "reward_mode", "reward"),
+    [
+        # One of two FAIL_TO_PASS tests passes; the one PASS_TO_PASS test still passes.
+        (["tests/test_app.py::test_old_a"], "f2p_regression", 0.5),
+        (["tests/test_app.py::test_old_a"], "resolved", 0.0),
+        # No PASS_TO_PASS tests: only FAIL_TO_PASS counts.
+        ([], "f2p_regression", 0.5),
+    ],
+)
+def test_verifiers_scores_the_task_with_its_one_reward(
+    tmp_path, pass_to_pass: list[str], reward_mode: str, reward: float
+) -> None:
+    """Score through Verifiers, which finds rewards by their decorator and name."""
+    fail_to_pass = ["tests/test_app.py::test_fix", "tests/test_app.py::test_fix_2"]
+    task_dir = _write_task(
+        tmp_path, "t-1", fail_to_pass=fail_to_pass, pass_to_pass=pass_to_pass
+    )
+    data = read_task_directory(task_dir, resources=RESOURCES).data
+    task = SWERebenchV21Task(data, SWERebenchV21TaskConfig(reward_mode=reward_mode))
+    trace = Trace(
+        task=TraceTask(
+            type="SWERebenchV21Task", data=data, key=task.key, hash=task.hash
+        ),
+        state=state_cls(type(task))(),
+        agent=vf.AgentInfo(config=vf.AgentConfig(), name="test", trainable=False),
+    )
+    trace.info[BASE_COMMIT_KEY] = BASE_AT_SETUP
+    test_log = (
+        "SWEREBENCH_V2_TEST_OUTPUT_START\n"
+        "PASSED tests/test_app.py::test_fix\n"
+        "FAILED tests/test_app.py::test_fix_2 - AssertionError\n"
+        "PASSED tests/test_app.py::test_old_a\n"
+        "SWEREBENCH_V2_TEST_OUTPUT_END\n"
+    )
+
+    asyncio.run(task.score(trace, _ScriptedRuntime(test_log)))
+
+    # The bridge trains on trace.reward.
+    assert {name: r.score for name, r in trace.rewards.items()} == {"solved": reward}
+    assert trace.reward == reward
 
 
 @pytest.mark.parametrize(
