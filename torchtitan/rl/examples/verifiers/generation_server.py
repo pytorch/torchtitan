@@ -17,7 +17,7 @@ from aiohttp import web
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
+from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout.types import GenerateFn, Prompt
 
 logger = logging.getLogger(__name__)

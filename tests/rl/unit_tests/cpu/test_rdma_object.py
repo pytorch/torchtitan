@@ -22,7 +22,7 @@ from torchtitan.rl.actors.monarch.rdma_object import (
     _TensorRef,
     MonarchRDMAObject,
 )
-from torchtitan.rl.rollout.rdma_prompt import RDMAImageFiles, RDMAPrompt
+from torchtitan.rl.rdma_object import RDMAImageFiles, RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 
 

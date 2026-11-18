@@ -54,7 +54,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
-from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
+from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import (

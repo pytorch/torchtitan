@@ -20,7 +20,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rollout.rdma_prompt import RDMAPrompt
+from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout.types import Completion
 
 
