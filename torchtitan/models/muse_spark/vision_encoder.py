@@ -215,7 +215,6 @@ class NaViTEncoder(Module):
         if config.pos_emb_grid_order not in {"raster", "legacy_spark"}:
             raise ValueError("NaViT positional embedding grid order is invalid")
 
-        self.config = config
         self.patch_size = config.patch_size
         self.patch_temporal = config.patch_temporal
         self.downsample_factor = config.downsample_factor
@@ -351,11 +350,7 @@ class NaViTEncoder(Module):
         pos_emb_GD = self._get_pos_emb(grid_h, grid_w, device)
         x_TD = self.ln_pre(x_TD + pos_emb_GD.to(dtype))
 
-        positions_GC = (
-            x_TD.new_empty((num_tokens, 0))
-            if self.config.block.attn.rope is None
-            else self._make_rope_positions(grid_h, grid_w, device)
-        )
+        positions_GC = self._make_rope_positions(grid_h, grid_w, device)
 
         sp_perm: torch.Tensor | None = None
         sp_slens = torch.empty(0, dtype=torch.int32, device=device)
