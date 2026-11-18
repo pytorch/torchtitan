@@ -22,11 +22,7 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymmMemScope
-from torchtitan.distributed.flex_shard_fsdp import (
-    record_buckets,
-    record_grad_norm_mesh,
-    reshard_flex_shard,
-)
+from torchtitan.distributed.flex_shard_fsdp import record_buckets, reshard_flex_shard
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
@@ -517,12 +513,9 @@ def _apply_flex_shard(
     expert_mesh = None
     if edp_mesh is not None:
         assert edp_mesh.mesh_dim_names == ("edp_shard", "ep"), edp_mesh.mesh_dim_names
+        # flex_shard_reduce_meshes gives the mesh to reduce these buckets' grad
+        # norm over.
         expert_mesh = edp_mesh["edp_shard"]
-        # FSDP2's DTensor grad norm reduces routed-expert grads over edp_shard
-        # and ep in one all-reduce, on torchtitan's loss mesh, which spans the
-        # same ranks and which DTensor finds by layout. _flatten returns that
-        # mesh, and raises if its layout differs.
-        record_grad_norm_mesh(expert_mesh, edp_mesh._flatten("loss_mesh"))
         # EP has split each routed-expert parameter's dim 0, the experts, over
         # ep. Declaring this rank's part makes the layouts that the wrapped
         # param_init functions use cover all experts, so each shard is its slice
