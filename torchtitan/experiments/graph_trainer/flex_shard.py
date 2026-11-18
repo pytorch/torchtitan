@@ -199,26 +199,43 @@ def _init_dtensor_param(param, *, layout, init_fn, parallelism_context):
 
 
 class FlexShardGradientClipper(GradientClipper):
+    def __init__(self, config):
+        super().__init__(config)
+        self._gradient_views = {}
+
     @torch.no_grad()
     def clip_grad_norm_(self, parameters, max_norm, *, parallelism_context):
         norm_parameters = []
-        for param in parameters:
-            if param.grad is None:
-                continue
-            norm_param = param._graph_trainer_dtensor_param
-            norm_param.grad = DTensor.from_local(
-                param.grad,
-                norm_param.device_mesh,
-                norm_param.placements,
-                run_check=False,
+        bound_views = []
+        try:
+            for param in parameters:
+                if param.grad is None:
+                    continue
+                norm_param = param._graph_trainer_dtensor_param
+                grad = param.grad
+                key = (id(norm_param), grad.dtype, grad.device)
+                view = self._gradient_views.get(key)
+                if view is None:
+                    view = DTensor.from_local(
+                        torch.empty(0, dtype=grad.dtype, device=grad.device),
+                        norm_param.device_mesh,
+                        norm_param.placements,
+                        shape=norm_param.shape,
+                        stride=norm_param.stride(),
+                        run_check=False,
+                    )
+                    self._gradient_views[key] = view
+                view.to_local().set_(grad)
+                bound_views.append((norm_param, view))
+                norm_param.grad = view
+                norm_parameters.append(norm_param)
+            return super().clip_grad_norm_(
+                norm_parameters, max_norm, parallelism_context=parallelism_context
             )
-            norm_parameters.append(norm_param)
-        norm = super().clip_grad_norm_(
-            norm_parameters, max_norm, parallelism_context=parallelism_context
-        )
-        for norm_param in norm_parameters:
-            norm_param.grad = None
-        return norm
+        finally:
+            for norm_param, view in bound_views:
+                view.to_local().set_()
+                norm_param.grad = None
 
 
 def _collect_bucket_regions(graph: fx.Graph):

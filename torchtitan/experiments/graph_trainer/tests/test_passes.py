@@ -4,21 +4,27 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import importlib.util
 import inspect
 import operator
 import sys
+import tempfile
+import weakref
 from collections import Counter, defaultdict
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
 from torch._decomp import get_decompositions
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
@@ -30,6 +36,7 @@ from torch.utils._ordered_set import OrderedSet
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.components.optim import GradientClipper
 from torchtitan.config import PrecisionConfig, TrainingConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
@@ -1321,6 +1328,111 @@ class TestFlexShardScheduling(TestCase):
                 before = list(graph.nodes)
                 self.schedule(gm)
                 self.assertEqual(list(graph.nodes), before)
+
+class TestFlexShardGradientClipper(TestCase):
+    def setUp(self):
+        super().setUp()
+        if importlib.util.find_spec("flex_shard") is None:
+            self.skipTest("FlexShard is not installed")
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            FlexShardGradientClipper,
+        )
+
+        self.rendezvous = tempfile.TemporaryDirectory()
+        dist.init_process_group(
+            "gloo",
+            init_method=f"file://{self.rendezvous.name}/rendezvous",
+            rank=0,
+            world_size=1,
+        )
+        self.mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("fsdp",))
+        self.clipper = FlexShardGradientClipper(GradientClipper.Config())
+        self.context = SimpleNamespace(get_optional_mesh=lambda axis: None)
+        self.param = torch.nn.Parameter(torch.zeros(2))
+        self.param._graph_trainer_dtensor_param = torch.nn.Parameter(
+            DTensor.from_local(self.param.detach(), self.mesh, (Shard(0),)),
+            requires_grad=False,
+        )
+
+    def tearDown(self):
+        dist.destroy_process_group()
+        self.rendezvous.cleanup()
+        super().tearDown()
+
+    def test_reuses_gradient_view_and_invalidates_changed_storage(self):
+        grad = torch.tensor([3.0, 4.0])
+        self.param.grad = grad
+        with patch.object(
+            DTensor, "from_local", wraps=DTensor.from_local
+        ) as from_local:
+            norm = self.clipper.clip_grad_norm_(
+                [self.param], 100.0, parallelism_context=self.context
+            )
+            self.assertEqual(norm.item(), 5.0)
+            grad.mul_(2)
+            norm = self.clipper.clip_grad_norm_(
+                [self.param], 100.0, parallelism_context=self.context
+            )
+            self.assertEqual(norm.item(), 10.0)
+            self.assertEqual(from_local.call_count, 1)
+            grad.set_(torch.tensor([5.0, 12.0]))
+            norm = self.clipper.clip_grad_norm_(
+                [self.param], 100.0, parallelism_context=self.context
+            )
+            self.assertEqual(norm.item(), 13.0)
+            self.assertEqual(from_local.call_count, 1)
+            self.param.grad = torch.tensor([8.0, 15.0])
+            norm = self.clipper.clip_grad_norm_(
+                [self.param], 100.0, parallelism_context=self.context
+            )
+            self.assertEqual(norm.item(), 17.0)
+            self.assertEqual(from_local.call_count, 1)
+
+    def test_cached_gradient_view_does_not_retain_eager_source(self):
+        grad = torch.tensor([3.0, 4.0])
+        self.param.grad = grad
+        self.clipper.clip_grad_norm_(
+            [self.param], 1.0, parallelism_context=self.context
+        )
+        self.assertEqual(grad, torch.tensor([3.0, 4.0]) / (5.0 + 1e-6))
+        source_ref = weakref.ref(grad)
+        view = next(iter(self.clipper._gradient_views.values()))
+        self.param.grad = None
+        del grad
+        gc.collect()
+        self.assertIsNone(source_ref())
+        with torch.no_grad():
+            self.assertEqual(view.to_local().untyped_storage().nbytes(), 0)
+        self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
+
+    def test_releases_bound_gradient_views_if_setup_fails(self):
+        other_param = torch.nn.Parameter(torch.zeros(2))
+        other_param._graph_trainer_dtensor_param = torch.nn.Parameter(
+            DTensor.from_local(other_param.detach(), self.mesh, (Shard(0),)),
+            requires_grad=False,
+        )
+        self.param.grad = torch.ones_like(self.param)
+        other_param.grad = torch.ones_like(other_param)
+        from_local = DTensor.from_local
+        calls = 0
+
+        def fail_second_view(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("gradient view setup failed")
+            return from_local(*args, **kwargs)
+
+        with patch.object(DTensor, "from_local", side_effect=fail_second_view):
+            with self.assertRaisesRegex(RuntimeError, "gradient view setup failed"):
+                self.clipper.clip_grad_norm_(
+                    [self.param, other_param], 1.0, parallelism_context=self.context
+                )
+        view = next(iter(self.clipper._gradient_views.values()))
+        with torch.no_grad():
+            self.assertEqual(view.to_local().untyped_storage().nbytes(), 0)
+        self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
+
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
