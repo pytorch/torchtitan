@@ -10,12 +10,13 @@ from .flavors import (
     QWEN3_5_SPECIAL_TOKENS,
     QWEN3_5_VISION_PROCESSOR_KWARGS,
 )
-from .model import Qwen35Model
+from .model import Qwen35Model, Qwen35MultimodalModel
 
 __all__ = [
     "MODEL_FLAVORS",
     "QWEN3_5_SPECIAL_TOKENS",
     "QWEN3_5_VISION_PROCESSOR_KWARGS",
     "Qwen35Model",
+    "Qwen35MultimodalModel",
     "build_model_config",
 ]

@@ -35,7 +35,7 @@ from torchtitan.models.qwen3_5.renderer import (
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout import RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
@@ -169,7 +169,7 @@ def test_rollout_keeps_each_image_on_its_placeholders(
     async def release_session_fn(**kwargs) -> None:
         pass
 
-    worker = RolloutWorker(
+    worker = MessageEnvRolloutWorker(
         SimpleNamespace(
             rubric=_Config(None),
             message_env=None,

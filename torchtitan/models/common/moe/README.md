@@ -114,7 +114,7 @@ before W2, or scoring after an output postprocess. The all-to-all dispatcher has
 `dispatch` and `combine` regions that include local reordering and collectives.
 
 Dist-MoE always retains its outer region and owns its internal activation
-save/recompute decisions. See [REMAT.md](../../../distributed/REMAT.md) for
+save/recompute decisions. See [ACTIVATION_REMAT.md](../../../distributed/ACTIVATION_REMAT.md) for
 policy details.
 
 ## Dependencies

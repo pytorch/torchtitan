@@ -16,12 +16,13 @@ from .flavors import (
     MUSE_SPARK_SPECIAL_TOKENS,
     MUSE_SPARK_VISION_PROCESSOR_KWARGS,
 )
-from .model import MuseSparkModel
+from .model import MuseSparkModel, MuseSparkMultimodalModel
 from .vision_encoder import MuseSparkNaViTAdapter
 
 __all__ = [
     "MuseSparkAudioEncoder",
     "MuseSparkModel",
+    "MuseSparkMultimodalModel",
     "MuseSparkNaViTAdapter",
     "MODEL_FLAVORS",
     "MUSE_SPARK_DEBUG_SPECIAL_TOKENS",

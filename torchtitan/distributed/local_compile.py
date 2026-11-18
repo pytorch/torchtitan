@@ -38,7 +38,8 @@ def _wait_async_collective_inputs(
 ) -> Callable[..., Any]:
     """Pass compiled regions plain tensors instead of un-awaited collectives.
 
-    Async redistributions, such as those at Module boundaries, return
+    Async redistributions, such as the CP all-gather and all-to-alls in
+    ``models/common/attention/cp_mla.py`` (``async_op=True``), return
     ``AsyncCollectiveTensor``s. AOTAutograd unwraps such an input with
     ``trigger_wait()``, which returns the inner tensor without
     ``requires_grad``, so the compiled region's output has no grad path back to

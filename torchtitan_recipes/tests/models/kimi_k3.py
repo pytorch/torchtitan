@@ -82,7 +82,7 @@ def kimi_k3_debugmodel(
     if parallelism is None:
         parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend=attn_backend,
         parallelism=parallelism,

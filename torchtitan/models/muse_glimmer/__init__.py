@@ -13,6 +13,7 @@ from .flavors import (
     MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS,
     muse_glimmer_vision_configs,
     MuseGlimmerModel,
+    MuseGlimmerMultimodalModel,
 )
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
     "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
+    "MuseGlimmerMultimodalModel",
     "build_model_config",
     "muse_glimmer_vision_configs",
 ]

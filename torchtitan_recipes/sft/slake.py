@@ -44,7 +44,7 @@ from torchtitan.models.muse_spark import (
     build_model_config as build_muse_spark_model_config,
     MUSE_SPARK_VISION_PROCESSOR_KWARGS,
 )
-from torchtitan.models.muse_spark.model import MuseSparkModel
+from torchtitan.models.muse_spark.model import MuseSparkMultimodalModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.observability.metrics import TensorBoardLogger
 from torchtitan.trainer import Trainer
@@ -203,7 +203,7 @@ def _use_muse_spark_slake_sft_data(config: Trainer.Config) -> None:
     for packing and validation.
     """
     model_config = config.model
-    assert isinstance(model_config, MuseSparkModel.Config)
+    assert isinstance(model_config, MuseSparkMultimodalModel.Config)
     model_config = replace(model_config, dataset_modalities=("vision",))
     config.model = model_config
     config.vision_processor = VisionProcessor.Config(

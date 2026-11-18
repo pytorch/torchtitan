@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import json
 import logging
 import os
 import time
@@ -37,7 +38,7 @@ from sglang.srt.managers.scheduler import (
     Scheduler,
 )
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.runtime_context import publish, SpawnRanks
+from sglang.srt.runtime_context import get_parallel, publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils.common import next_power_of_2
@@ -82,6 +83,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "skip_tokenizer_init",
         "dtype",
         "tp_size",
+        "attn_dp_size",
         "mem_fraction_static",
         "max_running_requests",
         "context_length",
@@ -166,6 +168,31 @@ class SGLangEngine(GenerationEngine):
                     "extra_server_args cannot set ServerArgs that TorchTitan controls: "
                     f"{owned_keys}"
                 )
+            # A HiCache storage backend (L3) outlives a run and a new run's policy
+            # versions (the cache salts) restart at 0, so a run could read KV that
+            # another run's weights computed. Only Mooncake has a verified key
+            # prefix that scopes keys to a run (extra_backend_tag).
+            storage_backend = self.extra_server_args.get("hicache_storage_backend")
+            if storage_backend not in (None, "mooncake"):
+                raise ValueError(
+                    "TorchTitan allows only the 'mooncake' HiCache storage backend "
+                    f"(SGLang supports more), got {storage_backend!r}: only Mooncake "
+                    "has a verified key prefix that scopes keys to a run "
+                    "(extra_backend_tag), and without one a run could read KV that "
+                    "another run's weights computed"
+                )
+            if storage_backend == "mooncake":
+                extra_config = json.loads(
+                    self.extra_server_args.get("hicache_storage_backend_extra_config")
+                    or "{}"
+                )
+                if not extra_config.get("extra_backend_tag"):
+                    raise ValueError(
+                        "The Mooncake HiCache storage backend needs an "
+                        "'extra_backend_tag' (the Store key prefix that scopes keys "
+                        "to a run) in hicache_storage_backend_extra_config (a JSON "
+                        "string)"
+                    )
 
     def __init__(
         self,
@@ -194,16 +221,23 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine serves text prompts only; image prompts "
                 "(Controller.Config.vision_processor) need VLLMEngine."
             )
-        if parallelism.data_parallel_degree != 1:
-            # TODO(https://github.com/sgl-project/sglang/issues/48476): SGLang builds
-            # one torch world per data-parallel replica; run DP replicas in one world by
-            # building SGLang's TP groups over it.
-            raise ValueError(
-                "SGLangEngine supports data_parallel_degree=1 only; run more "
-                "generators to scale out"
-            )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        # Reset mode clears KV at each weight load instead of salting requests by
+        # policy version, but SGLang's KV reset (flush_cache) clears GPU and host
+        # memory, not the storage backend: unsalted requests would read KV that
+        # earlier weights computed.
+        # TODO(https://github.com/pytorch/torchtitan/pull/5953): drop with the
+        # reset mode.
+        if (
+            config.extra_server_args.get("hicache_storage_backend") is not None
+            and reset_kv_cache_on_model_state_dict_load
+        ):
+            raise ValueError(
+                "A HiCache storage backend requires "
+                "reset_kv_cache_on_model_state_dict_load=False: SGLang's KV reset "
+                "does not clear the storage backend"
+            )
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
             isinstance(layer.attention, KDA.Config) for layer in model.layers
         ):
@@ -245,11 +279,13 @@ class SGLangEngine(GenerationEngine):
             # MASTER_PORT); SGLang then builds its groups over this world.
             torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
             dist.init_process_group(init_method="env://")
-        if dist.get_world_size() != parallelism.tensor_parallel_degree:
+        self._dp_size = parallelism.data_parallel_degree
+        world_size = self._dp_size * parallelism.tensor_parallel_degree
+        if dist.get_world_size() != world_size:
             raise ValueError(
-                f"SGLangEngine needs one process per TP rank, got world size "
-                f"{dist.get_world_size()} for tensor_parallel_degree "
-                f"{parallelism.tensor_parallel_degree}"
+                f"SGLangEngine needs one process per DP and TP rank, got world size "
+                f"{dist.get_world_size()} for data_parallel_degree {self._dp_size} "
+                f"and tensor_parallel_degree {parallelism.tensor_parallel_degree}"
             )
 
         # TODO(https://github.com/sgl-project/sglang/issues/48460): importing SGLang
@@ -273,6 +309,7 @@ class SGLangEngine(GenerationEngine):
             checkpointer_config=checkpointer,
             dist_moe_runtime=dist_moe_runtime,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            hf_assets_path=model_path,
         )
         server_args = self._build_server_args(
             model,
@@ -293,6 +330,9 @@ class SGLangEngine(GenerationEngine):
                 gpu_id=torch.accelerator.current_device_index(),
             ),
         )
+        # SGLang's attention-DP rank, so the Generator's check of data_parallel_rank
+        # verifies that this rank's request slice matches its attention-TP group.
+        self._dp_rank = get_parallel().attn_dp_rank
         logger.info("Building the SGLang scheduler...")
         self._scheduler = Scheduler(server_args, PortArgs.init_new(server_args))
         # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang has no option
@@ -369,12 +409,19 @@ class SGLangEngine(GenerationEngine):
             # Token-in-token-out: prompts and outputs are token ids.
             skip_tokenizer_init=True,
             dtype=param_dtype,
-            tp_size=parallelism.tensor_parallel_degree,
+            # Data parallelism runs as SGLang's attention DP: one SGLang instance whose
+            # TP group is the world, with a TP-wide attention group per DP rank. SGLang
+            # steps every DP rank together, an idle one with an empty batch, as the
+            # EP collectives across DP ranks need.
+            tp_size=parallelism.data_parallel_degree
+            * parallelism.tensor_parallel_degree,
+            attn_dp_size=parallelism.data_parallel_degree,
             # SGLang sizes weights and the KV pool to this fraction and leaves activations
             # little room on top: at 0.8, Qwen3-0.6B (TP 2) peaks at 81% of GPU memory,
             # as with vLLM's gpu_memory_utilization=0.8.
             mem_fraction_static=gpu_memory_limit,
-            max_running_requests=max_num_seqs,
+            # SGLang splits these over its DP ranks; the engine's are per DP rank.
+            max_running_requests=max_num_seqs * parallelism.data_parallel_degree,
             context_length=model.max_context_length + CONTEXT_LENGTH_MARGIN,
             attention_backend=TORCHTITAN_VARLEN_ATTENTION_BACKEND,
             # SGLang's default for this backend (its 128-token pages are for its own
@@ -411,7 +458,9 @@ class SGLangEngine(GenerationEngine):
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True
         if max_num_batched_tokens is not None:
-            server_kwargs["chunked_prefill_size"] = max_num_batched_tokens
+            server_kwargs["chunked_prefill_size"] = (
+                max_num_batched_tokens * parallelism.data_parallel_degree
+            )
         if debug.seed is not None:
             server_kwargs["random_seed"] = debug.seed
             # SGLang samples with each request's seed only in deterministic mode,
@@ -448,11 +497,11 @@ class SGLangEngine(GenerationEngine):
 
     @property
     def data_parallel_size(self) -> int:
-        return 1
+        return self._dp_size
 
     @property
     def data_parallel_rank(self) -> int:
-        return 0
+        return self._dp_rank
 
     @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
@@ -606,17 +655,31 @@ class SGLangEngine(GenerationEngine):
         return params
 
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running or held, or finished and not
-        yet returned by ``step()``."""
-        return (
+        """Whether any admitted request of any DP rank is still running or held, or
+        finished and not yet returned by ``step()``.
+
+        With data parallelism, a collective over all ranks: each ``step()`` is one, so
+        every DP rank steps until all are done, as vLLM's DP engines do.
+        """
+        unfinished = (
             bool(self._finished)
             or bool(self._awaiting_prefill)
             or not self._scheduler.is_fully_idle()
         )
+        if self._dp_size == 1:
+            return unfinished
+        # NOTE: a CPU (gloo) all-reduce on every call, i.e. every step, over the DP x
+        # TP world: SGLang's attention DP has no DP-only group. VLLMEngine (vLLM's
+        # has_unfinished_requests) does the same over vLLM's DP group.
+        flag = torch.tensor([unfinished], dtype=torch.int32)
+        dist.all_reduce(
+            flag, op=dist.ReduceOp.MAX, group=get_parallel().tp_group.cpu_group
+        )
+        return bool(flag.item())
 
     def step(self) -> list[FinishedRequest]:
-        """Run one iteration of SGLang's event loop, a TP collective, and return the
-        requests whose results it processed."""
+        """Run one iteration of SGLang's event loop, a collective over all DP and TP
+        ranks, and return the requests whose results it processed."""
         scheduler = self._scheduler
         # As SGLang's own event loops; the model's TP all-reduces take their fast
         # path only with grad mode off.
