@@ -6,11 +6,14 @@
 
 """NVFP4 weight-only (W4A16) Dist-MoE routed experts.
 
-Training runs Dist-MoE's BF16 kernels on NVFP4 quantize-dequantized (QDQ)
-expert weights, built once per FSDP unshard, with straight-through weight
-gradients. With ``mega_fused_inference`` (RL generator), the experts keep
-dist_moe's NVFP4 operands and run its fused W4A16 Mega kernel, which applies
-the same codes and scales but rounds the global scale in FP32, not BF16.
+The weights follow dist_moe's weight-only NVFP4 recipe: Four Over Six block
+scales and one global scale per expert, as in the miles/humans& W4A16 RL
+recipe. Training passes the quantize-dequantized (QDQ) expert weights, prepared
+once per FSDP unshard, to a weight-only Dist-MoE training context, which runs
+its BF16 kernels on them and passes the weight gradients straight through.
+With ``mega_fused_inference`` (RL generator), the experts keep dist_moe's NVFP4
+operands of the same codes and scales and run its fused W4A16 Mega kernel,
+which applies the global scale to the FP32 accumulator instead.
 
 Shape suffixes: ``E`` local experts, ``N`` output features, ``K`` input
 features.
@@ -37,11 +40,32 @@ from .routed_experts import DistMoeRoutedExperts
 __all__ = ["NVFP4W4A16DistMoeRoutedExperts"]
 
 
+def _weight_only_nvfp4() -> dist_moe.BlockScaledConfig:
+    """Return dist_moe's weight-only NVFP4 (W4A16) Mega policy."""
+    return dist_moe.BlockScaledConfig(
+        format=dist_moe.BlockScaledFormat.NVFP4, pipeline="mega", weight_only=True
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _NVFP4QDQOperands:
     """QDQ expert weight owned by one FSDP unshard lifetime."""
 
     weight: torch.Tensor
+
+    def prepared(self, source: torch.Tensor) -> dist_moe.PreparedWeight:
+        """Return the annex facade of the QDQ weight for ``source`` [E, N, K]."""
+        # TODO: use a public dist_moe constructor once it has one; MXFP8 calls
+        # this private one too.
+        return dist_moe.PreparedWeight._create(
+            source=source,
+            format=dist_moe.BlockScaledFormat.NVFP4,
+            fprop_data=self.weight.view(source.shape),
+            fprop_scale=None,
+            dgrad_data=None,
+            dgrad_scale=None,
+            fake_quantized=True,
+        )
 
 
 class _NVFP4QDQShardedTensor(_ShardedFSDPTensor):
@@ -54,12 +78,18 @@ class _NVFP4QDQShardedTensor(_ShardedFSDPTensor):
     def _build_operands(
         self, logical_tensor: torch.Tensor, out: _NVFP4QDQOperands | None = None
     ) -> _NVFP4QDQOperands:
-        from .nvfp4_qdq_kernel import nvfp4_qdq
-
         weight_ENK = logical_tensor.flatten(1, -2)
+        prepared = dist_moe.prepare_block_scaled_weight(
+            weight_ENK,
+            _weight_only_nvfp4(),
+            out=None if out is None else out.prepared(weight_ENK),
+        )
         if out is None:
-            return _NVFP4QDQOperands(nvfp4_qdq(weight_ENK).view_as(logical_tensor))
-        nvfp4_qdq(weight_ENK, out.weight.flatten(1, -2))
+            return _NVFP4QDQOperands(prepared.fprop_data.view_as(logical_tensor))
+        # FSDP checks that a refill keeps the operand objects, not that
+        # dist_moe wrote into them; a refill elsewhere would leave stale weights.
+        if prepared.fprop_data.data_ptr() != out.weight.data_ptr():
+            raise RuntimeError("dist_moe did not refill the retained QDQ weight")
         return out
 
 
@@ -76,6 +106,7 @@ class _NVFP4MegaOperands:
         self, source: torch.Tensor, *, gate_up: bool
     ) -> dist_moe.PreparedWeight:
         """Return the annex facade consumed by one Dist-MoE invocation."""
+        # TODO: use a public dist_moe constructor once it has one.
         return dist_moe.PreparedWeight._create(
             source=source,
             format=dist_moe.BlockScaledFormat.NVFP4,
@@ -104,9 +135,7 @@ class _NVFP4MegaShardedTensor(_ShardedFSDPTensor):
         # accepts out= for NVFP4 inference.
         prepared = dist_moe.prepare_block_scaled_weight(
             logical_tensor.flatten(1, -2).contiguous(),
-            dist_moe.BlockScaledConfig(
-                format=dist_moe.BlockScaledFormat.NVFP4, pipeline="mega"
-            ),
+            _weight_only_nvfp4(),
             inference=True,
             fuse_swiglu=logical_tensor.ndim == 4,
         )
@@ -121,23 +150,6 @@ class _NVFP4MegaShardedTensor(_ShardedFSDPTensor):
         for field in fields(out):
             getattr(out, field.name).copy_(getattr(operands, field.name))
         return out
-
-
-class _StraightThroughQDQ(torch.autograd.Function):
-    """Compute with the QDQ weight; pass its gradient to ``weight`` unchanged.
-
-    ``weight`` is never read: an FSDP unsharded parameter has no storage.
-    """
-
-    @staticmethod
-    def forward(ctx, weight: torch.Tensor, qdq_weight: torch.Tensor) -> torch.Tensor:
-        del ctx, weight
-        return qdq_weight.detach()
-
-    @staticmethod
-    def backward(ctx, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
-        del ctx
-        return grad, None
 
 
 def _operands(weight: torch.Tensor) -> Any:
@@ -180,12 +192,7 @@ class NVFP4W4A16DistMoeRoutedExperts(DistMoeRoutedExperts):
     def __init__(self, config: Config):
         super().__init__(config)
         self.mega_fused_inference = config.mega_fused_inference
-        if self.mega_fused_inference:
-            self.block_scaled_config = dist_moe.BlockScaledConfig(
-                format=dist_moe.BlockScaledFormat.NVFP4,
-                pipeline="mega",
-                weight_only=True,
-            )
+        self.block_scaled_config = _weight_only_nvfp4()
         self._wrap_weights()
 
     def _wrap_weights(self) -> None:
@@ -217,7 +224,7 @@ class NVFP4W4A16DistMoeRoutedExperts(DistMoeRoutedExperts):
         torch.Tensor | dist_moe.PreparedWeight,
         torch.Tensor | dist_moe.PreparedWeight,
     ]:
-        """Return the Mega operands, or the QDQ weights with a straight-through edge."""
+        """Return the Mega operands, or the QDQ weights for the training context."""
         w13_E2FD, w2_EDF = self.w13.weight, self.w2.weight
         w13_operands, w2_operands = _operands(w13_E2FD), _operands(w2_EDF)
         if self.mega_fused_inference:
@@ -226,12 +233,6 @@ class NVFP4W4A16DistMoeRoutedExperts(DistMoeRoutedExperts):
                 w2_operands.prepared(w2_EDF, gate_up=False),
             )
         return (
-            _StraightThroughQDQ.apply(w13_E2FD, w13_operands.weight).flatten(1, 2),
-            _StraightThroughQDQ.apply(w2_EDF, w2_operands.weight),
+            w13_operands.prepared(w13_E2FD.flatten(1, 2)),
+            w2_operands.prepared(w2_EDF),
         )
-
-    def _wgrad_parameter_owners(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Point in-place WGRAD at the parameters; the QDQ operands are not views."""
-        if self.mega_fused_inference or not self.inplace_wgrad_accum:
-            return None
-        return self.w13.weight, self.w2.weight

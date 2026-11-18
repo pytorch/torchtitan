@@ -525,11 +525,11 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         generator_transform = DistMoeTransform(
             expert_precision="mxfp8",
             block_scaled_config=BlockScaledConfig(pipeline="mega"),
-            mxfp8_mega_fused_inference=True,
+            mega_fused_inference=True,
         )
     elif expert_precision == "nvfp4_w4a16":
         generator_transform = DistMoeTransform(
-            expert_precision="nvfp4_w4a16", nvfp4_w4a16_mega_fused_inference=True
+            expert_precision="nvfp4_w4a16", mega_fused_inference=True
         )
     else:
         generator_transform = DistMoeTransform(expert_precision=expert_precision)

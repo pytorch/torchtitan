@@ -35,11 +35,6 @@ from torchtitan.models.common.dist_moe import (  # noqa: E402
     NVFP4W4A16DistMoeRoutedExperts,
 )
 from torchtitan.models.common.dist_moe.mxfp8 import _prepare_mxfp8_weight  # noqa: E402
-from torchtitan.models.common.dist_moe.nvfp4_qdq_kernel import nvfp4_qdq  # noqa: E402
-from torchtitan.models.common.dist_moe.nvfp4_w4a16 import (  # noqa: E402
-    _NVFP4MegaShardedTensor,
-    _operands,
-)
 from torchtitan.models.common.linear import GroupedLinear  # noqa: E402
 from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
 from torchtitan.models.common.moe.token_dispatcher import (  # noqa: E402
@@ -316,10 +311,12 @@ class TestDistMoeNumerics(DTensorTestBase):
     def test_nvfp4_w4a16_matches_bf16_on_qdq_weights(self) -> None:
         """NVFP4 W4A16 equals BF16 Dist-MoE on the QDQ weights, over two microbatches.
 
-        The first microbatch returns WGRAD through autograd and the
-        straight-through edge; the second accumulates it in place through the
-        explicit owners. Catches FPROP/DGRAD reading the raw weights, and weight
-        gradients going missing or reaching the parameters twice.
+        Both run under FSDP, which reshards after each backward, and the
+        experts are reloaded in another order before the second microbatch, so
+        its unshard refills the retained QDQ weights with new values. Catches
+        FPROP/DGRAD reading the raw weights, a refill leaving stale QDQ
+        weights, and weight gradients going missing or reaching the parameters
+        twice.
         """
         (
             _,
@@ -334,63 +331,92 @@ class TestDistMoeNumerics(DTensorTestBase):
         grad_out_TD = 0.02 * torch.randn(
             _T, _D, device=device, dtype=torch.bfloat16, generator=generator
         )
-        context = dist_moe.create_context(
-            group=torch.distributed.group.WORLD,
-            config=dist_moe.Config(
-                max_num_local_input_tokens=_T,
-                hidden_dim=_D,
-                intermediate_dim=_F,
-                top_k=_K,
-                num_experts=num_experts,
-                max_moe_layers_per_activation_slot=1,
-                device_scratch_capacity_factor=1.0,
-                activation_slot_capacity_factor=1.0,
-                num_activation_slots=1,
-            ),
-            device=device,
+        policy = dist_moe.BlockScaledConfig(
+            format=dist_moe.BlockScaledFormat.NVFP4, pipeline="mega", weight_only=True
         )
-        qdq_w13_E2FD = nvfp4_qdq(w13_E2FD.flatten(1, 2)).view_as(w13_E2FD)
+
+        def qdq(
+            w13_E2FD: torch.Tensor, w2_EDF: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return (
+                dist_moe.quantize_dequantize_weight(
+                    w13_E2FD.flatten(1, 2), policy
+                ).view_as(w13_E2FD),
+                dist_moe.quantize_dequantize_weight(w2_EDF, policy),
+            )
+
+        microbatch_weights = (
+            (w13_E2FD, w2_EDF),
+            (w13_E2FD.roll(1, dims=0), w2_EDF.roll(1, dims=0)),
+        )
+        fsdp_mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size, 1),
+            mesh_dim_names=("ep", "dp_shard"),
+        )["dp_shard"]
         results = []
-        try:
-            for experts_cls, w13, w2 in (
-                (NVFP4W4A16DistMoeRoutedExperts, w13_E2FD, w2_EDF),
-                (DistMoeRoutedExperts, qdq_w13_E2FD, nvfp4_qdq(w2_EDF)),
-            ):
-                experts = experts_cls.Config(
-                    w13=GroupedLinear.Config(
-                        group_size=_E_LOCAL,
-                        in_features=_D,
-                        out_features=_F,
-                        num_linears=2,
-                    ),
-                    w2=GroupedLinear.Config(
-                        group_size=_E_LOCAL, in_features=_F, out_features=_D
-                    ),
+        for experts_cls, weights in (
+            (NVFP4W4A16DistMoeRoutedExperts, microbatch_weights),
+            (DistMoeRoutedExperts, [qdq(*w) for w in microbatch_weights]),
+        ):
+            experts = experts_cls.Config(
+                w13=GroupedLinear.Config(
+                    group_size=_E_LOCAL,
+                    in_features=_D,
+                    out_features=_F,
+                    num_linears=2,
+                ),
+                w2=GroupedLinear.Config(
+                    group_size=_E_LOCAL, in_features=_F, out_features=_D
+                ),
+                top_k=_K,
+            ).build()
+            experts.to(device=device, dtype=torch.bfloat16)
+            fully_shard(experts, mesh=fsdp_mesh)
+            context = dist_moe.create_context(
+                group=torch.distributed.group.WORLD,
+                config=dist_moe.Config(
+                    max_num_local_input_tokens=_T,
+                    hidden_dim=_D,
+                    intermediate_dim=_F,
                     top_k=_K,
-                ).build()
-                experts.to(device=device, dtype=torch.bfloat16)
-                with torch.no_grad():
-                    experts.w13.weight.copy_(w13)
-                    experts.w2.weight.copy_(w2)
+                    num_experts=num_experts,
+                    max_moe_layers_per_activation_slot=1,
+                    device_scratch_capacity_factor=1.0,
+                    activation_slot_capacity_factor=1.0,
+                    num_activation_slots=1,
+                    block_scaled=experts.block_scaled_config,
+                ),
+                device=device,
+            )
+            try:
                 runtime = cast(DistMoeRuntime, object.__new__(DistMoeRuntime))
                 runtime.config = DistMoeRuntime.Config()
                 runtime.context = context
                 experts._runtime = runtime
                 x_copy_TD = x_TD.clone().requires_grad_()
                 scores_TK = routing[0].clone().requires_grad_()
-                for _ in range(2):
+                for w13, w2 in weights:
+                    with torch.no_grad():
+                        experts.w13.weight.to_local().copy_(w13)
+                        experts.w2.weight.to_local().copy_(w2)
                     out_TD = experts(x_copy_TD, scores_TK, *routing[1:])
                     out_TD.backward(grad_out_TD)
-                weights = (experts.w13.weight, experts.w2.weight)
-                results.append((out_TD, x_copy_TD, scores_TK, *weights))
-        finally:
-            context.close()
+                results.append(
+                    (
+                        out_TD,
+                        x_copy_TD.grad,
+                        scores_TK.grad,
+                        experts.w13.weight.grad.to_local(),
+                        experts.w2.weight.grad.to_local(),
+                    )
+                )
+            finally:
+                context.close()
         for name, actual, expected in zip(
             ("output", "input", "score", "W13", "W2"), *results, strict=True
         ):
             with self.subTest(name=name):
-                if name != "output":
-                    actual, expected = actual.grad, expected.grad
                 torch.testing.assert_close(actual, expected, rtol=_TOL, atol=_TOL)
 
     @with_comms
@@ -610,77 +636,6 @@ class TestMXFP8InferenceWeights(unittest.TestCase):
             torch.testing.assert_close(
                 actual.view(torch.uint8), expected.view(torch.uint8), rtol=0, atol=0
             )
-
-
-@unittest.skipUnless(
-    torch.cuda.is_available()
-    and torch.cuda.get_device_capability() in ((10, 0), (10, 3)),
-    "Dist-MoE requires an SM100 or SM103 GPU",
-)
-class TestNVFP4W4A16Weights(unittest.TestCase):
-    def test_mega_operands_decode_to_qdq_weights(self) -> None:
-        """The generator's NVFP4 Mega operands decode to the trainer's QDQ weights.
-
-        Decodes dist_moe's packed E2M1 codes, blocked E4M3 scales and global
-        scales here, independently of the annex, and compares them bit for bit
-        with the Triton QDQ (fresh and refilled), after undoing W13's gate/up
-        interleave. Catches the trainer and the generator quantizing differently
-        (scale rounding, E2M1 ties, masked tails, layout), so the generator
-        would serve weights the trainer never computed with.
-        """
-        generator = torch.Generator(device="cuda").manual_seed(0)
-        e2m1_values = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device="cuda")
-        e2m1_values = torch.cat([e2m1_values, -e2m1_values])
-        # The columns are not a multiple of the kernel's 256-column tile.
-        num_experts, num_rows, num_cols = 2, 2 * _F, _D + 16
-        shape = (num_experts, num_rows, num_cols)
-        # Quarter-integers with amax 6 land on E2M1 ties; a distinct magnitude
-        # per row and block keeps misplaced scales from matching by chance.
-        near_ties = torch.randint(-24, 25, shape, device="cuda", generator=generator)
-        near_ties[:, 0, 0] = 24
-        rows = torch.arange(num_rows, device="cuda")[:, None]
-        cols = torch.arange(num_cols, device="cuda")[None, :]
-        randn = torch.randn(shape, device="cuda", generator=generator)
-        cases = {
-            "near_ties": (near_ties / 4).bfloat16(),
-            "randn": (0.02 * randn * 2.0 ** (rows % 8 + cols // 16 % 4)).bfloat16(),
-        }
-        gate_groups = torch.arange(num_rows // 2, device="cuda").view(-1, 8)
-        interleaved_order = torch.stack(
-            (gate_groups, gate_groups + num_rows // 2), dim=1
-        ).flatten()
-        for (name, weight_ENK), gate_up in (
-            (case, gate_up) for case in cases.items() for gate_up in (True, False)
-        ):
-            with self.subTest(name=name, gate_up=gate_up):
-                # The 4-D (E, 2, F, D) shape marks W13
-                logical = weight_ENK.unflatten(1, (2, -1)) if gate_up else weight_ENK
-                operands = _operands(_NVFP4MegaShardedTensor(logical))
-                packed_ENQ = operands.qdata.view(torch.uint8)
-                # Two codes per byte, the even column in the low nibble
-                codes_ENK = torch.stack((packed_ENQ & 0xF, packed_ENQ >> 4), dim=-1)
-                values_ENBV = e2m1_values[codes_ENK.flatten(-2).long()].unflatten(
-                    -1, (-1, 16)
-                )
-                scale_ENB = (
-                    _blocked_scales_to_rows(operands.scale)
-                    .view(num_experts, num_rows, -1)[..., : num_cols // 16]
-                    .view(torch.float8_e4m3fn)
-                    .float()
-                )
-                decoded_ENK = (
-                    values_ENBV
-                    * scale_ENB.unsqueeze(-1)
-                    / operands.global_scale.view(-1, 1, 1, 1)
-                ).flatten(-2)
-                order = interleaved_order if gate_up else slice(None)
-                for qdq_ENK in (
-                    nvfp4_qdq(weight_ENK),
-                    nvfp4_qdq(weight_ENK, torch.full_like(weight_ENK, float("nan"))),
-                ):
-                    torch.testing.assert_close(
-                        decoded_ENK.bfloat16(), qdq_ENK[:, order], rtol=0, atol=0
-                    )
 
 
 if __name__ == "__main__":

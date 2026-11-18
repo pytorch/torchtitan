@@ -140,10 +140,6 @@ class DistMoeRoutedExperts(Module):
         w13_EFD = w13_E2FD.flatten(1, 2)
         return w13_EFD, w2_EDF
 
-    def _wgrad_parameter_owners(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """W13/W2 gradient owners if the operands are not their views, else None."""
-        return None
-
     def _output_postprocess(
         self,
     ) -> dist_moe.RMSNormPostprocess | Callable[[torch.Tensor], torch.Tensor] | None:
@@ -220,7 +216,6 @@ class DistMoeRoutedExperts(Module):
         postprocess = self._output_postprocess()
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
-            wgrad_parameter_owners=self._wgrad_parameter_owners(),
             experts_output_postprocess=postprocess,
             # -1 routes come from the padding mask (rows inside the call) and
             # from the pad above (rows appended up to the call size). A Python

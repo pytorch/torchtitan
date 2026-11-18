@@ -55,12 +55,6 @@ from tests.rl.unit_tests.gpu.test_bitwise_parity import (
 )
 
 
-# TODO: drop once dist_moe main ships the W4A16 Mega kernel (weight_only).
-_HAS_NVFP4_W4A16_MEGA = "weight_only" in {
-    field.name for field in dataclasses.fields(dist_moe.BlockScaledConfig)
-}
-
-
 def _mega_generator_config(expert_precision: str) -> Controller.Config:
     """Build a one-GPU debug MoE generator with Mega inference weights."""
     config = rl_grpo_qwen3_moe_debug_varlen()
@@ -92,11 +86,11 @@ def _mega_generator_config(expert_precision: str) -> Controller.Config:
             DistMoeTransform(
                 expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
-                mxfp8_mega_fused_inference=True,
+                mega_fused_inference=True,
             )
             if expert_precision == "mxfp8"
             else DistMoeTransform(
-                expert_precision="nvfp4_w4a16", nvfp4_w4a16_mega_fused_inference=True
+                expert_precision="nvfp4_w4a16", mega_fused_inference=True
             )
         ],
     )
@@ -249,26 +243,15 @@ def _check_inference_operands(engine) -> None:
     not torch.cuda.is_available() or not has_cuda_capability(10, 0),
     reason="Dist-MoE requires an SM100-or-newer GPU",
 )
-@pytest.mark.parametrize(
-    "expert_precision",
-    [
-        "mxfp8",
-        pytest.param(
-            "nvfp4_w4a16",
-            marks=pytest.mark.skipif(
-                not _HAS_NVFP4_W4A16_MEGA, reason="needs dist_moe's W4A16 Mega"
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("expert_precision", ["mxfp8", "nvfp4_w4a16"])
 def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
     """The generator serves Mega experts with Mega fused inference weights.
 
-    With ``mxfp8_mega_fused_inference`` or ``nvfp4_w4a16_mega_fused_inference``,
-    every expert's operands are inference operands (for MXFP8, no DGRAD scales)
-    from the first unshard. Under FULL CUDA graphs, weight
-    loads refill those retained operands in place: their objects stay fixed
-    while their contents and the generated logprobs follow the loaded weights.
+    With ``mega_fused_inference``, every expert's operands are inference
+    operands (for MXFP8, no DGRAD scales) from the first unshard. Under FULL
+    CUDA graphs, weight loads refill those retained operands in place: their
+    objects stay fixed while their contents and the generated logprobs follow
+    the loaded weights.
     """
     world_size = (
         dist.get_world_size()
@@ -284,7 +267,7 @@ def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
     engine = None
     try:
         if owns_process_group:
-            temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_mxfp8_")
+            temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_mega_")
             dist_utils.init_distributed(CommConfig(), base_folder=temporary_dump_folder)
         _clear_cached_model_class()
         register_to_vllm(

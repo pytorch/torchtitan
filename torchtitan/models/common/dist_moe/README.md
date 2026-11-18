@@ -100,21 +100,22 @@ config.generator = apply_transforms(
         DistMoeTransform(
             expert_precision="mxfp8",
             block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
-            mxfp8_mega_fused_inference=True,
+            mega_fused_inference=True,
         )
     ],
 )
 ```
 
-Set `mxfp8_mega_fused_inference` only on the RL generator, since it does not
+Set `mega_fused_inference` only on the RL generator, since it does not
 support backward. During validation, the trainer runs under `torch.no_grad()`
 instead.
 
-With `expert_precision="nvfp4_w4a16"`, the trainer runs the BF16 kernels on
-NVFP4 quantize-dequantized expert weights with straight-through weight
-gradients. On the RL generator, also set `nvfp4_w4a16_mega_fused_inference=True`
-to run the fused W4A16 Mega kernel on the same NVFP4 codes and scales; it needs
-a dist_moe build with `BlockScaledConfig.weight_only`. See
+With `expert_precision="nvfp4_w4a16"`, the experts use dist_moe's weight-only
+NVFP4 policy (Four Over Six block scales, as in the miles/humans& W4A16 RL
+recipe). The trainer prepares the quantize-dequantized expert weights once per
+FSDP unshard, and dist_moe runs its BF16 kernels on them with straight-through
+weight gradients. On the RL generator, `mega_fused_inference=True` runs the
+fused W4A16 Mega kernel on the same NVFP4 codes and scales. See
 `rl_dapo_qwen3_30b_a3b_math_8k_nvfp4_w4a16` in `torchtitan_recipes.rl.dapo_math`.
 
 Verified 671B recipes live in `torchtitan_recipes.models.deepseek_v3`, while
@@ -143,11 +144,10 @@ Per-layer settings belong to the transform:
 | Setting | Meaning |
 | --- | --- |
 | `expert_precision` | Select `"bf16"` (default), the asynchronous `"mxfp8"` expert path, or `"nvfp4_w4a16"`. |
-| `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default for BF16 and MXFP8 experts. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
+| `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
 | `bf16_grouped_gemm_preset` | Optional BF16 FPROP/DGRAD schedule override for expert users. `None` uses the annex's shape-aware production defaults. BF16 WGRAD has its own production schedule. |
 | `block_scaled_config` | MXFP8-only annex policy. `pipeline="staged"` uses separate expert kernels; `pipeline="mega"` uses the fused chunk-pipelined implementation. `fast_math` selects approximate fused-SwiGLU sigmoid math, and `kernel_config` is an expert-only CuTe tuning override. |
-| `mxfp8_mega_fused_inference` | MXFP8 RL generator only; requires `pipeline="mega"`. Prepare weights in the interleaved format so the Mega kernel can fuse SwiGLU into the W13 GEMM, for inference only. Quantized weights and scales match training numerics exactly. |
-| `nvfp4_w4a16_mega_fused_inference` | NVFP4 W4A16 RL generator only. Run the fused W4A16 Mega kernel on the codes and scales of the trainer's QDQ weights; only the global scale's rounding differs. |
+| `mega_fused_inference` | RL generator only, for `"mxfp8"` and `"nvfp4_w4a16"`. Prepare weights for the fused Mega inference kernel. MXFP8 requires `pipeline="mega"` and interleaves the weights so the kernel can fuse SwiGLU into the W13 GEMM; its quantized weights and scales match training numerics exactly. NVFP4 W4A16 runs the fused W4A16 Mega kernel on the codes and scales of the trainer's QDQ weights; only the global scale's rounding differs. |
 
 One `DistMoeRuntime.Config` owns rank-wide resources shared by every local
 Dist-MoE layer:

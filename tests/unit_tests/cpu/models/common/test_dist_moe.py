@@ -662,7 +662,7 @@ def test_mxfp8_mega_fused_inference_builds_inference_weights() -> None:
         DistMoeTransform(
             expert_precision="mxfp8",
             block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
-            mxfp8_mega_fused_inference=True,
+            mega_fused_inference=True,
         )
         .transform(_stock_config())
         .build()
@@ -673,15 +673,15 @@ def test_mxfp8_mega_fused_inference_builds_inference_weights() -> None:
     assert module.w2.weight.mega_fused_inference
 
 
-def test_mxfp8_mega_fused_inference_requires_mxfp8_mega() -> None:
-    """Mega fused inference needs MXFP8 experts on the Mega pipeline."""
+def test_mega_fused_inference_requires_quantized_mega() -> None:
+    """Mega fused inference needs quantized experts, MXFP8 on the Mega pipeline."""
     with pytest.raises(ValueError, match="expert_precision='mxfp8'"):
-        DistMoeTransform(mxfp8_mega_fused_inference=True)
+        DistMoeTransform(mega_fused_inference=True)
     with pytest.raises(
         ValueError,
-        match="mxfp8_mega_fused_inference requires block_scaled_config",
+        match="mega_fused_inference requires block_scaled_config",
     ):
-        DistMoeTransform(expert_precision="mxfp8", mxfp8_mega_fused_inference=True)
+        DistMoeTransform(expert_precision="mxfp8", mega_fused_inference=True)
 
 
 @pytest.mark.parametrize(
