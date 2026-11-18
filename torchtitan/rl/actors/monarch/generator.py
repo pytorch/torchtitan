@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -71,8 +73,12 @@ class _GeneratorActorEndpoints:
         await super().sync_log_step(step, relative_step)
 
     @concurrent_endpoint
-    async def start_engine_loop(self) -> None:
-        await super().start_engine_loop()
+    async def open_result_channel(self) -> Any | None:
+        return await super().open_result_channel()
+
+    @concurrent_endpoint
+    async def start_engine_loop(self, result_port: Any | None = None) -> None:
+        await super().start_engine_loop(result_port)
 
     @concurrent_endpoint
     async def wait_engine_loop(self) -> None:

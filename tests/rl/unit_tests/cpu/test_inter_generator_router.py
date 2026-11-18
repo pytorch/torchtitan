@@ -18,8 +18,9 @@ from torchtitan.rl.routing.strategies import (
 
 
 class _Endpoint:
-    def __init__(self, *, wait: bool = False, raises: bool = False):
+    def __init__(self, *, wait: bool = False, raises: bool = False, result=None):
         self.raises = raises
+        self.result = result
         self.calls = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -32,6 +33,7 @@ class _Endpoint:
         await self.release.wait()
         if self.raises:
             raise RuntimeError("endpoint failed")
+        return self.result
 
     async def call(self, *args, **kwargs):
         return await self.call_one(*args, **kwargs)
@@ -52,6 +54,8 @@ class _Actor:
         self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
         self.load_model_state_dict = _Endpoint(wait=wait_pull, raises=raises_pull)
         self.release_sessions = _Endpoint()
+        self.open_result_channel = _Endpoint(result=object())
+        self.start_engine_loop = _Endpoint()
 
 
 def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
@@ -69,6 +73,24 @@ def _route(router, *, session_id: str | None = None) -> str:
     name = router.reserve("probe", routing_session_id=session_id).name
     router.release_reservation("probe")
     return name
+
+
+def test_start_distributes_each_generators_port_before_its_loops():
+    async def run():
+        first, second = _Actor("first"), _Actor("second")
+        first.open_result_channel.release.clear()
+        task = asyncio.create_task(_router([first, second]).start_engine_loop())
+        await asyncio.wait_for(first.open_result_channel.started.wait(), timeout=5)
+        await asyncio.wait_for(second.start_engine_loop.started.wait(), timeout=5)
+        assert first.start_engine_loop.calls == []
+        first.open_result_channel.release.set()
+        await asyncio.wait_for(task, timeout=5)
+        for actor in (first, second):
+            assert actor.start_engine_loop.calls == [
+                ((actor.open_result_channel.result,), {})
+            ]
+
+    asyncio.run(run())
 
 
 def test_least_loaded_routes_to_lowest_reserved_load():

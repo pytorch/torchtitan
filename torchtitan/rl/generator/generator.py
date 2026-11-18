@@ -313,20 +313,20 @@ class Generator(Configurable):
         self._torchstore_loop: asyncio.AbstractEventLoop | None = None
 
         broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
+        self._request_dispatcher = RequestDispatcher(
+            rank=self._rank,
+            dp_rank=dp_rank,
+            tp_rank=tp_rank,
+            dp_degree=dp_degree,
+            intra_generator_router=config.intra_generator_router,
+            open_result_channel=open_result_channel,
+        )
         # The engine loop owns the engine from here on and releases it on exit, so this
         # generator keeps no reference to it.
         self._engine_loop = EngineLoop(
             engine,
             event_loop=self._engine_loop_thread.event_loop,
-            request_dispatcher=RequestDispatcher(
-                rank=self._rank,
-                dp_rank=dp_rank,
-                tp_rank=tp_rank,
-                dp_degree=dp_degree,
-                broadcast_group=broadcast_group,
-                intra_generator_router=config.intra_generator_router,
-                open_result_channel=open_result_channel,
-            ),
+            request_dispatcher=self._request_dispatcher,
             rank=self._rank,
             broadcast_group=broadcast_group,
             max_engine_steps_between_decisions=config.max_engine_steps_between_decisions,
@@ -368,9 +368,16 @@ class Generator(Configurable):
         sl.set_step(step, relative_step=relative_step)
         self._engine_loop.log_engine_stats(step)
 
-    async def start_engine_loop(self) -> None:
-        """Start the background engine loop on every rank (one-time, idempotent)."""
-        self._engine_loop.start()
+    async def open_result_channel(self) -> Any | None:
+        """RANK 0: return the result port for the actor system to distribute."""
+        return self._request_dispatcher.open_result_channel()
+
+    async def start_engine_loop(self, result_port: Any | None = None) -> None:
+        """Start the background engine loop (one-time, idempotent).
+
+        For DP>1, first open rank 0's result channel and pass its port to every rank.
+        """
+        self._engine_loop.start(result_port)
 
     async def wait_engine_loop(self) -> None:
         """Wait until this rank's engine loop exits, raising whatever crashed it.

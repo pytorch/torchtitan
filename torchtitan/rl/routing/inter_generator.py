@@ -225,7 +225,12 @@ class InterGeneratorRouter(Configurable):
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""
-        await self._fanout("start_engine_loop")
+
+        async def start_one(handle: _GeneratorHandle) -> None:
+            result_port = await handle.rank0_actor.open_result_channel.call_one()
+            await handle.actor.start_engine_loop.call(result_port)
+
+        await asyncio.gather(*(start_one(handle) for handle in self._generators))
 
     async def sync_log_step(self, step: int) -> None:
         """Set the step counter in this process and in every generator rank."""

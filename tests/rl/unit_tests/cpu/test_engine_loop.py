@@ -18,6 +18,7 @@ import concurrent.futures
 import contextvars
 import gc
 import logging
+import pickle
 import threading
 import weakref
 from collections.abc import Callable, Iterable
@@ -30,6 +31,7 @@ import torch
 
 import torchtitan.rl.generator.engine_loop as engine_loop_module
 import torchtitan.rl.generator.generator as generator_module
+from renderers import PlaceholderRange
 from torchtitan.rl.generator.dispatcher import (
     _FinishedRequests,
     _RejectedRequests,
@@ -54,7 +56,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
-from torchtitan.rl.rollout.types import Prompt
+from torchtitan.rl.rollout.types import Prompt, PromptImage
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -85,7 +87,6 @@ def _dispatcher(
         dp_rank=0,
         tp_rank=tp_rank,
         dp_degree=dp_size,
-        broadcast_group=None,
         open_result_channel=open_result_channel,
         intra_generator_router=IntraGeneratorRouter.Config(
             strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()
@@ -707,9 +708,7 @@ def engine_thread(monkeypatch):
     """Returns a function that builds an engine loop around `engine`, with its engine loop thread
     running; stops those threads afterwards."""
     # Rank 0 is the only rank, so the decision broadcast and the load's all-reduce are no-ops.
-    monkeypatch.setattr(
-        engine_loop_module.dist, "broadcast_object_list", lambda *a, **k: None
-    )
+    monkeypatch.setattr(engine_loop_module.dist, "broadcast", lambda *a, **k: None)
     monkeypatch.setattr(engine_loop_module.dist, "all_reduce", lambda *a, **k: None)
     engine_threads: list[EngineLoopThread] = []
 
@@ -1020,7 +1019,9 @@ def test_load_replies_only_after_every_rank_finished_fetching(
     reducing, released = threading.Event(), threading.Event()
     reduced: list[int] = []
 
-    def all_reduce(tensor, group) -> None:
+    def all_reduce(tensor, group, op=None) -> None:
+        if op is engine_loop_module.dist.ReduceOp.MIN:
+            return
         reduced.append(int(tensor.item()))
         reducing.set()
         assert released.wait(timeout=_TIMEOUT_S)
@@ -1052,7 +1053,9 @@ def test_load_fails_on_every_rank_when_any_rank_fails(
 ) -> None:
     reduced: list[int] = []
 
-    def all_reduce(tensor, group) -> None:
+    def all_reduce(tensor, group, op=None) -> None:
+        if op is engine_loop_module.dist.ReduceOp.MIN:
+            return
         reduced.append(int(tensor.item()))
         tensor.fill_(1)
 
@@ -1378,14 +1381,12 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         ]
     )
 
-    def broadcast_object_list(container, **kwargs):
+    def broadcast_decision(self, decision):
         # A follower sends nothing and receives rank 0's decision.
-        assert container == [None]
-        container[0] = next(decisions)
+        assert decision is None
+        return next(decisions)
 
-    monkeypatch.setattr(
-        engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
-    )
+    monkeypatch.setattr(EngineLoop, "_broadcast_decision", broadcast_decision)
     reads: list[threading.Thread] = []
 
     async def load_pre_hook():
@@ -1425,10 +1426,14 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
             recv_threads.append(threading.current_thread())
             return await peer_results.get()
 
+    class ResultPort:
+        def __reduce__(self):
+            raise AssertionError("the result port must not enter an object collective")
+
     async def run() -> None:
         engine = _FakeEngine()
         dispatcher = _dispatcher(
-            dp_size=2, open_result_channel=lambda: ("port", ResultReceiver())
+            dp_size=2, open_result_channel=lambda: (ResultPort(), ResultReceiver())
         )
         # Load DP rank 0, so the request goes to the peer, DP rank 1.
         dispatcher._rank0_dp_router.reserve("busy", routing_session_id="busy")
@@ -1436,7 +1441,7 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
         peer_requests: list[str] = []
         broadcast_actions: list[LoopAction] = []
 
-        def broadcast_object_list(container, **kwargs):
+        def broadcast_decision(self, decision):
             # Stand-in for DP rank 1, which meets rank 0 at every decision broadcast: it sends
             # back the finished (or rejected) requests it took at the previous one,
             # then takes its share of this one.
@@ -1463,19 +1468,20 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
                 engine_loop._event_loop.call_soon_threadsafe(
                     peer_results.put_nowait, results
                 )
-            decision = container[0]
-            if isinstance(decision, LoopDecision):
-                broadcast_actions.append(decision.action)
-                if decision.action is LoopAction.STEP:
-                    peer_requests.extend(
-                        r.request_id for r in decision.requests_per_dp_rank[1]
-                    )
+            assert isinstance(decision, LoopDecision)
+            broadcast_actions.append(decision.action)
+            if decision.action is LoopAction.STEP:
+                peer_requests.extend(
+                    r.request_id for r in decision.requests_per_dp_rank[1]
+                )
 
-        monkeypatch.setattr(
-            engine_loop_module.dist, "broadcast_object_list", broadcast_object_list
-        )
+            return decision
+
+        monkeypatch.setattr(EngineLoop, "_broadcast_decision", broadcast_decision)
         engine_loop.policy_version = 3  # rank 0 stamps it at admission
-        engine_loop.start()
+        result_port = dispatcher.open_result_channel()
+        assert dispatcher.open_result_channel() is result_port
+        engine_loop.start(result_port)
 
         if peer_result == "rejected":
             with pytest.raises(ValueError, match="r0 rejected"):
@@ -1518,3 +1524,94 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
         await asyncio.wait_for(engine_loop.close(), _TIMEOUT_S)
 
     asyncio.run(run())
+
+
+def test_decision_wire_roundtrip_and_rejects_pickle():
+    request = _request("image", group_id=-2)
+    request.min_policy_version = 7
+    request.prompt = Prompt(
+        token_ids=[1, 9, 9, 2],
+        images=(
+            PromptImage(
+                hash_value="image",
+                source_path="image.png",
+                grid_thw=(1, 2, 1),
+                data=b"\x00\xff\x80",
+            ),
+        ),
+        image_placeholders=(PlaceholderRange(offset=1, length=2),),
+    )
+    for action in LoopAction:
+        decision = LoopDecision(
+            action=action,
+            requests_per_dp_rank=[[request], []],
+            load_version=9,
+            released_session_ids=["s0"],
+            released_group_ids=[-2],
+        )
+        decoded = LoopDecision.from_bytes(decision.to_bytes())
+        assert decoded == decision
+        decoded_request = decoded.requests_per_dp_rank[0][0]
+        assert decoded_request.min_policy_version == 7
+        assert isinstance(decoded_request.prompt.images, tuple)
+        assert decoded_request.prompt.images[0].grid_thw == (1, 2, 1)
+        assert decoded_request.prompt.image_placeholders == (
+            PlaceholderRange(offset=1, length=2),
+        )
+        assert (
+            decoded.requests_per_dp_rank[0][0].prompt.images[0].data == b"\x00\xff\x80"
+        )
+    with pytest.raises((ValueError, UnicodeError)):
+        LoopDecision.from_bytes(pickle.dumps(eval, protocol=4))
+
+
+@pytest.mark.parametrize("size", [-1, 0, engine_loop_module._MAX_DECISION_BYTES + 1])
+def test_decision_broadcast_rejects_size_before_payload(monkeypatch, runner, size):
+    calls = []
+
+    def broadcast(tensor, **kwargs):
+        calls.append(tensor.dtype)
+        assert tensor.dtype == torch.int64
+        tensor[0] = size
+
+    monkeypatch.setattr(engine_loop_module.dist, "broadcast", broadcast)
+    loop = _bare_loop(event_loop=runner.get_loop(), rank=1)
+    with pytest.raises(ValueError, match="decision size"):
+        loop._broadcast_decision(None)
+    assert calls == [torch.int64]
+
+
+def test_decision_encoding_failure_announced_to_peers(monkeypatch, runner):
+    sizes = []
+    monkeypatch.setattr(
+        engine_loop_module.dist,
+        "broadcast",
+        lambda tensor, **kwargs: sizes.append(tensor.item()),
+    )
+    loop = _bare_loop(event_loop=runner.get_loop())
+    request = _request()
+    request.min_policy_version = 0
+    request.arrival_time = float("nan")
+    decision = LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[request]])
+    with pytest.raises(ValueError, match="decision size"):
+        loop._broadcast_decision(decision)
+    assert sizes == [0]
+
+
+@pytest.mark.parametrize("local_failure", [False, True])
+def test_decision_decode_failure_is_collective(monkeypatch, runner, local_failure):
+    decision = LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
+    received = []
+    monkeypatch.setattr(engine_loop_module.dist, "broadcast", lambda *a, **k: None)
+
+    def all_reduce(tensor, **kwargs):
+        received.append(tensor.item())
+        tensor.zero_()  # A peer rejected the payload.
+
+    monkeypatch.setattr(engine_loop_module.dist, "all_reduce", all_reduce)
+    if local_failure:
+        monkeypatch.setattr(LoopDecision, "from_bytes", Mock(side_effect=ValueError))
+    loop = _bare_loop(event_loop=runner.get_loop())
+    with pytest.raises(ValueError, match="decision payload"):
+        loop._broadcast_decision(decision)
+    assert received == [int(not local_failure)]
