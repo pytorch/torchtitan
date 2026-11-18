@@ -49,25 +49,21 @@ RESOURCES = vf.TaskResources(cpu=1, memory=1, disk=1)
 TEST_PATCH = "diff --git a/tests/test_app.py b/tests/test_app.py\n-old\r\n+new\r\n"
 GOLD_PATCH = "diff --git a/app.py b/app.py\n-old\r\n+new\r\n"
 
-# A stand-in for V2.1's tests/grade.py with the same command line and report: a
-# test passes when the log has a "PASSED <name>" line.
+# A stand-in for V2.1's tests/grade.py with the same `grade` function and report:
+# a test passes when the log has a "PASSED <name>" line.
 GRADER = """
-import json, sys
-config_path, log_path, report_path = sys.argv[1:4]
-config = json.load(open(config_path))
-lines = open(log_path).read().splitlines()
-# V2.1 grades the test command's output alone.
-assert not any(line.startswith("SWEREBENCH_V2_TEST_OUTPUT") for line in lines)
-passed = {line.split()[1] for line in lines if line.startswith("PASSED ")}
-failed = {line.split()[1] for line in lines if line.startswith("FAILED ")}
-report = {
-    "resolved": passed >= set(config["FAIL_TO_PASS"] + config["PASS_TO_PASS"]),
-    "parsed_counts": {"PASSED": len(passed), "FAILED": len(failed)},
-    "fail_to_pass": {name: name in passed for name in config["FAIL_TO_PASS"]},
-    "pass_to_pass": {name: name in passed for name in config["PASS_TO_PASS"]},
-}
-json.dump(report, open(report_path, "w"))
-sys.exit(0 if report["resolved"] else 1)
+def grade(config, test_log):
+    lines = test_log.splitlines()
+    # V2.1 grades the test command's output alone.
+    assert not any(line.startswith("SWEREBENCH_V2_TEST_OUTPUT") for line in lines)
+    passed = {line.split()[1] for line in lines if line.startswith("PASSED ")}
+    failed = {line.split()[1] for line in lines if line.startswith("FAILED ")}
+    return {
+        "resolved": passed >= set(config["FAIL_TO_PASS"] + config["PASS_TO_PASS"]),
+        "parsed_counts": {"PASSED": len(passed), "FAILED": len(failed)},
+        "fail_to_pass": {name: name in passed for name in config["FAIL_TO_PASS"]},
+        "pass_to_pass": {name: name in passed for name in config["PASS_TO_PASS"]},
+    }
 """
 
 
@@ -371,11 +367,10 @@ def test_the_gold_check_reads_the_base_commit_itself(
 
 
 def test_a_crashed_grader_fails_scoring_instead_of_scoring_zero() -> None:
-    """A grader exits 1 both for an unresolved task and on a crash."""
     with pytest.raises(RuntimeError, match="grader failed"):
         asyncio.run(
             run_grader(
-                "raise SystemExit(1)",
+                "def grade(config, test_log):\n    raise ValueError(test_log)\n",
                 fail_to_pass=FAIL_TO_PASS,
                 pass_to_pass=PASS_TO_PASS,
                 test_log="",
