@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch's `RDMAObject` (`rl/actors/rdma.py`): the owner registers a value's large tensors,
-arrays and bytes as Monarch RDMA buffers, and a reader reads them all in one RDMA action. The
+"""Monarch's `RDMAObject` (`rl/actors/rdma.py`): the owner registers a value's large tensors and
+bytes as Monarch RDMA buffers, and a reader reads them all in one RDMA action. The
 batcher sends trainer microbatches this way (`Batcher.Config.rdma_min_tensor_bytes`), and the
 rollout workers send prompt image files (`BaseRolloutWorker.Config.rdma_min_image_bytes`).
 """
@@ -19,7 +19,6 @@ import logging
 from collections.abc import Callable
 from typing import Any, Generic, TypeVar
 
-import numpy as np
 import torch
 from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
@@ -31,8 +30,7 @@ _ValueT = TypeVar("_ValueT")
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class MonarchRDMAObject(Generic[_ValueT]):
-    """A value whose large tensors, arrays and bytes stay in its owner, the process that
-    registered it.
+    """A value whose large tensors and bytes stay in its owner, the process that registered it.
 
     Example (a microbatch: its 4 KiB ``input`` stays in the batcher, its 8-byte token counts go
     by value):
@@ -42,26 +40,21 @@ class MonarchRDMAObject(Generic[_ValueT]):
     """
 
     value: _ValueT
-    """The value, with each tensor, array and bytes leaf of at least `min_bytes` replaced by its
-    buffer reference. `register` looks for leaves in dataclass fields and in the containers pytree
-    flattens (dict, list, tuple, ...); a leaf inside any other object goes by value."""
+    """The value, with each tensor and bytes leaf of at least `min_bytes` replaced by its buffer
+    reference (see `_map_leaves` for where leaves are found)."""
 
     @classmethod
     def register(cls, value: _ValueT, *, min_bytes: int) -> MonarchRDMAObject[_ValueT]:
-        def register_leaf(leaf: torch.Tensor | np.ndarray | bytes) -> Any:
+        def register_leaf(leaf: torch.Tensor | bytes) -> Any:
             if isinstance(leaf, torch.Tensor):
                 return _TensorRef.register(leaf) if leaf.nbytes >= min_bytes else leaf
-            if isinstance(leaf, np.ndarray):
-                return _ArrayRef.register(leaf) if leaf.nbytes >= min_bytes else leaf
             return _BytesRef.register(leaf) if len(leaf) >= min_bytes else leaf
 
-        return cls(
-            value=_map_leaves(value, (torch.Tensor, np.ndarray, bytes), register_leaf)
-        )
+        return cls(value=_map_leaves(value, (torch.Tensor, bytes), register_leaf))
 
     async def read(self) -> _ValueT:
         action = RDMAAction()
-        # Tensors and arrays are filled in place when the action runs; bytes are copied out after.
+        # Tensors are filled in place when the action runs; bytes are copied out after.
         value = _map_leaves(
             self.value, _BUFFER_REFS, lambda ref: ref.queue_read(action)
         )
@@ -69,9 +62,7 @@ class MonarchRDMAObject(Generic[_ValueT]):
         return _map_leaves(value, _BytesRead, _BytesRead.to_bytes)
 
     async def drop(self) -> None:
-        refs: list[_TensorRef | _ArrayRef | _BytesRef] = []
-        _map_leaves(self.value, _BUFFER_REFS, refs.append)
-        await asyncio.gather(*(ref.buffer.drop() for ref in refs))
+        await asyncio.gather(*(ref.buffer.drop() for ref in _buffer_refs(self.value)))
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -98,32 +89,6 @@ class _TensorRef:
         tensor = torch.empty(self.shape, dtype=self.dtype)
         action.read_remote(tensor.view(-1).view(torch.uint8), self.buffer)
         return tensor
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _ArrayRef:
-    """A numpy array as its RDMA buffer, plus the shape and dtype to rebuild it."""
-
-    buffer: RDMABuffer
-    shape: tuple[int, ...]
-    dtype: np.dtype
-
-    @classmethod
-    def register(cls, array: np.ndarray) -> _ArrayRef:
-        # A view like a tensor's: from_numpy shares the array's memory. It needs a writable,
-        # contiguous array, e.g. one np.asarray built from a list.
-        return cls(
-            buffer=RDMABuffer(torch.from_numpy(array).view(-1).view(torch.uint8)),
-            shape=array.shape,
-            dtype=array.dtype,
-        )
-
-    def queue_read(self, action: RDMAAction) -> np.ndarray:
-        array = np.empty(self.shape, dtype=self.dtype)
-        action.read_remote(
-            torch.from_numpy(array).view(-1).view(torch.uint8), self.buffer
-        )
-        return array
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -156,38 +121,39 @@ class _BytesRead:
         return self.destination.numpy().tobytes()
 
 
-_BUFFER_REFS = (_TensorRef, _ArrayRef, _BytesRef)
+_BUFFER_REFS = (_TensorRef, _BytesRef)
 
 
 def _map_leaves(
     value: Any, leaf_types: type | tuple[type, ...], fn: Callable[[Any], Any]
 ) -> Any:
-    """Return a copy of `value` with each `leaf_types` instance replaced by `fn(instance)`,
-    looking in dataclass fields and in the containers pytree flattens. A dataclass with no such
-    leaf (e.g. a microbatch's `VisionProcessor.Config`) is kept as is, not rebuilt."""
+    """Return `value` with each `leaf_types` instance replaced by `fn(instance)`. Leaves are found
+    in the containers pytree flattens (dict, list, tuple, ...) and, when `value` is a dataclass
+    (e.g. a `TrainingMicrobatch`), in each of its fields; a leaf inside any other object,
+    including a nested dataclass, is kept. A dataclass `value` is rebuilt with
+    `dataclasses.replace`, so its `__post_init__` sees the replaced leaves."""
+    if isinstance(value, leaf_types) or not _is_dataclass_instance(value):
+        return pytree.tree_map_only(leaf_types, fn, value)
+    return dataclasses.replace(
+        value,
+        **{
+            field.name: pytree.tree_map_only(leaf_types, fn, getattr(value, field.name))
+            for field in dataclasses.fields(value)
+        },
+    )
 
-    def map_value(value: Any) -> tuple[Any, bool]:
-        found = False
 
-        def map_leaf(leaf: Any) -> Any:
-            nonlocal found
-            if isinstance(leaf, leaf_types):
-                found = True
-                return fn(leaf)
-            if dataclasses.is_dataclass(leaf) and not isinstance(leaf, type):
-                changes = {}
-                for field in dataclasses.fields(leaf):
-                    mapped, field_found = map_value(getattr(leaf, field.name))
-                    if field_found:
-                        changes[field.name] = mapped
-                if changes:
-                    found = True
-                    return dataclasses.replace(leaf, **changes)
-            return leaf
+def _buffer_refs(value: Any) -> list[_TensorRef | _BytesRef]:
+    """The buffer references `_map_leaves` finds in `value`, without rebuilding `value`."""
+    if _is_dataclass_instance(value) and not isinstance(value, _BUFFER_REFS):
+        value = [getattr(value, field.name) for field in dataclasses.fields(value)]
+    return [
+        leaf for leaf in pytree.tree_leaves(value) if isinstance(leaf, _BUFFER_REFS)
+    ]
 
-        return pytree.tree_map(map_leaf, value), found
 
-    return map_value(value)[0]
+def _is_dataclass_instance(value: Any) -> bool:
+    return dataclasses.is_dataclass(value) and not isinstance(value, type)
 
 
 # The CUDA driver's `CU_LIMIT_STACK_SIZE` (cuda.h).

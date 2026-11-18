@@ -5,8 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 """Opt-in RDMA path for values sent between services: the process that registers a value (its
-owner) keeps the value's large tensors, arrays and bytes, and the process that receives the
-value reads them by RDMA instead of getting them in the message.
+owner) keeps the value's large tensors and bytes, and the process that receives the value
+reads them by RDMA instead of getting them in the message.
 
     batcher        --RDMAMicrobatch--> trainer rank      ==RDMA read==> batcher
     rollout worker --RDMAPrompt------> generator rank 0  ==RDMA read==> rollout worker (image files)
@@ -24,8 +24,7 @@ _RegisteredValueT = TypeVar("_RegisteredValueT")
 
 
 class RDMAObject(Protocol[_ValueT]):
-    """A value whose large tensors, arrays and bytes stay in its owner, the process that
-    registered it.
+    """A value whose large tensors and bytes stay in its owner, the process that registered it.
 
     Example:
         rdma_file = register_rdma_object(image.data, min_bytes=1024)  # owner (a rollout worker)
@@ -43,7 +42,7 @@ class RDMAObject(Protocol[_ValueT]):
 
 
 class RegisterRDMAObject(Protocol):
-    """Registers a value's tensors, arrays and bytes of at least `min_bytes` for RDMA reads, e.g.
+    """Registers a value's tensors and bytes of at least `min_bytes` for RDMA reads, e.g.
     `MonarchRDMAObject.register`."""
 
     def __call__(

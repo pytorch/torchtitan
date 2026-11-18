@@ -267,8 +267,8 @@ class Batcher(Configurable):
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
         rdma_min_tensor_bytes: int | None = None
-        """Send microbatch tensors of at least this many bytes as RDMA buffers (the actor system's
-        `RDMAMicrobatch`), not in the RPC message:
+        """Send microbatch tensors of at least this many bytes as RDMA buffers (registered with the
+        actor system's `RegisterRDMAObject`), not in the RPC message:
             None (default): every tensor in the message.
             e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
         The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable

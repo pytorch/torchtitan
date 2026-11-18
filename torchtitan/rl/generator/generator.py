@@ -428,14 +428,20 @@ class Generator(Configurable):
         assert (
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
+        # Before reading the kept image files, so the request's latency includes the read.
+        arrival_time = time.time()
         return await self._engine_loop.generate(
             EngineRequest(
                 request_id=request_id,
+                # TODO: this reads every file the rollout worker kept, even when the engine's pixel
+                # cache already has the image (`VLLMEngine._preprocess_images` looks up
+                # `hash_value` first), and the engine loop still broadcasts the bytes to the
+                # other generator ranks. Read only on a cache miss.
                 prompt=await prompt.read(),
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
-                arrival_time=time.time(),
+                arrival_time=arrival_time,
             )
         )
 

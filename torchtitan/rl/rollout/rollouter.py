@@ -309,11 +309,14 @@ class BaseRolloutWorker(Configurable, ABC):
         """Keep each prompt image file of at least this many bytes in this worker as an RDMA
         buffer, which generator rank 0 reads, instead of sending it in every `generate` call:
             None (default): every file in the call.
-            e.g. 2_000_000: files of >= 2 MB stay here, one buffer per file per group,
+            e.g. 5_000_000: files of >= 5 MB stay here, one buffer per file per group,
             until the group's last `generate` call returns.
-        Each read is a round trip back to this worker, so only multi-MB files gain. With
-        Monarch, each rollout worker makes a CUDA context on GPU 0 when it starts (~256 MiB,
-        so `Rollouter.Config.worker_pool_size` x 256 MiB on the rollout worker host)."""
+        Each read is a round trip back to this worker, so only multi-MB files gain: across GB300
+        hosts with ibverbs, reading broke even with sending at ~2 MB per file, was ~2x faster
+        from 5 MB, and 2-6x slower below 1 MB (e.g. Geometry3K's ~15 KB files). With Monarch, each
+        rollout worker makes a CUDA context (~256 MiB) on GPU 0 of its host when it starts,
+        `Rollouter.Config.worker_pool_size` x 256 MiB in all; on a single-host run, GPU 0 is
+        trainer rank 0's GPU."""
 
         def __post_init__(self) -> None:
             if self.rdma_min_image_bytes is not None and self.rdma_min_image_bytes < 1:
@@ -518,6 +521,9 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
             # Every generate call has returned: `_run_single_rollout` catches its errors, and a
             # cancelled gather cancels the calls first (a read rank 0 is still doing then fails).
+            # A sibling raising a BaseException (e.g. CancelledError from an inner await) ends the
+            # gather early; a sibling still running then fails its next registration
+            # (`RDMAImageFiles.register` after drop) instead of keeping a buffer nothing drops.
             await image_files.drop()
 
         # score

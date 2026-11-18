@@ -21,6 +21,8 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from torchtitan.observability import structured_logger as sl
+
 if TYPE_CHECKING:
     from torchtitan.rl.actors.rdma import RDMAObject, RegisterRDMAObject
     from torchtitan.rl.rollout.types import Prompt
@@ -51,11 +53,12 @@ class RDMAPrompt:
         """The prompt with every image file, reading the kept ones from the rollout worker."""
         if all(file is None for file in self.image_files):
             return self.prompt
-        files = iter(
-            await asyncio.gather(
-                *(file.read() for file in self.image_files if file is not None)
+        with sl.log_trace_span("read_prompt_image_files"):
+            files = iter(
+                await asyncio.gather(
+                    *(file.read() for file in self.image_files if file is not None)
+                )
             )
-        )
         return replace(
             self.prompt,
             images=tuple(
@@ -73,7 +76,8 @@ class RDMAImageFiles:
     A group's siblings carry the same images, and each turn's prompt carries every earlier
     image again, so each file of at least `min_bytes` is registered once, on the first prompt
     that carries it (keyed by `PromptImage.hash_value`), and every later prompt sends the same
-    buffer. `drop` frees them all, after the group's last generate call.
+    buffer. `drop` frees them all, after the group's last generate call; a file `register`
+    would keep after that raises instead, since nothing would drop it.
 
     With `min_bytes` None, `register` sends every prompt whole.
     """
@@ -88,6 +92,7 @@ class RDMAImageFiles:
         self._register_rdma_object = register_rdma_object
         self._min_bytes = min_bytes
         self._files: dict[str, RDMAObject[bytes]] = {}
+        self._dropped = False
 
     def register(self, prompt: Prompt) -> RDMAPrompt:
         """`prompt` as generator rank 0 reads it: its files of at least `min_bytes` stay here."""
@@ -104,6 +109,11 @@ class RDMAImageFiles:
                 continue
             file = self._files.get(image.hash_value)
             if file is None:
+                if self._dropped:
+                    raise RuntimeError(
+                        "RDMAImageFiles.register after drop(): the group has finished, so "
+                        "nothing would drop this file's buffer"
+                    )
                 file = self._register_rdma_object(image.data, min_bytes=min_bytes)
                 self._files[image.hash_value] = file
             image_files.append(file)
@@ -120,6 +130,7 @@ class RDMAImageFiles:
 
     async def drop(self) -> None:
         """Free every registered file; after the group's last generate call has returned."""
+        self._dropped = True
         files = list(self._files.values())
         self._files.clear()
         await asyncio.gather(*(file.drop() for file in files))
