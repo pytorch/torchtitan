@@ -837,6 +837,7 @@ def _run_with_generator_watcher(
     )
     controller.start_step = 0
     controller._validation_tasks = []
+    controller._weight_sync_tasks = []
     controller._has_pending_validation = False
     controller.metrics_processor = Mock()
     controller.trainer = None
@@ -983,6 +984,7 @@ def test_validation_schedule(
         )
     )
     controller._validation_tasks = []
+    controller._weight_sync_tasks = []
     controller._has_pending_validation = False
     controller.validate = validate
     controller.metrics_processor = Mock()
@@ -1095,3 +1097,25 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     assert keys["validation_math_verify/timeouts/sum"] == 2.0
     assert "generator/queue_time_ms/mean" not in keys
     assert "math_verify/timeouts/sum" not in keys
+
+
+def test_run_cancels_an_in_flight_pull_before_it_releases_groups_into_a_closed_buffer() -> None:
+    events: list[str] = []
+    buffer_closed = asyncio.Event()
+
+    async def pull() -> None:
+        await buffer_closed.wait()
+        events.append("released groups after close")
+
+    async def failing_trainer_loop(self, *args, **kwargs) -> None:
+        self._weight_sync_tasks = [asyncio.create_task(pull())]
+        raise RuntimeError("forward/backward failed")
+
+    with pytest.raises(RuntimeError, match="forward/backward failed"):
+        _run_with_generator_watcher(
+            _block_forever,
+            trainer_loop=failing_trainer_loop,
+            on_close=buffer_closed.set,
+        )
+
+    assert events == []

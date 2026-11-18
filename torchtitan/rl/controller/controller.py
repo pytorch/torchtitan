@@ -95,8 +95,9 @@ import math
 import os
 import time
 import warnings
+from collections.abc import Awaitable
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, TypeVar
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
@@ -139,6 +140,24 @@ from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
+
+
+async def _await_unless_failed(
+    awaitable: Awaitable[_T], watched: asyncio.Task[Any] | None
+) -> _T:
+    """Await ``awaitable``, but raise ``watched``'s error as soon as ``watched`` fails."""
+    task = asyncio.ensure_future(awaitable)
+    if watched is not None:
+        try:
+            await asyncio.wait({task, watched}, return_when=asyncio.FIRST_COMPLETED)
+            if watched.done():
+                watched.result()
+        except BaseException:
+            task.cancel()
+            raise
+    return await task
 
 
 @dataclass(kw_only=True, slots=True)
@@ -609,6 +628,8 @@ class Controller(Configurable):
         # One task per validation that runs beside training (all its prompts), from its start until
         # `_log_ended_validations` logs its metrics once or drops it.
         self._validation_tasks: list[asyncio.Task[list[m.Metric]]] = []
+        # The trainer loop's in-flight push and pull, which run()'s teardown cancels.
+        self._weight_sync_tasks: list[asyncio.Task[float]] = []
         # A validation that came due but hasn't started: it waits for the running one
         # (`defer_new_if_not_finished`).
         self._has_pending_validation = False
@@ -1081,12 +1102,20 @@ class Controller(Configurable):
             # TODO: abort a cancelled validation's rollouts and release its groups. The generators have no abort
             # path yet.
             await self._group_buffer.close()
-            for task in (*background_tasks, trainer_task, *self._validation_tasks):
+            # TODO: this stops only the controller's waits on the weight sync. The remote push and pull can
+            # still run while close() tears down the actors.
+            for task in (
+                *background_tasks,
+                trainer_task,
+                *self._validation_tasks,
+                *self._weight_sync_tasks,
+            ):
                 task.cancel()
             await asyncio.gather(
                 *background_tasks,
                 trainer_task,
                 *self._validation_tasks,
+                *self._weight_sync_tasks,
                 return_exceptions=True,
             )
 
@@ -1302,6 +1331,9 @@ class Controller(Configurable):
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
 
+        A failed push or pull fails the loop while it waits for the next batch, and a pull that
+        failed before the next optimizer step fails that step before it commits.
+
         consumes: a TrainerStepBatch (training_batch_queue.get)
             waits for:    a TrainerStepBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
@@ -1328,7 +1360,10 @@ class Controller(Configurable):
                     sl.log_trace_span("wait_for_training_batch"),
                     step_timer.record("timing/step/wait_for_training_batch"),
                 ):
-                    packed = await training_batch_queue.get()
+                    # A failed pull never releases its groups, so a lockstep run would wait here forever.
+                    packed = await _await_unless_failed(
+                        training_batch_queue.get(), pull_task
+                    )
 
                 if packed is None:
                     logger.info("Batcher closed and drained; stopping training")
@@ -1396,6 +1431,10 @@ class Controller(Configurable):
                 ):
                     push_s = await push_task if push_task is not None else 0.0
 
+                # A pull that already failed fails this step before the commit below.
+                if pull_task is not None and pull_task.done():
+                    pull_task.result()
+
                 with (
                     sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
@@ -1430,6 +1469,7 @@ class Controller(Configurable):
                         optimizer_result.policy_version, after=push_task
                     )
                 )
+                self._weight_sync_tasks = [push_task, pull_task]
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
@@ -1471,10 +1511,6 @@ class Controller(Configurable):
 
             self._maybe_start_validation(step=step)
 
-        # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
-        # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
-        # a failed push's error in the pull task ("Task exception was never retrieved"). Cancel or await both
-        # in a `finally`.
         # Finish the last push and pull so generators hold the final weights for the validation after
         # training (`validate_after_training`).
         if push_task is not None:
