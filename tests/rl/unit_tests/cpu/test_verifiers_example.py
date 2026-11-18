@@ -9,7 +9,10 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+import contextlib
+import sys
+from dataclasses import replace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -108,6 +111,97 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
         == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
     assert config.local_taskset_module == data.__name__
+
+
+@pytest.mark.parametrize(
+    ("agent_update", "expectation"),
+    [
+        (
+            {"sampling": vf.SamplingConfig(temperature=0.7)},
+            pytest.raises(ValueError, match=r"sets sampling \['temperature'\]"),
+        ),
+        (
+            {"sampling": vf.SamplingConfig(seed=1)},
+            pytest.raises(ValueError, match=r"sets sampling \['seed'\]"),
+        ),
+        ({"sampling": vf.SamplingConfig(max_tokens=256)}, contextlib.nullcontext()),
+        (
+            {
+                "sampling": vf.SamplingConfig(temperature=0.7),
+                "client": vf.EvalClientConfig(),
+            },
+            contextlib.nullcontext(),
+        ),
+    ],
+    ids=["temperature", "seed", "max_tokens", "own_client"],
+)
+def test_agent_sampling_allows_only_max_tokens_and_chat_template_kwargs(
+    agent_update, expectation
+) -> None:
+    rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
+    env_server_config = rollouter_config.verifiers_env_server
+    agent = env_server_config.environment.agent.model_copy(update=agent_update)
+    environment = env_server_config.environment.model_copy(update={"agent": agent})
+
+    with expectation:
+        replace(
+            rollouter_config,
+            verifiers_env_server=replace(env_server_config, environment=environment),
+        )
+
+
+@pytest.mark.parametrize(
+    "recipe_env_class_is_the_tasksets",
+    [False, True],
+    ids=["single_agent_env", "taskset_env"],
+)
+def test_agent_sampling_check_sees_the_taskset_env_class_defaults(
+    monkeypatch, recipe_env_class_is_the_tasksets
+) -> None:
+    """The env server resolves the dumped env config into the taskset's own env class. That
+    class's default temperature then merges into the agent's sampling, which set only max_tokens.
+    The merge also happens when the recipe already passes that class."""
+
+    class DefaultTemperatureEnvConfig(vf.EnvConfig):
+        agent: vf.AgentConfig = vf.AgentConfig(
+            sampling=vf.SamplingConfig(temperature=0.6)
+        )
+
+    class DefaultTemperatureEnv(vf.Env[DefaultTemperatureEnvConfig]):
+        async def run(self, task, agents) -> None:
+            await agents.agent.run(task)
+
+    taskset_module = ModuleType("taskset_with_its_own_env")
+    taskset_module.VerifiersMathTaskset = data.VerifiersMathTaskset
+    taskset_module.DefaultTemperatureEnv = DefaultTemperatureEnv
+    taskset_module.__all__ = ["VerifiersMathTaskset", "DefaultTemperatureEnv"]
+    monkeypatch.setitem(sys.modules, taskset_module.__name__, taskset_module)
+    taskset = data.VerifiersMathTasksetConfig(
+        id=taskset_module.__name__, dataset="dapo_math"
+    )
+
+    rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
+    dataloader_config = rollouter_config.training_dataloader
+    env_server_config = rollouter_config.verifiers_env_server
+    agent = env_server_config.environment.agent.model_copy(
+        update={"sampling": vf.SamplingConfig(max_tokens=256)}
+    )
+    environment_class = (
+        DefaultTemperatureEnvConfig
+        if recipe_env_class_is_the_tasksets
+        else vf.SingleAgentEnvConfig
+    )
+    environment = environment_class(agent=agent, taskset=taskset)
+
+    with pytest.raises(ValueError, match=r"sets sampling \['temperature'\]"):
+        replace(
+            rollouter_config,
+            training_dataloader=replace(
+                dataloader_config,
+                dataset=replace(dataloader_config.dataset, verifiers_taskset=taskset),
+            ),
+            verifiers_env_server=replace(env_server_config, environment=environment),
+        )
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:

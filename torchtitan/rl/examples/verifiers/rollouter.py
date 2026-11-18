@@ -14,11 +14,16 @@ from dataclasses import dataclass, replace
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
+
+# TODO: import `agent_config_fields` from a public Verifiers module once one exports it. A Verifiers bump may move it.
+from verifiers.v1.configs.agent import agent_config_fields
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
+from verifiers.v1.serve import env_config_data
 from verifiers.v1.serve.client import EnvClient as VerifiersEnvClient
 from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
+from verifiers.v1.utils.loaders import resolve_env_config
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
@@ -34,6 +39,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     GROUP_ID_SAMPLING_PARAM,
     VerifiersGenerationMetadata,
 )
+from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import RewardFn
@@ -125,6 +131,46 @@ class VerifiersRollouter(Rollouter):
                     self.training_dataloader.dataset.verifiers_taskset
                 ),
             )
+
+            # Verifiers merges an agent's `sampling` over the run's (`generator.sampling`), but the
+            # trainer scores every token at the run's temperature. An agent temperature of 0.7 on a
+            # 1.0 run would skew every importance ratio, silently. So an agent that calls our
+            # generator (no `client` of its own) may set only fields that keep the token
+            # distribution the trainer scores:
+            #   max_tokens            caps a turn's length
+            #   chat_template_kwargs  changes how the prompt renders, e.g. enable_thinking
+            # TODO: allow temperature once each turn records its own and the trainer scores at it
+            # (the per-turn temperature TODO in `Batcher._pack_training_samples`).
+            allowed_sampling_fields = {"max_tokens", "chat_template_kwargs"}
+
+            # Check the env config the env server runs, built as `_run_env_server_process` builds
+            # it. Checked here, not in the env server: that starts after the trainer and generators,
+            # so a bad agent would fail only after they load. Resolving into the taskset's own env
+            # class can add agents, and can merge that class's default sampling into an agent's,
+            # e.g. a temperature the recipe never set.
+            local_taskset_module = self.verifiers_env_server.local_taskset_module
+            if local_taskset_module is not None:
+                register_local_taskset_alias(local_taskset_module)
+            resolved_environment = resolve_env_config(
+                env_config_data(self.verifiers_env_server.environment)
+            )
+            agent_configs = agent_config_fields(resolved_environment)
+            for agent_name, agent_config in agent_configs.items():
+                if agent_config.sampling is None or agent_config.client is not None:
+                    continue
+
+                rejected_fields = (
+                    agent_config.sampling.model_dump(exclude_unset=True).keys()
+                    - allowed_sampling_fields
+                )
+                if rejected_fields:
+                    raise ValueError(
+                        f"Verifiers agent {agent_name!r} sets sampling {sorted(rejected_fields)}. "
+                        "An agent that calls the policy may set only "
+                        f"{sorted(allowed_sampling_fields)}: the trainer scores every token with "
+                        "the run's sampling. Set the run's temperature and top_p in "
+                        "`generator.sampling`, and its seed in `generator.debug.seed`."
+                    )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
