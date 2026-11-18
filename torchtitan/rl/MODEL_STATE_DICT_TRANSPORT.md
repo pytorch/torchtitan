@@ -77,6 +77,60 @@ generator ranks are spread across them round-robin. Init raises if the trainer
 does not cover every element of a generator shard, or on `Partial` and uneven
 `_StridedShard` placements.
 
+## XOR deltas
+
+An optimizer step changes few bits of the weights as sent: on Qwen3-30B-A3B
+(FP32 master, BF16 sent), 0.4% of elements per step at lr 1e-6 and 2.6% at
+5e-6, nearly all in the low mantissa bits, and every tensor changes. So whole
+tensors rarely repeat, but the XOR of two pushes is mostly zeros. With
+`xor_delta_codec="zstd"`, the trainer sends each push
+after the first as that XOR, compressed with nvCOMP on its GPU (zstd: 64-100x at
+lr 1e-6, 27-53x at 5e-6), and generators apply it to their prefetch buffers. It is
+lossless: the prefetch buffers end up bitwise equal to a whole read.
+
+```python
+config.model_state_dict_transport = ModelStateDictTransport.Config(
+    xor_delta_codec="zstd"
+)
+```
+
+Trainer rank, once `stage`'s copies have completed (`finish_stage`, off the
+event loop), for each 256 MiB window of the staging buffer:
+
+```
+staging (this push)  --H2D--> new ------------------------D2H--> baseline
+baseline (last push) --H2D--> xor ^= new --compress--D2H--> delta buffer
+```
+
+The copies to the GPU, the compression and the copies back run on three
+streams, so window i loads while window i - 1 compresses and stores.
+
+The baseline is a second pinned copy of the staging buffer. The delta buffer
+(registered) holds a header (push index, whether the push has a delta, and the
+offset and size of each window's compressed bytes), then the windows back to
+back. It holds a quarter of the staging buffer: a push whose delta does not fit
+gets no delta, and so does the first push.
+
+Generator rank, per pull: read every trainer rank's header. If the prefetch
+buffers hold the push before this one and every trainer rank encoded a delta,
+read the compressed windows covering this rank's pieces (consecutive windows in
+one read), then on the GPU decompress each window, copy in the prefetch bytes
+it covers, XOR, and copy them back, pipelined the same way. Otherwise read
+every piece whole: the first pull, after a missed push, or when a delta is too
+large.
+
+The delta trades network bytes for local copies: per push, each trainer rank
+moves its staging buffer over PCIe three more times (two H2D, one D2H),
+overlapped with forward/backward, and each generator rank moves its pieces H2D
+and back. It pays off when the link between trainer and generators is slower
+than that, e.g. across nodes; within a node a whole read can be as fast.
+
+Memory: per trainer rank, the baseline (one staging buffer) and the delta
+buffer (a quarter) in host memory, and four windows (1 GiB) plus nvCOMP's zstd
+workspace (~1.3 GB) on the GPU while encoding; per generator rank, a receive
+buffer of a quarter of its pieces, and three windows on the GPU while
+decoding.
+
 ## Lifecycle
 
 1. Init (`ActorSystem.initialize_model_state_dict_transport`): every generator
@@ -86,10 +140,11 @@ does not cover every element of a generator shard, or on `Partial` and uneven
    its prefetch buffers, connects to every trainer rank and plans its reads
    (`connect_generator`).
 2. Push: the trainer casts its shards and copies them into the staging buffer
-   (`stage`), with no collectives.
+   (`stage`), with no collectives, then encodes the XOR delta if enabled
+   (`finish_stage`).
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
    raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
-   restart the job.
+   restart the job. With XOR deltas, it then applies them.
 4. Load: the generator copies its weights from the prefetch buffers, unpacking
    packed keys (`copy_prefetched_`).
 

@@ -165,7 +165,16 @@ def test_push_model_state_dict_stages_on_push_stream() -> None:
         stream.synchronize.side_effect = lambda: sync_thread_ids.append(
             threading.get_ident()
         )
-        trainer._model_state_dict_transport = SimpleNamespace(stage=stage)
+        finished = []
+
+        async def finish_stage() -> None:
+            # After the staging copies completed.
+            assert len(sync_thread_ids) == 1
+            finished.append(True)
+
+        trainer._model_state_dict_transport = SimpleNamespace(
+            stage=stage, finish_stage=finish_stage
+        )
 
         await trainer.push_model_state_dict()
         assert len(staged) == 1
@@ -173,6 +182,7 @@ def test_push_model_state_dict_stages_on_push_stream() -> None:
         stream.__exit__.assert_called_once()
         # The wait for staging is off the event loop.
         assert len(sync_thread_ids) == 1
+        assert finished == [True]
         assert sync_thread_ids[0] != main_thread_id
 
     asyncio.run(run())
