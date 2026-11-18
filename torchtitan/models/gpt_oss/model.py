@@ -31,6 +31,7 @@ from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttentio
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.norm import residual_sum_and_norm
 from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
@@ -193,9 +194,9 @@ class GptOssTransformerBlock(TransformerBlock):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
-        x = x + attn_out
+        x, ffn_input = residual_sum_and_norm(x, attn_out, self.ffn_norm)
         moe_out = self.feed_forward(
-            self.ffn_norm(x),
+            ffn_input,
             padding_mask_T=padding_mask,
             aux_loss_denominator=aux_loss_denominator,
         )
@@ -234,6 +235,7 @@ class GptOssModel(Decoder):
                     "fused_binary_activation",
                     "rope",
                     "fp32_to_bf16_split",
+                    "residual_sum_and_norm",
                 ]
             )
         )

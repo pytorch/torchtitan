@@ -51,6 +51,7 @@ from torchtitan.models.common.multimodal import (
     replicate_to_residual,
     scatter_vision_embeds,
 )
+from torchtitan.models.common.norm import residual_sum_and_norm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 
 from .rope import MRoPE
@@ -263,9 +264,7 @@ class Qwen35TransformerBlock(TransformerBlock):
             h_TD = self.attention(h_TD, attention_metadata)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
-        x_TD = x_TD + h_TD
-
-        h_TD = self.ffn_norm(x_TD)
+        x_TD, h_TD = residual_sum_and_norm(x_TD, h_TD, self.ffn_norm)
         if isinstance(self.feed_forward, MoE):
             h_TD = self.feed_forward(
                 h_TD,
@@ -321,6 +320,7 @@ class Qwen35Model(Decoder):
                     "partial_rope",
                     "shared_expert_gate",
                     "fp32_to_bf16_split",
+                    "residual_sum_and_norm",
                 ]
             )
         )
