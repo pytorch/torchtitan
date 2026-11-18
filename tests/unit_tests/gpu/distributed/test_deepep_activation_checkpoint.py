@@ -51,17 +51,6 @@ _MODEL_DIM = 256
 _NUM_TOKENS = 64
 _TOP_K = 2
 
-_EXPERT_CONFIGS = (
-    (GroupedLinear, SwiGLU.Config(), None),
-    (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
-    (GroupedLinear, SwiGLU.Config(), RMSNorm.Config(normalized_shape=_MODEL_DIM)),
-    (
-        GptOssGroupedLinear,
-        ClampedSwiGLU.Config(),
-        RMSNorm.Config(normalized_shape=_MODEL_DIM),
-    ),
-)
-
 
 class _EPBlock(Module):
     def __init__(
@@ -125,7 +114,7 @@ class _EPBlock(Module):
 
 
 class _PostW2(_EPBlock):
-    """Reference EP experts with router scores applied after W2."""
+    """Reference DeepEP experts with router scores applied after W2."""
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
@@ -189,7 +178,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
 
     def _check_ep_activation_checkpointing(
         self,
-        ac_configs: tuple[tuple[ActivationRematConfig, int], ...],
+        ac_configs: tuple,
         *,
         num_dispatch_replays: int,
         num_combine_replays: int,
@@ -215,13 +204,14 @@ class _EPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for (activation_remat, num_configured_w2_replays), (
+        for activation_remat, (
             grouped_linear_cls,
             activation_fn,
             output_postprocess,
         ) in itertools.product(ac_configs, expert_configs):
-            # Spawned workers invoke the test directly without running setUp.
-            # Filling empty outputs races with the communication streams.
+            # Spawned ranks run the test method without setUp, so set determinism
+            # here, matching set_determinism in torchtitan/distributed/utils.py.
+            # Filling empty outputs must stay off: it races with comm streams.
             with (
                 DeterministicGuard(True, fill_uninitialized_memory=False),
                 patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}),
@@ -288,11 +278,10 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 w2 = ac_model.layers["0"].routed_experts.w2
-                num_calls = {"dispatch": 0, "combine": 0, "w2": 0}
+                num_calls = {"dispatch": 0, "combine": 0}
                 original = {
                     "dispatch": getattr(buffer_type, dispatch_method),
                     "combine": getattr(buffer_type, combine_method),
-                    "w2": w2._grouped_mm,
                 }
 
                 def counted(name):
@@ -329,11 +318,11 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         autospec=True,
                         side_effect=counted("combine"),
                     ),
-                    patch.object(w2, "_grouped_mm", side_effect=counted("w2")),
+                    patch.object(w2, "_grouped_mm", wraps=w2._grouped_mm) as w2_mm,
                 ):
                     expected = _run_forward_backward(baseline, x_TD)
                     baseline_calls = dict(num_calls)
-                    num_calls.update(dispatch=0, combine=0, w2=0)
+                    num_calls.update(dispatch=0, combine=0)
                     if capture:
                         graph = torch.cuda.CUDAGraph()
                         with torch.cuda.graph(graph):
@@ -364,20 +353,22 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         )
 
                 # Forward dispatch and combine, plus their backward passes.
-                self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2, "w2": 0})
+                self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
                     num_calls,
                     {
                         "dispatch": 2 + num_dispatch_replays,
                         "combine": 2 + num_combine_replays,
-                        "w2": 1
-                        + (
-                            num_configured_w2_replays
-                            if output_postprocess is not None
-                            else 0
-                        ),
                     },
-                    msg=f"unexpected EP and W2 calls: {num_calls}",
+                    msg=f"unexpected EP communication replays: {num_calls}",
+                )
+                self.assertEqual(
+                    w2_mm.call_count,
+                    1
+                    + int(
+                        output_postprocess is not None
+                        and w2.remat_should_recompute("grouped_mm")
+                    ),
                 )
                 if exact:
                     for actual_grad, expected_grad in zip(actual, expected):
@@ -408,7 +399,20 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
                 hidden_dim=_MODEL_DIM,
                 num_max_tokens_per_rank=_NUM_TOKENS,
             ),
-            expert_configs=_EXPERT_CONFIGS,
+            expert_configs=(
+                (GroupedLinear, SwiGLU.Config(), None),
+                (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
+                (
+                    GroupedLinear,
+                    SwiGLU.Config(),
+                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                ),
+                (
+                    GptOssGroupedLinear,
+                    ClampedSwiGLU.Config(),
+                    RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                ),
+            ),
             buffer_type=deep_ep.ElasticBuffer,
             dispatch_method="dispatch",
             combine_method="combine",
@@ -419,8 +423,8 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
     def test_dispatch_and_combine_are_saved_not_replayed(self):
         self._check_deepep_activation_checkpointing(
             (
-                (DefaultActivationRematConfig(), 0),
-                (ActivationRematConfig(save_regions=["*ep_communication"]), 1),
+                DefaultActivationRematConfig(),
+                ActivationRematConfig(save_regions=["*ep_communication"]),
             ),
             num_replays=0,
         )
@@ -428,15 +432,7 @@ class TestDeepEPActivationCheckpointing(_EPActivationCheckpointing):
     @with_comms
     def test_region_ac_replay_is_exact(self):
         self._check_deepep_activation_checkpointing(
-            (
-                (FullActivationRematConfig(), 1),
-                (
-                    ActivationRematConfig(
-                        save_regions=["*routed_experts.w2.grouped_mm"]
-                    ),
-                    0,
-                ),
-            ),
+            (FullActivationRematConfig(), ActivationRematConfig(save_regions=[])),
             num_replays=1,
         )
 
@@ -464,7 +460,20 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                         # Pad blocking rows; leave unused capacity in nonblocking mode.
                         pad_multiple=64 if capacity_factor is None else None,
                     ),
-                    expert_configs=_EXPERT_CONFIGS,
+                    expert_configs=(
+                        (GroupedLinear, SwiGLU.Config(), None),
+                        (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
+                        (
+                            GroupedLinear,
+                            SwiGLU.Config(),
+                            RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                        ),
+                        (
+                            GptOssGroupedLinear,
+                            ClampedSwiGLU.Config(),
+                            RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                        ),
+                    ),
                     buffer_type=deep_ep.HybridEPBuffer,
                     dispatch_method="dispatch_with_permute",
                     combine_method="combine_with_unpermute",
@@ -480,8 +489,8 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
         ):
             self._check_hybridep_activation_checkpointing(
                 (
-                    (DefaultActivationRematConfig(), 0),
-                    (ActivationRematConfig(save_regions=["*ep_communication"]), 1),
+                    DefaultActivationRematConfig(),
+                    ActivationRematConfig(save_regions=["*ep_communication"]),
                 ),
                 num_replays=0,
             )
@@ -489,22 +498,14 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
     @with_comms
     def test_region_ac_replay_is_exact(self):
         self._check_hybridep_activation_checkpointing(
-            (
-                (FullActivationRematConfig(), 1),
-                (
-                    ActivationRematConfig(
-                        save_regions=["*routed_experts.w2.grouped_mm"]
-                    ),
-                    0,
-                ),
-            ),
+            (FullActivationRematConfig(), ActivationRematConfig(save_regions=[])),
             num_replays=1,
         )
 
     @with_comms
     def test_saved_communication_is_graph_capturable(self):
         self._check_hybridep_activation_checkpointing(
-            ((DefaultActivationRematConfig(), 0),),
+            (DefaultActivationRematConfig(),),
             num_replays=0,
             capture=True,
         )
