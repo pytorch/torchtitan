@@ -43,7 +43,10 @@ from torchtitan.config.parallelism import (
 )
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.flex_shard_fsdp import load_hf_into_local_shards
+from torchtitan.distributed.flex_shard_fsdp import (
+    flex_shard_reduce_meshes,
+    load_hf_into_local_shards,
+)
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -227,12 +230,16 @@ class TestFlexShardDecoder(DTensorTestBase):
                     with spmd.no_typecheck():
                         loss.backward()
                 losses.append(loss.detach())
+            flex_shard_enabled = isinstance(parallelism.fsdp_backend, FlexShardConfig)
             grad_norm = dist_utils.clip_grad_norm_(
                 list(model.parameters()),
                 max_norm=1.0,
                 foreach=True,
-                flex_shard_enabled=isinstance(
-                    parallelism.fsdp_backend, FlexShardConfig
+                flex_shard_enabled=flex_shard_enabled,
+                flex_shard_reduce_meshes=(
+                    flex_shard_reduce_meshes(parallelism_context)
+                    if flex_shard_enabled
+                    else None
                 ),
             )
             grads = {

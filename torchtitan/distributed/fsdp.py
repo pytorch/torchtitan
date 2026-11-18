@@ -25,8 +25,8 @@ from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymmMemScope
 from torchtitan.distributed.flex_shard_fsdp import (
     declare_state_dict_layouts,
+    flex_shard_bucket_mesh,
     record_buckets,
-    record_grad_norm_mesh,
     reshard_flex_shard,
 )
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
@@ -583,28 +583,11 @@ def _apply_flex_shard(
     # pyrefly: ignore [missing-import]
     from flex_shard.custom_placements.shard import Shard as FlexShardShard
 
-    if dp_mesh_dims is None:
-        # One rank, where fully_shard takes the mesh as it is.
-        bucket_mesh = dp_mesh
-    else:
-        # validate_flex_shard_training rejects HSDP.
-        assert not dp_mesh_dims.replicate_names, dp_mesh_dims
-        shard_names = dp_mesh_dims.shard_names
-        # As fully_shard does. DeviceMesh caches a flattened mesh by name, so
-        # both backends reduce on one process group.
-        bucket_mesh = (
-            dp_mesh[shard_names[0]]
-            if len(shard_names) == 1
-            else dp_mesh[shard_names]._flatten("_".join(shard_names))
-        )
+    # flex_shard_reduce_meshes gives the mesh to reduce the grad norm over for
+    # the parameters of buckets that another parallelism split first.
+    bucket_mesh = flex_shard_bucket_mesh(dp_mesh, dp_mesh_dims)
     tp_mesh = dp_mesh["tp"] if "tp" in (dp_mesh.mesh_dim_names or ()) else None
     if tp_mesh is not None:
-        # FSDP2 lays the dense grads out as DTensors on (bucket_mesh, tp). No
-        # flattened mesh spans tp, so DTensor reduces their norm over
-        # bucket_mesh, then tp.
-        record_grad_norm_mesh(
-            bucket_mesh, DeviceMesh._concatenate([bucket_mesh, tp_mesh])
-        )
         _declare_tensor_parallelism(
             model,
             tp_mesh,
@@ -619,17 +602,6 @@ def _apply_flex_shard(
     if edp_mesh is not None:
         assert edp_mesh.mesh_dim_names == ("edp_shard", "ep"), edp_mesh.mesh_dim_names
         expert_mesh = edp_mesh["edp_shard"]
-        # FSDP2's routed-expert grads are DTensors on edp_mesh. Without TP,
-        # torchtitan's loss mesh spans the same ranks, and DTensor finds it by
-        # layout and reduces their norm over it in one all-reduce. _flatten
-        # returns that mesh, and raises if its layout differs. With TP, no
-        # flattened mesh does, so it reduces over edp_shard, then ep. Flattening
-        # one here would make DTensor reduce differently with FSDP2 in the same
-        # process.
-        record_grad_norm_mesh(
-            expert_mesh,
-            edp_mesh if tp_mesh is not None else edp_mesh._flatten("loss_mesh"),
-        )
         # EP has split each routed-expert parameter's dim 0, the experts, over
         # ep. Declaring this rank's part makes the layouts that the wrapped
         # param_init functions use cover all experts, so each shard is its slice
