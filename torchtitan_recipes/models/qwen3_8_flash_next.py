@@ -94,16 +94,18 @@ def make_dist_muon_optimizer(
         attention = layer.attention
         if isinstance(attention, GDN.Config):
             # Per key group: q, k, and one v matrix per value head. The z gate
-            # and a/b scalars are separate AdamW parameters.
+            # and a/b scalars are separate AdamW parameters. With equal head
+            # dims a uniform block size names the same matrices, and DistMuon
+            # batches them into one Newton-Schulz call instead of one call per
+            # pattern position (batch 1 when a rank owns one key group).
+            if attention.key_head_dim != attention.value_head_dim:
+                raise ValueError(
+                    "The Flash-Next DistMuon policy expects equal GDN key and "
+                    f"value head dims, got {attention.key_head_dim} and "
+                    f"{attention.value_head_dim}"
+                )
             attention_shardings = {
-                "in_proj.projection": blocks_of(
-                    attention.key_head_dim,
-                    attention.key_head_dim,
-                    *(
-                        [attention.value_head_dim]
-                        * (attention.n_heads // attention.n_key_heads)
-                    ),
-                ),
+                "in_proj.projection": blocks_of(attention.key_head_dim),
                 "out_proj": owned,
             }
         else:
