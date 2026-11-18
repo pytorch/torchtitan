@@ -13,7 +13,7 @@ from monarch.actor import Actor, endpoint
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.actors.monarch.rdma import (
+from torchtitan.rl.actors.monarch.rdma_object import (
     create_cuda_context_to_silence_monarch_log,
     MonarchRDMAObject,
 )

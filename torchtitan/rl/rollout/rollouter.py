@@ -40,7 +40,7 @@ from torchtitan.rl.rollout.types import (
 if TYPE_CHECKING:
     from renderers import Renderer
 
-    from torchtitan.rl.actors.rdma import RegisterRDMAObject
+    from torchtitan.rl.actors.rdma_object import RegisterRDMAObject
     from torchtitan.rl.actors.system import ActorSystem
 
     # Type-only: importing the generator module here would pull in vLLM at import time.

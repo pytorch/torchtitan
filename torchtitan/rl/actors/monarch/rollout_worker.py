@@ -18,7 +18,7 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
-from torchtitan.rl.actors.monarch.rdma import (
+from torchtitan.rl.actors.monarch.rdma_object import (
     create_cuda_context_to_silence_monarch_log,
     MonarchRDMAObject,
 )

@@ -14,7 +14,7 @@ import pytest
 import torch
 from monarch.actor import ActorError, this_host
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.rdma import _TensorRef
+from torchtitan.rl.actors.monarch.rdma_object import _TensorRef
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutGroup,

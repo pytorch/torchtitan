@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from torchtitan.observability import structured_logger as sl
 
 if TYPE_CHECKING:
-    from torchtitan.rl.actors.rdma import RDMAObject, RegisterRDMAObject
+    from torchtitan.rl.actors.rdma_object import RDMAObject, RegisterRDMAObject
     from torchtitan.rl.rollout.types import Prompt
 
 

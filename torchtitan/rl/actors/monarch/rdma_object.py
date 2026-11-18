@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch's `RDMAObject` (`rl/actors/rdma.py`): the owner registers a value's large tensors and
-bytes as Monarch RDMA buffers, and a reader reads them all in one RDMA action. The
+"""Monarch's `RDMAObject` (`rl/actors/rdma_object.py`): the owner registers a value's large
+tensors and bytes as Monarch RDMA buffers, and a reader reads them all in one RDMA action. The
 batcher sends trainer microbatches this way (`Batcher.Config.rdma_min_tensor_bytes`), and the
 rollout workers send prompt image files (`BaseRolloutWorker.Config.rdma_min_image_bytes`).
 """

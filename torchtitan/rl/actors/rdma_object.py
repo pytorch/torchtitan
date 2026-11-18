@@ -11,8 +11,8 @@ reads them by RDMA instead of getting them in the message.
     batcher        --RDMAMicrobatch--> trainer rank      ==RDMA read==> batcher
     rollout worker --RDMAPrompt------> generator rank 0  ==RDMA read==> rollout worker (image files)
 
-The actor system implements `RDMAObject` (e.g. `actors/monarch/rdma.py`); the services use only
-this interface.
+The actor system implements `RDMAObject` (e.g. `actors/monarch/rdma_object.py`); the services
+use only this interface.
 """
 
 from __future__ import annotations
