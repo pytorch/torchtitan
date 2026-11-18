@@ -270,10 +270,12 @@ def _vision_encoder_config(
 
 def _qk_clip_attention_config(
     attn_backend: str,
+    *,
+    num_heads: int,
 ) -> QKClipFlexInnerAttention.Config:
     if attn_backend != "flex":
         raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
-    return QKClipFlexInnerAttention.Config()
+    return QKClipFlexInnerAttention.Config(num_heads=num_heads)
 
 
 def _build_kimi_layers(**kwargs) -> list[DeepSeekV3TransformerBlock.Config]:
@@ -287,7 +289,9 @@ def _build_kimi_layers(**kwargs) -> list[DeepSeekV3TransformerBlock.Config]:
         norm_init=_NORM_INIT,
         depth_init=_depth_init,
         depth_experts_init=_depth_experts_init,
-        attention_config_factory=_qk_clip_attention_config,
+        attention_config_factory=partial(
+            _qk_clip_attention_config, num_heads=kwargs["n_heads"]
+        ),
     )
 
 

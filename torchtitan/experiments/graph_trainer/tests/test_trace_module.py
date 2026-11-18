@@ -8,6 +8,7 @@ import contextlib
 import unittest
 from collections import Counter
 from copy import deepcopy
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -37,6 +38,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.passes import (
     annotate_flex_attention_for_regional_inductor_pass,
 )
+from torchtitan.models.kimi_k2_7.qk_clip import QKClipFlexInnerAttention
 from torchtitan.observability.profiler import Profiler
 
 
@@ -474,6 +476,29 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
 
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
+    def test_qk_clip_maxima_are_updated_by_replay_after_reset(self):
+        attention = QKClipFlexInnerAttention.Config(num_heads=2).build()
+        attention.train()
+
+        def record(scores):
+            attention._process_aux(SimpleNamespace(max_scores=scores))
+            return attention.max_attention_logits_H.clone()
+
+        first = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
+        traced = minimal_fx_tracer(record, module=attention)(first)
+        replay = run_traced(traced, module=attention)
+        self.assertTrue(torch.isneginf(attention.max_attention_logits_H).all())
+        replay(first)
+        replay(torch.tensor([[[5.0, 2.0], [1.0, 3.0]]]))
+        self.assertTrue(
+            torch.equal(attention.max_attention_logits_H, torch.tensor([5.0, 4.0]))
+        )
+        attention.max_attention_logits_H.fill_(-torch.inf)
+        replay(torch.tensor([[[2.0, 1.0], [3.0, 2.0]]]))
+        self.assertTrue(
+            torch.equal(attention.max_attention_logits_H, torch.tensor([2.0, 3.0]))
+        )
+
     def _trace_mark_dynamic_value_range(self, *, min_value=None, max_value=None):
         from torch._dynamo import mark_dynamic
 

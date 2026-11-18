@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -17,6 +18,7 @@ from torch.nn.attention.flex_attention import AuxRequest
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.attention import FlexInnerAttention, MLAAttention
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
@@ -30,11 +32,36 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(FlexInnerAttention.Config):
-        pass
+        num_heads: int
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.max_attention_logits_H: list[torch.Tensor] = []
+        self.num_heads = config.num_heads
+        local_num_heads = self.num_heads // spmd_mesh_size("tp")
+        mesh = current_spmd_mesh()
+        mesh_axis_names = mesh.mesh_dim_names if mesh is not None else ()
+        rank = (
+            mesh.get_local_rank(mesh_axis_names.index("tp"))
+            if mesh is not None
+            and mesh_axis_names is not None
+            and "tp" in mesh_axis_names
+            else 0
+        )
+        self._head_start = rank * local_num_heads
+        self._head_end = self._head_start + local_num_heads
+        self.register_buffer(
+            "max_attention_logits_H",
+            torch.full((self.num_heads,), -torch.inf, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        self.max_attention_logits_H = torch.full(
+            (self.num_heads,),
+            -torch.inf,
+            dtype=torch.float32,
+            device=buffer_device or self.max_attention_logits_H.device,
+        )
 
     def _get_aux_request(self, *, return_lse: bool) -> AuxRequest:
         return AuxRequest(lse=return_lse, max_scores=self.training)
@@ -45,7 +72,12 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
             assert max_scores_1HT is not None
             # Record gradient-accumulation and PP microbatches once, excluding
             # activation-checkpoint replay.
-            self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
+            maxima_H = self.max_attention_logits_H[self._head_start : self._head_end]
+            torch.maximum(
+                maxima_H,
+                max_scores_1HT.amax(dim=(0, 2)).detach(),
+                out=maxima_H,
+            )
 
 
 def _replicated_scales(row_scales_R1: torch.Tensor, weight: DTensor) -> DTensor:
@@ -104,11 +136,12 @@ def _clip_mla_weights(
     scales_H: torch.Tensor,
     *,
     alpha: float,
+    parameter_resolver: Callable[[nn.Module, str], DTensor],
 ) -> None:
     q_projection = attention.wq if attention.q_lora_rank == 0 else attention.wq_b
     # Query: NoPE rows take ``scale ** alpha``, RoPE rows take the full scale.
     _scale_mla_heads(
-        cast(DTensor, q_projection.weight),
+        parameter_resolver(q_projection, "weight"),
         scales_H,
         rows_per_head=attention.qk_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
@@ -118,7 +151,7 @@ def _clip_mla_weights(
     # Key/value: the K rows take the remaining ``scale ** (1 - alpha)``, and the
     # V rows stay unchanged.
     _scale_mla_heads(
-        cast(DTensor, cast(Any, attention.inner_attention.wkv_b).weight),
+        parameter_resolver(cast(Any, attention.inner_attention.wkv_b), "weight"),
         scales_H,
         rows_per_head=attention.qk_nope_head_dim + attention.v_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
@@ -132,8 +165,11 @@ def qk_clip(
     model_parts: list[nn.Module],
     *,
     reduction_mesh: DeviceMesh,
+    parameter_resolver: Callable[[nn.Module, str], DTensor] | None = None,
 ) -> None:
     """Apply the Kimi K2 QK clipping update with the report defaults."""
+    if parameter_resolver is None:
+        parameter_resolver = getattr
     threshold = 100.0
     alpha = 0.5
     attention_layers = [
@@ -153,8 +189,7 @@ def qk_clip(
     ]
     # Each entry holds one layer's local maximum logit per query head.
     layer_max_logits_H = [
-        torch.stack(inner_attention.max_attention_logits_H).amax(dim=0)
-        for inner_attention in inner_attentions
+        inner_attention.max_attention_logits_H for inner_attention in inner_attentions
     ]
     num_heads_per_layer = [logits.numel() for logits in layer_max_logits_H]
     max_logits_H = torch.cat(layer_max_logits_H)
@@ -171,19 +206,26 @@ def qk_clip(
         scales_H.split(num_heads_per_layer),
         strict=True,
     ):
-        _clip_mla_weights(attention, layer_scales_H, alpha=alpha)
+        _clip_mla_weights(
+            attention,
+            layer_scales_H,
+            alpha=alpha,
+            parameter_resolver=parameter_resolver,
+        )
         cast(
             QKClipFlexInnerAttention, attention.inner_attention.inner_attention
-        ).max_attention_logits_H.clear()
+        ).max_attention_logits_H.fill_(-torch.inf)
 
 
 def register_qk_clip_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
     parallelism_context: ParallelismContext,
+    *,
+    parameter_resolver: Callable[[nn.Module, str], DTensor] | None = None,
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
-    reduction_mesh = parallelism_context.get_mesh("loss")
+    reduction_mesh = parallelism_context.spmd_dense_mesh()._flatten("qk_clip")
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,
@@ -193,6 +235,7 @@ def register_qk_clip_hook(
         qk_clip(
             model_parts,
             reduction_mesh=reduction_mesh,
+            parameter_resolver=parameter_resolver,
         )
 
     optimizers.register_step_post_hook(_qk_clip_hook)
