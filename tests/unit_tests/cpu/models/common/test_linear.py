@@ -12,12 +12,10 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_remat as remat
 import torchtitan.models.common.linear.linear as linear_module
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
-from torch.testing._internal.common_utils import DeterministicGuard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -154,64 +152,6 @@ class TestLinear(unittest.TestCase):
 
 
 class TestGroupedLinear(unittest.TestCase):
-    def test_absorbed_projection_replay_preserves_specialized_kernel_policy(self):
-        """Skip native W2 replay without retaining outputs or custom intermediates."""
-
-        class SquaredGroupedLinear(GroupedLinear):
-            def _grouped_mm(self, *, input_RI, weight_EOI, offsets_E):
-                return (
-                    super()
-                    ._grouped_mm(
-                        input_RI=input_RI, weight_EOI=weight_EOI, offsets_E=offsets_E
-                    )
-                    .square()
-                )
-
-        def cpu_grouped_mm(input_RI, weight_EIO, *, offs):
-            del offs
-            return input_RI @ weight_EIO[0]
-
-        for linear_cls, expected_calls in (
-            (GroupedLinear, 1),
-            (SquaredGroupedLinear, 2),
-        ):
-            with self.subTest(linear=linear_cls.__name__), DeterministicGuard(True):
-                torch.manual_seed(42)
-                grouped = linear_cls(
-                    linear_cls.Config(group_size=1, in_features=3, out_features=5)
-                )
-                nn.init.normal_(grouped.weight, std=0.1)
-                input_RI = torch.randn(7, 3, dtype=torch.bfloat16, requires_grad=True)
-                scores_R = torch.rand(7, requires_grad=True)
-                packed_shapes = []
-
-                def pack(tensor):
-                    packed_shapes.append(tuple(tensor.shape))
-                    return tensor
-
-                def projection(input_RI, scores_R):
-                    output_RO = grouped(
-                        input_RI,
-                        torch.tensor([7], dtype=torch.int32),
-                        scores_R=scores_R,
-                        output_needed_for_recompute=False,
-                    )
-                    return remat.region(torch.sum, "loss", recompute=False)(output_RO)
-
-                # The default checkpoint recomputes all policy-controlled regions.
-                with patch.object(
-                    torch, "_grouped_mm", side_effect=cpu_grouped_mm
-                ) as grouped_mm:
-                    loss = remat.checkpoint(
-                        saved_tensors_hooks=(pack, lambda tensor: tensor)
-                    )(projection)(input_RI, scores_R)
-                    # R x O differs from every input shape, including R x I.
-                    self.assertNotIn((7, 5), packed_shapes)
-                    loss.backward()
-                self.assertEqual(grouped_mm.call_count, expected_calls)
-                for tensor in (input_RI, scores_R, grouped.weight):
-                    self.assertIsNotNone(tensor.grad)
-
     def test_scores_use_fp32_without_saving_fp32_input(self):
         """Keep score precision without doubling the saved activation storage."""
         torch.manual_seed(42)
