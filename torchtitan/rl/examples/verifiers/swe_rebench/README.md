@@ -2,15 +2,15 @@
 
 This example trains a coding agent with TitanRL on the Python GitHub issues of
 [SWE-rebench V2.1](https://hub.harborframework.com/datasets/ibragim-badertdinov/swe-rebench-v2.1-rl).
-Each rollout is one attempt at one issue: Verifiers' `bash` harness edits the
-repository in the issue's Docker image, every model call goes to TitanRL's
-generators, and the issue's held-out tests grade the result. Verifiers runs the
+Each rollout is one attempt at one issue: the model edits the repository through
+Verifiers' `bash` harness, in a container of the issue's Docker image; every model
+call goes to TitanRL's generators, and the issue's held-out tests grade the result. Verifiers runs the
 agent and the grading through the [Verifiers bridge](../README.md).
 
 > **Toy sandbox.** Local Docker keeps this example self-contained; it is not a sandbox
-> for real training. Containers run untrusted task code on the controller host and,
-> by default, share its network. For real training, plug in a mature sandbox as
-> the Verifiers runtime. Do not use `SubprocessConfig`: it runs the agent on the host.
+> for real training. Containers run untrusted task code on the controller host and, by
+> default, can reach any address the host can, including the upstream repository.
+> For real training, plug in a mature sandbox as the Verifiers runtime.
 
 ## How it works
 
@@ -21,20 +21,25 @@ filled from V2.1's Harbor task directories ([`taskset.py`](./taskset.py)).
   solution, and records the repository's `HEAD` as the base commit. V2.1 has no base
   commit field, and the agent can move `HEAD` later.
 - **Agent.** Verifiers' `bash` harness (bash and edit tools) runs in the task container.
-  The prompt is the issue text plus prime-envs' rule against looking up the upstream fix.
+  The user prompt is the task's `instruction.md`: the issue text, often followed by
+  V2.1's added contract requirements. The system prompt adds prime-envs' rule against
+  looking up the upstream fix; it is only a prompt, and the default Docker network lets
+  the agent reach GitHub.
 - **Grading.** After the agent stops, the task restores the files the test patch touches
   to the base commit, applies the held-out test patch and runs the test command in the
   container. The env server parses the log with prime-envs' copy of SWE-rebench's
   log parsers, outside the container.
-- **Reward.** `f2p_regression` (default) is the FAIL_TO_PASS pass fraction times
-  `0.5 + 0.5 x` the PASS_TO_PASS pass fraction. `resolved` is V2.1's binary criterion:
-  every FAIL_TO_PASS and PASS_TO_PASS test passes. Both are logged as metrics, with
-  `f2p_fraction`, `p2p_fraction` and `answer_key_present`.
+- **Reward.** `f2p_regression` (default) is `f2p_fraction * (0.5 + 0.5 * p2p_fraction)`,
+  where the two fractions are the pass rates of the FAIL_TO_PASS and PASS_TO_PASS tests.
+  `resolved` is V2.1's binary criterion: every FAIL_TO_PASS and PASS_TO_PASS test passes.
+  The task also records `resolved`, `f2p_fraction`, `p2p_fraction`, `parsed_tests` and
+  `answer_key_present` on each Verifiers trace; the bridge does not forward them to
+  TorchTitan's metrics yet.
 
 | What | Where |
 | --- | --- |
-| Recipes: model, parallelism, generator, training loop, and the Verifiers setup (taskset, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_swe_rebench.py` |
-| V2.1 task directories to prime-envs tasks, setup, grading and the train/validation split | [`taskset.py`](./taskset.py) |
+| Recipe: model, parallelism, generator, training loop, and the Verifiers setup (taskset, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_swe_rebench.py` |
+| V2.1 task directories to prime-envs tasks, setup, grading and the train/validation split by project | [`taskset.py`](./taskset.py) |
 | Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_swe_rebench.py` |
 
@@ -52,7 +57,9 @@ GIT_LFS_SKIP_SMUDGE=1 pip install --no-deps \
 
 `GIT_LFS_SKIP_SMUDGE=1` skips the large files of other prime-envs environments. The
 env server runs on the controller host, so that host needs Docker and pulls the task
-images from Docker Hub.
+images from Docker Hub. Each task has its own image, 1-3.5 GB, and Verifiers removes
+the containers but not the images, so prune them (`docker image prune -a`) during
+long runs.
 
 ## Run
 
@@ -62,14 +69,9 @@ python -m torchtitan.rl.train \
   --config rl_grpo_qwen35_9b_swe_rebench
 ```
 
-| Config | Model | GPUs |
-| --- | --- | --- |
-| `rl_grpo_qwen35_9b_swe_rebench` | Qwen3.5-9B, 64K context | 4 trainer, 4 generators x 1 |
-| `rl_grpo_qwen38_27b_swe_rebench` | Qwen3.8-27B, 256K context | 8 trainer (FSDP=4, CP=2), 16 generators x 1 |
-
-The recipes read the checkpoint from `./assets/hf/Qwen3.5-9B` and
-`./assets/hf/Qwen3.8-27B`. `torchtitan.rl.train` places every process on the local host,
-so the 27B recipe needs a multi-host launcher. Neither recipe has been run end to end.
+The recipe trains Qwen3.5-9B at 64K context on one 8-GPU host: 4 trainer GPUs (FSDP=4)
+and 4 one-GPU generators. It reads the checkpoint from `./assets/hf/Qwen3.5-9B`. It has
+not been run end to end yet.
 
 ## Datasets
 
@@ -77,27 +79,47 @@ The taskset loads the V2.1 Harbor dataset pinned in `taskset.py`. Verifiers down
 into `~/.cache/harbor` with the `harbor` CLI on first use; set the taskset's
 `dataset_dir` to read a local copy instead.
 
-- **Split.** V2.1 has no split. `partition="train"` and `"validation"` split the
-  repositories by `validation_repository_fraction`, so no repository is in both.
-- **Task lists.** To train on chosen tasks, set `partition="all"` and `task_list` to a
-  file of instance ids, one per line. Every listed id must exist.
-- **Quality flags.** Tasks V2.1 flags `weak_f2p` (FAIL_TO_PASS barely checks the fix)
-  are dropped by default (`exclude_quality_flags`).
+- **Split.** V2.1 has no split. `partition="train"` and `"validation"` split the projects
+  by `validation_project_fraction`, so no project is in both, even when V2.1 lists it
+  under two owners after a rename.
+- **Quality flags.** Tasks that V2.1 flags `weak_f2p` (their FAIL_TO_PASS tests barely
+  check the fix) are skipped by default (`exclude_quality_flags`).
 - **Resources.** The taskset asks for 4 CPUs, 7 GB memory and 10 GB disk per sandbox
-  (Docker applies the CPU and memory limits), less than the 6 CPUs, 24 GB and 32 GB in
-  every V2.1 `task.toml`, so more sandboxes fit on a host.
+  (`resources`), less than the 6 CPUs, 24 GB and 32 GB in every V2.1 `task.toml`, so more
+  sandboxes fit on a host. Docker enforces the CPU and memory limits; the disk size is
+  advisory.
 
 ## Differences from V2.1's own grading
 
-V2.1's `tests/test.sh` runs the test command under a login shell (`bash -lc`) and grades
-with each task's `tests/grade.py`. Here prime-envs runs the command under a fixed `PATH`
-in a non-login shell and parses the log with its parsers, so a task can score
-differently. Check a task with Verifiers' gold-patch validation before trusting it.
+A task can score differently here than under V2.1's own `tests/test.sh`:
+
+- **Shell.** V2.1 runs the test command under a login shell (`bash -lc`); prime-envs runs
+  it under a fixed `PATH` in a non-login shell.
+- **Parser.** V2.1 grades with each task's `tests/grade.py`, from a parser audit of
+  2026-10-29: it reads appended JUnit XML, fails a test if any line fails it, and matches
+  expected names through aliases. prime-envs parses with its copy of SWE-rebench V2's
+  log parsers from 2026-04, which keeps the last status line of each test.
+- **Timeout.** V2.1 caps the test command at 1800 s. Here the recipe's scoring timeout
+  (2400 s, V2.1's verifier timeout) bounds restoring the test files, applying the test
+  patch and running the tests together; a timeout fails the rollout.
+
+Gold-check the tasks before trusting them (next section).
 
 ## If every reward is 0
 
-- **Check the gold patch first.** `SWERebenchV21Task.validate` applies the gold patch and
-  scores it; it should return `True` for the tasks you train on.
+- **Check the gold patch first.** Verifiers' `vf-validate` applies each task's gold patch
+  and scores it (`--only-gold`); every task you train on should come out valid. The
+  taskset is a local module, so register its alias before calling the CLI:
+
+  ```bash
+  python -c '
+  import sys
+  from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
+  from verifiers.v1.cli.validate import main
+  main([register_local_taskset_alias("torchtitan.rl.examples.verifiers.swe_rebench.taskset"), *sys.argv[1:]])
+  ' --only-gold --runtime.type docker --select.include.names aio-libs__aiohttp-7889
+  ```
 - **The run fails after 10 untrainable batches.** A group whose samples all get the same
   reward is dropped (`TrainingSampleBuilder.drop_zero_std_reward_groups`), and the batcher
-  raises "consecutive untrainable batches" after 10 in a row.
+  raises "consecutive untrainable batches" after 10 in a row. Gold-check the tasks, and
+  check that the model solves some of them, before a long run.

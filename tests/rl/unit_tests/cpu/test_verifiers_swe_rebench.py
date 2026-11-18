@@ -24,18 +24,15 @@ import verifiers.v1 as vf
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.examples.verifiers import env_server
-from torchtitan.rl.examples.verifiers.swe_rebench import taskset
 from torchtitan.rl.examples.verifiers.swe_rebench.taskset import (
     ANSWER_KEY_DIR,
     BASE_COMMIT_KEY,
-    parse_test_statuses,
     read_task_directory,
     SWERebenchV21Task,
     SWERebenchV21TaskConfig,
     SWERebenchV21Taskset,
     SWERebenchV21TasksetConfig,
 )
-from verifiers.v1.harnesses import BashHarnessConfig
 from verifiers.v1.runtimes import ProgramResult
 from verifiers.v1.serve import env_config_data
 
@@ -80,9 +77,8 @@ docker_image = "docker.io/swerebenchv2/app:1-abc@sha256:0123"
         "HARBOR_TEST_CMD_EOF\n"
         'cd "$WORKDIR"\n'
     )
-    # V2.1 stores some name lists as the Python repr of a list.
     (task_dir / "tests" / "config.json").write_text(
-        json.dumps({"FAIL_TO_PASS": FAIL_TO_PASS, "PASS_TO_PASS": str(PASS_TO_PASS)})
+        json.dumps({"FAIL_TO_PASS": FAIL_TO_PASS, "PASS_TO_PASS": PASS_TO_PASS})
     )
     (task_dir / "tests" / "test.patch").write_text("diff --git a/tests/test_app.py\n")
     (task_dir / "solution" / "gold.patch").write_text("diff --git a/app.py\n")
@@ -120,46 +116,32 @@ def _load(root: Path, **options) -> list[SWERebenchV21Task]:
     return list(SWERebenchV21Taskset(config).load())
 
 
-def test_training_and_validation_never_share_a_repository(tmp_path) -> None:
+def test_training_and_validation_never_share_a_project(tmp_path) -> None:
     for index in range(20):
         _write_task(tmp_path, f"t-{index}", repo=f"owner/repo-{index % 10}")
+    # The same project under its owner before a rename.
+    for index in range(10):
+        _write_task(tmp_path, f"renamed-{index}", repo=f"old-owner/Repo-{index}")
     _write_task(tmp_path, "weak", repo="owner/repo-0", quality_flags=("weak_f2p",))
 
-    def repos(tasks: list[SWERebenchV21Task]) -> set[str]:
-        return {
+    def projects(tasks: list[SWERebenchV21Task]) -> set[str]:
+        repos = {
             read_task_directory(tmp_path / task.data.name, resources=RESOURCES).repo
             for task in tasks
         }
+        return {repo.split("/")[1].lower() for repo in repos}
 
     training = _load(tmp_path, partition="train")
     validation = _load(tmp_path, partition="validation")
-    assert repos(training).isdisjoint(repos(validation))
-    assert len(training) + len(validation) == 20
+    assert validation and projects(training).isdisjoint(projects(validation))
+    assert len(training) + len(validation) == 30
     assert "weak" not in {task.data.name for task in training + validation}
     assert [task.data.idx for task in training] == list(range(len(training)))
 
 
-def test_a_task_list_selects_its_tasks_and_fails_on_a_missing_one(tmp_path) -> None:
-    for index in range(3):
-        _write_task(tmp_path, f"t-{index}")
-    listed = tmp_path / "list.txt"
-    listed.write_text("t-0  # a comment\nt-2\n")
-    assert [
-        t.data.name for t in _load(tmp_path, partition="all", task_list=listed)
-    ] == [
-        "t-0",
-        "t-2",
-    ]
-
-    with pytest.raises(ValueError, match="partition='all'"):
-        _load(tmp_path, partition="train", task_list=listed)
-    listed.write_text("t-0\nt-9\n")
-    with pytest.raises(ValueError, match="t-9"):
-        _load(tmp_path, partition="all", task_list=listed)
-
-
 class _ScriptedRuntime:
-    """Answers each command the task runs, and records them in order."""
+    """Answers each command the task runs, and records them in order. HEAD is
+    `HEAD_NOW`."""
 
     def __init__(self, test_log: str = "") -> None:
         self.test_log = test_log
@@ -168,7 +150,7 @@ class _ScriptedRuntime:
     async def run(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
         self.commands.append((argv, env))
         if argv == ["git", "rev-parse", "HEAD"]:
-            return ProgramResult(exit_code=0, stdout="abc123\n", stderr="")
+            return ProgramResult(exit_code=0, stdout=f"{HEAD_NOW}\n", stderr="")
         if argv == ["cat", "/test_output.txt"]:
             return ProgramResult(exit_code=0, stdout=self.test_log, stderr="")
         if ANSWER_KEY_DIR in " ".join(argv):
@@ -177,6 +159,14 @@ class _ScriptedRuntime:
 
     async def write(self, path: str, data: bytes) -> None:
         pass
+
+    async def read(self, path: str) -> bytes:
+        return b"diff --git a/app.py b/app.py\n"
+
+
+HEAD_NOW = "head-now"
+# A different commit: the agent can move HEAD after setup recorded the base.
+BASE_AT_SETUP = "base-at-setup"
 
 
 def _trace() -> SimpleNamespace:
@@ -195,27 +185,18 @@ def test_setup_removes_the_answer_key_and_records_the_base_commit(tmp_path) -> N
 
     asyncio.run(_task(tmp_path).setup(trace=trace, runtime=runtime))
 
-    assert trace.info[BASE_COMMIT_KEY] == "abc123"
+    assert trace.info[BASE_COMMIT_KEY] == HEAD_NOW
     assert trace.metrics["answer_key_present"] == 1.0
     assert "rm -rf /swebench_matterhorn" in " ".join(runtime.commands[0][0])
 
 
-TEST_LOG = """setup noise PASSED tests/test_app.py::test_old_b
-SWEREBENCH_V2_TEST_OUTPUT_START
+# What prime-envs' test script writes: its markers around the test command's output.
+TEST_LOG = """SWEREBENCH_V2_TEST_OUTPUT_START
 PASSED tests/test_app.py::test_fix
 PASSED tests/test_app.py::test_old_a
 FAILED tests/test_app.py::test_old_b - AssertionError
 SWEREBENCH_V2_TEST_OUTPUT_END
 """
-
-
-def test_only_the_marked_region_of_the_test_log_is_parsed() -> None:
-    statuses = parse_test_statuses(TEST_LOG, {"log_parser": "parse_log_pytest"})
-    assert statuses == {
-        "tests/test_app.py::test_fix": "PASSED",
-        "tests/test_app.py::test_old_a": "PASSED",
-        "tests/test_app.py::test_old_b": "FAILED",
-    }
 
 
 @pytest.mark.parametrize(
@@ -226,7 +207,7 @@ def test_scoring_restores_tests_from_the_recorded_commit(
 ) -> None:
     """The fix passes, but it breaks one of the two tests that passed before."""
     runtime, trace = _ScriptedRuntime(TEST_LOG), _trace()
-    trace.info[BASE_COMMIT_KEY] = "abc123"
+    trace.info[BASE_COMMIT_KEY] = BASE_AT_SETUP
 
     score = asyncio.run(
         _task(tmp_path, reward_mode).solved(runtime=runtime, trace=trace)
@@ -234,7 +215,7 @@ def test_scoring_restores_tests_from_the_recorded_commit(
 
     assert score == reward
     restore_env = next(env for argv, env in runtime.commands if "base" in env)
-    assert restore_env["base"] == "abc123"
+    assert restore_env["base"] == BASE_AT_SETUP
     assert trace.metrics == {
         "resolved": 0.0,
         "f2p_fraction": 1.0,
@@ -259,29 +240,24 @@ def test_the_gold_check_reads_the_base_commit_itself(
     argvs = [argv for argv, _ in runtime.commands]
     assert argvs.index(["git", "rev-parse", "HEAD"]) == 0
     restore_env = next(env for argv, env in runtime.commands if "base" in env)
-    assert restore_env["base"] == "abc123"
+    assert restore_env["base"] == HEAD_NOW
+
+
+def test_the_patch_is_diffed_against_the_recorded_commit(tmp_path) -> None:
+    runtime, trace = _ScriptedRuntime(), _trace()
+    trace.info[BASE_COMMIT_KEY] = BASE_AT_SETUP
+
+    asyncio.run(_task(tmp_path).finalize(trace=trace, runtime=runtime))
+
+    diff_env = next(env for argv, env in runtime.commands if "VF_DIFF_BASE" in env)
+    assert diff_env["VF_DIFF_BASE"] == BASE_AT_SETUP
+    assert trace.info["patch"].startswith("diff --git a/app.py")
 
 
 def _recipe(name: str) -> Controller.Config:
     return ConfigLoader().load(
         ["--module", "torchtitan_recipes.rl.verifiers_swe_rebench", "--config", name]
     )
-
-
-@pytest.mark.parametrize(
-    "name", ["rl_grpo_qwen38_27b_swe_rebench", "rl_grpo_qwen35_9b_swe_rebench"]
-)
-def test_recipes_validate_on_repositories_they_do_not_train_on(name: str) -> None:
-    rollouter = _recipe(name).rollouter
-    training = rollouter.training_dataloader.dataset.verifiers_taskset
-    validation = rollouter.validation_dataset.verifiers_taskset
-    environment = rollouter.verifiers_env_server.environment
-    assert (training.partition, validation.partition) == ("train", "validation")
-    assert environment.taskset == training
-    assert isinstance(environment.agent.harness, BashHarnessConfig)
-    assert environment.agent.harness.compaction is None
-    assert isinstance(environment.agent.runtime, vf.DockerConfig)
-    assert rollouter.verifiers_env_server.local_taskset_module == taskset.__name__
 
 
 def test_env_server_workers_load_the_swe_rebench_env(monkeypatch) -> None:

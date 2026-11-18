@@ -6,19 +6,20 @@
 
 """SWE-rebench V2.1 tasks, built on prime-envs' SWE-rebench V2 task.
 
-Each task directory of the V2.1 Harbor dataset holds one GitHub issue: the task
-image, the issue text, a held-out test patch, the FAIL_TO_PASS and PASS_TO_PASS
-test names and the gold patch. This module turns each directory into
-prime-envs' ``SWERebenchV2Task``. At scoring time that task restores the files
-the test patch touches, applies it and runs the test command in the task
-container; the env-server worker parses the log, out of the agent's reach.
+Each task directory of the V2.1 Harbor dataset holds one GitHub issue: the
+task's Docker image, the issue text, the test command and log parser, a
+held-out test patch, the FAIL_TO_PASS and PASS_TO_PASS test names and the gold
+patch. This module turns each directory into a subclass of prime-envs'
+``SWERebenchV2Task``. At scoring time that task restores the files the test
+patch touches, applies it and runs the test command in the task container; the
+env-server worker then parses the log outside the container, so the agent
+cannot alter the parser.
 
-The env-server worker is a spawned process, and it only imports the module behind
-a locally registered taskset alias (see ``_local_taskset_module`` in
-``torchtitan/rl/examples/verifiers/rollouter.py``), so the taskset lives here.
+Verifiers' env-server workers are spawned processes that import the taskset by
+module name and must not import torch, so the taskset lives in this torch-free
+module rather than in the recipe.
 """
 
-import ast
 import hashlib
 import json
 import re
@@ -26,14 +27,13 @@ import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 import verifiers.v1 as vf
 from pydantic import Field
 from swerebench_v2 import log_parsers
 from swerebench_v2.taskset import (
     ENV,
-    extract_install_config,
     is_resolved,
     normalize_test_name,
     SOLVER_SYSTEM_PROMPT,
@@ -56,8 +56,6 @@ ANSWER_KEY_DIR = "/swebench_matterhorn"
 BASE_COMMIT_KEY = "swe_rebench_base_commit"
 """`trace.info` key for the repository commit the agent started from."""
 
-_TEST_OUTPUT_START = "SWEREBENCH_V2_TEST_OUTPUT_START"
-_TEST_OUTPUT_END = "SWEREBENCH_V2_TEST_OUTPUT_END"
 # V2.1's tests/test.sh carries the test command in this heredoc.
 _TEST_COMMAND = re.compile(
     r"<<'HARBOR_TEST_CMD_EOF'\n(.*?)\nHARBOR_TEST_CMD_EOF\n", re.DOTALL
@@ -66,25 +64,17 @@ _TEST_COMMAND = re.compile(
 
 class SWERebenchV21TaskConfig(vf.TaskConfig):
     reward_mode: Literal["f2p_regression", "resolved"] = "f2p_regression"
-    """`resolved` is V2.1's binary criterion: every FAIL_TO_PASS and PASS_TO_PASS
-    test passes. `f2p_regression` is dense: the FAIL_TO_PASS pass fraction times
-    0.5 + 0.5 x the PASS_TO_PASS pass fraction, so a fix that breaks passing tests
-    earns at most half credit."""
+    """`resolved`: 1.0 when every FAIL_TO_PASS and PASS_TO_PASS test passes, else
+    0.0 (V2.1's criterion). `f2p_regression` gives partial credit:
+    f2p * (0.5 + 0.5 * p2p), where f2p and p2p are the pass fractions of the
+    FAIL_TO_PASS and PASS_TO_PASS tests. Each broken PASS_TO_PASS test lowers the
+    reward; breaking all of them halves it."""
 
 
-def parse_test_statuses(test_output: str, install_config: dict | str) -> dict[str, str]:
-    """Map each test name in the log to its status, e.g. ``"PASSED"``.
-
-    Only the region between the eval script's markers is parsed, so setup noise
-    can't add test names. An empty log (the test patch did not apply) has none.
-    """
-    if _TEST_OUTPUT_START in test_output:
-        test_output = test_output.split(_TEST_OUTPUT_START, 1)[1]
-    if _TEST_OUTPUT_END in test_output:
-        test_output = test_output.rsplit(_TEST_OUTPUT_END, 1)[0]
-    parser = log_parsers.NAME_TO_PARSER[
-        extract_install_config(install_config)["log_parser"]
-    ]
+def parse_test_statuses(test_output: str, log_parser: str) -> dict[str, str]:
+    """Map each test name in the log to its status, e.g. ``"PASSED"``. An empty log
+    (the test patch did not apply) yields no statuses."""
+    parser = log_parsers.NAME_TO_PARSER[log_parser]
     return {
         normalize_test_name(name): status
         for name, status in parser(test_output).items()
@@ -104,17 +94,20 @@ class SWERebenchV21Task(
     SWERebenchV2Task,
     vf.Task[SWERebenchV2Data, vf.State, SWERebenchV21TaskConfig],
 ):
-    """prime-envs' task, plus answer-key removal and a base commit read at setup.
+    """prime-envs' SWE-rebench V2 task, adapted to V2.1 task directories.
 
-    V2.1 rows carry no base commit, which prime-envs needs to restore the test
-    files before applying the test patch. The image's HEAD is that commit, so
-    setup records it before the agent can move HEAD.
+    V2.1 tasks carry no base commit, which prime-envs needs to restore the test
+    patch's files before applying it and to diff the agent's changes. The image's
+    HEAD is that commit, so setup records it before the agent can move HEAD.
+    Setup also deletes the answer key some images ship, and scoring adds the
+    `f2p_regression` reward mode and per-test metrics.
     """
 
     @property
     def key(self) -> str:
-        # The default key hashes TaskData, which includes the task's position in
-        # this filtered view. The instance id is stable across filters.
+        # The default key hashes all task data, including idx (the position after
+        # this taskset's filters) and the resources; the instance id stays the
+        # same when either changes.
         return self.data.name
 
     async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
@@ -135,11 +128,16 @@ class SWERebenchV21Task(
         await super().setup(runtime)
 
     async def finalize(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
-        # Before scoring restores the test files, so the agent's test edits are kept.
+        # prime-envs diffs against the task data's base commit, which V2.1 tasks
+        # lack; without it Verifiers diffs against HEAD and misses commits the agent
+        # made. Runs before scoring restores the test files, so the patch keeps the
+        # agent's test edits.
         await capture_patch(
             trace, runtime, base_commit=trace.info[BASE_COMMIT_KEY], env=ENV
         )
 
+    # Same name as prime-envs' reward, so it replaces that reward instead of adding a
+    # second one.
     @vf.reward(weight=1.0)
     async def solved(self, runtime: vf.Runtime, trace: vf.Trace) -> float:
         metrics = await self._grade(runtime, base_commit=trace.info[BASE_COMMIT_KEY])
@@ -167,12 +165,13 @@ class SWERebenchV21Task(
     async def _grade(
         self, runtime: vf.Runtime, *, base_commit: str
     ) -> dict[str, float]:
-        """Run the held-out tests against `base_commit` and summarize their statuses."""
-        grading = SWERebenchV21Task(
-            self.data.model_copy(update={"base_commit": base_commit}), self.config
-        )
+        """Grade the current tree: restore the test patch's files to `base_commit`,
+        apply the test patch, run the tests, and return `resolved`, the FAIL_TO_PASS
+        and PASS_TO_PASS pass fractions and the number of parsed tests."""
+        # prime-envs reads the base commit from the task data.
+        test_output = await self.with_data(base_commit=base_commit).run_tests(runtime)
         statuses = parse_test_statuses(
-            await grading.run_tests(runtime), self.data.install_config
+            test_output, self.data.install_config["log_parser"]
         )
         resolved = bool(statuses) and is_resolved(
             statuses, self.data.fail_to_pass, self.data.pass_to_pass
@@ -187,17 +186,12 @@ class SWERebenchV21Task(
 
 @dataclass(frozen=True, slots=True)
 class TaskDirectory:
-    """One V2.1 task directory, read into the fields this taskset filters on."""
+    """One V2.1 task directory: the task data plus the repository and quality flags
+    the taskset filters on."""
 
     repo: str
     quality_flags: list[str]
     data: SWERebenchV2Data
-
-
-def _test_names(value: Any) -> list[str]:
-    # V2.1 stores some name lists as the Python repr of a list.
-    names = ast.literal_eval(value) if isinstance(value, str) else value
-    return [str(name) for name in names]
 
 
 def read_task_directory(
@@ -227,33 +221,26 @@ def read_task_directory(
             install_config={"test_cmd": [match.group(1)], "log_parser": log_parser},
             test_patch=(task_dir / "tests" / "test.patch").read_text(),
             gold_patch=(task_dir / "solution" / "gold.patch").read_text(),
-            fail_to_pass=_test_names(tests["FAIL_TO_PASS"]),
-            pass_to_pass=_test_names(tests["PASS_TO_PASS"]),
+            fail_to_pass=tests["FAIL_TO_PASS"],
+            pass_to_pass=tests["PASS_TO_PASS"],
         ),
     )
 
 
-def validation_repositories(
-    repositories: set[str], *, fraction: float, seed: int
-) -> set[str]:
-    """Pick about `fraction` of the repositories, at least one, by a seeded hash."""
+def project_name(repo: str) -> str:
+    """The repository name without its owner. 20 V2.1 projects appear under two
+    owners after a rename (e.g. pypa/pipx and pipxproject/pipx); the split keys on
+    this name so both land on the same side."""
+    return repo.split("/", 1)[1].lower()
+
+
+def validation_projects(projects: set[str], *, fraction: float) -> set[str]:
+    """Pick about `fraction` of the projects, at least one, ranked by the hash of
+    their names so every run picks the same ones."""
     ranked = sorted(
-        repositories,
-        key=lambda repo: hashlib.sha256(f"{seed}:{repo}".encode()).digest(),
+        projects, key=lambda project: hashlib.sha256(project.encode()).digest()
     )
     return set(ranked[: max(1, round(fraction * len(ranked)))])
-
-
-def read_task_list(path: Path) -> set[str]:
-    """Instance ids in a task list file, one per line; `#` starts a comment."""
-    names = {
-        line.split("#", 1)[0].strip()
-        for line in path.expanduser().read_text().splitlines()
-    }
-    names.discard("")
-    if not names:
-        raise ValueError(f"task list {path} names no tasks")
-    return names
 
 
 class SWERebenchV21TasksetConfig(vf.TasksetConfig):
@@ -264,28 +251,25 @@ class SWERebenchV21TasksetConfig(vf.TasksetConfig):
     ``~/.cache/harbor`` on first use."""
 
     dataset_dir: Path | None = None
-    """A local copy of the task directories; when set, `dataset` is not downloaded."""
+    """A local copy of the task directories, e.g. on a shared filesystem; when set,
+    `dataset` is not downloaded."""
 
-    partition: Literal["train", "validation", "all"] = "train"
-    """V2.1 has no split. `train` and `validation` split the repositories by
-    `validation_repository_fraction`, so no repository is in both."""
+    partition: Literal["train", "validation"] = "train"
+    """V2.1 has no split, so this taskset splits the projects: no project is in both
+    partitions, even under a renamed owner."""
 
-    validation_repository_fraction: float = Field(0.1, gt=0, lt=1)
-    split_seed: int = 0
-
-    task_list: Path | None = None
-    """File of instance ids to keep, one per line. Requires `partition="all"`;
-    every listed id must be a task that survives `exclude_quality_flags`."""
+    validation_project_fraction: float = Field(0.1, gt=0, lt=1)
+    """Fraction of the projects held out for `partition="validation"`, rounded, at
+    least one."""
 
     exclude_quality_flags: list[str] = Field(default_factory=lambda: ["weak_f2p"])
-    """Drop tasks V2.1 flags. `weak_f2p`: FAIL_TO_PASS barely checks the fix."""
+    """Skip tasks that carry any of these V2.1 `quality_flags`. `weak_f2p` marks
+    tasks whose FAIL_TO_PASS tests barely check the fix."""
 
-    cpu: int = Field(4, ge=1)
-    memory: float = Field(7, gt=0)
-    """GB. Each V2.1 task.toml asks for 6 CPUs, 24 GB memory and 32 GB disk;
-    smaller defaults fit more sandboxes on a host. Raise them if tests run out
-    of memory."""
-    disk: float = Field(10, gt=0)
+    resources: vf.TaskResources = vf.TaskResources(cpu=4, memory=7, disk=10)
+    """CPU cores and GB of memory and disk per sandbox. Each V2.1 task.toml asks for
+    6 CPUs, 24 GB memory and 32 GB disk; these smaller defaults fit more sandboxes
+    on one host. Raise memory if tests run out of it."""
 
 
 class SWERebenchV21Taskset(vf.Taskset[SWERebenchV21Task, SWERebenchV21TasksetConfig]):
@@ -293,50 +277,31 @@ class SWERebenchV21Taskset(vf.Taskset[SWERebenchV21Task, SWERebenchV21TasksetCon
 
     def load(self) -> Iterator[SWERebenchV21Task]:
         config = self.config
-        if config.task_list is not None and config.partition != "all":
-            raise ValueError("a task_list selects its own tasks; set partition='all'")
         root = config.dataset_dir or harbor_dataset_dir(
             HarborConfig(dataset=config.dataset)
         )
-        resources = vf.TaskResources(
-            cpu=config.cpu, memory=config.memory, disk=config.disk
-        )
         task_dirs = [
-            read_task_directory(toml_path.parent, resources=resources)
+            read_task_directory(toml_path.parent, resources=config.resources)
             for toml_path in sorted(root.rglob("task.toml"))
         ]
         if not task_dirs:
             raise ValueError(f"no SWE-rebench V2.1 tasks found in {root}")
-        validation = validation_repositories(
-            {task_dir.repo for task_dir in task_dirs},
-            fraction=config.validation_repository_fraction,
-            seed=config.split_seed,
+        validation = validation_projects(
+            {project_name(task_dir.repo) for task_dir in task_dirs},
+            fraction=config.validation_project_fraction,
         )
-        listed = read_task_list(config.task_list) if config.task_list else None
-        found: set[str] = set()
-        idx = 0
+        index = 0
         for task_dir in task_dirs:
             if set(config.exclude_quality_flags) & set(task_dir.quality_flags):
                 continue
-            in_validation = task_dir.repo in validation
-            if config.partition == "train" and in_validation:
+            in_validation = project_name(task_dir.repo) in validation
+            if in_validation != (config.partition == "validation"):
                 continue
-            if config.partition == "validation" and not in_validation:
-                continue
-            if listed is not None:
-                if task_dir.data.name not in listed:
-                    continue
-                found.add(task_dir.data.name)
             yield SWERebenchV21Task(
-                task_dir.data.model_copy(update={"idx": idx}), config.task
+                task_dir.data.model_copy(update={"idx": index}), config.task
             )
-            idx += 1
-        if listed is not None and listed - found:
-            missing = sorted(listed - found)
-            raise ValueError(
-                f"{len(missing)} listed task(s) are not in {root} or are excluded by "
-                f"quality flags {config.exclude_quality_flags}: {missing[:5]}"
-            )
+            index += 1
 
 
+# Verifiers loads the one Taskset subclass this module exports.
 __all__ = ["SWERebenchV21Taskset"]

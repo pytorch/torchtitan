@@ -87,7 +87,8 @@ jobs:
           -r torchtitan/rl/examples/verifiers/terminal_bench/requirements.txt \
           -r torchtitan/rl/examples/verifiers/swe_rebench/requirements.txt \
           --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
-        # prime-envs' SWE-rebench taskset declares a newer Verifiers than the pin above.
+        # prime-envs' SWE-rebench taskset declares a newer Verifiers than the 0.4.0 that
+        # the requirements above pin, so it installs without its dependencies.
         GIT_LFS_SKIP_SMUDGE=1 uv pip install --no-deps \
           -r torchtitan/rl/examples/verifiers/swe_rebench/requirements-no-deps.txt
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
