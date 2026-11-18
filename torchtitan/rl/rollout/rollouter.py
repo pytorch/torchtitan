@@ -83,6 +83,7 @@ class Rollouter(Configurable):
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
                 ),
                 message_env=MyEnv.Config(),
+                token_env=TokenEnv.Config(max_rollout_tokens=32768),
             ),
         ).build(max_rollouts_in_flight=256)
 
@@ -460,7 +461,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         message_env: MessageEnv.Config
         """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
 
-        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
+        token_env: TokenEnv.Config
         """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
     def __init__(self, config: Config) -> None:
