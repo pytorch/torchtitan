@@ -58,6 +58,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.rope import CosSinVisionRoPE
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -95,7 +96,7 @@ from .sharding import (
     vision_merger_sharding_config,
 )
 
-from .vision_encoder import CosSinVisionRoPE, PatchMerger, Qwen35VisionEncoder
+from .vision_encoder import PatchMerger, Qwen35VisionEncoder
 
 __all__ = [
     "Qwen35Model",

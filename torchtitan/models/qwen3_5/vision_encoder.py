@@ -35,7 +35,6 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import _maybe_check_max_pos, CosSinRoPE, RoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -193,75 +192,6 @@ def _compute_2d_positions(
     if spmd.is_type_checking():
         positions_TC = spmd.mutate_type(positions_TC, "dp", src=spmd.R, dst=spmd.V)
     return positions_TC
-
-
-class CosSinVisionRoPE(RoPE):
-    """2D Rotary Position Embedding for Vision Transformer.
-
-    Coordinates are zero-based ``(row, column)`` pairs in token order.
-    ``max_context_length`` is the exclusive bound on either coordinate.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
-        def __post_init__(self) -> None:
-            if self.dim % 4 != 0:
-                raise ValueError(
-                    f"2D RoPE requires head_dim divisible by 4, got {self.dim}."
-                )
-            if self.scaling is not None:
-                raise ValueError("CosSinVisionRoPE does not support frequency scaling.")
-
-    @staticmethod
-    def apply_rotary_emb(
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        rope_cache: torch.Tensor,
-        *,
-        inverse: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return CosSinRoPE.apply_rotary_emb(query, key, rope_cache, inverse=inverse)
-
-    def _precompute_cache(self) -> torch.Tensor:
-        """Compute the per-coordinate angle table.
-
-        Returns:
-            Cache of shape ``(max_context_length, dim / 4)``.
-        """
-        cfg = self.config
-        half_dim = cfg.dim // 2
-        inv_freq_F = 1.0 / (
-            cfg.theta ** (torch.arange(0, half_dim, 2, dtype=torch.float32) / half_dim)
-        )
-        positions_P = torch.arange(
-            cfg.max_context_length, device=inv_freq_F.device, dtype=inv_freq_F.dtype
-        )
-        return torch.outer(positions_P, inv_freq_F)
-
-    def _reshape_cache(
-        self,
-        query: torch.Tensor,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Compute 2D RoPE cache for vision patches.
-
-        Gathers separate frequency sets for each dimension and concatenates them.
-
-        Args:
-            query: Query tensor with shape ``[T, N, H]``.
-            positions: ``(total_num_patches, 2)`` row/column coordinates.
-
-        Returns:
-            Cache of shape ``(total_num_patches, 1, head_dim * 2)`` in float32.
-        """
-        assert positions is not None
-        _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
-        # 2D RoPE: row and col each get separate frequency sets, concatenated
-        # (not interleaved).
-        angles_TR = self.cache[positions].flatten(1, 2)
-        angles_TDh = torch.cat((angles_TR, angles_TR), dim=-1)
-        # Compute cos/sin in float32 for numerical precision
-        return torch.cat((angles_TDh.cos(), angles_TDh.sin()), dim=-1).unsqueeze(1)
 
 
 class PatchMerger(Module):

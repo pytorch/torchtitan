@@ -24,11 +24,11 @@ from torchtitan.models.common.rope import (
     ComplexRoPE,
     ComplexVisionRoPE,
     CosSinRoPE,
+    CosSinVisionRoPE,
     RoPE,
     YaRNScalingConfig,
 )
 from torchtitan.models.qwen3_5.rope import MRoPE
-from torchtitan.models.qwen3_5.vision_encoder import CosSinVisionRoPE
 
 
 def test_vision_rope_matches_prepared_cache():
