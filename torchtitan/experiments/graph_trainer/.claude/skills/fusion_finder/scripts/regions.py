@@ -325,8 +325,9 @@ def _break_cycles(
 
 def find_regions(root: str) -> tuple[float, list[dict]]:
     """The profit floor and the regions of the capture in ``root``, in the order
-    the lift passes run, each with its ``Pattern`` (or None) and the node names of
-    its instances (``members``)."""
+    the lift passes run, each with its ``Pattern`` (or None), the node names of its
+    instances (``members``) and their measured and ideal time
+    (``instance_stats``)."""
     with gzip.open(os.path.join(root, "graph.jsonl.gz"), "rt") as f:
         nodes = {r["name"]: r for r in map(json.loads, f)}
     with open(os.path.join(root, "node_table.csv")) as f:
@@ -555,6 +556,7 @@ def find_regions(root: str) -> tuple[float, list[dict]]:
                 "code": [nodes[m]["code"] for m in first],
                 "pattern": pattern,
                 "members": group,
+                "instance_stats": stats,
             }
         )
 
@@ -614,7 +616,11 @@ def main() -> None:
                 "profit_floor_ms": round(floor_ms, 3),
                 "regions": [
                     {
-                        **{k: v for k, v in r.items() if k != "members"},
+                        **{
+                            k: v
+                            for k, v in r.items()
+                            if k not in ("members", "instance_stats")
+                        },
                         "pattern": r["pattern"] and r["pattern"].to_json(),
                     }
                     for r in regions

@@ -23,8 +23,9 @@ them and arguments. Node names do not matter, and neither do sizes
 counts and ranks of the same model code.
 
 Match ``k`` becomes ``fusion_<id>_i<k> = self.fusion_<id>_i<k>(...)``, a submodule
-holding the matched nodes: the computation a kernel replaces. The call takes the
-place of the match's last node. The nodes between the match's first and last node
+holding the matched nodes: the computation a kernel replaces, on tensors (a
+``getitem`` of a tuple from outside the match stays outside, and the call takes the
+tensor). The call takes the place of the match's last node. The nodes between the match's first and last node
 that depend on it, through a tensor or through a storage they share
 (``storage_effects``), move after the call in their order; nothing else moves. A
 pass raises if it finds no match, or if a path leaves a match and comes back (it
@@ -73,7 +74,7 @@ def _find(pattern: Pattern, graph: fx.Graph) -> list[list[fx.Node]]:
     ]
 
 
-def _submodule_storage(sub: fx.GraphModule) -> tuple[set[int], list[int | str]]:
+def submodule_storage(sub: fx.GraphModule) -> tuple[set[int], list[int | str]]:
     """The inputs (placeholder indices) a lifted submodule writes into, and per
     output its storage: an input's index, or the name of the node inside that
     allocated it."""
@@ -113,7 +114,7 @@ class _Storage:
         for n in gm.graph.nodes:
             sub = gm.get_submodule(n.target) if n.op == "call_module" else None
             if isinstance(sub, fx.GraphModule):
-                written, calls[n] = _submodule_storage(sub)
+                written, calls[n] = submodule_storage(sub)
                 self.base[n] = n
                 self.reads[n] = {self.base[i] for i in n.all_input_nodes}
                 self.writes[n] = {self.base[n.args[i]] for i in written}
@@ -153,23 +154,23 @@ class _Storage:
 
 
 def _outline(
-    gm: fx.GraphModule, members: list[fx.Node], name: str
+    gm: fx.GraphModule, members: list[fx.Node], order: list[fx.Node], name: str
 ) -> tuple[fx.Node, list[fx.Node], list[fx.Node]]:
-    """Move ``members`` (in graph order) into submodule ``name``. Returns the call,
-    placed after the last member, the members it outputs, and the ``getitem``
-    nodes of its outputs."""
+    """Move ``members`` (in graph order) into submodule ``name``, in ``order``.
+    Returns the call, placed after the last member, the members it outputs, and the
+    ``getitem`` nodes of its outputs."""
     mset = set(members)
     sub = fx.Graph()
     env: dict[fx.Node, fx.Node] = {}
     inputs: list[fx.Node] = []
-    for n in members:
+    for n in order:
         for i in n.all_input_nodes:
             if i not in mset and i not in env:
                 env[i] = sub.placeholder(i.name)
                 env[i].meta = dict(i.meta)
                 inputs.append(i)
         env[n] = sub.node_copy(n, env.__getitem__)
-    outputs = [n for n in members if any(u not in mset for u in n.users)]
+    outputs = [n for n in order if any(u not in mset for u in n.users)]
     sub.output(tuple(env[n] for n in outputs))
     module = fx.GraphModule(torch.nn.Module(), sub, name)
     # FX treats a GraphModule call as pure: dead code elimination would drop a call
@@ -200,8 +201,17 @@ def _lift_region(gm: fx.GraphModule, region: dict, pattern: Pattern) -> fx.Graph
     # Positions only need to stay increasing along the graph.
     position = {n: float(i) for i, n in enumerate(gm.graph.nodes)}
     storage = _Storage(gm)
-    for k, members in enumerate(matches):
-        members.sort(key=position.__getitem__)
+    for k, matched in enumerate(matches):
+        # A getitem of a tuple from outside the match reads one tensor of it: it
+        # stays outside, and the call takes that tensor rather than the tuple.
+        members = sorted(
+            (
+                n
+                for n in matched
+                if not (n.target is operator.getitem and n.args[0] not in matched)
+            ),
+            key=position.__getitem__,
+        )
         mset = set(members)
         # Walk from the first to the last member. A node that depends on a member,
         # or on a node already moved, moves after the call; a member must not.
@@ -241,7 +251,17 @@ def _lift_region(gm: fx.GraphModule, region: dict, pattern: Pattern) -> fx.Graph
             if n is members[-1]:
                 break
             n = n.next
-        call, outputs, getitems = _outline(gm, members, f"fusion_{region['id']}_i{k}")
+        # Without writes, the submodule lists the nodes in the pattern's order (a
+        # topological order of every match), so every instance has the same code,
+        # inputs and outputs, whatever the order of independent nodes in the graph.
+        order = (
+            members
+            if any(storage.writes[n] for n in members)
+            else [n for n in matched if n in mset]
+        )
+        call, outputs, getitems = _outline(
+            gm, members, order, f"fusion_{region['id']}_i{k}"
+        )
         storage.add_call(call, members, outputs, getitems)
         anchor = getitems[-1] if getitems else call
         for n in moved:
