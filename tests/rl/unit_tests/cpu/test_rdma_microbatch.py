@@ -22,8 +22,8 @@ from torch.utils import _pytree as pytree
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
-from torchtitan.rl.actors.monarch import rdma
-from torchtitan.rl.actors.monarch.rdma import _TensorRef, MonarchRDMAObject
+from torchtitan.rl.actors.monarch import rdma_object
+from torchtitan.rl.actors.monarch.rdma_object import _TensorRef, MonarchRDMAObject
 from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
@@ -105,8 +105,8 @@ def _fields(microbatch: TrainingMicrobatch) -> dict:
 def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(rdma, "RDMABuffer", _FakeRDMABuffer)
-    monkeypatch.setattr(rdma, "RDMAAction", _FakeRDMAAction)
+    monkeypatch.setattr(rdma_object, "RDMABuffer", _FakeRDMABuffer)
+    monkeypatch.setattr(rdma_object, "RDMAAction", _FakeRDMAAction)
     # At 512 tokens the int64 (4 KiB), float (2 KiB) and routed-id (2 KiB, in model_kwargs)
     # tensors go by ref; the bool masks (512 B), token counts and empty tensor go by value.
     microbatch = _microbatch(num_tokens=512)
@@ -181,7 +181,7 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
     def fail_to_register(tensor: torch.Tensor) -> None:
         pytest.fail("registered an RDMA buffer with rdma_min_tensor_bytes unset")
 
-    monkeypatch.setattr(rdma, "RDMABuffer", fail_to_register)
+    monkeypatch.setattr(rdma_object, "RDMABuffer", fail_to_register)
     batcher = _build_batcher(rdma_min_tensor_bytes=None)
 
     batch, _ = batcher.add_training_samples(
@@ -193,7 +193,7 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
 
 
 def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> None:
-    monkeypatch.setattr(rdma, "RDMABuffer", _FakeRDMABuffer)
+    monkeypatch.setattr(rdma_object, "RDMABuffer", _FakeRDMABuffer)
     batcher = _build_batcher(rdma_min_tensor_bytes=1024)
 
     batches = [

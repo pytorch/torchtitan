@@ -22,7 +22,7 @@ from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.actor import Actor
-from torchtitan.rl.actors.monarch.rdma import MonarchRDMAObject
+from torchtitan.rl.actors.monarch.rdma_object import MonarchRDMAObject
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 

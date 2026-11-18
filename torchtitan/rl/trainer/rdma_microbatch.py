@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 from torchtitan.observability import structured_logger as sl
 
 if TYPE_CHECKING:
-    from torchtitan.rl.actors.rdma import RDMAObject
+    from torchtitan.rl.actors.rdma_object import RDMAObject
     from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 
 

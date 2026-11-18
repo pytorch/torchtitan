@@ -16,8 +16,12 @@ import torch
 from monarch.actor import Actor, endpoint, this_host
 from renderers import PlaceholderRange
 
-from torchtitan.rl.actors.monarch import rdma
-from torchtitan.rl.actors.monarch.rdma import _BytesRef, _TensorRef, MonarchRDMAObject
+from torchtitan.rl.actors.monarch import rdma_object
+from torchtitan.rl.actors.monarch.rdma_object import (
+    _BytesRef,
+    _TensorRef,
+    MonarchRDMAObject,
+)
 from torchtitan.rl.rollout.rdma_prompt import RDMAImageFiles, RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 
@@ -72,8 +76,8 @@ class _Payload:
 def test_rdma_object_round_trips_tensor_and_bytes_leaves_and_drops_their_buffers(
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(rdma, "RDMABuffer", _FakeRDMABuffer)
-    monkeypatch.setattr(rdma, "RDMAAction", _FakeRDMAAction)
+    monkeypatch.setattr(rdma_object, "RDMABuffer", _FakeRDMABuffer)
+    monkeypatch.setattr(rdma_object, "RDMAAction", _FakeRDMAAction)
     payload = _Payload(
         tensor=torch.arange(64, dtype=torch.float32).view(8, 8),  # 256 B
         files=(bytes(range(200)), b"x"),
@@ -122,8 +126,8 @@ def _image_prompt(*images: PromptImage) -> Prompt:
 
 
 def test_image_files_keep_each_large_file_once_and_drop_them(monkeypatch) -> None:
-    monkeypatch.setattr(rdma, "RDMABuffer", _FakeRDMABuffer)
-    monkeypatch.setattr(rdma, "RDMAAction", _FakeRDMAAction)
+    monkeypatch.setattr(rdma_object, "RDMABuffer", _FakeRDMABuffer)
+    monkeypatch.setattr(rdma_object, "RDMAAction", _FakeRDMAAction)
     registrations = []
 
     def register(value, *, min_bytes):
