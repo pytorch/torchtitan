@@ -242,11 +242,18 @@ def compile_time_passes(
 
     passes = construct_mandatory_graph_passes()
     if include_mandatory_normalization:
+        deduplication = deduplicate_fsdp_unshard_chains_pass
+        if config.use_flex_shard_instead_simple_fsdp:
+            from torchtitan.experiments.graph_trainer.flex_shard import (
+                deduplicate_flex_shard_unshard_pass,
+            )
+
+            deduplication = deduplicate_flex_shard_unshard_pass
         passes.extend(
             [
                 eliminate_dead_code_pass,
                 canonicalize_graph_pass,
-                deduplicate_fsdp_unshard_chains_pass,
+                deduplication,
             ]
         )
     ep_overlap_module_fqn: str | None = None

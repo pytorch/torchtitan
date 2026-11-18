@@ -1183,9 +1183,11 @@ class TestFlexShardScheduling(TestCase):
         if importlib.util.find_spec("flex_shard") is None:
             self.skipTest("FlexShard is not installed")
         from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_unshard_pass,
             flex_shard_fsdp_scheduling,
         )
 
+        self.deduplicate = deduplicate_flex_shard_unshard_pass
         self.schedule = flex_shard_fsdp_scheduling
 
     def _bucket(self, graph, source, action, *, fqn="layer.weight", backward=False):
@@ -1213,6 +1215,63 @@ class TestFlexShardScheduling(TestCase):
             }
             node.meta["autograd_backward"] = backward
         return send, copy, launch, wait, finish
+
+    def _bucket_values(self, bucket):
+        send, copy, launch, wait, finish = bucket
+        send.meta["val"] = torch.empty(4)
+        copy.meta["val"] = send.meta["val"]
+        launch.meta["val"] = torch.empty(8)
+        wait.meta["val"] = launch.meta["val"]
+        finish.meta["val"] = torch.empty(8)
+
+    def test_deduplicates_forward_but_preserves_backward_reductions(self):
+        graph = torch.fx.Graph()
+        param = graph.placeholder("param")
+        param.meta["val"] = torch.empty(4)
+        forward = [self._bucket(graph, param, "unshard") for _ in range(2)]
+        backward = [
+            self._bucket(graph, param, "reduce_grad", backward=True) for _ in range(2)
+        ]
+        for bucket in forward + backward:
+            self._bucket_values(bucket)
+        graph.output(tuple(bucket[-1] for bucket in forward + backward))
+        gm = torch.fx.GraphModule({}, graph)
+        self.deduplicate(gm)
+        self.assertNotIn(forward[1][2], list(graph.nodes))
+        self.assertIn(forward[0][2], list(graph.nodes))
+        for bucket in backward:
+            self.assertIn(bucket[2], list(graph.nodes))
+        outputs = list(graph.nodes)[-1].args[0]
+        self.assertIs(outputs[0], outputs[1])
+
+    def test_deduplication_preserves_input_and_output_mutations(self):
+        for mutation in ("input", "output", "chunk"):
+            with self.subTest(mutation=mutation):
+                graph = torch.fx.Graph()
+                param = graph.placeholder("param")
+                sibling = graph.placeholder("sibling")
+                storage = torch.empty(8)
+                param.meta["val"] = storage[:4]
+                sibling.meta["val"] = storage[4:]
+                first = self._bucket(graph, param, "unshard")
+                self._bucket_values(first)
+                if mutation in ("input", "output"):
+                    target = sibling if mutation == "input" else first[-1]
+                    alias = graph.call_function(torch.ops.aten.alias.default, (target,))
+                    alias.meta["val"] = target.meta["val"].view_as(target.meta["val"])
+                    write = graph.call_function(torch.ops.aten.zero_.default, (alias,))
+                    write.meta["val"] = alias.meta["val"]
+                second = self._bucket(graph, param, "unshard")
+                self._bucket_values(second)
+                if mutation == "chunk":
+                    for index, bucket in enumerate((first, second)):
+                        for node in bucket:
+                            node.meta["chunk_id"] = index
+                graph.output((first[-1], second[-1]))
+                gm = torch.fx.GraphModule({}, graph)
+                self.deduplicate(gm)
+                self.assertIn(first[2], list(graph.nodes))
+                self.assertIn(second[2], list(graph.nodes))
 
     def test_moves_buffer_writes_with_launch_and_unpacking_with_wait(self):
         for action in ("unshard", "reduce_grad"):

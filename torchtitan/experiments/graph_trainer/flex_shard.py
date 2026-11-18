@@ -7,6 +7,7 @@
 """Apply FlexShard's bucket runtime before GraphTrainer tracing."""
 
 import logging
+import operator
 from collections import defaultdict
 from functools import partial
 from itertools import pairwise
@@ -34,6 +35,7 @@ from torch.distributed.tensor.placement_types import (
     _StridedShard,
     Placement as DTensorPlacement,
 )
+from torch.utils._pytree import tree_leaves
 
 from torchtitan.components.optim import GradientClipper
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
@@ -44,6 +46,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     FSDPGraphRegions,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import graph_outputs
+from torchtitan.experiments.graph_trainer.mutation_utils import mutation_target_nodes
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
@@ -244,6 +247,121 @@ def _collect_bucket_regions(graph: fx.Graph):
         region.append(node)
         region_key, phase = key, next_phase
     return buckets
+
+
+def deduplicate_flex_shard_unshard_pass(
+    gm: fx.GraphModule, example_inputs: tuple | None = None
+) -> fx.GraphModule:
+    del example_inputs
+    chunk_keys = (
+        "chunk_id",
+        "chunked_region_fqn",
+        "chunked_region_is_backward",
+        "chunked_region_producer",
+        "chunked_region_role",
+    )
+    for module in gm.modules():
+        if not isinstance(module, fx.GraphModule):
+            continue
+        graph = module.graph
+        storages = {
+            node: frozenset(
+                value.untyped_storage()
+                for value in tree_leaves(node.meta.get("val"))
+                if isinstance(value, torch.Tensor)
+            )
+            for node in graph.nodes
+        }
+        writes = {
+            node: set().union(
+                *(storages[target] for target in mutation_target_nodes(node))
+            )
+            for node in graph.nodes
+        }
+        regions = _collect_bucket_regions(graph).get(("unshard", False), [])
+        starts = {region[0]: region for region in regions}
+        epochs = defaultdict(int)
+        canonical = {}
+        removable = set()
+        for node in tuple(graph.nodes):
+            if node in starts:
+                region = starts[node]
+                indices = {value: index for index, value in enumerate(region)}
+                inputs = {
+                    dependency
+                    for value in region
+                    for dependency in value.all_input_nodes
+                    if dependency not in indices
+                }
+                input_storages = set().union(*(storages[value] for value in inputs))
+                region_storages = set().union(*(storages[value] for value in region))
+                fresh_storages = region_storages - input_storages
+                safe = all(
+                    (
+                        getattr(value.target, "_schema", None) is not None
+                        or value.target is operator.getitem
+                    )
+                    and not (writes[value] & input_storages)
+                    for value in region
+                ) and not any(
+                    written & fresh_storages
+                    for value, written in writes.items()
+                    if value not in indices
+                )
+
+                def key(value):
+                    if isinstance(value, fx.Node):
+                        if value in indices:
+                            return ("owned", indices[value])
+                        return (
+                            "input",
+                            value,
+                            tuple(
+                                sorted(epochs[storage] for storage in storages[value])
+                            ),
+                        )
+                    if isinstance(value, (tuple, list)):
+                        return (type(value), tuple(key(item) for item in value))
+                    if isinstance(value, dict):
+                        return tuple((name, key(item)) for name, item in value.items())
+                    return value
+
+                if safe:
+                    signature = tuple(
+                        (
+                            value.op,
+                            value.target,
+                            key(value.args),
+                            key(value.kwargs),
+                            tuple(value.meta["custom"][FLEX_SHARD_META_PARAM_FQNS]),
+                            tuple(
+                                value.meta["custom"][FLEX_SHARD_META_MESH_AXIS_NAMES]
+                            ),
+                            tuple(
+                                value.meta.get(name, value.meta["custom"].get(name))
+                                for name in chunk_keys
+                            ),
+                        )
+                        for value in region
+                    )
+                    previous = canonical.setdefault(signature, region)
+                    if previous is not region:
+                        for duplicate, original in zip(region, previous, strict=True):
+                            for user in tuple(duplicate.users):
+                                if user not in indices:
+                                    user.replace_input_with(duplicate, original)
+                        removable.update(region)
+            for storage in writes[node]:
+                epochs[storage] += 1
+        if removable:
+            graph.eliminate_dead_code(
+                is_impure_node=lambda value: value not in removable
+                and value.is_impure()
+            )
+            graph.lint()
+            module.recompile()
+            logger.info("Removed %s duplicate FlexShard unshard nodes", len(removable))
+    return gm
 
 
 def get_flex_shard_graph_regions(

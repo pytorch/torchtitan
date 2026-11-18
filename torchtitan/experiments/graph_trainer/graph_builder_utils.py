@@ -305,13 +305,20 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     PagedStashManager.get_instance().current_stage_index = stage.stage_index
 
     compile_config: GraphTrainerCompileConfig = config.compile
+    deduplication = deduplicate_fsdp_unshard_chains_pass
+    if config.use_flex_shard_instead_simple_fsdp:
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_unshard_pass,
+        )
+
+        deduplication = deduplicate_flex_shard_unshard_pass
     traced.gm = apply_graph_passes(
         traced.gm,
         traced.example_inputs,
         [
             eliminate_dead_code_pass,
             canonicalize_graph_pass,
-            deduplicate_fsdp_unshard_chains_pass,
+            deduplication,
         ],
         compile_config=compile_config,
         respect_disable_passes=False,
