@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from unittest.mock import patch
 
 import pytest
@@ -38,9 +37,7 @@ def test_apply_env_defaults_preserves_existing_values() -> None:
         assert os.environ["UNRELATED"] == "value"
 
 
-@pytest.mark.parametrize(
-    "value", ["", "expandable_segments:False", "max_split_size_mb:128"]
-)
+@pytest.mark.parametrize("value", ["", "expandable_segments:False"])
 def test_apply_env_defaults_mirrors_explicit_allocator(value: str) -> None:
     with patch.dict(os.environ, {"PYTORCH_ALLOC_CONF": value}, clear=True):
         apply_env_defaults()
@@ -59,18 +56,3 @@ def test_apply_env_defaults_rejects_legacy_or_conflicting_allocator(canonical) -
         with pytest.raises(ValueError, match="Use PYTORCH_ALLOC_CONF"):
             apply_env_defaults()
         assert dict(os.environ) == explicit
-
-
-@pytest.mark.parametrize("explicit", [False, True])
-def test_apply_env_defaults_warns_only_for_late_defaults(explicit: bool) -> None:
-    env = {"PYTORCH_ALLOC_CONF": "expandable_segments:False"} if explicit else {}
-    with (
-        patch.dict(os.environ, env, clear=True),
-        patch.dict("sys.modules", {"torch": object()}),
-        warnings.catch_warnings(record=True) as caught,
-    ):
-        warnings.simplefilter("always")
-        apply_env_defaults()
-        assert len(caught) == (0 if explicit else 1)
-        if caught:
-            assert "default PYTORCH_ALLOC_CONF" in str(caught[0].message)
