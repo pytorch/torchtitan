@@ -162,12 +162,3 @@ def vision_merger_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         output_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
     )
-
-
-def vision_rotary_embedding_sharding_config() -> ShardingConfig:
-    """Vision rotary embedding; TP-replicated like the decoder RoPE cache."""
-    state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.R})
-    return ShardingConfig(
-        state_shardings={"inv_freq": state_placement},
-        output_shardings=state_placement,
-    )
