@@ -213,27 +213,17 @@ def test_ep_off_routed_experts_checked_as_dense() -> None:
     import spmd_types as spmd
 
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.base.module import Module
     from torchtitan.models.common.moe import MoE
 
     config = deepseek_v3_debugmodel()
-    patched = False
-    for _, moe_cfg, _, _ in config.model.traverse(MoE.Config):
-        for _, rcfg, _, _ in moe_cfg.routed_experts.traverse(
-            Module.Config, recurse=True
-        ):
-            sharding = rcfg.sharding_config
-            if sharding is None or "weight" not in sharding.state_shardings:
-                continue
-            sharding.state_shardings["weight"] = spmd.SpmdType(
-                {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
-                partition_spec=spmd.PartitionSpec(None, None),
-            )
-            patched = True
-            break
-        if patched:
-            break
-    assert patched
+    _, moe_cfg, _, _ = next(iter(config.model.traverse(MoE.Config)))
+    sharding = moe_cfg.routed_experts.w13.sharding_config
+    assert sharding is not None
+    # w13.weight is 3-D; the validator only reads the named axes.
+    sharding.state_shardings["weight"] = spmd.SpmdType(
+        {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+        partition_spec=spmd.PartitionSpec(None, None, None),
+    )
     with pytest.raises(ValueError, match="declares no 'tp' sharding"):
         validate_model_training_config(
             config.model,

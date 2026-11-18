@@ -171,17 +171,16 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         import spmd_types as spmd
 
         from torchtitan.distributed.parallelism_context import MeshAxisName
+        from torchtitan.models.common.attention import GQAttention
 
         cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
         # Strip TP from a single dense layout; the union still names TP.
-        # qkv_linear only exists on the concrete GQA config, not on the
-        # base Attention.Config type.
-        qkv_linear = getattr(cfg.layers[0].attention, "qkv_linear")
-        qkv_linear.wqkv.sharding_config.state_shardings["weight"] = (
-            spmd.SpmdType(
-                {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
-                partition_spec=spmd.PartitionSpec(None, None),
-            )
+        attention = cfg.layers[0].attention
+        assert isinstance(attention, GQAttention.Config)
+        qkv_linear = attention.qkv_linear
+        qkv_linear.wqkv.sharding_config.state_shardings["weight"] = spmd.SpmdType(
+            {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+            partition_spec=spmd.PartitionSpec(None, None),
         )
         with self.assertRaisesRegex(ValueError, r"declares no 'tp' sharding"):
             _validate(cfg, tp=2)

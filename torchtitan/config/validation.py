@@ -90,7 +90,7 @@ def _validate_declared_parallel_axes(
     weight placements, so validating it at ``expert_parallel_degree > 1``
     fails here instead of silently ignoring the EP degree at runtime.
     """
-    from torchtitan.distributed.parallelism_context import MeshAxisName as A
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.moe import MoE
 
     p = parallelism
@@ -99,10 +99,10 @@ def _validate_declared_parallel_axes(
     dense_required = [
         axis
         for axis, degree in (
-            (A.TP, p.tensor_parallel_degree),
-            (A.CP, p.context_parallel_degree),
-            (A.DP_REPLICATE, p.data_parallel_replicate_degree),
-            (A.DP_SHARD, p.data_parallel_shard_degree),
+            (MeshAxisName.TP, p.tensor_parallel_degree),
+            (MeshAxisName.CP, p.context_parallel_degree),
+            (MeshAxisName.DP_REPLICATE, p.data_parallel_replicate_degree),
+            (MeshAxisName.DP_SHARD, p.data_parallel_shard_degree),
         )
         if degree != 1
     ]
@@ -121,17 +121,17 @@ def _validate_declared_parallel_axes(
                 f"{p.expert_parallel_degree})."
             )
         # The mesh keeps edp_shard alive whenever EP is enabled.
-        sparse_required = [A.EP, A.EDP_SHARD]
+        sparse_required = [MeshAxisName.EP, MeshAxisName.EDP_SHARD]
         if p.data_parallel_replicate_degree > 1:
-            sparse_required.append(A.DP_REPLICATE)
+            sparse_required.append(MeshAxisName.DP_REPLICATE)
 
     for fqn, field, axes in _collect_model_layouts(model):
         if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
             required = sparse_required
         else:
             required = dense_required
-            if A.DP in axes:  # logical dp folds dp_replicate and dp_shard
-                axes = axes | {A.DP_REPLICATE, A.DP_SHARD}
+            if MeshAxisName.DP in axes:  # logical dp folds dp_replicate and dp_shard
+                axes = axes | {MeshAxisName.DP_REPLICATE, MeshAxisName.DP_SHARD}
         for axis in required:
             if axis not in axes:
                 raise ValueError(
