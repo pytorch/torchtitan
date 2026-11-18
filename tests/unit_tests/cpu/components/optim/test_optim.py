@@ -49,6 +49,7 @@ class _TestGradientClipper(GradientClipper):
 def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
     parameters = [torch.nn.Parameter(torch.tensor(1.0))]
     parallelism_context = MagicMock()
+    parallelism_context.flex_shard_enabled = False
     pp_mesh = MagicMock()
     parallelism_context.get_optional_mesh.return_value = pp_mesh
     gradient_clipper_config = Optim.Config().gradient_clipper
@@ -71,7 +72,8 @@ def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
         1.0,
         foreach=True,
         pp_mesh=pp_mesh,
-        flex_shard_enabled=parallelism_context.flex_shard_enabled,
+        flex_shard_enabled=False,
+        flex_shard_reduce_meshes=None,
     )
     assert grad_norm is expected_grad_norm
 
