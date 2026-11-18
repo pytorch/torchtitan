@@ -493,8 +493,6 @@ class ComplexVisionRoPE(RoPE):
             rotation_TR2 = torch.stack((col_TF2, row_TF2), dim=-2).flatten(-3, -2)
         else:
             rotation_TR2 = torch.cat((col_TF2, row_TF2), dim=-2)
-        if torch.compiler.is_compiling():
-            return rotation_TR2.flatten(-2).unsqueeze(1)
         return torch.view_as_complex(rotation_TR2).unsqueeze(1)
 
 
