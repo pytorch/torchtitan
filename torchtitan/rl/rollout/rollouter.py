@@ -347,11 +347,12 @@ class BaseRolloutWorker(Configurable, ABC):
         rollouts: list[Rollout],
         env_input: object,
     ) -> list[RubricOutput]:
-        """Score one group's rollouts; `run_group` applies the rewards.
+        """Score one group's rollouts; `make_scored_group` applies the rewards.
         Default impl delegates to `self.rubric.score_group`.
 
         Args:
-            rollouts: Sibling rollouts in one prompt group, already stepped.
+            rollouts: Sibling rollouts in one prompt group, already stepped. Only `is_trainable()`
+                rollouts are passed (see `make_scored_group`).
             env_input: the env initial input shared by the group.
 
         Returns:
@@ -370,8 +371,9 @@ class BaseRolloutWorker(Configurable, ABC):
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
-        """Roll out one prompt group, then set each reward from `score_group` and each
-        advantage from `advantage_estimator`.
+        """Roll out and score one prompt group: run its rollouts, then pass them to
+        `make_scored_group`. Each rollout returns a `Rollout` even when it fails (ERROR_INFRA on
+        an exception), and logs it with `log_failed_rollout`, so one failure doesn't fail the group.
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
