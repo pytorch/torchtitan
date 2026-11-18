@@ -444,6 +444,7 @@ class QSAInnerAttention(InnerAttention):
             config.indexer_loss.build() if config.indexer_loss is not None else None
         )
 
+    @torch.no_grad()
     def _teacher(self, query_THK, key_THK, selected_indices_TJ, num_blocks, *, scale):
         """Head-mean softmax over the selected tokens, max-pooled per complete block.
 
@@ -548,10 +549,12 @@ class QSAInnerAttention(InnerAttention):
         assert self.indexer_loss is not None
         num_blocks = scores_TB.shape[-1]
         if num_blocks:
-            with torch.no_grad():
-                teacher_TB = self._teacher(
-                    query_THK, key_THK, selected_indices_TJ, num_blocks, scale=scale
-                )
+            # The no-grad KL target is small ([T, B] fp32), so keep it instead of
+            # rerunning the key gather, GEMMs and softmax during recompute.
+            teacher_TB = remat.region(
+                self._teacher, "indexer_teacher", recompute=False
+            )(query_THK, key_THK, selected_indices_TJ, num_blocks, scale=scale)
+            remat.recompute_needs_tensor(teacher_TB)
             raw_sum = self.indexer_loss.block_kl(scores_TB, teacher_TB)
         else:
             # Empty ranks must participate in the indexer's FSDP gradient
