@@ -266,6 +266,7 @@ def _qwen35_vision_encoder_config(
     num_position_embeddings: int,
     layer_norm_eps: float = 1e-6,
     rope_theta: float = 10000.0,
+    # The default 16M-pixel budget with aspect ratio < 200 gives <= 3,620 patches per side.
     max_rope_positions: int = 4096,
     in_channels: int = 3,
 ) -> Qwen35VisionEncoder.Config:

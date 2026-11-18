@@ -153,15 +153,21 @@ MUSE_SPARK_DEBUG_SPECIAL_TOKENS = {
 # ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``. The patch
 # sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
 # ``downsample_factor``). Video applies the image settings to every frame.
+NAVIT_MAX_IMAGE_TOKENS = 4096
+
 MUSE_SPARK_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "patch_size": 14,
     "temporal_patch_size": 2,
     "spatial_merge_size": 2,
     "image_mean": (0.5, 0.5, 0.5),
     "image_std": (0.5, 0.5, 0.5),
-    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "resize": MuseGlimmerPatchGridResize.Config(
+        max_image_tokens=NAVIT_MAX_IMAGE_TOKENS
+    ),
     "patch_order": "raster",
-    "video_resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "video_resize": MuseGlimmerPatchGridResize.Config(
+        max_image_tokens=NAVIT_MAX_IMAGE_TOKENS
+    ),
     # The released processor_config.json resamples with LANCZOS.
     "image_interpolation_mode": "lanczos",
 }
@@ -675,7 +681,7 @@ def muse_spark_navit_encoder_config(
     pos_emb_grid_w: int = 32,
     use_rope: bool = True,
     rope_theta: float = 10000.0,
-    max_rope_positions: int = 8193,
+    max_image_tokens: int = NAVIT_MAX_IMAGE_TOKENS,
 ) -> NaViTEncoder.Config:
     head_dim = latent_dim // num_heads
     output_dim = latent_dim * downsample_factor**2
@@ -717,7 +723,7 @@ def muse_spark_navit_encoder_config(
                 rope=(
                     ComplexVisionRoPE.Config(
                         dim=head_dim,
-                        max_context_length=max_rope_positions,
+                        max_context_length=max_image_tokens * downsample_factor + 1,
                         theta=rope_theta,
                         pair_layout="concatenated",
                         sharding_config=vision_rope_sharding_config(),

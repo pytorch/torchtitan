@@ -89,13 +89,17 @@ KIMI_K2_5_SPECIAL_TOKENS = {
 # are not in the Hugging Face config: ``resize`` reimplements the NaViT
 # patch-grid resize in the processor's code, and ``patch_order`` is the raster
 # layout MoonViT3d expects.
+_MAX_PATCHES_PER_SIDE = 512
+
 KIMI_K2_5_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "patch_size": 14,
     "temporal_patch_size": 1,
     "spatial_merge_size": 2,
     "image_mean": (0.5, 0.5, 0.5),
     "image_std": (0.5, 0.5, 0.5),
-    "resize": NaViTPatchGridResize.Config(max_patches=16_384, max_patches_per_side=512),
+    "resize": NaViTPatchGridResize.Config(
+        max_patches=16_384, max_patches_per_side=_MAX_PATCHES_PER_SIDE
+    ),
     "patch_order": "raster",
 }
 
@@ -185,7 +189,7 @@ def _vision_encoder_config(
     init_pos_emb_height: int = 64,
     init_pos_emb_width: int = 64,
     rope_theta: float = 10000.0,
-    max_rope_positions: int = 512,
+    max_rope_positions: int = _MAX_PATCHES_PER_SIDE,
     merge_kernel_size: list[int] | None = None,
     text_hidden_size: int = 7168,
 ) -> KimiK25VisionEncoder.Config:
