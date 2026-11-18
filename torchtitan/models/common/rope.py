@@ -38,6 +38,34 @@ class Llama3ScalingConfig:
     high_freq_factor: float = 4.0
     original_max_position_embeddings: int = 8192
 
+    def inv_freq(self, dim: int, theta: float) -> torch.Tensor:
+        """Divide the low-frequency band by ``factor`` and blend the middle band."""
+        inv_freq_F = _default_inv_freq(dim, theta)
+        wavelength_F = 2 * math.pi / inv_freq_F
+        high_freq_wavelength = (
+            self.original_max_position_embeddings / self.high_freq_factor
+        )
+        low_freq_wavelength = (
+            self.original_max_position_embeddings / self.low_freq_factor
+        )
+        inv_freq_F = torch.where(
+            wavelength_F > low_freq_wavelength,
+            inv_freq_F / self.factor,
+            inv_freq_F,
+        )
+        smooth_F = (
+            self.original_max_position_embeddings / wavelength_F - self.low_freq_factor
+        ) / (self.high_freq_factor - self.low_freq_factor)
+        scaled_F = (1 - smooth_F) * inv_freq_F / self.factor + smooth_F * inv_freq_F
+        medium_F = ~(wavelength_F < high_freq_wavelength) * ~(
+            wavelength_F > low_freq_wavelength
+        )
+        return torch.where(medium_F, scaled_F, inv_freq_F)
+
+    def qk_amplitude(self, *, mscale: float = 1.0) -> float:
+        """Llama 3 scaling does not change the attention score magnitude."""
+        return 1.0
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class YaRNScalingConfig:
@@ -48,6 +76,26 @@ class YaRNScalingConfig:
     beta_slow: float = 1.0
     original_seq_len: int = 4096
     truncate: bool = True
+
+    def inv_freq(self, dim: int, theta: float) -> torch.Tensor:
+        """YaRN inverse frequencies; ``factor <= 1`` keeps the default ones."""
+        if self.factor <= 1.0:
+            return _default_inv_freq(dim, theta)
+        return _yarn_inv_freq(
+            dim,
+            theta,
+            self.factor,
+            self.beta_fast,
+            self.beta_slow,
+            self.original_seq_len,
+            self.truncate,
+        )
+
+    def qk_amplitude(self, *, mscale: float = 1.0) -> float:
+        """Per-Q/K magnitude factor applied by attention, not RoPE."""
+        if self.factor <= 1.0:
+            return 1.0
+        return 0.1 * mscale * math.log(self.factor) + 1.0
 
 
 RoPEScalingConfig = Llama3ScalingConfig | YaRNScalingConfig
@@ -111,52 +159,9 @@ def _yarn_inv_freq(
     return inv_freq / rope_factor * ramp + inv_freq * (1 - ramp)
 
 
-def _compute_inv_freq(
-    dim: int, theta: float, scaling: RoPEScalingConfig | None
-) -> torch.Tensor:
-    """Compute FP32 inverse frequencies; F denotes rotary frequency pairs."""
-    if isinstance(scaling, YaRNScalingConfig) and scaling.factor > 1.0:
-        # YaRN (DeepSeek V3 style)
-        return _yarn_inv_freq(
-            dim,
-            theta,
-            scaling.factor,
-            scaling.beta_fast,
-            scaling.beta_slow,
-            scaling.original_seq_len,
-            scaling.truncate,
-        )
-    inv_freq_F = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    if isinstance(scaling, Llama3ScalingConfig):
-        wavelength_F = 2 * math.pi / inv_freq_F
-        high_freq_wavelength = (
-            scaling.original_max_position_embeddings / scaling.high_freq_factor
-        )
-        low_freq_wavelength = (
-            scaling.original_max_position_embeddings / scaling.low_freq_factor
-        )
-        inv_freq_F = torch.where(
-            wavelength_F > low_freq_wavelength,
-            inv_freq_F / scaling.factor,
-            inv_freq_F,
-        )
-        smooth_F = (
-            scaling.original_max_position_embeddings / wavelength_F
-            - scaling.low_freq_factor
-        ) / (scaling.high_freq_factor - scaling.low_freq_factor)
-        scaled_F = (1 - smooth_F) * inv_freq_F / scaling.factor + smooth_F * inv_freq_F
-        medium_F = ~(wavelength_F < high_freq_wavelength) * ~(
-            wavelength_F > low_freq_wavelength
-        )
-        inv_freq_F = torch.where(medium_F, scaled_F, inv_freq_F)
-    return inv_freq_F
-
-
-def _qk_amplitude(scaling: RoPEScalingConfig | None, *, mscale: float = 1.0) -> float:
-    """Return the per-Q/K magnitude factor applied by attention, not RoPE."""
-    if isinstance(scaling, YaRNScalingConfig) and scaling.factor > 1.0:
-        return 0.1 * mscale * math.log(scaling.factor) + 1.0
-    return 1.0
+def _default_inv_freq(dim: int, theta: float) -> torch.Tensor:
+    """Unscaled FP32 inverse frequencies; F denotes rotary frequency pairs."""
+    return 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
 
 
 class RoPE(Module):
@@ -174,9 +179,17 @@ class RoPE(Module):
         theta: float = 10000.0
         scaling: RoPEScalingConfig | None = None
 
+        def inv_freq(self) -> torch.Tensor:
+            """Return the FP32 inverse frequencies after ``scaling``."""
+            if self.scaling is None:
+                return _default_inv_freq(self.dim, self.theta)
+            return self.scaling.inv_freq(self.dim, self.theta)
+
         def qk_amplitude(self, *, mscale: float = 1.0) -> float:
             """Return the magnitude factor used to scale attention scores."""
-            return _qk_amplitude(self.scaling, mscale=mscale)
+            if self.scaling is None:
+                return 1.0
+            return self.scaling.qk_amplitude(mscale=mscale)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -294,7 +307,7 @@ class ComplexRoPE(RoPE):
             Cache of shape ``(max_context_length, dim / 2)``.
         """
         cfg = self.config
-        inv_freq_F = _compute_inv_freq(cfg.dim, cfg.theta, cfg.scaling)
+        inv_freq_F = cfg.inv_freq()
         positions_P = torch.arange(cfg.max_context_length, device=inv_freq_F.device)
         angles_PF = torch.outer(positions_P, inv_freq_F).float()
         return torch.polar(torch.ones_like(angles_PF), angles_PF)  # complex64
@@ -509,7 +522,7 @@ class CosSinRoPE(RoPE):
         cfg = self.config
         if isinstance(cfg.scaling, Llama3ScalingConfig):
             raise NotImplementedError("Cos/sin RoPE does not support Llama scaling.")
-        inv_freq_F = _compute_inv_freq(cfg.dim, cfg.theta, cfg.scaling)
+        inv_freq_F = cfg.inv_freq()
         positions_P = torch.arange(
             cfg.max_context_length, dtype=inv_freq_F.dtype, device=inv_freq_F.device
         )
