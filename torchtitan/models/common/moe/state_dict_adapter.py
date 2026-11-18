@@ -14,7 +14,7 @@ from torch.distributed.tensor.placement_types import (
     Shard,
 )
 
-from torchtitan.models.base.state_dict_adapter import StateDictAdapter
+from torchtitan.models.base.state_dict_adapter import stack_or_view, StateDictAdapter
 
 from torchtitan.models.common.decoder import Decoder
 
@@ -318,10 +318,11 @@ class MoEStateDictAdapter(StateDictAdapter):
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
 
-        # Stack experts - result may be DTensor or plain tensor depending on sub_mesh
-        local_tensor = torch.stack(sorted_experts, dim=0)
-        if isinstance(local_tensor, DTensor):
-            local_tensor = local_tensor._local_tensor
+        # Experts are DTensors on a sub-mesh or plain tensors; stack their local
+        # tensors, as a view of the grouped weight when they still are its slices.
+        local_tensor = stack_or_view(
+            [e._local_tensor if isinstance(e, DTensor) else e for e in sorted_experts]
+        )
 
         assert (
             abstract_key in self.grouped_expert_weight_placements
@@ -389,7 +390,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         sorted_expert_ids = sorted(experts.keys())
         sorted_experts = [experts[i] for i in sorted_expert_ids]
-        stacked_tensor = torch.stack(sorted_experts, dim=0)
+        stacked_tensor = stack_or_view(sorted_experts)
 
         del expert_weights_by_layer[layer_num][abstract_key]
         if not expert_weights_by_layer[layer_num]:

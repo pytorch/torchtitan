@@ -11,19 +11,113 @@ import logging
 import os
 import re
 from abc import ABC, abstractmethod
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
-from torch.distributed.tensor.placement_types import Placement
+from torch.distributed.tensor.placement_types import _StridedShard, Placement
 
 from .model import BaseModel
 
 
 logger = logging.getLogger(__name__)
+
+
+def _stacked_view(tensors: Sequence[torch.Tensor], dim: int) -> torch.Tensor | None:
+    """``torch.stack(tensors, dim)`` as a view, if the tensors tile one storage evenly."""
+    first = tensors[0]
+    if len(tensors) == 1:
+        return first.unsqueeze(dim)
+    if first.numel() == 0 or any(s < 0 for s in first.stride()):
+        return None
+    storage = first.untyped_storage().data_ptr()
+    if not all(
+        t.untyped_storage().data_ptr() == storage
+        and t.shape == first.shape
+        and t.stride() == first.stride()
+        and t.dtype == first.dtype
+        for t in tensors
+    ):
+        return None
+    step = tensors[1].storage_offset() - first.storage_offset()
+    if step <= 0 or any(
+        t.storage_offset() != first.storage_offset() + i * step
+        for i, t in enumerate(tensors)
+    ):
+        return None
+    size = (*first.shape[:dim], len(tensors), *first.shape[dim:])
+    stride = [*first.stride()[:dim], step, *first.stride()[dim:]]
+    # No two elements may share memory: with the dims ordered by stride, each
+    # stride must step past everything the smaller dims reach.
+    extent = 0
+    for n, s in sorted((d for d in zip(size, stride) if d[0] > 1), key=lambda d: d[1]):
+        if s <= extent:
+            return None
+        extent += (n - 1) * s
+    # A size-1 dim never moves, so its stride is free. Give it the value a
+    # contiguous tensor has, as the parameter does, so that copy_ sees the same
+    # layout and skips the copy (a single local expert leaves one).
+    for i in reversed(range(len(size))):
+        if size[i] == 1:
+            stride[i] = stride[i + 1] * size[i + 1] if i + 1 < len(size) else 1
+    return first.as_strided(size, stride, first.storage_offset())
+
+
+def _shift_placements(
+    placements: Sequence[Placement], dim: int
+) -> tuple[Placement, ...]:
+    """The placements of a stack along ``dim`` of tensors with ``placements``."""
+    shifted: list[Placement] = []
+    for p in placements:
+        if isinstance(p, _StridedShard) and p.dim >= dim:
+            shifted.append(_StridedShard(p.dim + 1, split_factor=p.split_factor))
+        elif isinstance(p, Shard) and p.dim >= dim:
+            shifted.append(Shard(p.dim + 1))
+        else:
+            shifted.append(p)
+    return tuple(shifted)
+
+
+def stack_or_view(tensors: Sequence[torch.Tensor], dim: int = 0) -> torch.Tensor:
+    """``torch.stack(tensors, dim)``, as a view when the tensors already tile one storage.
+
+    After an HF load into ``to_hf``'s views of the native tensors, the loaded
+    tensors are evenly spaced slices of the native tensor, so the stack is a
+    view of it and ``load_state_dict`` copies it onto itself, which ``copy_``
+    skips. Tensors in separate storages, such as ones read from files, are
+    stacked into a new tensor. DTensors must share their mesh, placements and
+    shape to be viewed.
+    """
+    first = tensors[0]
+    if all(isinstance(t, DTensor) for t in tensors):
+        if all(
+            t.device_mesh == first.device_mesh
+            and t.placements == first.placements
+            and t.shape == first.shape
+            for t in tensors
+        ):
+            local = _stacked_view([t._local_tensor for t in tensors], dim)
+            if local is not None:
+                shape = torch.Size(
+                    (*first.shape[:dim], len(tensors), *first.shape[dim:])
+                )
+                return DTensor.from_local(
+                    local,
+                    first.device_mesh,
+                    _shift_placements(first.placements, dim),
+                    run_check=False,
+                    shape=shape,
+                    # The contiguous stride torch.stack would give the result.
+                    stride=torch.empty(shape, device="meta").stride(),
+                )
+    elif not any(isinstance(t, DTensor) for t in tensors):
+        local = _stacked_view(tensors, dim)
+        if local is not None:
+            return local
+    return torch.stack(list(tensors), dim)
 
 
 def dtensor_safe(fn):
@@ -251,7 +345,7 @@ class StateDictAdapter(BaseStateDictAdapter):
         """Stack logical projection parameters into one native parameter."""
         if not all(key in state_dict for key in logical_keys):
             return
-        state_dict[fused_key] = torch.stack(
+        state_dict[fused_key] = stack_or_view(
             [state_dict.pop(key) for key in logical_keys], dim=dim
         )
 
