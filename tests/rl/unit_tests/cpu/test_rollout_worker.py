@@ -7,9 +7,12 @@
 """Unit tests for direct rollout worker execution."""
 
 import asyncio
+import logging
 import random
+from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
 from renderers import (
     ParsedResponse,
     PlaceholderRange,
@@ -22,10 +25,11 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout import Prompt, PromptImage, RolloutStatus
+from torchtitan.rl.rollout import Prompt, PromptImage, RolloutGroup, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
-from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
@@ -56,6 +60,9 @@ class _TokenEnv:
         )
 
     async def step(self, completion: Completion) -> TokenEnvOutput:
+        if completion.finish_reason == "abort":
+            # What `TokenEnv.step` returns for a response the generator cut short.
+            return TokenEnvOutput(next_prompt=None, status=RolloutStatus.ERROR_INFRA)
         return TokenEnvOutput(
             next_prompt=None,
             status=RolloutStatus.COMPLETED,
@@ -242,6 +249,77 @@ class _CountingMessageEnv:
 
     async def close(self) -> None:
         pass
+
+
+class _RewardRolloutId(RewardFn):
+    """Rewards rollout_id + 1."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RewardFn.Config):
+        pass
+
+    async def __call__(self, rollout, env_input) -> float:
+        return float(rollout.rollout_id + 1)
+
+
+@pytest.mark.parametrize(
+    "fails_in, errors",
+    [
+        ("generate call", [("ConnectionError", "generator unreachable")]),
+        # Nothing raised: the env step returns ERROR_INFRA (this test's TokenEnv records no error).
+        ("aborted generation", []),
+    ],
+)
+def test_a_failed_rollout_is_kept_logged_once_and_left_out_of_the_advantage(
+    fails_in: str, errors: list[tuple[str, str]], caplog
+) -> None:
+    class _GenerateFnFailingRolloutZero(_GenerateFn):
+        async def __call__(self, prompt, **kwargs) -> Completion:
+            completion = await super().__call__(prompt, **kwargs)
+            if kwargs["request_id"].startswith("group=7/rollout=0/"):
+                if fails_in == "generate call":
+                    raise ConnectionError("generator unreachable")
+                if fails_in == "aborted generation":
+                    completion.finish_reason = "abort"
+            return completion
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    async def run() -> RolloutGroup:
+        worker = MessageEnvRolloutWorker(
+            SimpleNamespace(
+                # The stock rubric would give rollout 0 reward 1, had it scored it.
+                rubric=Rubric.Config(reward_fns=[_RewardRolloutId.Config()]),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=AdvantageEstimator.Config(),
+            )
+        )
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        return await worker.run_group(
+            generate_fn=_GenerateFnFailingRolloutZero(),
+            release_session_fn=release_session_fn,
+            sample="sample",
+            group_id=7,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+
+    with caplog.at_level(logging.WARNING):
+        failed, *scored = asyncio.run(run()).rollouts
+    assert failed.status is RolloutStatus.ERROR_INFRA
+    assert [
+        (error["type"], error["message"]) for error in failed.logs.get("errors", [])
+    ] == errors
+    assert caplog.text.count("rollout group=7/rollout=0 failed: ERROR_INFRA") == 1
+    assert (failed.reward, failed.advantage) == (None, None)
+    # Rewards 2 and 3, centered on their mean 2.5.
+    assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
 
 
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
