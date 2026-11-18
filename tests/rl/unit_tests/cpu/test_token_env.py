@@ -74,7 +74,9 @@ def test_env_passes_tools_to_render_parse_and_bridge() -> None:
     # Tool schemas are part of the chat template, and XML-style tool parsers need them
     # to type the arguments; every renderer call must see the same list.
     renderer = _RecordingRenderer()
-    env = TokenEnv.Config().build(message_env=_ToolMessageEnv(), renderer=renderer)
+    env = TokenEnv.Config(max_rollout_tokens=1024).build(
+        message_env=_ToolMessageEnv(), renderer=renderer
+    )
 
     async def run():
         await env.init()
@@ -109,7 +111,9 @@ class _ScriptedRenderer(_RecordingRenderer):
 
 def test_env_returns_each_next_prompt_as_a_delta() -> None:
     renderer = _ScriptedRenderer(prompts=[[1, 2, 3], [1, 2, 3, 4, 7], [1, 2, 3, 4, 9]])
-    env = TokenEnv.Config().build(message_env=_ToolMessageEnv(), renderer=renderer)
+    env = TokenEnv.Config(max_rollout_tokens=1024).build(
+        message_env=_ToolMessageEnv(), renderer=renderer
+    )
 
     def completion(token_ids: list[int]) -> Completion:
         return Completion(
@@ -236,7 +240,9 @@ def test_env_carries_rendered_images_across_turns(monkeypatch) -> None:
         lambda path, image_hash: files[(path, image_hash)],
     )
     renderer = _ImageRenderer()
-    env = TokenEnv.Config().build(message_env=_ImageMessageEnv(), renderer=renderer)
+    env = TokenEnv.Config(max_rollout_tokens=1024).build(
+        message_env=_ImageMessageEnv(), renderer=renderer
+    )
 
     async def run():
         first = await env.init()
@@ -292,7 +298,9 @@ def _init_prompt(multi_modal_data: MultiModalData | None, messages: list) -> Non
         async def init(self) -> MessageEnvInitOutput:
             return MessageEnvInitOutput(init_prompt_messages=messages)
 
-    env = TokenEnv.Config().build(message_env=_MessageEnv(), renderer=_Renderer())
+    env = TokenEnv.Config(max_rollout_tokens=1024).build(
+        message_env=_MessageEnv(), renderer=_Renderer()
+    )
     asyncio.run(env.init())
 
 
@@ -418,3 +426,41 @@ def test_a_response_that_fails_to_parse_is_error_parse_unless_the_generator_cut_
     output = asyncio.run(run())
     assert output.status is status
     assert [error["type"] for error in output.errors] == [error_type]
+
+
+@pytest.mark.parametrize(
+    "prompts, expected",
+    [
+        # The first prompt alone reaches the cap: the policy never answers.
+        ([[1, 2, 3, 4]], [RolloutStatus.FIRST_PROMPT_TOO_LONG]),
+        # The first prompt fits; the next one, after the env's reply, reaches the cap.
+        (
+            [[1, 2], [1, 2, 7, 8, 9]],
+            [RolloutStatus.ONGOING, RolloutStatus.TRUNCATED_PROMPT_TOO_LONG],
+        ),
+    ],
+)
+def test_a_prompt_that_reaches_max_rollout_tokens_ends_the_rollout(
+    prompts: list[list[int]], expected: list[RolloutStatus]
+) -> None:
+    env = TokenEnv.Config(max_rollout_tokens=4).build(
+        message_env=_ToolMessageEnv(), renderer=_ScriptedRenderer(prompts)
+    )
+
+    async def run() -> list[RolloutStatus]:
+        statuses = [(await env.init()).status]
+        if statuses[0] is RolloutStatus.ONGOING:
+            env_output = await env.step(
+                Completion(
+                    min_policy_version=0,
+                    max_policy_version=0,
+                    request_id="r0",
+                    token_ids=[7, 8],
+                    token_logprobs=[-0.1, -0.2],
+                    finish_reason="stop",
+                )
+            )
+            statuses.append(env_output.status)
+        return statuses
+
+    assert asyncio.run(run()) == expected

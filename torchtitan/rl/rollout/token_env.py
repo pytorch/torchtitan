@@ -145,7 +145,9 @@ class TokenEnv(Configurable):
 
     Example:
 
-        env = TokenEnv.Config().build(message_env=MyMessageEnv(...), renderer=renderer)
+        env = TokenEnv.Config(max_rollout_tokens=32768).build(
+            message_env=MyMessageEnv(...), renderer=renderer
+        )
         env_output = await env.init()
         while not env_output.status.is_terminal():
             completion = await generate_fn(env_output.next_prompt, ...)
@@ -156,9 +158,8 @@ class TokenEnv(Configurable):
     class Config(Configurable.Config):
         """Limits enforced by the wrapper"""
 
-        max_rollout_tokens: int | None = None
-        """Max prompt tokens before the next turn; multi-turn envs use it to stop before the
-        prompt outgrows context (`None` disables)."""
+        max_rollout_tokens: int
+        """A prompt of this many tokens or more ends the rollout."""
 
         # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
         step_timeout_s: float | None = 1800.0
@@ -203,18 +204,18 @@ class TokenEnv(Configurable):
             add_generation_prompt=True,
         )
 
-        # Carry the prompt either way: ONGOING if it fits, else
-        # TRUNCATED_PROMPT_TOO_LONG so the over-budget prompt stays debuggable.
+        # A first prompt that doesn't fit ends the rollout before the policy answers.
         prompt = await asyncio.to_thread(self._to_prompt, rendered)
         prompt_too_long = self._is_prompt_too_long(prompt_len=len(prompt.token_ids))
         if not prompt_too_long:
             self._last_prompt = prompt
             self._last_multi_modal_data = rendered.multi_modal_data
+
         return TokenEnvOutput(
             next_prompt=prompt,
             next_prompt_messages=self._messages,
             status=(
-                RolloutStatus.TRUNCATED_PROMPT_TOO_LONG
+                RolloutStatus.FIRST_PROMPT_TOO_LONG
                 if prompt_too_long
                 else RolloutStatus.ONGOING
             ),
@@ -415,8 +416,7 @@ class TokenEnv(Configurable):
         await self._message_env.close()
 
     def _is_prompt_too_long(self, *, prompt_len: int) -> bool:
-        cap = self._config.max_rollout_tokens
-        return cap is not None and prompt_len >= cap
+        return prompt_len >= self._config.max_rollout_tokens
 
     def _to_prompt(self, rendered: RenderedTokens) -> Prompt:
         """The generator's input for the rendered conversation: its tokens and images.
