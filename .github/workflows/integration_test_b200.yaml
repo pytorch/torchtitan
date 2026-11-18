@@ -85,6 +85,7 @@ jobs:
             tests/unit_tests/gpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
             tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference \
+            tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py::TestGatedDeltaNetContextParallel::test_native_cp_matches_reference_without_expanding_scalar_gates \
             -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
