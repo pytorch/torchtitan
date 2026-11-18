@@ -219,6 +219,10 @@ class RolloutStatus(StrEnum):
     """A deadline passed, e.g. the policy ran a command that never ends. Counts as the policy's
     failure."""
 
+    FIRST_PROMPT_TOO_LONG = "first_prompt_too_long"
+    """The first prompt alone reached `max_rollout_tokens`, so the policy never answered. A data
+    problem."""
+
     ONGOING = "ongoing"
     """Still running."""
 
@@ -228,6 +232,8 @@ class RolloutStatus(StrEnum):
     """The turn limit was reached."""
 
     TRUNCATED_PROMPT_TOO_LONG = "truncated_prompt_too_long"
+    """A later prompt reached `max_rollout_tokens`, e.g. after a long tool result: it leaves no
+    room for one output token."""
 
     def is_truncated(self) -> bool:
         return self in (
@@ -242,12 +248,16 @@ class RolloutStatus(StrEnum):
             RolloutStatus.ERROR_INFRA,
             RolloutStatus.ERROR_PARSE,
             RolloutStatus.ERROR_TIMEOUT,
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
         )
 
     def is_trainable(self) -> bool:
         """False for a status that is never scored or trained, e.g. ERROR_INFRA: a failure
         outside the policy says nothing about the policy."""
-        return self not in (RolloutStatus.ERROR_INFRA,)
+        return self not in (
+            RolloutStatus.ERROR_INFRA,
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
+        )
 
     def is_terminal(self) -> bool:
         return self is not RolloutStatus.ONGOING
