@@ -53,6 +53,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 if TYPE_CHECKING:
+    from torchtitan.distributed.parallelism_context import ParallelismContext
     from torchtitan.models.base.model import BaseModel
     from torchtitan.training_engine import TrainingEngine
 
@@ -61,19 +62,12 @@ __all__ = [
     "declare_state_dict_layouts",
     "flex_shard_grad_norm",
     "flex_shard_partial_backwards",
+    "flex_shard_reduce_meshes",
     "has_flex_shard_bucket",
     "record_buckets",
-    "record_grad_norm_mesh",
     "reshard_flex_shard",
     "validate_flex_shard_training",
 ]
-
-# The mesh to reduce a grad norm over for the parameters of the FlexShard buckets
-# on a mesh, when it isn't that mesh, for flex_shard_grad_norm. Keyed by the
-# mesh the buckets hold, which keeps the entry alive as long as the model.
-_GRAD_NORM_MESHES: weakref.WeakKeyDictionary[
-    DeviceMesh, DeviceMesh
-] = weakref.WeakKeyDictionary()
 
 # For flex_shard_partial_backwards, reshard_flex_shard and
 # declare_optimizer_state_layouts: the models FlexShard sharded, and for the
@@ -86,18 +80,29 @@ _MODULE_BUCKETS: weakref.WeakKeyDictionary[
 ] = weakref.WeakKeyDictionary()
 
 
-def record_grad_norm_mesh(bucket_mesh: DeviceMesh, mesh: DeviceMesh) -> None:
-    """Record that ``flex_shard_grad_norm`` reduces the grads of the parameters
-    of the FlexShard buckets on ``bucket_mesh`` over the 1D ``mesh``.
+def flex_shard_reduce_meshes(
+    parallelism_context: "ParallelismContext",
+) -> dict[DeviceMesh, DeviceMesh]:
+    """For each mesh of FlexShard buckets whose parameters another parallelism
+    split before FlexShard sharded them, the 1D mesh to reduce their grad norm
+    over (``flex_shard_grad_norm``), as FSDP2's DTensor grad norm does. The
+    grad norms of other buckets reduce over the buckets' own mesh.
 
-    For parameters that an outer sharding split over more ranks before FlexShard
-    sharded each part over ``bucket_mesh``, e.g. routed experts under expert
-    parallelism.
+    FlexShard knows only each bucket's mesh, so the meshes come from
+    ``parallelism_context``, resolved as ``apply_fsdp_to_decoder``'s callers
+    resolve the meshes they shard over. Under expert parallelism, EP has split
+    the routed experts over ``ep``, and their buckets are on ``edp_shard``.
     """
-    # Meshes compare by value. An equal mesh that an earlier model recorded
-    # would stay the key, and the entry would go when that model does.
-    _GRAD_NORM_MESHES.pop(bucket_mesh, None)
-    _GRAD_NORM_MESHES[bucket_mesh] = mesh
+    from torchtitan.distributed.fsdp import resolve_sparse_fsdp_mesh
+
+    edp_mesh, _ = resolve_sparse_fsdp_mesh(parallelism_context)
+    if edp_mesh is None:
+        return {}
+    # FSDP2's DTensor grad norm reduces routed-expert grads over edp_shard and
+    # ep in one all-reduce, on torchtitan's loss mesh, which spans the same
+    # ranks and which DTensor finds by layout. _flatten returns that mesh, and
+    # raises if its layout differs.
+    return {edp_mesh["edp_shard"]: edp_mesh._flatten("loss_mesh")}
 
 
 def flex_shard_grad_norm(
@@ -107,16 +112,15 @@ def flex_shard_grad_norm(
     error_if_nonfinite: bool,
     foreach: bool | None,
 ) -> torch.Tensor:
-    """The norm of the grads of FlexShard parameters ``params``, whose buckets
-    are on the 1D ``mesh`` (``flex_shard.get_mesh``).
+    """The norm of the grads of FlexShard parameters ``params``, reduced over
+    the 1D ``mesh``: their buckets' mesh (``flex_shard.get_mesh``), or the mesh
+    ``flex_shard_reduce_meshes`` gives for it.
 
-    The grads are plain local shards over ``mesh``. This reduces them over
-    ``mesh``, or over the 1D mesh ``record_grad_norm_mesh`` recorded for it, in
-    the order ``get_total_norm`` does for DTensor grads sharded over that mesh,
-    so the result is bitwise equal: each grad's local norm, reduced over the
-    mesh, then the norm of those norms.
+    The grads are plain local shards. This reduces them in the order
+    ``get_total_norm`` does for DTensor grads sharded over ``mesh``, so the
+    result is bitwise equal: each grad's local norm, reduced over the mesh, then
+    the norm of those norms.
     """
-    mesh = _GRAD_NORM_MESHES.get(mesh, mesh)
     grads = [p.grad for p in params if p.grad is not None]
     # From flex_shard's examples/deepseek_v3/train.py.
     if foreach is False:
