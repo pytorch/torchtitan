@@ -118,7 +118,10 @@ grades the same here as under V2.1's `tests/test.sh`. What differs:
   the test files, applying the test patch and grading; a timeout errors the rollout,
   which the recipe scores 0 (`error_reward`).
 
-Gold-check the tasks before trusting them (next section).
+A gold check of 100 Python tasks, one per repository, on one host: 94 valid (one of
+them only on a rerun). The other 6 also fail under V2.1's own `tests/test.sh` there;
+5 of them need direct internet access. Gold-check the tasks before trusting them
+(next section).
 
 ## If every reward is 0
 
