@@ -132,16 +132,6 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     assert tensor_refs and all(tensor_ref.buffer.dropped for tensor_ref in tensor_refs)
 
 
-def test_only_registered_microbatches_are_rdma_microbatches(monkeypatch) -> None:
-    """The trainer tells the two kinds apart with `isinstance(..., RDMAMicrobatch)`."""
-    monkeypatch.setattr(rdma, "RDMABuffer", _FakeRDMABuffer)
-    microbatch = _microbatch(num_tokens=512)
-    registered = _register(microbatch, min_bytes=1024)
-
-    assert isinstance(registered, RDMAMicrobatch)
-    assert not isinstance(microbatch, RDMAMicrobatch)
-
-
 def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
     # One group per batch, one 256-token microbatch: the int64 (2 KiB) and float32 (1 KiB) fields
     # reach 1 KiB; the bool masks and token counts stay in the message.

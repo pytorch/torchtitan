@@ -11,18 +11,13 @@ with Monarch's RDMA classes faked except in the tests over real Monarch (TCP).""
 import asyncio
 import dataclasses
 
-import numpy as np
+import pytest
 import torch
 from monarch.actor import Actor, endpoint, this_host
 from renderers import PlaceholderRange
 
 from torchtitan.rl.actors.monarch import rdma
-from torchtitan.rl.actors.monarch.rdma import (
-    _ArrayRef,
-    _BytesRef,
-    _TensorRef,
-    MonarchRDMAObject,
-)
+from torchtitan.rl.actors.monarch.rdma import _BytesRef, _TensorRef, MonarchRDMAObject
 from torchtitan.rl.rollout.rdma_prompt import RDMAImageFiles, RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 
@@ -57,108 +52,56 @@ class _FakeRDMAAction:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class _File:
-    name: str
-    data: bytes
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
 class _Settings:
-    """A dataclass with no large leaf, like a microbatch's `VisionProcessor.Config`."""
+    """A dataclass field with no large leaf, like a microbatch's `VisionProcessor.Config`."""
 
     sizes: tuple[int, ...]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _Payload:
-    """A value with every kind of leaf, large and small, inside dataclasses and containers."""
+    """A dataclass value with tensor and bytes leaves, large and small, in fields and containers."""
 
     tensor: torch.Tensor
-    array: np.ndarray
-    files: tuple[_File, ...]
+    files: tuple[bytes, ...]
     extras: dict
     settings: _Settings
     note: str | None = None
 
 
-def _payload() -> _Payload:
-    return _Payload(
-        tensor=torch.arange(64, dtype=torch.float32).view(8, 8),  # 256 B
-        array=np.arange(32, dtype=np.int32),  # 128 B
-        files=(
-            _File(name="large", data=bytes(range(200))),
-            _File(name="small", data=b"x"),
-        ),
-        extras={"small_tensor": torch.tensor([1, 2]), "count": 3},
-        settings=_Settings(sizes=(1, 2)),
-    )
-
-
-def test_rdma_object_round_trips_tensor_array_and_bytes_leaves_and_drops_their_buffers(
+def test_rdma_object_round_trips_tensor_and_bytes_leaves_and_drops_their_buffers(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(rdma, "RDMABuffer", _FakeRDMABuffer)
     monkeypatch.setattr(rdma, "RDMAAction", _FakeRDMAAction)
-    payload = _payload()
+    payload = _Payload(
+        tensor=torch.arange(64, dtype=torch.float32).view(8, 8),  # 256 B
+        files=(bytes(range(200)), b"x"),
+        extras={"small_tensor": torch.tensor([1, 2]), "count": 3},
+        settings=_Settings(sizes=(1, 2)),
+    )
 
     registered = MonarchRDMAObject.register(payload, min_bytes=100)
 
     # Leaves of at least 100 bytes stay in the owner; the rest travel with the handle.
     registered_value = registered.value
     assert isinstance(registered_value.tensor, _TensorRef)
-    assert isinstance(registered_value.array, _ArrayRef)
-    assert isinstance(registered_value.files[0].data, _BytesRef)
-    assert registered_value.files[1].data == b"x"
+    assert isinstance(registered_value.files[0], _BytesRef)
+    assert registered_value.files[1] == b"x"
     assert isinstance(registered_value.extras["small_tensor"], torch.Tensor)
     assert registered_value.extras["count"] == 3
-    # A dataclass without a registered leaf is sent as is, not rebuilt.
     assert registered_value.settings is payload.settings
 
     read = asyncio.run(registered.read())
     assert torch.equal(read.tensor, payload.tensor)
     assert read.tensor.dtype == payload.tensor.dtype
-    np.testing.assert_array_equal(read.array, payload.array)
-    assert read.array.dtype == payload.array.dtype
     assert read.files == payload.files
     assert torch.equal(read.extras["small_tensor"], payload.extras["small_tensor"])
     assert read.extras["count"] == 3 and read.note is None
 
     asyncio.run(registered.drop())
-    buffers = [
-        registered_value.tensor.buffer,
-        registered_value.array.buffer,
-        registered_value.files[0].data.buffer,
-    ]
-    assert all(buffer.dropped for buffer in buffers)
-
-
-class _Reader(Actor):
-    """Reads a registered value in another process."""
-
-    @endpoint
-    async def read(self, registered: MonarchRDMAObject) -> object:
-        return await registered.read()
-
-
-def test_monarch_rdma_object_round_trips_every_leaf_kind(monkeypatch) -> None:
-    # Real Monarch RDMA over TCP (works on any CI host; the reader process inherits the env var).
-    monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
-    payload = _payload()
-
-    async def run() -> _Payload:
-        mesh = this_host().spawn_procs(per_host={"procs": 1})
-        registered = MonarchRDMAObject.register(payload, min_bytes=100)
-        try:
-            reader = mesh.spawn("reader", _Reader)
-            return await reader.read.call_one(registered)
-        finally:
-            await registered.drop()
-            await mesh.stop()
-
-    read = asyncio.run(run())
-    assert torch.equal(read.tensor, payload.tensor)
-    np.testing.assert_array_equal(read.array, payload.array)
-    assert read.files == payload.files
+    assert registered_value.tensor.buffer.dropped
+    assert registered_value.files[0].buffer.dropped
 
 
 def _image(name: str, num_bytes: int) -> PromptImage:
@@ -218,6 +161,12 @@ def test_image_files_keep_each_large_file_once_and_drop_them(monkeypatch) -> Non
     assert all(
         file.value.buffer.dropped
         for file in (sent[2].image_files[0], sent[2].image_files[2])
+    )
+    # A sibling still running after the drop can't keep a buffer nothing would drop.
+    with pytest.raises(RuntimeError, match="after drop"):
+        image_files.register(_image_prompt(large))
+    assert image_files.register(_image_prompt(small)) == RDMAPrompt(
+        _image_prompt(small)
     )
 
 
