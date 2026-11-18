@@ -1,8 +1,8 @@
 # SWE-rebench V2.1 with Verifiers and TitanRL
 
 This example trains a coding agent with TitanRL on the
-[SWE-rebench V2.1 RL dataset](https://hub.harborframework.com/datasets/ibragim-badertdinov/swe-rebench-v2.1-rl),
-whose tasks are all Python GitHub issues.
+[SWE-rebench V2.1 RL dataset](https://hub.harborframework.com/datasets/ibragim-badertdinov/swe-rebench-v2.1-rl):
+GitHub issues from repositories in 20 languages.
 Each rollout is one attempt at one issue: the model edits the repository through
 Verifiers' `bash` harness, in a container of the issue's Docker image; every model
 call goes to TitanRL's generators, and the issue's held-out tests grade the result. Verifiers runs the
@@ -20,16 +20,21 @@ filled from V2.1's Harbor task directories ([`taskset.py`](./taskset.py)).
 
 - **Setup.** Deletes `/swebench_matterhorn`, where some images ship the reference
   solution, and records the repository's `HEAD` as the base commit. V2.1 has no base
-  commit field, and the agent can move `HEAD` later.
+  commit field, and the agent can move `HEAD` later. Every process in the container,
+  the agent's included, gets the task's environment variables from `task.toml`
+  (e.g. Java options).
 - **Agent.** Verifiers' `bash` harness (bash and edit tools) runs in the task container.
   The user prompt is the task's `instruction.md`: the issue text, often followed by
   V2.1's added contract requirements. The system prompt adds prime-envs' rule against
   looking up the upstream fix; it is only a prompt, and the default Docker network lets
   the agent reach GitHub.
-- **Grading.** After the agent stops, the task restores the files the test patch touches
-  to the base commit, applies the held-out test patch and runs the test command in the
-  container. The env server parses the log with prime-envs' copy of SWE-rebench's
-  log parsers, outside the container.
+- **Grading.** After the agent stops, prime-envs restores the files the test patch
+  touches to the base commit and applies the held-out test patch. The test command then
+  runs the way V2.1's `tests/test.sh` runs it: with the task's test environment
+  variables, in a login shell, for at most 1800 s. The env server grades the log with
+  the task's own `tests/grade.py` (V2.1's parser and test-name matching for the task's
+  test framework), outside the container. The grader is code from the pinned dataset
+  and runs on the controller host.
 - **Reward.** `f2p_regression` (default) is
   `fail_to_pass_fraction * (0.5 + 0.5 * pass_to_pass_fraction)`, the pass rates of the
   FAIL_TO_PASS and PASS_TO_PASS tests. `resolved` is V2.1's binary criterion: every
@@ -78,10 +83,13 @@ not been run end to end yet.
 
 ## Datasets
 
-The taskset loads the V2.1 Harbor dataset pinned in `taskset.py`. Verifiers downloads it
-into `~/.cache/harbor` with the `harbor` CLI on first use; set the taskset's
-`dataset_dir` to read a local copy instead.
+The taskset loads revision 3 of the V2.1 Harbor dataset (13,337 tasks), pinned in
+`taskset.py`. Verifiers downloads it into `~/.cache/harbor` with the `harbor` CLI on
+first use; set the taskset's `dataset_dir` to read a local copy instead.
 
+- **Languages.** 3,990 tasks are Python, 2,269 Go, 1,798 TypeScript, 1,687 JavaScript,
+  1,129 Rust, and 2,464 in 15 other languages. Every language is kept by default;
+  `languages` keeps only some (`task.toml`'s `language`, e.g. `["python"]`).
 - **Split.** V2.1 has no split. `partition="train"` and `"validation"` split the projects
   by `validation_project_fraction`, so no project is in both, even when V2.1 lists it
   under two owners after a rename.
@@ -94,33 +102,23 @@ into `~/.cache/harbor` with the `harbor` CLI on first use; set the taskset's
 
 ## Differences from V2.1's own grading
 
-A task can score differently here than under V2.1's own `tests/test.sh`:
+The test command runs as in V2.1 and the grader is the task's own, so a test log
+grades the same here as under V2.1's `tests/test.sh`. What differs:
 
-- **Shell.** V2.1 runs the test command in a login shell (`bash -lc`). prime-envs runs it
-  with a fixed `PATH` that puts `/opt/conda/bin` before `/usr/local/bin`, so in images
-  that install the project under `/usr/local`, a test that starts `python` gets conda's
-  interpreter instead.
-- **Parser.** V2.1 grades with each task's `tests/grade.py` (parser audit of 2026-10-29).
-  It also reads pytest's verbose `name PASSED` lines, fails a test if any line fails it,
-  and replaces volatile parts of test names with placeholders (`/tmp/<tmp>`,
-  `localhost:<port>`, ...) before matching; some expected names in `config.json` carry
-  those placeholders. prime-envs uses its copy of SWE-rebench V2's log parsers from
-  2026-04, which reads only lines that start with a status, cuts the name at the first
-  space, keeps the last status and strips only timing suffixes. An expected name with a
-  space or a placeholder never matches here: 190 of the 3990 tasks have one, so they can
-  never be fully resolved.
-- **Patches.** Before applying a patch, V2.1 refreshes the git index and skips archives
-  and new files that already match; prime-envs tries `git apply --3way`, then
-  `patch --fuzz=5`. In both, a test patch that does not apply scores 0.
-- **Timeout.** V2.1 caps the test command at 1800 s and grades the partial log. Here the
-  recipe's scoring timeout (2400 s, V2.1's verifier timeout) bounds restoring the test
-  files, applying the test patch and running the tests together; a timeout errors the
-  rollout, which the recipe scores 0 (`error_reward`).
+- **Patches.** prime-envs restores the test files to the recorded base commit and
+  applies patches with `git apply --3way`, then `patch --fuzz=5`. V2.1 restores them
+  with `git restore` and applies patches with `git apply`, skipping archives and new
+  files that already match. In both, a test patch that does not apply scores 0.
+- **Environment.** Harbor sets `task.toml`'s environment variables on the container;
+  here Verifiers adds them to every process it starts there. prime-envs runs its own
+  commands (restoring, patching, its test script) with a fixed `PATH`; the test command
+  itself runs in a login shell, as in V2.1.
+- **Timeout.** Both stop the test command after 1800 s and grade the partial log. Here
+  the recipe's scoring timeout (2400 s, V2.1's verifier timeout) also bounds restoring
+  the test files, applying the test patch and grading; a timeout errors the rollout,
+  which the recipe scores 0 (`error_reward`).
 
-A gold check of 100 tasks, one per repository, on one host: 91 valid. Of the other 9,
-6 also fail under V2.1's own `test.sh` there (5 need direct internet access), 2 hit the
-shell difference and 1 the parser difference. Gold-check the tasks before trusting them
-(next section).
+Gold-check the tasks before trusting them (next section).
 
 ## If every reward is 0
 

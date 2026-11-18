@@ -7,22 +7,28 @@
 """SWE-rebench V2.1 tasks, built on prime-envs' SWE-rebench V2 task.
 
 Each task directory of the V2.1 Harbor dataset holds one GitHub issue: the
-task's Docker image, the issue text, the test command and log parser, a
-held-out test patch, the FAIL_TO_PASS and PASS_TO_PASS test names and the gold
-patch. This module turns each directory into a ``SWERebenchV21Task``, a
-subclass of prime-envs' ``SWERebenchV2Task``. At scoring time the task restores
-the files the test patch touches to the base commit, applies the test patch and
-runs the test command in the task container; the env-server worker then parses
-the log outside the container, so the agent cannot alter the parser.
+task's Docker image, the issue text, the test command, a held-out test patch,
+the FAIL_TO_PASS and PASS_TO_PASS test names, the gold patch and the task's
+grader (``tests/grade.py``, V2.1's log parser and test-name matching for the
+task's test framework). This module turns each directory into a
+``SWERebenchV21Task``, a subclass of prime-envs' ``SWERebenchV2Task``. At
+scoring time prime-envs restores the files the test patch touches to the base
+commit and applies the test patch; the task runs the test command the way
+V2.1's ``tests/test.sh`` does; the env-server worker then runs the task's
+grader on the log outside the container, so the agent cannot alter it.
 
 Verifiers' env-server workers are spawned processes that import the taskset by
 module name, and the bridge keeps torch out of them, so the taskset lives in
 this torch-free module rather than in the recipe.
 """
 
+import asyncio
 import hashlib
 import json
 import re
+import shlex
+import sys
+import tempfile
 import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -31,11 +37,8 @@ from typing import Literal
 
 import verifiers.v1 as vf
 from pydantic import Field
-from swerebench_v2 import log_parsers
 from swerebench_v2.taskset import (
     ENV,
-    is_resolved,
-    normalize_test_name,
     SOLVER_SYSTEM_PROMPT,
     SWERebenchV2Data,
     SWERebenchV2Task,
@@ -49,7 +52,10 @@ DATASET = (
     "ibragim-badertdinov/swe-rebench-v2.1-rl"
     "@sha256:0dcba0d99e8c2bc7f1a8aefdd2e3cf8f5aae2387659d6390a06446ed5f3612b3"
 )
-"""The SWE-rebench V2.1 RL Harbor dataset, pinned to one revision."""
+"""The SWE-rebench V2.1 RL Harbor dataset, pinned to its revision 3: 13,337 tasks
+in 20 languages, 3,990 of them Python.
+TODO: move to v1.1.0 (revision 4, which adds 7,935 Python tasks from the first
+SWE-rebench) after gold-checking it."""
 
 ANSWER_KEY_DIR = "/swebench_matterhorn"
 """Some task images ship the reference solution here; setup deletes it."""
@@ -57,10 +63,21 @@ ANSWER_KEY_DIR = "/swebench_matterhorn"
 BASE_COMMIT_KEY = "swe_rebench_base_commit"
 """`trace.info` key for the repository commit the agent started from."""
 
-# V2.1's tests/test.sh carries the test command in this heredoc.
+# V2.1's tests/test.sh exports the task's test environment variables, if any,
+# then reads the test command from this heredoc.
 _TEST_COMMAND = re.compile(
-    r"<<'HARBOR_TEST_CMD_EOF'\n(.*?)\nHARBOR_TEST_CMD_EOF\n", re.DOTALL
+    r"^((?:export \w+=[^\n]*\n)*)IFS= read -r -d '' HARBOR_TEST_CMD "
+    r"<<'HARBOR_TEST_CMD_EOF'\n(.*?)\nHARBOR_TEST_CMD_EOF\n",
+    re.DOTALL | re.MULTILINE,
 )
+
+# How V2.1's tests/test.sh runs the test command: in a login shell, whose PATH
+# is the image's own rather than prime-envs' fixed one, with an 1800 s limit.
+_RUN_TEST_COMMAND = "bash -lc 'timeout -k 10 1800 bash -lc \"$HARBOR_TEST_CMD\"'"
+
+# prime-envs' test script prints these around the test command's output.
+_TEST_OUTPUT_START = "SWEREBENCH_V2_TEST_OUTPUT_START"
+_TEST_OUTPUT_END = "SWEREBENCH_V2_TEST_OUTPUT_END"
 
 
 class SWERebenchV21TaskConfig(vf.TaskConfig):
@@ -73,38 +90,80 @@ class SWERebenchV21TaskConfig(vf.TaskConfig):
     validation included, with the training taskset's value."""
 
 
-def parse_test_statuses(test_output: str, log_parser: str) -> dict[str, str]:
-    """Map each test name in the log to its status, e.g. ``"PASSED"``. An empty log
-    (the test patch did not apply) yields no statuses."""
-    parser = log_parsers.NAME_TO_PARSER[log_parser]
-    return {
-        normalize_test_name(name): status
-        for name, status in parser(test_output).items()
-    }
+class SWERebenchV21Data(SWERebenchV2Data):
+    grader_source: str
+    """The task's tests/grade.py."""
+
+    container_env: dict[str, str] = Field(default_factory=dict)
+    """task.toml's environment variables for the task container, e.g. Java options."""
 
 
-def pass_fraction(statuses: dict[str, str], test_names: list[str]) -> float:
-    """Fraction of `test_names` that passed; 1.0 when there are none."""
-    unique = {normalize_test_name(name) for name in test_names}
-    if not unique:
-        return 1.0
-    passed = log_parsers.TestStatus.PASSED.value
-    return sum(statuses.get(name) == passed for name in unique) / len(unique)
+def strip_script_markers(test_output: str) -> str:
+    """The test command's output, without the lines prime-envs' script adds around
+    it; the same log V2.1's tests/test.sh grades."""
+    region = test_output.split(_TEST_OUTPUT_START + "\n", 1)[-1]
+    return region.rsplit(_TEST_OUTPUT_END + "\n", 1)[0]
+
+
+async def run_grader(
+    grader_source: str,
+    *,
+    fail_to_pass: list[str],
+    pass_to_pass: list[str],
+    test_log: str,
+) -> dict:
+    """Run a task's grader on a test log, as V2.1's tests/test.sh does, and return
+    its report: `resolved`, `parsed_counts`, and `fail_to_pass` and `pass_to_pass`
+    mapping each expected test name to whether it passed."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "grade.py").write_text(grader_source)
+        (root / "config.json").write_text(
+            json.dumps({"FAIL_TO_PASS": fail_to_pass, "PASS_TO_PASS": pass_to_pass})
+        )
+        (root / "test_output.log").write_bytes(test_log.encode(errors="replace"))
+        report_path = root / "report.json"
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-S",
+            str(root / "grade.py"),
+            str(root / "config.json"),
+            str(root / "test_output.log"),
+            str(report_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        # The grader exits 1 both for an unresolved task and on a crash; only a
+        # finished grade writes the report.
+        if not report_path.exists():
+            raise RuntimeError(
+                f"the task's grader failed (exit {process.returncode}): "
+                f"{stderr.decode(errors='replace')[-500:]}"
+            )
+        return json.loads(report_path.read_text())
+
+
+def pass_fraction(passed: dict[str, bool]) -> float:
+    """Fraction of a grader report's tests that passed; 1.0 when there are none."""
+    return sum(passed.values()) / len(passed) if passed else 1.0
 
 
 class SWERebenchV21Task(
     SWERebenchV2Task,
-    vf.Task[SWERebenchV2Data, vf.State, SWERebenchV21TaskConfig],
+    vf.Task[SWERebenchV21Data, vf.State, SWERebenchV21TaskConfig],
 ):
     """prime-envs' SWE-rebench V2 task, adapted to V2.1 task directories.
 
     V2.1 tasks carry no base commit, which prime-envs needs to restore the test
     patch's files before applying it and to diff the agent's changes. The image's
     HEAD is that commit, so setup records it before the agent can move HEAD.
-    Setup also deletes the answer key some images ship, and scoring adds the
+    Setup also deletes the answer key some images ship. Scoring grades with the
+    task's own V2.1 grader instead of prime-envs' parsers, adds the
     `f2p_regression` reward mode and records the FAIL_TO_PASS and PASS_TO_PASS
-    pass fractions as metrics. The second base binds the config type to
-    ``SWERebenchV21TaskConfig``; prime-envs' base binds only the data type.
+    pass fractions as metrics. The second base binds the data and config types;
+    prime-envs' base binds only its own data type.
     """
 
     @property
@@ -113,6 +172,11 @@ class SWERebenchV21Task(
         # and in rollout logs. The default hashes all task data, so it would change
         # with the task's position after filtering (idx) or with `resources`.
         return self.data.name
+
+    def runtime_env(self) -> dict[str, str]:
+        # Verifiers adds these to every process in the task container, the agent's
+        # included, as Harbor does with task.toml's environment variables.
+        return dict(self.data.container_env)
 
     async def setup(self, trace: vf.Trace, runtime: vf.Runtime) -> None:
         removed = await runtime.run(
@@ -174,28 +238,32 @@ class SWERebenchV21Task(
         """Grade the current tree: restore the test patch's files to `base_commit`,
         apply the test patch, run the tests, and return `resolved`, the FAIL_TO_PASS
         and PASS_TO_PASS pass fractions and the number of parsed tests."""
-        # prime-envs reads the base commit from the task data.
+        # prime-envs reads the base commit from the task data. It returns an empty
+        # log when the test patch does not apply, which grades as unresolved.
         test_output = await self.with_data(base_commit=base_commit).run_tests(runtime)
-        statuses = parse_test_statuses(
-            test_output, self.data.install_config["log_parser"]
+        report = await run_grader(
+            self.data.grader_source,
+            fail_to_pass=self.data.fail_to_pass,
+            pass_to_pass=self.data.pass_to_pass,
+            test_log=strip_script_markers(test_output),
         )
-        resolved = is_resolved(statuses, self.data.fail_to_pass, self.data.pass_to_pass)
         return {
-            "resolved": float(resolved),
-            "fail_to_pass_fraction": pass_fraction(statuses, self.data.fail_to_pass),
-            "pass_to_pass_fraction": pass_fraction(statuses, self.data.pass_to_pass),
-            "parsed_tests": float(len(statuses)),
+            "resolved": float(report["resolved"]),
+            "fail_to_pass_fraction": pass_fraction(report["fail_to_pass"]),
+            "pass_to_pass_fraction": pass_fraction(report["pass_to_pass"]),
+            "parsed_tests": float(sum(report["parsed_counts"].values())),
         }
 
 
 @dataclass(frozen=True, slots=True)
 class TaskDirectory:
-    """One V2.1 task directory: the task data plus the repository and quality flags
-    the taskset filters on."""
+    """One V2.1 task directory: the task data plus the repository, language and
+    quality flags the taskset filters on."""
 
     repo: str
+    language: str
     quality_flags: list[str]
-    data: SWERebenchV2Data
+    data: SWERebenchV21Data
 
 
 def read_task_directory(
@@ -205,40 +273,50 @@ def read_task_directory(
     task_toml = tomllib.loads((task_dir / "task.toml").read_text())
     metadata = task_toml["metadata"]
     environment = task_toml["environment"]
-    log_parser = metadata["log_parser"]
-    if log_parser not in log_parsers.NAME_TO_PARSER:
-        raise ValueError(f"{task_dir.name}: unknown log parser {log_parser!r}")
     match = _TEST_COMMAND.search((task_dir / "tests" / "test.sh").read_text())
     if match is None:
         raise ValueError(
             f"{task_dir.name}: tests/test.sh has no HARBOR_TEST_CMD heredoc"
         )
+    test_env_exports, test_command = match.group(1).splitlines(), match.group(2)
     tests = json.loads((task_dir / "tests" / "config.json").read_text())
     return TaskDirectory(
         repo=metadata["repo"],
+        language=metadata["language"],
         quality_flags=list(metadata.get("quality_flags", [])),
-        data=SWERebenchV2Data(
+        data=SWERebenchV21Data(
             name=task_dir.name,
             prompt=(task_dir / "instruction.md").read_text(),
             system_prompt=SOLVER_SYSTEM_PROMPT,
             image=environment["docker_image"],
             workdir=environment["workdir"],
             resources=resources,
-            install_config={"test_cmd": [match.group(1)], "log_parser": log_parser},
+            # prime-envs runs each line of test_cmd in its test script.
+            install_config={
+                "test_cmd": [
+                    *test_env_exports,
+                    f"export HARBOR_TEST_CMD={shlex.quote(test_command)}",
+                    _RUN_TEST_COMMAND,
+                ],
+                "log_parser": metadata["log_parser"],
+            },
             # Read the patches as bytes: read_text() turns "\r\n" into "\n", and a
             # patch to a file with CRLF line endings then no longer applies.
             test_patch=(task_dir / "tests" / "test.patch").read_bytes().decode(),
             gold_patch=(task_dir / "solution" / "gold.patch").read_bytes().decode(),
             fail_to_pass=tests["FAIL_TO_PASS"],
             pass_to_pass=tests["PASS_TO_PASS"],
+            grader_source=(task_dir / "tests" / "grade.py").read_text(),
+            container_env=dict(environment.get("env", {})),
         ),
     )
 
 
 def project_name(repo: str) -> str:
-    """The repository name without its owner, lowercased. 20 V2.1 projects appear
+    """The repository name without its owner, lowercased. Some V2.1 projects appear
     under two owners after a rename (e.g. pypa/pipx and pipxproject/pipx); the
-    train/validation split keys on this name so both land on the same side."""
+    train/validation split keys on this name so both land on the same side.
+    Unrelated projects that share a name land together too."""
     return repo.split("/", 1)[1].lower()
 
 
@@ -270,6 +348,10 @@ class SWERebenchV21TasksetConfig(vf.TasksetConfig):
     """Fraction of the projects held out for `partition="validation"`, rounded, at
     least one."""
 
+    languages: list[str] | None = None
+    """Keep only tasks in these languages (task.toml's `language`, e.g. "python",
+    "go", "rust"); None keeps every language."""
+
     exclude_quality_flags: list[str] = Field(default_factory=lambda: ["weak_f2p"])
     """Skip tasks that carry any of these V2.1 `quality_flags`. `weak_f2p` marks
     tasks whose FAIL_TO_PASS tests barely check the fix."""
@@ -296,13 +378,18 @@ class SWERebenchV21Taskset(vf.Taskset[SWERebenchV21Task, SWERebenchV21TasksetCon
         ]
         if not task_dirs:
             raise ValueError(f"no SWE-rebench V2.1 tasks found in {root}")
-        # Split all projects before the quality-flag filter, so changing
+        # Split all projects before filtering, so changing `languages` or
         # `exclude_quality_flags` does not move a project between partitions.
         validation = validation_projects(
             {project_name(task_dir.repo) for task_dir in task_dirs},
             fraction=config.validation_project_fraction,
         )
         for task_dir in task_dirs:
+            if (
+                config.languages is not None
+                and task_dir.language not in config.languages
+            ):
+                continue
             if set(config.exclude_quality_flags) & set(task_dir.quality_flags):
                 continue
             in_validation = project_name(task_dir.repo) in validation

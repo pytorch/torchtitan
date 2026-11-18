@@ -20,6 +20,7 @@ pytest.importorskip("verifiers")
 pytest.importorskip("swerebench_v2")
 
 import verifiers.v1 as vf
+from swerebench_v2.taskset import build_eval_script
 
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.controller.controller import Controller
@@ -29,6 +30,8 @@ from torchtitan.rl.examples.verifiers.swe_rebench.taskset import (
     BASE_COMMIT_KEY,
     project_name,
     read_task_directory,
+    run_grader,
+    strip_script_markers,
     SWERebenchV21Task,
     SWERebenchV21TaskConfig,
     SWERebenchV21Taskset,
@@ -46,18 +49,44 @@ RESOURCES = vf.TaskResources(cpu=1, memory=1, disk=1)
 TEST_PATCH = "diff --git a/tests/test_app.py b/tests/test_app.py\n-old\r\n+new\r\n"
 GOLD_PATCH = "diff --git a/app.py b/app.py\n-old\r\n+new\r\n"
 
+# A stand-in for V2.1's tests/grade.py with the same command line and report: a
+# test passes when the log has a "PASSED <name>" line.
+GRADER = """
+import json, sys
+config_path, log_path, report_path = sys.argv[1:4]
+config = json.load(open(config_path))
+lines = open(log_path).read().splitlines()
+# V2.1 grades the test command's output alone.
+assert not any(line.startswith("SWEREBENCH_V2_TEST_OUTPUT") for line in lines)
+passed = {line.split()[1] for line in lines if line.startswith("PASSED ")}
+failed = {line.split()[1] for line in lines if line.startswith("FAILED ")}
+report = {
+    "resolved": passed >= set(config["FAIL_TO_PASS"] + config["PASS_TO_PASS"]),
+    "parsed_counts": {"PASSED": len(passed), "FAILED": len(failed)},
+    "fail_to_pass": {name: name in passed for name in config["FAIL_TO_PASS"]},
+    "pass_to_pass": {name: name in passed for name in config["PASS_TO_PASS"]},
+}
+json.dump(report, open(report_path, "w"))
+sys.exit(0 if report["resolved"] else 1)
+"""
+
 
 def _write_task(
     root: Path,
     name: str,
     *,
     repo: str = "owner/app",
+    language: str = "python",
     quality_flags: tuple[str, ...] = (),
-    log_parser: str = "parse_log_pytest",
     fail_to_pass: list[str] = FAIL_TO_PASS,
     pass_to_pass: list[str] = PASS_TO_PASS,
+    test_command: str = "pytest -rA tests/test_app.py",
+    test_env: str = "",
+    container_env: str = "",
 ) -> Path:
-    """Write one task directory laid out like SWE-rebench V2.1's Harbor export."""
+    """Write one task directory laid out like SWE-rebench V2.1's Harbor export.
+    `test_env` holds tests/test.sh's export lines; `container_env` is task.toml's
+    `env` table."""
     task_dir = root / name
     (task_dir / "tests").mkdir(parents=True)
     (task_dir / "solution").mkdir()
@@ -68,23 +97,31 @@ name = "org/{name}"
 
 [metadata]
 repo = "{repo}"
-language = "python"
-log_parser = "{log_parser}"
+language = "{language}"
+log_parser = "parse_log_pytest"
 quality_flags = [{flags}]
 
 [environment]
 workdir = "/app"
 docker_image = "docker.io/swerebenchv2/app:1-abc@sha256:0123"
+{container_env}
 """
     )
     (task_dir / "instruction.md").write_text(f"Fix {name}.")
     (task_dir / "tests" / "test.sh").write_text(
         "#!/bin/bash\n"
-        "IFS= read -r -d '' HARBOR_TEST_CMD <<'HARBOR_TEST_CMD_EOF'\n"
-        "pytest -rA tests/test_app.py\n"
+        "set -uo pipefail\n"
+        "\n"
+        "WORKDIR=/app\n"
+        "TEST_FILES=(tests/test_app.py)\n"
+        f"{test_env}IFS= read -r -d '' HARBOR_TEST_CMD <<'HARBOR_TEST_CMD_EOF'\n"
+        f"{test_command}\n"
         "HARBOR_TEST_CMD_EOF\n"
+        "\n"
         'cd "$WORKDIR"\n'
+        "export HARBOR_TEST_CMD=\"${HARBOR_TEST_CMD%$'\\n'}\"\n"
     )
+    (task_dir / "tests" / "grade.py").write_text(GRADER)
     (task_dir / "tests" / "config.json").write_text(
         json.dumps({"FAIL_TO_PASS": fail_to_pass, "PASS_TO_PASS": pass_to_pass})
     )
@@ -100,23 +137,42 @@ def test_a_task_directory_becomes_a_prime_envs_task(tmp_path) -> None:
     assert (task_dir.repo, data.name, data.prompt) == ("owner/app", "t-1", "Fix t-1.")
     assert data.image == "docker.io/swerebenchv2/app:1-abc@sha256:0123"
     assert data.workdir == "/app"
-    assert data.install_config == {
-        "test_cmd": ["pytest -rA tests/test_app.py"],
-        "log_parser": "parse_log_pytest",
-    }
     assert (data.fail_to_pass, data.pass_to_pass) == (FAIL_TO_PASS, PASS_TO_PASS)
     # Byte for byte: a patch that lost its "\r" no longer applies.
     assert (data.test_patch, data.gold_patch) == (TEST_PATCH, GOLD_PATCH)
+    assert (data.grader_source, data.container_env) == (GRADER, {})
     # V2.1 has no base commit; setup reads it from the image.
     assert data.base_commit == ""
 
 
-def test_an_unknown_log_parser_fails_at_load(tmp_path) -> None:
-    with pytest.raises(ValueError, match="unknown log parser"):
-        read_task_directory(
-            _write_task(tmp_path, "t-1", log_parser="parse_log_nothing"),
-            resources=RESOURCES,
-        )
+def test_the_test_command_runs_as_in_v21s_test_script(tmp_path) -> None:
+    """The task's test environment reaches the command, which runs in a login shell;
+    a multi-line command with shell variables survives prime-envs' `set -u` script."""
+    task_dir = _write_task(
+        tmp_path,
+        "t-1",
+        language="rust",
+        test_command=(
+            'printf "threads=%s\\n" "$RUST_TEST_THREADS"\n'
+            "shopt -q login_shell && echo login_shell"
+        ),
+        test_env="export RUST_TEST_THREADS=1\n",
+        container_env='env = { _JAVA_OPTIONS = "-Xmx1g" }',
+    )
+    data = read_task_directory(task_dir, resources=RESOURCES).data
+    task = SWERebenchV21Task(data, SWERebenchV21TaskConfig())
+
+    script = build_eval_script(data.install_config["test_cmd"])
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert strip_script_markers(result.stdout).splitlines() == [
+        "threads=1",
+        "login_shell",
+    ]
+    assert task.runtime_env() == {"_JAVA_OPTIONS": "-Xmx1g"}
 
 
 def _load(root: Path, **options) -> list[SWERebenchV21Task]:
@@ -146,6 +202,25 @@ def test_training_and_validation_never_share_a_project(tmp_path) -> None:
     assert (len(projects(validation)), len(validation), len(training)) == (1, 3, 27)
     assert "weak" not in {task.data.name for task in training + validation}
     assert project_name("old-owner/Repo-3") == project_name("owner/repo-3")
+
+
+def test_a_language_filter_keeps_the_split(tmp_path) -> None:
+    for index in range(10):
+        _write_task(tmp_path, f"py-{index}", repo=f"owner/repo-{index}")
+        _write_task(tmp_path, f"go-{index}", repo=f"owner/repo-{index}", language="go")
+
+    def names(tasks: list[SWERebenchV21Task]) -> set[str]:
+        return {task.data.name for task in tasks}
+
+    validation = names(_load(tmp_path, partition="validation"))
+    python_validation = names(
+        _load(tmp_path, partition="validation", languages=["python"])
+    )
+    go_training = names(_load(tmp_path, partition="train", languages=["go"]))
+
+    assert len(validation) == 2 and python_validation < validation
+    assert all(name.startswith("py-") for name in python_validation)
+    assert len(go_training) == 9 and all(name.startswith("go-") for name in go_training)
 
 
 class _ScriptedRuntime:
@@ -293,6 +368,19 @@ def test_the_gold_check_reads_the_base_commit_itself(
     assert argvs.index(["git", "rev-parse", "HEAD"]) == 0
     restore_env = next(env for argv, env in runtime.commands if "base" in env)
     assert restore_env["base"] == HEAD_NOW
+
+
+def test_a_crashed_grader_fails_scoring_instead_of_scoring_zero() -> None:
+    """A grader exits 1 both for an unresolved task and on a crash."""
+    with pytest.raises(RuntimeError, match="grader failed"):
+        asyncio.run(
+            run_grader(
+                "raise SystemExit(1)",
+                fail_to_pass=FAIL_TO_PASS,
+                pass_to_pass=PASS_TO_PASS,
+                test_log="",
+            )
+        )
 
 
 def test_the_patch_is_diffed_against_the_recorded_commit(tmp_path) -> None:
