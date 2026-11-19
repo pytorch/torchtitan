@@ -6,6 +6,7 @@
 
 import dataclasses
 import importlib
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -62,6 +63,49 @@ def test_vllm_replacement_preserves_attention_scale(model_name, expected_scale):
             with torch.device("meta"):
                 attention = attention_config.build()
             assert scale == attention.softmax_scale
+
+
+@pytest.mark.parametrize("train_indexer", [False, True])
+def test_vllm_replacement_preserves_indexer_trainability(monkeypatch, train_indexer):
+    """Trainable indexers must not enter the generator's frozen parameter set."""
+    pytest.importorskip(
+        "attn_gym.sparse.indexer.paged",
+        reason="Flash-Next conversion requires the Attention Gym paged indexer",
+    )
+    from torchtitan.models.qwen3_8_flash_next import build_model_config
+    from torchtitan.models.qwen3_8_flash_next.attention import (
+        QSAAttention,
+        QSAIndexerLoss,
+    )
+    from torchtitan.rl.generator.vllm.attention import qsa
+
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto", block_size=16),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16, enforce_eager=True, max_model_len=64
+        ),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1, tensor_parallel_size=1
+        ),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    monkeypatch.setattr(qsa, "get_current_vllm_config", lambda: config)
+    model_config = build_model_config(
+        "debugmodel",
+        seq_len=64,
+        parallelism=ParallelismConfig(),
+        indexer_loss=QSAIndexerLoss.Config(coeff=1.0) if train_indexer else None,
+    )
+    generator_config = _replace_vllm_layer_configs(model_config)
+    with torch.device("meta"):
+        attention = generator_config.layers[3].attention.build()
+    assert type(attention) is QSAAttention
+    assert all(
+        parameter.requires_grad == train_indexer
+        for parameter in attention.indexer.parameters()
+    )
+    assert attention.inner_attention.indexer_loss is None
 
 
 @pytest.mark.parametrize(

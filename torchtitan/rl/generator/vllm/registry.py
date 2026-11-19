@@ -44,6 +44,8 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.qwen3_5.rope import get_mrope_config
+from torchtitan.models.qwen3_8_flash_next.attention import QSAInnerAttention
+from torchtitan.models.qwen3_8_flash_next.model import Qwen38FlashNextModel
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -84,14 +86,30 @@ def uses_compressed_mla_cache(inner_attention: InnerAttention.Config) -> bool:
     )
 
 
+def uses_paged_qsa_cache(cfg: Decoder.Config) -> bool:
+    """Return whether ``cfg`` has QSA layers.
+
+    Each QSA layer stores its keys and values in ``PagedCache`` pages whose
+    ``get_attn_backend`` selects ``QSAPagedBackend``, so these layers never use
+    vLLM's global attention backend.
+    """
+    return any(
+        isinstance(layer.attention.inner_attention, QSAInnerAttention.Config)
+        for layer in cfg.layers
+    )
+
+
 def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
     """Return the vLLM attention backend for ``cfg``'s full attention layers.
 
-    Returns ``None`` for MLA with a compressed cache: each compressed MLA layer
-    passes TorchTitan's decode and prefill backends to vLLM directly.
+    Returns ``None`` when the attention layers pass their own backends to vLLM:
+    QSA layers (see ``uses_paged_qsa_cache``), and MLA with a compressed cache,
+    where each layer passes TorchTitan's decode and prefill backends directly.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+    if uses_paged_qsa_cache(cfg):
+        return None
     attention = cfg.first_full_attention
     if attention is None:
         raise ValueError("No full attention layer found in the model spec.")
@@ -164,7 +182,11 @@ def model_config_to_hf_config_dict(
         ),  # positive int; only PP/KV-transfer read magnitude
         # Unused
         "rope_theta": rope_theta,  # only used for non-default rope_type; wrapper builds RoPE
-        "rms_norm_eps": cfg.norm.eps,  # only minimax-qk-norm fusion reads it; wrapper builds RMSNorm
+        "rms_norm_eps": (
+            cfg.hyper_connection_mixer.hc_norm.eps
+            if isinstance(cfg, Qwen38FlashNextModel.Config)
+            else cfg.norm.eps
+        ),  # only minimax-qk-norm fusion reads it; wrapper builds the norms
         "tie_word_embeddings": getattr(
             cfg, "enable_weight_tying", False
         ),  # multimodal/GGUF only; wrapper ties weights
