@@ -18,7 +18,7 @@ from torchtitan.models.deepseek_v4.attention import (
     CompressedSparseAttention,
     DeepSeekV4CompressedSparseAttentionMetadata,
 )
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
@@ -36,7 +36,8 @@ class TestIndexerSelect(unittest.TestCase):
         metadata = CompressedSparseAttention.Config(
             window_size=1, compress_ratio=ratio, softmax_scale=0.1, index_topk=topk
         ).build_attention_metadata(torch.arange(seqlen))
-        selected, selected_scores = Indexer.select(
+        indexer = InnerIndexer.Config().build()
+        selected, selected_scores = indexer(
             idx_q,
             idx_k,
             idx_w,

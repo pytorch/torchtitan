@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
@@ -191,6 +192,7 @@ class Indexer(Module):
         wq_b: Linear.Config
         weights_proj: Linear.Config
         compressor: "Compressor.Config"
+        inner_indexer: "InnerIndexer.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
         rope_head_dim: int = 64
@@ -207,6 +209,7 @@ class Indexer(Module):
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
         self.compressor = cfg.compressor.build()
+        self.inner_indexer = cfg.inner_indexer.build()
 
     @staticmethod
     def _rotate_activation(x):
@@ -228,8 +231,10 @@ class Indexer(Module):
         *,
         positions: torch.Tensor,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+        topk,
+        return_scores=True,
     ):
-        """Project raw indexer queries, keys, and per-head weights."""
+        """Project features and return document-local selections and scores."""
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -248,20 +253,41 @@ class Indexer(Module):
         # The scale reads the weights_proj output with bare ops.
         remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
-        return q, k, weights
+        indices, scores = self.inner_indexer(
+            q,
+            k,
+            weights,
+            max_seqlen=seqlen,
+            ratio=self.compressor.compress_ratio,
+            topk=topk,
+            attention_metadata=attention_metadata,
+            return_scores=return_scores,
+        )
+        return indices, scores if return_scores else None
 
-    @staticmethod
-    def select(
+
+class InnerIndexer(Module):
+    """Local-SPMD boundary for discrete selection and differentiable scores."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__()
+
+    def forward(
+        self,
         idx_q,
         idx_k,
         idx_w,
         *,
-        max_seqlen: int,
-        ratio: int,
-        topk: int,
+        max_seqlen,
+        ratio,
+        topk,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
-        return_scores: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return_scores=True,
+    ):
         """Select top-k compressed positions per folded query token.
 
         Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
@@ -273,45 +299,46 @@ class Indexer(Module):
             ``(indices, scores)``. ``indices`` is int32
             ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
             slots. ``scores`` holds live indexer logits for those selected
-            entries and ``-inf`` in unusable slots, or None when return_scores
-            is False (evaluation and disabled auxiliary loss).
+            entries and ``-inf`` in unusable slots, or an empty tensor when
+            return_scores is False (evaluation and disabled auxiliary loss).
         """
-        # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
-        # fall back; CPU, fp32, ROCm, and older GPUs use the reference
-        # implementation.
-        fused = (
-            idx_q.is_cuda
-            and idx_q.dtype in (torch.float16, torch.bfloat16)
-            and has_cuda_capability(9, 0)
-        )
-        k = min(topk, max_seqlen // ratio)
-        cu_seqlens = attention_metadata.cu_seq_q
-        cu_seqlens_k = attention_metadata.cu_seq_compressed
-        with torch.no_grad():
-            topk_indices = lightning_indexer(
-                idx_q.unsqueeze(0),
-                idx_k.unsqueeze(0),
-                idx_w.unsqueeze(0),
-                k,
-                causal=True,
-                compress_ratio=ratio,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_k=cu_seqlens_k,
-                impl="fused" if fused else "reference",
-            ).squeeze(0)
+        with spmd.no_typecheck():
+            # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
+            # fall back; CPU, fp32, ROCm, and older GPUs use the reference
+            # implementation.
+            fused = (
+                idx_q.is_cuda
+                and idx_q.dtype in (torch.float16, torch.bfloat16)
+                and has_cuda_capability(9, 0)
+            )
+            k = min(topk, max_seqlen // ratio)
+            cu_seqlens = attention_metadata.cu_seq_q
+            cu_seqlens_k = attention_metadata.cu_seq_compressed
+            with torch.no_grad():
+                topk_indices = lightning_indexer(
+                    idx_q.unsqueeze(0),
+                    idx_k.unsqueeze(0),
+                    idx_w.unsqueeze(0),
+                    k,
+                    causal=True,
+                    compress_ratio=ratio,
+                    cu_seqlens=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens_k,
+                    impl="fused" if fused else "reference",
+                ).squeeze(0)
 
-        if not return_scores:
-            return topk_indices, None
-        valid_TK = topk_indices >= 0
-        gather_indices_TK = compressed_gather_indices(
-            topk_indices, attention_metadata, ratio
-        )
-
-        selected_TKD = idx_k[gather_indices_TK]
-        logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
-        topk_scores = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
-        topk_scores = topk_scores.masked_fill(~valid_TK, -torch.inf)
-        return topk_indices, topk_scores
+            if not return_scores:
+                # local_map requires tensors at both declared output leaves.
+                return topk_indices, idx_w.new_empty((0, 0))
+            valid_TK = topk_indices >= 0
+            gather_indices_TK = compressed_gather_indices(
+                topk_indices, attention_metadata, ratio
+            )
+            selected_TKD = idx_k[gather_indices_TK]
+            logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
+            topk_scores = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
+            topk_scores = topk_scores.masked_fill(~valid_TK, -torch.inf)
+            return topk_indices, topk_scores
 
 
 class SparseIndexerLoss(AuxLoss):

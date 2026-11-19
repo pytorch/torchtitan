@@ -85,9 +85,8 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
         input_shardings.update(
             {
                 "cmp_k": replicated_activation,
-                "idx_q": replicated_activation,
-                "idx_k": replicated_activation,
-                "idx_w": replicated_activation,
+                "topk_indices": replicated_activation,
+                "topk_scores": replicated_activation,
                 "attn_sink": _attn_sink_placement,
                 "padding_mask_T": token_id_placement(),
             }
@@ -220,4 +219,19 @@ def mtp_block_sharding_config() -> ShardingConfig:
             "mtp_input_valid_mask": token_id_placement(),
         },
         output_shardings=replicated_activation,
+    )
+
+
+def inner_indexer_sharding_config() -> ShardingConfig:
+    """Local-SPMD selection boundary over the indexer's q/k/weights."""
+    replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    query = SpmdType(
+        replicated.local_type,
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+    inputs = {"idx_q": query, "idx_k": replicated, "idx_w": replicated}
+    return ShardingConfig(
+        input_shardings=inputs,
+        output_shardings=(replicated, replicated),
+        local_spmd=True,
     )

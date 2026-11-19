@@ -6,6 +6,7 @@
 
 import bisect
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import torch
@@ -17,7 +18,7 @@ from torchtitan.models.deepseek_v4 import build_model_config
 from torchtitan.models.deepseek_v4.attention import CompressedSparseAttention
 from torchtitan.models.deepseek_v4.compressor import (
     compressed_cu_seqlens,
-    Indexer,
+    InnerIndexer,
     SparseIndexerLoss,
 )
 
@@ -249,8 +250,9 @@ class TestIndexerSelect(unittest.TestCase):
         q = torch.randn(12, 3, 8, requires_grad=True)
         k = torch.randn(3, 8, requires_grad=True)
         w = torch.randn(12, 3, requires_grad=True)
+        indexer = InnerIndexer.Config().build()
         for cu in (None, torch.tensor([0, 4, 12], dtype=torch.int32)):
-            indices, scores = Indexer.select(
+            indices, scores = indexer(
                 q,
                 k,
                 w,
@@ -259,7 +261,7 @@ class TestIndexerSelect(unittest.TestCase):
                 topk=2,
                 attention_metadata=_metadata(cu, 12),
             )
-            index_only, no_scores = Indexer.select(
+            index_only, no_scores = indexer(
                 q,
                 k,
                 w,
@@ -270,47 +272,60 @@ class TestIndexerSelect(unittest.TestCase):
                 return_scores=False,
             )
             torch.testing.assert_close(indices, index_only)
-            self.assertIsNone(no_scores)
+            self.assertEqual(no_scores.numel(), 0)
             scores[indices >= 0].sum().backward()
             for tensor in (q, k, w):
                 self.assertTrue(torch.isfinite(tensor.grad).all())
 
     def test_eval_and_disabled_loss_do_not_rescore(self):
-        q, kv = torch.randn(8, 4, 8), torch.randn(8, 8)
-        iq, ik, iw = torch.randn(8, 2, 8), torch.randn(2, 8), torch.randn(8, 2)
+        model_config = build_model_config(
+            "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+        )
+        layer = next(
+            layer
+            for layer in model_config.layers
+            if layer.attention.compress_ratio == 4
+        )
         for training, enabled in ((False, True), (True, False)):
-            cfg = CompressedSparseAttention.Config(
-                window_size=3,
-                compress_ratio=4,
-                softmax_scale=8**-0.5,
-                index_topk=2,
-                aux_loss=SparseIndexerLoss.Config(
-                    coeff=0.01, softmax_scale=8**-0.5, num_heads=4
-                )
-                if enabled
-                else None,
+            cfg = replace(
+                layer.attention,
+                inner_attention=replace(
+                    layer.attention.inner_attention,
+                    aux_loss=layer.attention.inner_attention.aux_loss
+                    if enabled
+                    else None,
+                ),
             )
-            module = cfg.build().train(training)
-            metadata = cfg.build_attention_metadata(torch.arange(8))
+            with torch.device("meta"):
+                attention = cfg.build()
+            attention.to_empty(device="cpu")
+            attention.init_states(buffer_device=torch.device("cpu"))
+            attention.train(training)
+            x = torch.randn(16, cfg.dim)
+            positions = torch.arange(16)
+            metadata = cfg.inner_attention.build_attention_metadata(positions)
+            captured = {}
+            original_forward = InnerIndexer.forward
+
+            def spy(self, *args, **kwargs):
+                captured.update(kwargs)
+                return original_forward(self, *args, **kwargs)
+
             with (
-                patch.object(Indexer, "select", wraps=Indexer.select) as select,
+                patch.object(InnerIndexer, "forward", spy),
                 patch(
                     "torchtitan.models.deepseek_v4.attention.gather_attn",
                     wraps=gather_attn,
-                ) as attention,
+                ) as kernel,
             ):
-                module(
-                    q,
-                    kv,
-                    kv[:2],
-                    iq,
-                    ik,
-                    iw,
-                    torch.zeros(4),
+                attention(
+                    x,
                     attention_metadata=metadata,
+                    positions=positions,
+                    aux_loss_denominator=torch.tensor(16.0),
                 )
-                self.assertFalse(select.call_args.kwargs["return_scores"])
-                self.assertFalse(attention.call_args.kwargs["return_aux"].lse)
+                self.assertFalse(captured["return_scores"])
+                self.assertFalse(kernel.call_args.kwargs["return_aux"].lse)
 
 
 if __name__ == "__main__":

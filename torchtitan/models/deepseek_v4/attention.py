@@ -273,31 +273,19 @@ class CompressedSparseAttention(DSV4InnerAttention):
         q,
         swa_k,
         cmp_k,
-        idx_q,
-        idx_k,
-        idx_w,
+        topk_indices,
         attn_sink,
         *,
+        topk_scores=None,
         attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         aux_loss_denominator=None,
         padding_mask_T=None,
     ) -> torch.Tensor:
-        with spmd.no_typecheck():
-            cmp_topk, topk_scores = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                max_seqlen=attention_metadata.max_k,
-                ratio=self.compress_ratio,
-                topk=self.index_topk,
-                attention_metadata=attention_metadata,
-                return_scores=self.training and self.aux_loss is not None,
-            )
         return self._gather_attn(
             q,
             swa_k,
             cmp_k,
-            cmp_topk,
+            topk_indices,
             attn_sink,
             attention_metadata,
             topk_scores_TK=topk_scores,
@@ -464,13 +452,16 @@ class DeepSeekV4Attention(Attention):
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
-        cmp_k = idx_q = idx_k = idx_w = None
+        cmp_k = topk_indices = topk_scores = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            idx_q, idx_k, idx_w = self.indexer(
+            topk_indices, topk_scores = self.indexer(
                 x.detach(),
                 qr.detach(),
                 positions=positions,
                 attention_metadata=attention_metadata,
+                topk=self.inner_attention.index_topk,
+                return_scores=self.training
+                and self.inner_attention.aux_loss is not None,
             )
         if self.compress_ratio == 4:
             cmp_k = self.compressor(
@@ -487,10 +478,9 @@ class DeepSeekV4Attention(Attention):
                 q,
                 kv,
                 cmp_k,
-                idx_q,
-                idx_k,
-                idx_w,
+                topk_indices,
                 attn_sink_param,
+                topk_scores=topk_scores,
                 attention_metadata=attention_metadata,
                 aux_loss_denominator=aux_loss_denominator,
                 padding_mask_T=padding_mask,
