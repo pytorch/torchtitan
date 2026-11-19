@@ -494,6 +494,10 @@ class VLLMEngine(GenerationEngine):
 
     def has_unfinished_requests(self) -> bool:
         """Whether any admitted request is still running."""
+        # NOTE: with data parallelism, vLLM's has_unfinished_requests is a CPU (gloo)
+        # all-reduce over the DP group on every call, i.e. every step; SGLangEngine
+        # does the same over the DP x TP world (SGLang's attention DP has no DP-only
+        # group).
         return self._engine.has_unfinished_requests()
 
     def step(self) -> list[FinishedRequest]:

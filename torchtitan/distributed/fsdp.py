@@ -27,6 +27,7 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.param_init import skip_param_init
 
 __all__ = [
     "apply_fsdp_to_decoder",
@@ -540,7 +541,9 @@ def _apply_flex_shard(
         module_fqn, _, name = fqn.rpartition(".")
         module = model.get_submodule(module_fqn)
         assert isinstance(module, Module) and module._param_init is not None, fqn
-        if name in module._param_init:
+        # A skipped init, e.g. tok_embeddings' with tied weights, which lm_head
+        # initializes, stays a no-op on the shard.
+        if module._param_init.get(name, skip_param_init) is not skip_param_init:
             # A new dict: modules built from one Config share its param_init.
             module._param_init = {
                 **module._param_init,

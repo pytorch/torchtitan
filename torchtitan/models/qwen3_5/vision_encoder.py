@@ -11,6 +11,10 @@ Shape suffixes:
 - D = vision hidden dimension
 - M = packed merged tokens
 - K = merged feature dimension
+- C = two spatial coordinates (row, column)
+- H = patch merge block rows
+- W = patch merge block columns
+- S = patches per side of a merge block
 """
 
 from dataclasses import dataclass, field
@@ -27,7 +31,6 @@ from torchtitan.models.common import Linear
 
 from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
-from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     get_packed_vision_grids,
@@ -119,147 +122,72 @@ def _compute_learned_pos_embeds(
     return packed_pos_embeds
 
 
-def _compute_2d_rope_cache(
-    freq_table: torch.Tensor,
-    grids: list[list[int]],
-    spatial_merge_size: int,
-    head_dim: int,
+def _compute_2d_positions(
+    grids: list[list[int]], spatial_merge_size: int, device: torch.device
 ) -> torch.Tensor:
-    """Compute 2D RoPE cache for vision patches.
+    """Compute 2D RoPE coordinates for vision patches.
 
     Builds row and col indices in block order (matching the patch layout from
-    the collator), looks up separate frequency sets for each dimension, and
-    concatenates them into a rope_cache for VisionAttention.
+    the collator).
 
     Args:
-        freq_table: (max_hw, head_dim//4) precomputed RoPE frequencies
         grids: per-item ``[t, h, w]`` patch counts as host ints.
         spatial_merge_size: Number of patches to merge per spatial dimension
-        head_dim: Attention head dimension
+        device: Device for the position indices.
 
     Returns:
-        rope_cache: (total_num_patches, 1, head_dim*2) float32 for
-            VisionAttention.
+        ``(total_num_patches, 2)`` row/column coordinates.
     """
-    device = freq_table.device
-    merge_size = spatial_merge_size
-
-    rope_embeds: dict[int, torch.Tensor] = {}
-
-    # Group images by (h, w) to batch compute RoPE embeddings
+    positions: dict[int, torch.Tensor] = {}
+    # Group images by (h, w) to batch compute RoPE positions
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
     for i, (_, h, w) in enumerate(grids):
-        key = (h, w)
-        if key not in hw_to_indices:
-            hw_to_indices[key] = []
-        hw_to_indices[key].append(i)
+        hw_to_indices.setdefault((h, w), []).append(i)
 
+    merge_size = spatial_merge_size
     for (h, w), indices in hw_to_indices.items():
         # Compute RoPE position ids in block order (once per unique h, w)
         # A "block" is a merge_size x merge_size group of patches that will
         # be merged into one LLM visual token. RoPE indices must follow
         # block order to match the patch layout from image_to_patches
         merged_h, merged_w = h // merge_size, w // merge_size
-        row_base = (
-            torch.arange(merged_h, device=device) * merge_size
-        )  # starting row of each block
-        col_base = (
-            torch.arange(merged_w, device=device) * merge_size
-        )  # starting col of each block
-        intra_row = torch.arange(merge_size, device=device)
-        intra_col = torch.arange(merge_size, device=device)
-
+        # starting row of each block
+        row_base_H = torch.arange(merged_h, device=device) * merge_size
+        # starting col of each block
+        col_base_W = torch.arange(merged_w, device=device) * merge_size
+        intra_row_S = torch.arange(merge_size, device=device)
+        intra_col_S = torch.arange(merge_size, device=device)
         # Build row and col indices in block order
         # The 4 dimensions represent: [block_row, block_col, intra_row, intra_col]
         # e.g., for merge_size=2 on a 4x4 patch grid (2x2 blocks):
         #   row_idx = [0,0,1,1, 0,0,1,1, 2,2,3,3, 2,2,3,3]
         #   col_idx = [0,1,0,1, 2,3,2,3, 0,1,0,1, 2,3,2,3]
-        row_idx = (
-            (row_base[:, None, None, None] + intra_row[None, None, :, None])
+        row_T = (
+            (row_base_H[:, None, None, None] + intra_row_S[None, None, :, None])
             .expand(merged_h, merged_w, merge_size, merge_size)
             .reshape(-1)
         )
-        col_idx = (
-            (col_base[None, :, None, None] + intra_col[None, None, None, :])
+        col_T = (
+            (col_base_W[None, :, None, None] + intra_col_S[None, None, None, :])
             .expand(merged_h, merged_w, merge_size, merge_size)
             .reshape(-1)
         )
         if spmd.is_type_checking():
-            row_idx = spmd.mutate_type(row_idx, "tp", src=spmd.R, dst=spmd.I)
-            row_idx = spmd.mutate_type(row_idx, "cp", src=spmd.R, dst=spmd.I)
-            col_idx = spmd.mutate_type(col_idx, "tp", src=spmd.R, dst=spmd.I)
-            col_idx = spmd.mutate_type(col_idx, "cp", src=spmd.R, dst=spmd.I)
-
-        # 2D RoPE: row and col each get separate frequency sets, concatenated
-        # (not interleaved). freq_table shape: (max_hw, head_dim//4)
-        rope_row = freq_table[row_idx]  # (h*w, head_dim//4)
-        rope_col = freq_table[col_idx]  # (h*w, head_dim//4)
-        rope_2d = torch.cat([rope_row, rope_col], dim=-1)  # (h*w, head_dim//2)
-
+            row_T = spmd.mutate_type(row_T, "tp", src=spmd.R, dst=spmd.I)
+            row_T = spmd.mutate_type(row_T, "cp", src=spmd.R, dst=spmd.I)
+            col_T = spmd.mutate_type(col_T, "tp", src=spmd.R, dst=spmd.I)
+            col_T = spmd.mutate_type(col_T, "cp", src=spmd.R, dst=spmd.I)
+        spatial_TC = torch.stack((row_T, col_T), dim=-1)
         # Apply to all visual items with this (h, w).
-        # For videos (t > 1), repeat spatial embeddings per frame;
+        # For videos (t > 1), repeat spatial positions per frame;
         # temporal position encoding is handled by MRoPE in the LLM
         for i in indices:
-            t = grids[i][0]
-            if t > 1:
-                rope_embeds[i] = rope_2d.repeat(t, 1).to(torch.float32)
-            else:
-                rope_embeds[i] = rope_2d.to(torch.float32)
+            positions[i] = spatial_TC.repeat(grids[i][0], 1)
 
-    # Compute cos/sin in float32 for numerical precision
-    packed_rope_embeds = torch.cat([rope_embeds[i] for i in range(len(grids))], dim=0)
+    positions_TC = torch.cat([positions[i] for i in range(len(grids))], dim=0)
     if spmd.is_type_checking():
-        packed_rope_embeds = spmd.mutate_type(
-            packed_rope_embeds,
-            src={"dp": spmd.R, "tp": spmd.I},
-            dst={"dp": spmd.V, "tp": spmd.I},
-        )
-    packed_rope_embeds = torch.cat((packed_rope_embeds, packed_rope_embeds), dim=-1)
-    rope_cache = torch.cat(
-        [packed_rope_embeds.cos(), packed_rope_embeds.sin()], dim=-1
-    ).unsqueeze(1)
-
-    return rope_cache
-
-
-class VisionRotaryEmbedding(Module):
-    """2D Rotary Position Embedding for Vision Transformer."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        theta: float = 10000.0
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.dim = config.dim
-        self.theta = config.theta
-        inv_freq = 1.0 / (
-            config.theta
-            ** (torch.arange(0, config.dim, 2, dtype=torch.float) / config.dim)
-        )
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        """Re-compute inv_freq on the target device after to_empty()."""
-        device = buffer_device or self.inv_freq.device
-        self.inv_freq = 1.0 / (
-            self.theta
-            ** (
-                torch.arange(0, self.dim, 2, dtype=torch.float, device=device)
-                / self.dim
-            )
-        )
-
-    def forward(self, seqlen: int) -> torch.Tensor:
-        """Compute rotary frequency table for positions up to seqlen."""
-        seq = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
-        if spmd.is_type_checking():
-            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
-            seq = spmd.mutate_type(seq, "cp", src=spmd.R, dst=spmd.I)
-        return torch.outer(seq, self.inv_freq)
+        positions_TC = spmd.mutate_type(positions_TC, "dp", src=spmd.R, dst=spmd.V)
+    return positions_TC
 
 
 class PatchMerger(Module):
@@ -329,7 +257,6 @@ class Qwen35VisionEncoder(Module):
         # Sub-module configs
         patch_embed_proj: Linear.Config
         block: VisionTransformerBlock.Config
-        rotary_pos_emb: VisionRotaryEmbedding.Config
         merger: PatchMerger.Config
 
         def build_flops_estimator(
@@ -389,9 +316,6 @@ class Qwen35VisionEncoder(Module):
         )
         self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
-        self.rotary_pos_emb = config.rotary_pos_emb.build()
-        self._cached_freq_table: torch.Tensor | None = None
-
         self.layers = ModuleDict(
             {str(idx): config.block.build() for idx in range(config.num_layers)}
         )
@@ -401,42 +325,30 @@ class Qwen35VisionEncoder(Module):
     def compute_position_embeddings(
         self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute packed learned position embeddings and RoPE caches.
+        """Compute packed learned position embeddings and RoPE positions.
 
         Delegates to two standalone helpers:
         - ``_compute_learned_pos_embeds``: bilinear-interpolated learned embeddings
-        - ``_compute_2d_rope_cache``: 2D RoPE cache
+        - ``_compute_2d_positions``: 2D RoPE coordinates
 
         Args:
             grids: per-item ``[t, h, w]`` patch counts as host ints.
 
         Returns:
             learned_pos: ``(total_num_patches, dim)`` learned positions.
-            rope_cache: ``(total_num_patches, 1, head_dim*2)`` RoPE cache.
+            positions: ``(total_num_patches, 2)`` row/column coordinates.
         """
-        head_dim = self.config.dim // self.config.num_heads
-
-        # Get RoPE freq table, reusing cache when possible
-        max_hw = max(max(h, w) for _, h, w in grids)
-        if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
-            self._cached_freq_table = self.rotary_pos_emb(max_hw)
-
-        learned_pos = _compute_learned_pos_embeds(
+        learned_pos_TD = _compute_learned_pos_embeds(
             self.pos_embed,
             grids,
             self.num_grid_per_side,
             self.spatial_merge_size,
             self.config.dim,
         )
-
-        rope_cache = _compute_2d_rope_cache(
-            self._cached_freq_table,
-            grids,
-            self.spatial_merge_size,
-            head_dim,
+        positions_TC = _compute_2d_positions(
+            grids, self.spatial_merge_size, self.pos_embed.device
         )
-
-        return learned_pos, rope_cache
+        return learned_pos_TD, positions_TC
 
     # Vision activations are never sequence-sharded, so they stay TP-invariant.
     @disable_dense_sp()
@@ -475,8 +387,8 @@ class Qwen35VisionEncoder(Module):
             )
 
         x = self.patch_embed(pixel_values)
-        learned_pos, rope_cache = self.compute_position_embeddings(grids)
-        x = x + learned_pos
+        learned_pos_TD, positions_TC = self.compute_position_embeddings(grids)
+        x = x + learned_pos_TD
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -490,8 +402,7 @@ class Qwen35VisionEncoder(Module):
         for layer in self.layers.values():
             x = layer(
                 x,
-                rope_cache=rope_cache,
-                rope_apply=CosSinRoPE.apply_rotary_emb,
+                positions=positions_TC,
                 attention_mask=attention_mask,
             )
 
