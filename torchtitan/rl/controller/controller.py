@@ -423,6 +423,17 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
+            fault_tolerance = self.generator_router.fault_tolerance
+            if (
+                fault_tolerance is not None
+                and fault_tolerance.min_healthy_generators >= self.num_generators
+            ):
+                raise ValueError(
+                    "generator_router.fault_tolerance.min_healthy_generators "
+                    f"({fault_tolerance.min_healthy_generators}) must be less than "
+                    f"num_generators ({self.num_generators}): any generator failure "
+                    "would fail the run."
+                )
             # TODO: support "gpu_fetch" by reading into generator GPU memory
             # (https://github.com/pytorch/torchtitan/issues/6070).
             if (

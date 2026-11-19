@@ -6,21 +6,28 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+from monarch.actor import ActorError
 
 from torchtitan.config import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl import train
 from torchtitan.rl.actors.monarch import provisioning, system as monarch_system
+from torchtitan.rl.actors.monarch.router import InterGeneratorRouterActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.actors.system import ServiceHandle, TrainerHandle
 from torchtitan.rl.controller.controller import AsyncLoopConfig
+from torchtitan.rl.generator.engine_loop import GeneratorUnavailableError
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
-from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.inter_generator import (
+    GeneratorFaultToleranceConfig,
+    InterGeneratorRouter,
+)
 
 
 class _FakeController:
@@ -239,7 +246,7 @@ class _RouterCloseEndpoint:
         self._router = router
 
     async def call_one(self):
-        return await self._router._fanout("close", return_exceptions=True)
+        return await self._router.close_generators()
 
 
 class _StubRouterHandle:
@@ -295,6 +302,12 @@ class _StubRouter(InterGeneratorRouter):
 
     async def _spawn_generator(self, index):
         return _service(self._stub_generators[index])
+
+    async def _stop_generator(self, index):
+        raise AssertionError("no generator fails in these tests")
+
+    def _is_generator_unavailable(self, error):
+        raise AssertionError("no generator fails in these tests")
 
 
 def _set_generator_router(rl_trainer, generators):
@@ -599,3 +612,35 @@ def test_monarch_actor_system_spans_pipeline_stages_per_dp_rank():
 def test_monarch_actor_system_rejects_a_trainer_not_laid_out_as_dp_cp_tp():
     with pytest.raises(RuntimeError, match="DP rank 0 report DP ranks"):
         _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2)
+
+
+def test_monarch_router_supervises_only_current_generators():
+    h0, h1 = object(), object()
+
+    def router(fault_tolerance, phase="running"):
+        return SimpleNamespace(
+            _config=SimpleNamespace(fault_tolerance=fault_tolerance),
+            _phase=phase,
+            _generators=[h0, h1],
+            _actor_mesh_names=["gen0-a", "gen1-b"],
+            _report_failure=Mock(),
+        )
+
+    def supervise(router, mesh_name):
+        failure = SimpleNamespace(mesh_name=mesh_name)
+        return asyncio.run(InterGeneratorRouterActor.__supervise__(router, failure))
+
+    # Without fault tolerance, or during setup, every failure goes on to the controller.
+    assert not supervise(router(None), "gen1-b")
+    assert not supervise(router(GeneratorFaultToleranceConfig(), "setup"), "gen1-b")
+    # With it, a current generator's mesh is reported; other meshes (Monarch's logging
+    # mesh, a stopped generator) are absorbed.
+    r = router(GeneratorFaultToleranceConfig())
+    assert supervise(r, "gen1-b") and supervise(r, "log_level-c")
+    r._report_failure.assert_called_once()
+    assert r._report_failure.call_args.args[0] is h1
+
+    unavailable = ActorError(GeneratorUnavailableError("generator is closed"))
+    assert InterGeneratorRouterActor._is_generator_unavailable(None, unavailable)
+    rejected = ActorError(ValueError("prompt too long"))
+    assert not InterGeneratorRouterActor._is_generator_unavailable(None, rejected)

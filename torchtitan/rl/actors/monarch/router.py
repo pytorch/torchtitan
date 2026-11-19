@@ -11,7 +11,15 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from monarch.actor import concurrent_endpoint, current_size
+# TODO: private; monarch.actor doesn't export SupervisionError (no upstream issue yet).
+from monarch._rust_bindings.monarch_hyperactor.supervision import SupervisionError
+from monarch.actor import (
+    ActorError,
+    concurrent_endpoint,
+    current_size,
+    MeshFailure,
+    ProcMesh,
+)
 
 from torchtitan.rl.actors.monarch.actor import TitanActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
@@ -21,6 +29,7 @@ from torchtitan.rl.actors.monarch.provisioning import (
 )
 from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.generator.engine_loop import GeneratorUnavailableError
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.model_state_dict_transport import (
     ModelStateDictTransport,
@@ -47,6 +56,10 @@ class _InterGeneratorRouterActorEndpoints:
         self._placements = placements
         self._generator_config = generator_config
         self._generator_kwargs = generator_kwargs
+        # Per generator index, its proc mesh and the Monarch name of its actor mesh,
+        # which `MeshFailure`s carry.
+        self._proc_meshes: list[ProcMesh | None] = [None] * len(placements)
+        self._actor_mesh_names: list[str | None] = [None] * len(placements)
 
     @concurrent_endpoint
     async def spawn_generators(self) -> None:
@@ -57,8 +70,10 @@ class _InterGeneratorRouterActorEndpoints:
         return super().reserve(request_id, routing_session_id=routing_session_id)
 
     @concurrent_endpoint
-    async def release_reservation(self, request_id: str) -> None:
-        super().release_reservation(request_id)
+    async def release_reservation(
+        self, request_id: str, *, error: BaseException | None = None
+    ) -> bool:
+        return super().release_reservation(request_id, error=error)
 
     @concurrent_endpoint
     async def start_engine_loop(self) -> None:
@@ -117,7 +132,9 @@ class InterGeneratorRouterActor(
     spawns each generator's proc mesh on its ``RolePlacement``."""
 
     async def _spawn_generator(self, index: int) -> ServiceHandle:
-        procs = self._placements[index].spawn_procs()
+        # Record the procs first, so that `_stop_generator` stops them even if the
+        # rest of the spawn fails.
+        procs = self._proc_meshes[index] = self._placements[index].spawn_procs()
         await setup_torch_elastic_env(procs)
         generator = procs.spawn(
             generator_role_names(len(self._placements))[index],
@@ -125,6 +142,37 @@ class InterGeneratorRouterActor(
             self._generator_config,
             **self._generator_kwargs,
         )
+        # TODO: private; Monarch has no public API for an actor mesh's name, which
+        #   `MeshFailure.mesh_name` carries (no upstream issue yet).
+        self._actor_mesh_names[index] = await generator._name
         return ServiceHandle(
             all_ranks=generator, rank0=generator.flatten("rank").slice(rank=0)
         )
+
+    async def _stop_generator(self, index: int) -> None:
+        procs = self._proc_meshes[index]
+        if procs is not None:
+            await procs.stop()
+            self._proc_meshes[index] = None
+
+    def _is_generator_unavailable(self, error: BaseException) -> bool:
+        # A call to a generator whose process died or that was stopped raises
+        # `SupervisionError`; a call to one whose engine loop closed raises
+        # `GeneratorUnavailableError`, which reaches the caller in an `ActorError`.
+        if isinstance(error, ActorError):
+            error = error.exception
+        return isinstance(error, (SupervisionError, GeneratorUnavailableError))
+
+    # pyrefly: ignore [bad-override]
+    async def __supervise__(self, failure: MeshFailure) -> bool:
+        """Without fault tolerance, or before the engine loops start, pass every
+        failure to the owner, the controller, which exits. Otherwise, report a failure
+        of a current generator's actor mesh and absorb the rest: a killed process also
+        fails the other meshes on it, e.g. Monarch's logging meshes, and the meshes of
+        a stopped generator."""
+        if self._config.fault_tolerance is None or self._phase == "setup":
+            return False
+        if failure.mesh_name in self._actor_mesh_names:
+            index = self._actor_mesh_names.index(failure.mesh_name)
+            self._report_failure(self._generators[index], str(failure))
+        return True

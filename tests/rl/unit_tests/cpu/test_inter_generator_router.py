@@ -10,7 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from torchtitan.rl.actors.system import ServiceHandle
-from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.routing.inter_generator import (
+    GeneratorFaultToleranceConfig,
+    InterGeneratorRouter,
+)
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
@@ -19,8 +22,8 @@ from torchtitan.rl.routing.strategies import (
 
 
 class _Endpoint:
-    def __init__(self, *, wait: bool = False, raises: bool = False):
-        self.raises = raises
+    def __init__(self, *, wait: bool = False, error: Exception | None = None):
+        self.error = error
         self.calls = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -31,8 +34,8 @@ class _Endpoint:
         self.calls.append((args, kwargs))
         self.started.set()
         await self.release.wait()
-        if self.raises:
-            raise RuntimeError("endpoint failed")
+        if self.error is not None:
+            raise self.error
 
     async def call(self, *args, **kwargs):
         return await self.call_one(*args, **kwargs)
@@ -51,8 +54,18 @@ class _Actor:
     ):
         self.name = name
         self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
-        self.load_model_state_dict = _Endpoint(wait=wait_pull, raises=raises_pull)
+        self.load_model_state_dict = _Endpoint(
+            wait=wait_pull,
+            error=RuntimeError("endpoint failed") if raises_pull else None,
+        )
         self.release_sessions = _Endpoint()
+        self.start_engine_loop = _Endpoint()
+        self.release_groups = _Endpoint()
+        self.close = _Endpoint()
+
+
+class _Unavailable(Exception):
+    """What a call to a gone generator raises in these tests."""
 
 
 class _FakeRouter(InterGeneratorRouter):
@@ -61,23 +74,38 @@ class _FakeRouter(InterGeneratorRouter):
     def __init__(self, config, actors):
         super().__init__(config, num_generators=len(actors))
         self.actors = actors
+        self.stopped: list[int] = []
 
     async def _spawn_generator(self, index):
         actor = self.actors[index]
         return ServiceHandle(all_ranks=actor, rank0=actor)
 
+    async def _stop_generator(self, index):
+        self.stopped.append(index)
 
-def _router(actors, *, strategy=None, hot_swap=False) -> _FakeRouter:
+    def _is_generator_unavailable(self, error):
+        return isinstance(error, _Unavailable)
+
+
+def _router(
+    actors, *, strategy=None, hot_swap=False, fault_tolerance=None
+) -> _FakeRouter:
     router = _FakeRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
+            fault_tolerance=fault_tolerance,
         ),
         actors,
     )
+
+    async def start():
+        await router.spawn_generators()
+        await router.start_engine_loop()
+
     # In a thread, since some tests build routers inside a running event loop.
     with ThreadPoolExecutor(1) as executor:
-        executor.submit(asyncio.run, router.spawn_generators()).result()
+        executor.submit(asyncio.run, start()).result()
     return router
 
 
@@ -409,5 +437,134 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
         router = _router(actors)
 
         await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
+
+    asyncio.run(_run())
+
+
+def test_failed_generator_leaves_routing_and_is_stopped():
+    async def _run():
+        router = _router(
+            [_Actor("gen0"), _Actor("gen1")],
+            fault_tolerance=GeneratorFaultToleranceConfig(),
+        )
+        old_gen0 = router._generators[0]
+        assert router.reserve("r0", routing_session_id=None).name == "gen0"
+        assert router.reserve("r1", routing_session_id=None).name == "gen1"
+        assert router.reserve("r2", routing_session_id=None).name == "gen0"
+
+        # E.g. the engine rejects r1's prompt: the caller raises it, nothing fails.
+        assert not router.release_reservation("r1", error=ValueError("prompt too long"))
+        # The calls find gen0 gone: the callers may retry, and gen0 leaves routing.
+        assert router.release_reservation("r0", error=_Unavailable())
+        assert router.release_reservation("r2", error=_Unavailable())
+        assert [_route(router) for _ in range(2)] == ["gen1", "gen1"]
+
+        await asyncio.gather(*router._background_tasks)
+        # One stop for both reports; a later report of gen0 is a no-op.
+        router._report_failure(old_gen0, "late report")
+        assert router.stopped == [0]
+
+    asyncio.run(_run())
+
+
+def test_fault_tolerant_pull_fails_only_the_generator_whose_pull_fails():
+    async def _run():
+        router = _router(
+            [_Actor("gen0", raises_pull=True), _Actor("gen1")],
+            fault_tolerance=GeneratorFaultToleranceConfig(),
+        )
+
+        await router.pull_model_state_dict(1)
+
+        assert [h.state for h in router._generators] == ["dead", "healthy"]
+
+    asyncio.run(_run())
+
+
+async def _exited():
+    return None
+
+
+async def _crashed():
+    raise RuntimeError("engine loop crashed")
+
+
+def test_wait_engine_loop_takes_a_crashed_generator_out_of_service():
+    async def _run():
+        gen0, gen1 = _Actor("gen0"), _Actor("gen1")
+        gen0.wait_engine_loop = _StreamEndpoint(_crashed)
+        gen1.wait_engine_loop = _StreamEndpoint(_exited)
+        router = _router([gen0, gen1], fault_tolerance=GeneratorFaultToleranceConfig())
+
+        # Returns once gen1 exits; gen0's crash only takes it out of service.
+        await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
+        await asyncio.gather(*router._background_tasks)
+        assert router.stopped == [0]
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "fault_tolerance, match",
+    [
+        (
+            GeneratorFaultToleranceConfig(min_healthy_generators=2),
+            "fewer than min_healthy_generators=2",
+        ),
+    ],
+)
+def test_wait_engine_loop_raises_when_fault_tolerance_gives_up(fault_tolerance, match):
+    async def _run():
+        never = asyncio.Event()
+
+        async def blocked():
+            await never.wait()
+
+        gen0, gen1 = _Actor("gen0"), _Actor("gen1")
+        gen0.wait_engine_loop = _StreamEndpoint(_crashed)
+        gen1.wait_engine_loop = _StreamEndpoint(blocked)
+        router = _router([gen0, gen1], fault_tolerance=fault_tolerance)
+
+        with pytest.raises(RuntimeError, match=match):
+            await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
+        # The failed generator is stopped, so calls in flight to it fail, and no new
+        # call is routed.
+        await asyncio.gather(*router._background_tasks)
+        assert router.stopped == [0]
+        with pytest.raises(RuntimeError, match="gave up"):
+            router.reserve("r0", routing_session_id=None)
+
+    asyncio.run(_run())
+
+
+def test_fanout_reports_generators_found_gone_and_raises_other_errors():
+    async def _run():
+        gen0, gen1 = _Actor("gen0"), _Actor("gen1")
+        gen0.release_groups = _Endpoint(error=_Unavailable())
+        router = _router([gen0, gen1], fault_tolerance=GeneratorFaultToleranceConfig())
+
+        await router.release_groups([1])
+        assert [h.state for h in router._generators] == ["dead", "healthy"]
+
+        gen1.release_groups = _Endpoint(error=ValueError("bug"))
+        with pytest.raises(ValueError, match="bug"):
+            await router.release_groups([2])
+
+    asyncio.run(_run())
+
+
+def test_close_generators_skips_dead_generators_and_retries_nothing():
+    async def _run():
+        gen0, gen1 = _Actor("gen0"), _Actor("gen1")
+        router = _router([gen0, gen1], fault_tolerance=GeneratorFaultToleranceConfig())
+        router._report_failure(router._generators[0], "test")
+        router.reserve("r0", routing_session_id=None)
+
+        results = await router.close_generators()
+
+        assert results == [None, None]
+        assert gen0.close.calls == [] and len(gen1.close.calls) == 1
+        # Calls failing at shutdown aren't retried.
+        assert not router.release_reservation("r0", error=_Unavailable())
 
     asyncio.run(_run())
