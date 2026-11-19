@@ -302,7 +302,6 @@ def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
     def validate(config):
         config.parallelism.fsdp_backend = FlexShardConfig()
         config.loss = CrossEntropyLoss.Config()
-        config.training.disable_accelerator_graphs = True
         validate_flex_shard_training(config, config.model)
 
     validate(llama3_debugmodel())
@@ -356,7 +355,6 @@ def test_flex_shard_rejects_checkpointers_that_drop_shard_layouts(
     config = llama3_debugmodel()
     config.parallelism.fsdp_backend = FlexShardConfig()
     config.loss = CrossEntropyLoss.Config()
-    config.training.disable_accelerator_graphs = True
     config.checkpointer = checkpointer
     if unsupported is None:
         validate_flex_shard_training(config, config.model)
