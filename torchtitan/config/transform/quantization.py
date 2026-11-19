@@ -9,10 +9,11 @@
 import logging
 from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
-from typing import Literal
+from typing import cast, Literal
 
 import torch
 
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -39,6 +40,23 @@ _QUANTIZABLE_LINEAR_CLASSES = (
 )
 
 
+def _require_stock_config(
+    config: Linear.Config | GroupedLinear.Config, fqn: str
+) -> None:
+    """Reject a config subclass, e.g. one LoRATransform froze: the quantized config is
+    rebuilt from its fields alone, so the subclass's behavior (frozen weights) would be
+    lost. The relations order quantization before LoRA only within one call."""
+    owner = type(config)._owner
+    assert owner is not None
+    stock_config_cls = cast(type[Module], owner).Config
+    if type(config) is not stock_config_cls:
+        raise ValueError(
+            f"Cannot quantize {fqn!r}: {type(config).__qualname__} is not the stock "
+            f"{stock_config_cls.__qualname__} (e.g. LoRATransform froze it). Apply "
+            "quantization before LoRATransform, or in the same apply_transforms call."
+        )
+
+
 def _validate_quantizable_linear(
     config: Linear.Config,
     fqn: str,
@@ -51,6 +69,7 @@ def _validate_quantizable_linear(
             f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
             f"supported Linear classes are {supported}."
         )
+    _require_stock_config(config, fqn)
     if config.preserve_dtype_params:
         raise ValueError(
             f"Cannot quantize {fqn!r}: it lists preserve_dtype_params "
@@ -240,9 +259,10 @@ class MXFP8GroupedLinearTransform(QuantizationTransform):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
 
         routed_configs: dict[int, RoutedExperts.Config] = {}
-        for _fqn, config, parent, attr in model.traverse(GroupedLinear.Config):
+        for fqn, config, parent, attr in model.traverse(GroupedLinear.Config):
             if not isinstance(parent, RoutedExperts.Config):
                 raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            _require_stock_config(config, fqn)
             routed_configs[id(parent)] = parent
             base_module_cls = type(config)._owner
             quantized_cls = _get_mxfp8_grouped_linear_cls(base_module_cls)
@@ -344,6 +364,7 @@ class NVFP4GroupedLinearTransform(QuantizationTransform):
         for fqn, config, parent, _attr in targets:
             if not isinstance(parent, RoutedExperts.Config):
                 raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            _require_stock_config(config, fqn)
             if config.in_features % 128 or config.out_features % 128:
                 raise ValueError(
                     "NVFP4 grouped linears require input and output widths "

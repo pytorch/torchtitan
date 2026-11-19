@@ -21,9 +21,12 @@ from torchtitan.components.data import (
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.config import ConfigLoader
 from torchtitan.config.transform import (
+    LoRATransform,
+    MXFP8GroupedLinearTransform,
     MXFP8LinearTransform,
     NVFP4GroupedLinearTransform,
     NVFP4LinearTransform,
+    transform_model_config_,
 )
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
@@ -859,6 +862,46 @@ def test_mxfp8_linear_loads_stock_checkpoint():
     mxfp8.load_state_dict(stock.state_dict())
     assert isinstance(mxfp8.weight, _LinearShardedTensorWithMXFP8Compute)
     assert torch.equal(mxfp8.weight._tensor, stock.weight)
+
+
+def _dense_feed_forward_config() -> DenseFeedForward.Config:
+    return DenseFeedForward.Config(
+        w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
+        w2=Linear.Config(in_features=128, out_features=128),
+    )
+
+
+def _routed_experts_config() -> RoutedExperts.Config:
+    return RoutedExperts.Config(
+        w13=GroupedLinear.Config(
+            group_size=2, in_features=128, out_features=128, num_linears=2
+        ),
+        w2=GroupedLinear.Config(group_size=2, in_features=128, out_features=128),
+        token_dispatcher=AllToAllTokenDispatcher.Config(num_experts=2, top_k=1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("make_config", "transform", "stock_config"),
+    [
+        (_dense_feed_forward_config, MXFP8LinearTransform(fqns=["w2"]), "Linear"),
+        (_dense_feed_forward_config, NVFP4LinearTransform(fqns=["w2"]), "Linear"),
+        (_routed_experts_config, MXFP8GroupedLinearTransform(), "GroupedLinear"),
+        (_routed_experts_config, NVFP4GroupedLinearTransform(), "GroupedLinear"),
+    ],
+)
+def test_quantization_rejects_a_projection_lora_froze(
+    monkeypatch, make_config, transform, stock_config
+):
+    """Quantizing in a call after LoRA would rebuild LoRA's frozen w2 as a trainable
+    quantized config; it raises instead."""
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    model = transform_model_config_(
+        make_config(), [LoRATransform(rank=8, alpha=16.0, target_modules=["w13"])]
+    )
+
+    with pytest.raises(ValueError, match=f"is not the stock {stock_config}.Config"):
+        transform_model_config_(model, [transform])
 
 
 def test_nvfp4_grouped_transform_selects_both_projections_and_one_dispatcher_swap(

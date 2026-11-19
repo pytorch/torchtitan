@@ -22,6 +22,7 @@ from torchtitan.config.transform import (
     LoRATransform,
     ModelConfigTransform,
     MXFP8LinearTransform,
+    NVFP4LinearTransform,
     QuantizationTransform,
     TokenDispatcherTransform,
     transform_model_config_,
@@ -878,17 +879,19 @@ class TestQuantizationAndLMHeadRelations(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "cannot be combined"):
                 transform_model_config_(self._model_config(), transforms)
 
-    def test_quantization_conflicts_with_async_tensor_parallel(self):
-        with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            transform_model_config_(
-                self._model_config(),
-                [
-                    AsyncTensorParallelTransform(
-                        enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
-                    ),
-                    MXFP8LinearTransform(),
-                ],
-            )
+    def test_dense_quantization_conflicts_with_async_tensor_parallel(self):
+        for quantization in (MXFP8LinearTransform(), NVFP4LinearTransform()):
+            with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                transform_model_config_(
+                    self._model_config(),
+                    [
+                        AsyncTensorParallelTransform(
+                            enable_sequence_parallel=True,
+                            disable_inplace_wgrad_accum=True,
+                        ),
+                        quantization,
+                    ],
+                )
 
 
 if __name__ == "__main__":

@@ -14,7 +14,11 @@ from .context_parallel import ContextParallelTransform
 from .dist_moe import DistMoeTransform
 from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
-from .quantization import QuantizationTransform
+from .quantization import (
+    MXFP8LinearTransform,
+    NVFP4LinearTransform,
+    QuantizationTransform,
+)
 from .token_dispatcher import TokenDispatcherTransform
 
 TransformType: TypeAlias = type[ModelConfigTransform]
@@ -44,9 +48,12 @@ _BUILTIN_CONFLICTS: tuple[ConflictRelation, ...] = (
     # Async kernels invoke fused autograd functions directly instead of the
     # projection's _linear method, which would silently omit LoRA computation.
     (AsyncTensorParallelTransform, LoRATransform),
-    # Async TP does not support quantized projections, and quantization does
-    # not support the async projection classes.
-    (AsyncTensorParallelTransform, QuantizationTransform),
+    # Async TP converts only stock ColumnParallelLinear and RowParallelLinear
+    # owners, so it would silently leave quantized projections synchronous, and
+    # quantization does not support the async projection classes. Grouped
+    # quantization touches only routed experts, which async TP never converts.
+    (AsyncTensorParallelTransform, MXFP8LinearTransform),
+    (AsyncTensorParallelTransform, NVFP4LinearTransform),
     # TODO: Allow this pair once linear quantization and HiMidLoLinear can
     # preserve each other's config and compute semantics.
     (QuantizationTransform, LMHeadFP32OutputTransform),
