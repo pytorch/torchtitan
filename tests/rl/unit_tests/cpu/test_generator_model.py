@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -13,12 +14,14 @@ import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.distributed.tensor import DTensor
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator import model as generator_model
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import ModelStateDictLoader
@@ -68,6 +71,16 @@ def _build_loader(
             frozen_param_keys=frozen,
             hf_assets_path="/hf",
         )
+
+
+def test_direct_fetch_uses_quantized_high_precision_storage() -> None:
+    class _QuantizedShard(_ShardedFSDPTensor):
+        pass
+
+    high_precision = torch.zeros(4)
+    fsdp_param = SimpleNamespace(_sharded_local_tensor=_QuantizedShard(high_precision))
+
+    assert generator_model._writable_sharded_param_storage(fsdp_param) is high_precision
 
 
 @pytest.mark.parametrize("loads_checkpoint", [False, True])

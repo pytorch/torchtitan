@@ -11,12 +11,15 @@ from __future__ import annotations
 import abc
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+
+if TYPE_CHECKING:
+    from torchtitan.rl.model_state_dict_transport import TensorShard
 
 
 ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
@@ -82,6 +85,16 @@ class GenerationEngine(Configurable, abc.ABC):
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
 
+    @property
+    @abc.abstractmethod
+    def model_state_dict_load_groups(self) -> list[list[str]]:
+        """The keys of each ``fetch`` call of a load that fills every key, in load order."""
+
+    @property
+    @abc.abstractmethod
+    def model_state_dict_layout(self) -> dict[str, TensorShard]:
+        """The sharded weights and buffers a model state dict load fills."""
+
     @abc.abstractmethod
     def add_requests(
         self, requests: list[EngineRequest]
@@ -99,7 +112,10 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @abc.abstractmethod
     def load_model_state_dict(
-        self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]
+        self,
+        fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]],
+        *,
+        local_storage: bool = False,
     ) -> None:
         """Load a model state dict by having ``fetch`` fill the model's weights in place, and
         reset the KV cache when configured.
@@ -107,6 +123,9 @@ class GenerationEngine(Configurable, abc.ABC):
         Args:
             fetch: Fills each tensor of the given subset of the model state dict in place
                 with the new weights and returns the keys it filled.
+            local_storage: Have ``fetch`` fill each sharded parameter's local storage
+                (a quantized parameter's high-precision tensor) rather than the
+                sharded parameter, as reads straight into GPU memory do.
         """
 
     @property
