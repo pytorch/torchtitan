@@ -9,6 +9,7 @@
 import logging
 import operator
 from collections import defaultdict
+from collections.abc import Callable
 from functools import partial
 from itertools import pairwise
 
@@ -30,13 +31,19 @@ from flex_shard import (
 from flex_shard.custom_placements.shard import Shard
 from flex_shard.layout_adapters.spmd_types import spmd_types_to_global_layout
 from torch._functorch.compile_utils import fx_graph_cse
+from torch._guards import detect_fake_mode
+from torch._higher_order_ops.passes.inline_invoke_subgraph import (
+    inline_invoke_subgraph_nodes,
+)
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard as DTensorShard
 from torch.distributed.tensor.placement_types import (
     _StridedShard,
     Placement as DTensorPlacement,
 )
+from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.utils._pytree import tree_leaves
+from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.components.optim import GradientClipper
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
@@ -51,6 +58,7 @@ from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     mutation_target_nodes,
 )
+from torchtitan.experiments.graph_trainer.subgraph_regions import mark_invoke_subgraph
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
@@ -67,6 +75,8 @@ _CHUNK_OWNERSHIP_KEYS = (
     "chunked_region_producer",
     "chunked_region_role",
 )
+
+_UNSHARD_REMAT_REGION = "flex_shard_unshard_remat_region"
 
 
 def apply_flex_shard(
@@ -369,6 +379,160 @@ def _graph_tensor_storages_and_writes(graph: fx.Graph):
         for node in graph.nodes
     }
     return storages, writes
+
+
+def outline_flex_shard_unshards_pass(
+    gm: fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    policy_fn: Callable[[fx.Node], CheckpointPolicy] | None = None,
+) -> fx.GraphModule:
+    del example_inputs
+    count = 0
+    for module in list(gm.modules()):
+        if not isinstance(module, fx.GraphModule):
+            continue
+        nodes = list(module.graph.nodes)
+        positions = {node: index for index, node in enumerate(nodes)}
+        storages, writes = _graph_tensor_storages_and_writes(module.graph)
+        regions = _collect_bucket_regions(module.graph).get(("unshard", False), ())
+        for region in regions:
+            names = region[0].meta["custom"][FLEX_SHARD_META_PARAM_FQNS]
+            owners = {tuple(name.split(".")[:2]) for name in names}
+            if len(owners) != 1:
+                continue
+            owner = next(iter(owners))
+            if len(owner) != 2 or owner[0] != "layers" or not owner[1].isdigit():
+                continue
+            if policy_fn is not None and any(
+                policy_fn(node) is CheckpointPolicy.MUST_SAVE for node in region
+            ):
+                continue
+            node_set = set(region)
+            inputs = {
+                dependency
+                for node in region
+                for dependency in node.all_input_nodes
+                if dependency not in node_set
+            }
+            outputs = [
+                node
+                for node in region
+                if any(user not in node_set for user in node.users)
+            ]
+            input_storages = set().union(*(storages[node] for node in inputs))
+            written_storages = set().union(*(writes[node] for node in region))
+            if written_storages & input_storages:
+                continue
+            targets = {
+                base_tensor_for_mutation_target(target)
+                for node in region
+                for target in mutation_target_nodes(node)
+            }
+            if any(
+                target not in node_set
+                or not getattr(
+                    getattr(target.target, "_schema", None), "name", ""
+                ).startswith("aten::empty")
+                for target in targets
+            ):
+                continue
+            if any(
+                writes[node] & input_storages
+                for node in nodes[positions[region[-1]] + 1 :]
+                if node not in node_set
+            ):
+                continue
+            if any(
+                tag in getattr(node.target, "tags", ())
+                for node in region
+                for tag in (
+                    torch.Tag.nondeterministic_seeded,
+                    torch.Tag.nondeterministic_bitwise,
+                    torch.Tag.data_dependent_output,
+                    torch.Tag.dynamic_output_shape,
+                )
+            ) or any(
+                node.meta.get("recompute") is CheckpointPolicy.MUST_SAVE
+                for node in region
+            ):
+                continue
+            if not outputs or any(
+                not tree_leaves(node.meta.get("val"))
+                or any(
+                    not isinstance(value, torch.Tensor)
+                    for value in tree_leaves(node.meta.get("val"))
+                )
+                or storages[node] & input_storages
+                for node in outputs
+            ):
+                continue
+            output_storages = set().union(*(storages[node] for node in outputs))
+            if any(
+                writes[node] & output_storages for node in nodes if node not in node_set
+            ):
+                continue
+            call = mark_invoke_subgraph(
+                module.graph,
+                region,
+                region_name_prefix=f"flex_shard_unshard_remat_{count}",
+            )
+            call.meta[_UNSHARD_REMAT_REGION] = True
+            call.meta["autograd_backward"] = False
+            call.meta["custom"] = {"module_fqn": ".".join(owner)}
+            for getter in call.users:
+                assert getter.target is operator.getitem
+                getter.meta["custom"] = dict(
+                    getter.meta.get("custom", {}), module_fqn=".".join(owner)
+                )
+            count += 1
+        module.graph.lint()
+        module.recompile()
+    logger.info("Outlined %s FlexShard unshard regions for rematerialization", count)
+    return gm
+
+
+def inline_flex_shard_unshards_pass(
+    gm: fx.GraphModule, example_inputs: tuple | None = None
+) -> fx.GraphModule:
+    del example_inputs
+    count = 0
+    for module in list(gm.modules()):
+        if not isinstance(module, fx.GraphModule):
+            continue
+        calls = [
+            node for node in module.graph.nodes if node.meta.get(_UNSHARD_REMAT_REGION)
+        ]
+        targets = {str(node.args[0].target) for node in calls}
+        for call in calls:
+            child = getattr(module, str(call.args[0].target))
+            inputs = [node.meta["val"] for node in call.args[2:]]
+            with torch.no_grad():
+                FakeTensorProp(
+                    child, mode=detect_fake_mode(inputs)
+                ).propagate_dont_convert_inputs(*inputs)
+            before = set(module.graph.nodes)
+            backward = call.meta.get("autograd_backward", False)
+            owner = call.meta["custom"]["module_fqn"]
+            inline_invoke_subgraph_nodes(module, [call])
+            for node in module.graph.nodes:
+                if node not in before:
+                    node.meta["autograd_backward"] = backward
+                    node.meta["custom"] = dict(
+                        node.meta.get("custom", {}), module_fqn=owner
+                    )
+                    node.meta.pop(_UNSHARD_REMAT_REGION, None)
+            count += 1
+        for target in targets:
+            if not any(
+                node.op == "get_attr" and node.target == target
+                for node in module.graph.nodes
+            ):
+                delattr(module, target)
+        module.graph.lint()
+        module.recompile()
+    logger.info("Inlined %s FlexShard unshard regions before scheduling", count)
+    return gm
 
 
 def fold_flex_shard_gradient_casts_pass(

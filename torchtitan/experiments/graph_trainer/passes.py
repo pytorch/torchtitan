@@ -79,6 +79,7 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
+    make_full_memory_policy,
     tag_with_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
@@ -272,6 +273,31 @@ def compile_time_passes(
     if ep_overlap_enabled:
         _, ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
 
+    remat_flex_shard_unshards = (
+        config.use_flex_shard_instead_simple_fsdp
+        and config.compile.memory_policy in ("default", "full")
+        and get_fsdp_reshard_after_forward_policy(
+            config.parallelism.fsdp_reshard_after_forward,
+            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+        )
+    )
+    if remat_flex_shard_unshards:
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            inline_flex_shard_unshards_pass,
+            outline_flex_shard_unshards_pass,
+        )
+
+        passes.append(
+            functools.partial(
+                outline_flex_shard_unshards_pass,
+                policy_fn=(
+                    make_full_memory_policy(config.compile.full_recompute_save_ops)
+                    if config.compile.memory_policy == "full"
+                    else None
+                ),
+            )
+        )
+
     passes.extend(
         [
             functools.partial(
@@ -284,6 +310,7 @@ def compile_time_passes(
                 defer_n_layers=config.compile.cpu_offload_defer_n_layers,
             ),
             selective_activation_remat_pass,
+            *([inline_flex_shard_unshards_pass] if remat_flex_shard_unshards else []),
             # Paged stash runs after CPU offload (the two claim disjoint nodes)
             # and *after* remat. Remat duplicates recomputed forward ops in
             # front of their backward consumers, and those duplicates read the

@@ -104,7 +104,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
     _backward_side_nodes,
     _default_memory_policy_pass,
     _make_default_memory_policy,
-    _make_full_memory_policy,
+    make_full_memory_policy,
     tag_min_cut_saved_values,
     tag_sac_policy,
     tag_with_memory_policy_pass,
@@ -1216,6 +1216,187 @@ class TestFlexShardScheduling(TestCase):
             "flex_shard_mesh_axis_names": ("fsdp",),
         }
         return root
+
+    def _trace_private_unshard_buffers(self):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        def joint(x, weight0, weight1):
+            buffer0 = torch.empty_like(weight0)
+            full0 = buffer0.view(weight0.shape)
+            buffer0.copy_(weight0)
+            buffer1 = torch.empty_like(weight1)
+            full1 = buffer1.view(weight1.shape)
+            buffer1.copy_(weight1)
+            hidden = x @ full0
+            output = hidden @ full1
+            loss = output.square().sum()
+            output_grad = output * 2
+            weight1_grad = hidden.t() @ output_grad
+            hidden_grad = output_grad @ full1.t()
+            weight0_grad = x.t() @ hidden_grad
+            input_grad = hidden_grad @ full0.t()
+            return loss, weight0_grad, weight1_grad, input_grad
+
+        inputs = (torch.randn(2, 4), torch.randn(4, 4), torch.randn(4, 4))
+        gm = make_fx(joint, tracing_mode="fake")(*inputs)
+        bucket = -1
+        num_matmuls = 0
+        backward = False
+        for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
+            if node.target is torch.ops.aten.empty_like.default:
+                bucket += 1
+            if node.target is torch.ops.aten.mm.default:
+                num_matmuls += 1
+            if not num_matmuls:
+                node.meta["custom"] = {
+                    "flex_shard_action": "unshard",
+                    "flex_shard_phase": "execute",
+                    "flex_shard_param_fqns": (f"layers.{bucket}.weight",),
+                    "flex_shard_mesh_axis_names": ("fsdp",),
+                    "module_fqn": f"layers.{bucket}",
+                }
+            else:
+                layer = 0 if num_matmuls <= 1 or num_matmuls >= 5 else 1
+                node.meta["custom"] = {"module_fqn": f"layers.{layer}"}
+            node.meta["autograd_backward"] = backward
+            if node.target is torch.ops.aten.sum.default:
+                backward = True
+        return gm, inputs
+
+    def test_private_unshard_remat_preserves_values_and_fake_aliases(self):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            inline_flex_shard_unshards_pass,
+            outline_flex_shard_unshards_pass,
+        )
+
+        gm, inputs = self._trace_private_unshard_buffers()
+        expected = gm(*inputs)
+        outline_flex_shard_unshards_pass(gm)
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
+        selective_activation_remat_pass(gm)
+        inline_flex_shard_unshards_pass(gm)
+        self.assertEqual(gm(*inputs), expected, exact_dtype=True, rtol=0, atol=0)
+        self.assertFalse(
+            any(
+                node.target is torch.ops.higher_order.invoke_subgraph
+                for node in gm.graph.nodes
+            )
+        )
+        buffers = list(
+            gm.graph.find_nodes(
+                op="call_function", target=torch.ops.aten.empty_like.default
+            )
+        )
+        self.assertEqual(len(buffers), 4)
+        self.assertEqual(
+            sum(node.meta.get("autograd_backward", False) for node in buffers), 2
+        )
+        self.assertEqual(
+            len({node.meta["val"].untyped_storage() for node in buffers}), 4
+        )
+        for node in gm.graph.find_nodes(
+            op="call_function", target=torch.ops.aten.view.default
+        ):
+            self.assertIs(
+                node.meta["val"].untyped_storage(),
+                node.args[0].meta["val"].untyped_storage(),
+            )
+        gm.graph.lint()
+
+    def test_unshard_outline_preserves_selected_full_policy_regions(self):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            inline_flex_shard_unshards_pass,
+            outline_flex_shard_unshards_pass,
+        )
+
+        gm, inputs = self._trace_private_unshard_buffers()
+        expected = gm(*inputs)
+        outline_flex_shard_unshards_pass(
+            gm, policy_fn=make_full_memory_policy("layers.0::aten.copy_.default")
+        )
+        self.assertEqual(
+            len(
+                gm.graph.find_nodes(
+                    op="call_function", target=torch.ops.higher_order.invoke_subgraph
+                )
+            ),
+            1,
+        )
+        copies = list(
+            gm.graph.find_nodes(op="call_function", target=torch.ops.aten.copy_.default)
+        )
+        self.assertEqual(len(copies), 1)
+        self.assertEqual(copies[0].meta["custom"]["module_fqn"], "layers.0")
+        inline_flex_shard_unshards_pass(gm)
+        self.assertEqual(gm(*inputs), expected, exact_dtype=True, rtol=0, atol=0)
+
+    def test_unshard_outline_rejects_shared_mutations_and_random_values(self):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            outline_flex_shard_unshards_pass,
+        )
+
+        for case in (
+            "input_write",
+            "output_alias",
+            "output_write",
+            "later_input_write",
+            "rng",
+        ):
+            with self.subTest(case=case):
+
+                def forward(weight, x):
+                    if case == "output_alias":
+                        full = weight.view(weight.shape)
+                    else:
+                        full = torch.empty_like(weight)
+                        if case == "input_write":
+                            weight.add_(1)
+                        full.copy_(weight)
+                        if case == "rng":
+                            full.add_(torch.rand_like(weight))
+                    if case == "output_write":
+                        full.add_(1)
+                    output = x @ full
+                    if case == "later_input_write":
+                        weight.add_(1)
+                    return output
+
+                gm = make_fx(forward, tracing_mode="fake")(
+                    torch.randn(4, 4), torch.randn(2, 4)
+                )
+                for node in gm.graph.nodes:
+                    if (
+                        node.op != "call_function"
+                        or node.target is torch.ops.aten.mm.default
+                    ):
+                        continue
+                    if (
+                        case == "output_write"
+                        and node.target is torch.ops.aten.add_.Tensor
+                    ):
+                        continue
+                    if (
+                        case == "later_input_write"
+                        and node.target is torch.ops.aten.add_.Tensor
+                    ):
+                        continue
+                    node.meta["custom"] = {
+                        "flex_shard_action": "unshard",
+                        "flex_shard_phase": "execute",
+                        "flex_shard_param_fqns": ("layers.0.weight",),
+                        "flex_shard_mesh_axis_names": ("fsdp",),
+                    }
+                outline_flex_shard_unshards_pass(gm)
+                self.assertFalse(
+                    any(
+                        node.target is torch.ops.higher_order.invoke_subgraph
+                        for node in gm.graph.nodes
+                    )
+                )
 
     def test_parameter_transforms_preserve_mutations_aliases_and_context(self):
         cases = (
@@ -3457,7 +3638,7 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(mutations, [update])
 
-        for policy_fn in (_make_default_memory_policy(), _make_full_memory_policy()):
+        for policy_fn in (_make_default_memory_policy(), make_full_memory_policy()):
             for through_view, writer_fqn in (
                 (False, ""),
                 (True, ""),
@@ -3550,7 +3731,7 @@ class TestApplySACPass(TestCase):
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         # Even a recompute-everything policy must save sym_size.
-        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
 
         tags = {
             n.target: n.meta["recompute"]
@@ -3574,7 +3755,7 @@ class TestApplySACPass(TestCase):
         graph.output(backward)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
-        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
         self.assertEqual(effect.meta["recompute"], CheckpointPolicy.MUST_SAVE)
 
         selective_activation_remat_pass(gm)
@@ -3833,7 +4014,7 @@ class TestFullMemoryPolicy(TestCase):
                 torch.ops.aten.relu.default,
             ]
         )
-        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
         for node in self._get_call_function_nodes(gm):
             self.assertEqual(
                 node.meta["recompute"],
@@ -3849,7 +4030,7 @@ class TestFullMemoryPolicy(TestCase):
                 torch.ops.aten.max.default,
             ]
         )
-        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
         for node in self._get_call_function_nodes(gm):
             self.assertEqual(
                 node.meta["recompute"],
@@ -3859,7 +4040,7 @@ class TestFullMemoryPolicy(TestCase):
     def test_rng_ops_saved(self):
         """RNG ops (nondeterministic_seeded) are saved: the remat pass cannot
         replay their random state, unlike eager AC's preserve_rng_state."""
-        policy_fn = _make_full_memory_policy()
+        policy_fn = make_full_memory_policy()
         gm = self._build_gm([torch.ops.aten.native_dropout.default])
         node = self._get_call_function_nodes(gm)[0]
         self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_SAVE)
@@ -3867,13 +4048,13 @@ class TestFullMemoryPolicy(TestCase):
     def test_higher_order_ops_recomputed(self):
         """Higher-order ops (flex_attention) are recomputed, not saved: the
         remat pass duplicates the HOP together with its subgraph get_attrs."""
-        policy_fn = _make_full_memory_policy()
+        policy_fn = make_full_memory_policy()
         gm = self._build_gm([torch.ops.higher_order.flex_attention])
         node = self._get_call_function_nodes(gm)[0]
         self.assertEqual(policy_fn(node), CheckpointPolicy.MUST_RECOMPUTE)
 
     def test_selected_module_ops_saved(self):
-        policy_fn = _make_full_memory_policy(
+        policy_fn = make_full_memory_policy(
             "layers.*.feed_forward.router.gate :: aten.mm.default | "
             "layers.*.attention.inner_attention :: higher_order.flex_attention"
         )
@@ -3907,7 +4088,7 @@ class TestFullMemoryPolicy(TestCase):
                 self.assertEqual(policy_fn(node), expected)
 
     def test_selected_module_op_can_target_one_layer(self):
-        policy_fn = _make_full_memory_policy(
+        policy_fn = make_full_memory_policy(
             "layers.7.attention.wo :: torch.ops.aten.mm.default"
         )
         for layer_id, expected in (
@@ -3961,7 +4142,7 @@ class TestFullMemoryPolicy(TestCase):
         )
         for value in invalid_values:
             with self.subTest(value=value), self.assertRaises(ValueError):
-                _make_full_memory_policy(value)
+                make_full_memory_policy(value)
 
     def test_layer_boundary_forced_to_must_save(self):
         """Nodes at layer boundaries should still be forced to MUST_SAVE."""
@@ -3975,7 +4156,7 @@ class TestFullMemoryPolicy(TestCase):
                 "layers.1.attention",
             ],
         )
-        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
         nodes = self._get_call_function_nodes(gm)
         # add crosses from layer 0 to layer 1 — forced to MUST_SAVE
         self.assertEqual(nodes[0].meta["recompute"], CheckpointPolicy.MUST_SAVE)
@@ -3998,7 +4179,7 @@ class TestFullMemoryPolicy(TestCase):
                 "layers.0.feed_forward",
             ],
         )
-        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
         for node in self._get_call_function_nodes(gm):
             self.assertEqual(
                 node.meta["recompute"],

@@ -210,7 +210,7 @@ def validate_memory_policy_config(
     _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
 
 
-def _make_full_memory_policy(save_ops: str = "") -> Callable:
+def make_full_memory_policy(save_ops: str = "") -> Callable:
     """Full recompute policy: mark everything as MUST_RECOMPUTE.
 
     The layer boundary pass in tag_sac_policy will force MUST_SAVE on nodes
@@ -496,7 +496,7 @@ def _full_memory_policy_pass(
     """Full recompute except for user-selected module operations."""
     tag_sac_policy(
         gm,
-        policy_fn=_make_full_memory_policy(config.compile.full_recompute_save_ops),
+        policy_fn=make_full_memory_policy(config.compile.full_recompute_save_ops),
     )
     return gm
 

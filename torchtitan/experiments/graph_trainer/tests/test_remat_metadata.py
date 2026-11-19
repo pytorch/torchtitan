@@ -25,7 +25,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     run_traced,
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
-    _make_full_memory_policy,
+    make_full_memory_policy,
     tag_sac_policy,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
@@ -115,7 +115,7 @@ class TestRematMetadata(TestCase):
             for node in traced.gm.graph.nodes
         )
 
-        tag_sac_policy(traced.gm, policy_fn=_make_full_memory_policy())
+        tag_sac_policy(traced.gm, policy_fn=make_full_memory_policy())
 
         boundary_edges = set()
         for node in traced.gm.graph.nodes:
