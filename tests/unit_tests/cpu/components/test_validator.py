@@ -65,6 +65,7 @@ def _generic_validator(loader):
         dp_enabled=False,
         pp_enabled=False,
         dp_cp_enabled=False,
+        flex_shard_enabled=False,
         activate_spmd=lambda **kwargs: nullcontext(),
         get_optional_mesh=lambda axes: None,
     )
