@@ -286,6 +286,9 @@ class NGramEmbedding(Module):
                     self.eos_token_id,
                 )
             )
+        return self.mix_hashes(shifted_T)
+
+    def mix_hashes(self, shifted_T: list[torch.Tensor]) -> torch.Tensor:
         hashes_TN = []
         mixed_T = shifted_T[0] * self.layer_multipliers[0]
         for position in range(1, self.ngram_size):
@@ -313,6 +316,15 @@ class NGramEmbedding(Module):
             if routing is None
             else routing.input_ids
         )
+        return self.lookup(hashes_TN, routing=routing, dtype=dtype)
+
+    def lookup(
+        self,
+        hashes_TN: torch.Tensor,
+        *,
+        routing: RowShardedEmbeddingMetadata | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
         embedding_TNE = self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype)
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
@@ -355,6 +367,25 @@ class PLELayer(Module):
         self.norm_conv = config.norm_conv.build()
         self.conv1d = config.conv1d.build()
 
+    def gate(
+        self, x_TC: torch.Tensor, embedding_TE: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key_TC = self.key_proj(embedding_TE)
+        # The grouped norm reads the projection with bare ops.
+        remat.recompute_needs_tensor(key_TC)
+        key_TSD = self.norm_key(key_TC).unflatten(-1, (self.num_streams, self.dim))
+        query_TSD = self.norm_query(x_TC).unflatten(-1, (self.num_streams, self.dim))
+        score_TS = (key_TSD * query_TSD).sum(-1) * self.dim**-0.5
+        score_TS = score_TS.abs().clamp_min(1e-6).sqrt() * score_TS.sign()
+        value_TD = self.value_proj(embedding_TE)
+        remat.recompute_needs_tensor(value_TD)
+        gated_TC = (score_TS.sigmoid().unsqueeze(-1) * value_TD.unsqueeze(-2)).flatten(
+            -2
+        )
+        normed_TC = self.norm_conv(gated_TC)
+        remat.recompute_needs_tensor(normed_TC)
+        return gated_TC, normed_TC
+
     def forward(
         self,
         x_TC: torch.Tensor,
@@ -370,20 +401,7 @@ class PLELayer(Module):
             routing=routing,
             dtype=x_TC.dtype,
         )
-        key_TC = self.key_proj(embedding_TE)
-        # The grouped norm reads the projection with bare ops.
-        remat.recompute_needs_tensor(key_TC)
-        key_TSD = self.norm_key(key_TC).unflatten(-1, (self.num_streams, self.dim))
-        query_TSD = self.norm_query(x_TC).unflatten(-1, (self.num_streams, self.dim))
-        score_TS = (key_TSD * query_TSD).sum(-1) * self.dim**-0.5
-        score_TS = score_TS.abs().clamp_min(1e-6).sqrt() * score_TS.sign()
-        value_TD = self.value_proj(embedding_TE)
-        remat.recompute_needs_tensor(value_TD)
-        gated_TC = (score_TS.sigmoid().unsqueeze(-1) * value_TD.unsqueeze(-2)).flatten(
-            -2
-        )
-        normed_TC = self.norm_conv(gated_TC)
-        remat.recompute_needs_tensor(normed_TC)
+        gated_TC, normed_TC = self.gate(x_TC, embedding_TE)
         if padding_mask_T is not None:
             gated_TC = gated_TC * (~padding_mask_T).unsqueeze(-1)
             normed_TC = normed_TC * (~padding_mask_T).unsqueeze(-1)

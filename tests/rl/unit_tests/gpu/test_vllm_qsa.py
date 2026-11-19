@@ -14,12 +14,13 @@ import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 pytest.importorskip(
-    "attn_gym.sparse.indexer.paged",
-    reason="Paged QSA tests require the Attention Gym decode indexer",
+    "attn_gym.sparse.paged_decode",
+    reason="Flash-Next cache tests require Attention Gym paged sparse attention",
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_8_flash_next import build_model_config
+from torchtitan.rl.generator.vllm import ple
 from torchtitan.rl.generator.vllm.attention import qsa, qsa_model
 from torchtitan.rl.generator.vllm.attention.qsa_model import VLLMQSAIndexer
 
@@ -29,9 +30,11 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def make_cache(monkeypatch):
+def vllm_context(monkeypatch):
     config = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="auto", block_size=16),
+        cache_config=SimpleNamespace(
+            cache_dtype="auto", block_size=16, enable_prefix_caching=False
+        ),
         model_config=SimpleNamespace(
             dtype=torch.bfloat16, enforce_eager=False, max_model_len=64
         ),
@@ -43,13 +46,17 @@ def make_cache(monkeypatch):
             static_forward_context={}, cudagraph_mode=qsa.CUDAGraphMode.NONE
         ),
     )
-    monkeypatch.setattr(qsa, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(qsa_model, "get_current_vllm_config", lambda: config)
     metadata = {}
+    for module in (qsa, qsa_model, ple):
+        monkeypatch.setattr(module, "get_current_vllm_config", lambda: config)
     monkeypatch.setattr(
         qsa, "get_forward_context", lambda: SimpleNamespace(attn_metadata=metadata)
     )
+    return metadata
 
+
+@pytest.fixture
+def make_cache(vllm_context):
     def build(prefix, head_dim, num_kv_heads=1, num_pages=8):
         cache = qsa.PagedCache(
             prefix=prefix, head_dim=head_dim, num_kv_heads=num_kv_heads
@@ -64,7 +71,7 @@ def make_cache(monkeypatch):
                 dtype=torch.bfloat16,
             )
         )
-        return cache, metadata
+        return cache, vllm_context
 
     return build
 
@@ -149,9 +156,12 @@ def test_paged_qsa_mixed_queries_tail_and_padding(make_cache):
 
 
 @pytest.mark.parametrize("tied_scores", [False, True])
-def test_indexer_completed_blocks_across_prefill_and_decode(make_cache, tied_scores):
+def test_indexer_completed_blocks_across_prefill_and_decode(vllm_context, tied_scores):
     """Chunked cache pooling and selected blocks must match the trainer, including ties."""
-    make_cache("fixture", 32)
+    pytest.importorskip(
+        "attn_gym.sparse.indexer.paged",
+        reason="Paged QSA tests require the Attention Gym decode indexer",
+    )
     torch.manual_seed(42)
     config = (
         build_model_config("debugmodel", seq_len=64, parallelism=ParallelismConfig())
@@ -188,7 +198,7 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache, tied_sco
             :, :, :4
         ]
     )
-    context = qsa.get_forward_context().attn_metadata
+    context = vllm_context
     candidate_builder = _metadata_builder(indexer.cache)
     raw_builder = _metadata_builder(indexer.raw_cache)
     raw_keys = []
@@ -319,3 +329,95 @@ def test_decode_graph_refreshes_request_layout(make_cache):
     graph.replay()
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     assert torch.count_nonzero(actual[2:]) == 0
+
+
+def test_ple_chunked_history_reordering_eos_and_page_reuse(vllm_context):
+    """Split PLE execution must match full requests even after reordering and slot reuse."""
+    torch.manual_seed(42)
+    ple_config = (
+        build_model_config("debugmodel", seq_len=64, parallelism=ParallelismConfig())
+        .layers[1]
+        .ple
+    )
+    ple_config.ple_embedding.eos_token_id = 63
+    reference = ple_config.build().cuda()
+    cached = (
+        ple.VLLMPLELayer.Config(
+            **{
+                field.name: getattr(ple_config, field.name)
+                for field in fields(ple_config)
+            },
+            layer_idx=1,
+        )
+        .build()
+        .cuda()
+    )
+    for layer in (reference, cached):
+        layer.init_states()
+        layer.requires_grad_(False)
+        for parameter in layer.parameters():
+            parameter.data = parameter.data.bfloat16()
+    reference.conv1d.weight.normal_(std=0.1)
+    cached.load_state_dict(reference.state_dict(), strict=True)
+    channels = ple_config.dim * ple_config.num_streams
+    cached.cache.bind_kv_cache(
+        torch.randn(6, 1, 32, 2 * channels, device="cuda", dtype=torch.bfloat16)
+    )
+    builder = _metadata_builder(cached.cache)
+    ids = torch.randint(0, 248320, (3, 27), device="cuda")
+    ids[0, 1] = 0x7FC1
+    ids[0, 2] = ids[0, 15] = 63
+    inputs = torch.randn(3, 27, channels, device="cuda", dtype=torch.bfloat16)
+    expected = [
+        reference(
+            x, input_ids_T=tokens, document_positions_T=torch.arange(27, device="cuda")
+        )
+        for x, tokens in zip(inputs, ids)
+    ]
+    completed = [0, 0, 0]
+    # Request 2 reuses request 0's pages after it completes.
+    pages = [4, 3, 4]
+    for step in (
+        [(0, 3), (1, 11)],
+        [(1, 1), (0, 14)],
+        [(0, 10), (1, 15)],
+        [(2, 1)],
+        [(2, 26)],
+    ):
+        offsets = [0]
+        positions, tokens, x, slots, lengths, expected_chunks = [], [], [], [], [], []
+        for request, count in step:
+            start = completed[request]
+            rows = slice(start, start + count)
+            position = torch.arange(start, start + count, device="cuda")
+            positions.append(position)
+            tokens.append(ids[request, rows])
+            x.append(inputs[request, rows])
+            slots.append(pages[request] * 16 + position % 16)
+            expected_chunks.append(expected[request][rows])
+            lengths.append(start + count)
+            offsets.append(offsets[-1] + count)
+            completed[request] += count
+        vllm_context[cached.cache.prefix] = builder.build(
+            0,
+            _common_metadata(
+                block_table=torch.tensor(
+                    [[pages[request]] for request, _ in step],
+                    device="cuda",
+                    dtype=torch.int32,
+                ),
+                slot_mapping=torch.cat(slots).long(),
+                query_start_loc=torch.tensor(offsets, device="cuda", dtype=torch.int32),
+                seq_lens=torch.tensor(lengths, device="cuda", dtype=torch.int32),
+                num_tokens=offsets[-1],
+            ),
+        )
+        actual = cached(
+            torch.cat((*x, x[0].new_zeros(1, channels))),
+            input_ids_T=torch.cat((*tokens, tokens[0].new_zeros(1))),
+            document_positions_T=torch.cat((*positions, positions[0].new_zeros(1))),
+        )
+        assert torch.count_nonzero(actual[offsets[-1] :]) == 0
+        torch.testing.assert_close(
+            actual[: offsets[-1]], torch.cat(expected_chunks), atol=0, rtol=0
+        )

@@ -184,6 +184,45 @@ def test_frozen_params_need_a_checkpoint_load() -> None:
         )
 
 
+@pytest.mark.parametrize("frozen_table", [False, True])
+def test_load_persistent_parameter_preserves_storage(tmp_path, frozen_table):
+    """Ignored embedding shards must load in place, or stay frozen after initial load."""
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Module()
+        model.table = nn.Embedding(16, 4)
+        model.projection = nn.Linear(4, 4)
+        mesh = init_device_mesh("cpu", (1,))
+        fully_shard(model, mesh=mesh, ignored_params={model.table.weight})
+        model.set_keep_unsharded_storage(True)
+        initial = {
+            key: value.detach().clone() for key, value in model.state_dict().items()
+        }
+        pointer = model.table.weight.data_ptr()
+        loader = _build_loader(
+            model,
+            loads_checkpoint=frozen_table,
+            frozen=frozenset({"table.weight"}) if frozen_table else frozenset(),
+        )
+        updated = {key: value + 1 for key, value in initial.items()}
+        keys = set(updated) - ({"table.weight"} if frozen_table else set())
+        loader.load(_copy_published(updated, keys))
+        assert model.table.weight.data_ptr() == pointer
+        torch.testing.assert_close(
+            model.table.weight,
+            initial["table.weight"] if frozen_table else updated["table.weight"],
+        )
+        if not frozen_table:
+            with pytest.raises(
+                RuntimeError, match="did not fill 1 weights.*table.weight"
+            ):
+                loader.load(_copy_published(updated, keys - {"table.weight"}))
+    finally:
+        dist.destroy_process_group()
+
+
 def test_load_model_state_dict_fetches_params_in_their_own_dtype(tmp_path) -> None:
     """Fetch every parameter in its own dtype, as the trainer sends it: a float32
     parameter (preserve_dtype_params, e.g. GDN A_log) next to bfloat16 ones."""

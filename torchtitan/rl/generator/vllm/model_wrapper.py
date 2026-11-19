@@ -40,6 +40,7 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention
+from torchtitan.models.qwen3_8_flash_next.embedding import PLELayer
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import (
     build_dist_moe_runtime,
@@ -203,6 +204,19 @@ def _replace_vllm_layer_configs(model_config):
                     inner_attention=vllm_inner_kda_cfg,
                 ),
             )
+
+        ple_cfg = getattr(layer_cfg, "ple", None)
+        if isinstance(ple_cfg, PLELayer.Config):
+            from torchtitan.rl.generator.vllm.ple import VLLMPLELayer
+
+            ple_cfg = VLLMPLELayer.Config(
+                **{
+                    field.name: getattr(ple_cfg, field.name)
+                    for field in dataclasses.fields(ple_cfg)
+                },
+                layer_idx=layer_idx,
+            )
+            new_layer_cfg = dataclasses.replace(new_layer_cfg, ple=ple_cfg)
 
         new_layers.append(new_layer_cfg)
 
