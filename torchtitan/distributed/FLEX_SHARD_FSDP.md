@@ -128,7 +128,7 @@ Memory and communication timing differ from FSDP2's in two places:
 
 | | Supported with `FlexShardConfig()` |
 | --- | --- |
-| Models | Decoders that shard through `Decoder._apply_fsdp`, also with tied embedding and output weights (`enable_weight_tying`). The parity tests cover Llama 3 (also with tied weights), Qwen3 MoE, and DeepSeek V3 without MTP layers |
+| Models | Decoders that shard through `Decoder._apply_fsdp`, also with tied embedding and output weights (`enable_weight_tying`). The parity tests cover Llama 3 (also with tied weights), Qwen3 MoE, and DeepSeek V3, also with an MTP layer |
 | Parallelism | FSDP over `dp_shard`; tensor parallelism, with or without sequence parallelism; context parallelism; expert parallelism with `AllToAllTokenDispatcher`; and their combinations |
 | Training | `ChunkedLossWrapper`, gradient accumulation, activation remat, local compile, validation, EMA (`optim.ema`, also with `offload_to_cpu`), DistMuon without tensor parallelism, and accelerator graphs without expert parallelism (the four capture settings in [ACCELERATOR_GRAPH.md](ACCELERATOR_GRAPH.md)) |
 | Checkpointing | `CheckpointManager` with synchronous or `async_mode="async"` saves, seed checkpoints, `export_dtype`, `initial_load_path` (including FSDP2 checkpoints), and `initial_load_in_hf` |
@@ -145,7 +145,6 @@ for these when the training engine is built, before anything else:
 | `fsdp_symm_mem_scope`, `fsdp_enable_cpu_offloading`, `fsdp_unshard_in_current_stream` | torchtitan's FlexShard path has no equivalent of these yet. |
 | `fsdp_defer_gradient_reduction` | FlexShard has no equivalent of FSDP2's `set_is_last_backward`. |
 | Models that override `_apply_fsdp`: multimodal models, DeepSeek V4, FLUX and the transformers modeling backend | Only `Decoder._apply_fsdp` passes `fsdp_backend` on, so these would shard with FSDP2. |
-| MTP layers | Training isn't bitwise identical to FSDP2: FlexShard sums the grads of `lm_head`'s calls (one per objective) in bf16, where FSDP2 sums them in fp32, and the other grads differ from the first step too. The MTP layers' projections and norms also have no `param_init` (next row). |
 | Modules without `param_init` that have a `reset_parameters()` | FlexShard initializes parameters only through `param_init`. `reset_parameters()` would draw each rank's shard as the whole parameter, with the same values on every rank. The check reads the model config, so it also rejects modules with no parameters, such as the `RMSNorm(elementwise_affine=False)` QK norms of muse_glimmer and muse_spark. |
 | `preserve_dtype_params` | A bucket all-gathers in one dtype. |
 | MXFP8 and NVFP4 weights | FlexShard's plain-tensor parameters drop the quantized all-gather these weights implement for FSDP2. |
