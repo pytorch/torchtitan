@@ -47,7 +47,8 @@ class GradientClipper(Configurable):
     ) -> torch.Tensor:
         """Clip gradients with ``dist_utils.clip_grad_norm_``.
 
-        Use ``foreach=True`` and the PP mesh from ``parallelism_context``.
+        Use ``foreach=True``, and the PP mesh and whether FlexShard sharded the
+        parameters from ``parallelism_context``.
         Return the pre-clip global L2 norm as a local zero-dimensional tensor
         with an equivalent value on every rank. Preserve non-finite values and
         do not reuse the returned norm as the clip coefficient or scratch.
@@ -57,6 +58,7 @@ class GradientClipper(Configurable):
             max_norm,
             foreach=True,
             pp_mesh=parallelism_context.get_optional_mesh("pp"),
+            flex_shard_enabled=parallelism_context.flex_shard_enabled,
         )
 
 

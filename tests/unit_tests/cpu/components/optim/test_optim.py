@@ -71,6 +71,7 @@ def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
         1.0,
         foreach=True,
         pp_mesh=pp_mesh,
+        flex_shard_enabled=parallelism_context.flex_shard_enabled,
     )
     assert grad_norm is expected_grad_norm
 

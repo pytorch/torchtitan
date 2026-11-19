@@ -6,7 +6,7 @@
 
 """Parallelism configuration."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import get_args, Literal, TypeAlias
 
 import torch
@@ -16,6 +16,27 @@ from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
 _FSDP_SYMM_MEM_SCOPES = get_args(FSDPSymmMemScope)
+
+
+@dataclass(kw_only=True, slots=True)
+class FSDP2Config:
+    """Shard parameters with PyTorch's FSDP2 ``fully_shard``, configured by the
+    ``fsdp_*`` fields of ``ParallelismConfig``.
+
+    It lives here rather than in ``torchtitan.distributed.fsdp``, which imports
+    this module.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class FlexShardConfig:
+    """Shard parameters with FlexShard (meta-pytorch/flex_shard) in place of
+    FSDP2's ``fully_shard``.
+
+    Each FSDP2 group becomes an ``fsdp2_compatible`` bucket with the FSDP
+    settings in ``parallelism``, so training from the same parameters is
+    bitwise identical to FSDP2.
+    """
 
 
 @dataclass(kw_only=True, slots=True)
@@ -88,6 +109,17 @@ class ParallelismConfig:
     ``tok_embeddings -> layers -> norm/lm_head``, which is the chain the
     explicit prefetching follows. Raises for models with MTP layers or
     multimodal encoders, and for Flux.
+    """
+
+    fsdp_backend: FSDP2Config | FlexShardConfig = field(default_factory=FSDP2Config)
+    """
+    How parameters are sharded over ``dp_shard``. ``FSDP2Config()``, the default,
+    applies PyTorch's FSDP2 ``fully_shard``. ``FlexShardConfig()`` applies
+    FlexShard (meta-pytorch/flex_shard), with one ``fsdp2_compatible`` bucket per
+    FSDP2 group, so training from the same parameters is bitwise identical to
+    FSDP2. ``validate_flex_shard_training`` in
+    ``torchtitan/distributed/flex_shard_fsdp.py`` rejects what FlexShard doesn't
+    support yet.
     """
 
     tensor_parallel_degree: int = 1

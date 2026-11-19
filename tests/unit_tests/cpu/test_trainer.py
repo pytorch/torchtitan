@@ -855,6 +855,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
         pp_enabled=False,
         ep_enabled=False,
         get_optional_mesh=lambda name: None,
+        flex_shard_enabled=False,
     )
     optim.parameters = []
     optim.optimizers = optimizers
