@@ -9,7 +9,7 @@
 import os
 from contextlib import nullcontext
 from itertools import product
-from typing import Any, cast
+from typing import Any, cast, Literal
 from unittest.mock import patch
 
 import pytest
@@ -43,10 +43,17 @@ from torchtitan.config.parallelism import (
 )
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_accelerator_graph,
+    wrap_with_accelerator_graph,
+)
 from torchtitan.distributed.flex_shard_fsdp import (
     flex_shard_bucket,
     flex_shard_reduce_meshes,
 )
+from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -188,6 +195,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         parallelism_context,
         microbatches,
         chunked_loss,
+        accelerator_graph: Literal["step", "microbatch_group"] | None = None,
         *,
         optim=None,
     ):
@@ -209,14 +217,79 @@ class TestFlexShardDecoder(DTensorTestBase):
             model._skip_lm_head = True
         else:
             loss_fn = loss_config.build()
+        # Made outside the graphs: a host-to-device copy can't be captured.
+        global_loss_token_count = torch.tensor(_SEQ_LEN, device=self.device_type)
+
+        def forward_backward(prepared_microbatches) -> torch.Tensor:
+            losses = []
+            for inputs, labels, model_kwargs in prepared_microbatches:
+                with parallelism_context.activate_spmd():
+                    output = model(inputs, **model_kwargs)
+                    loss, _ = loss_fn(output, labels, global_loss_token_count)
+                    with spmd.no_typecheck():
+                        loss.backward()
+                losses.append(loss.detach())
+            return torch.stack(losses)
+
+        # As the training engine wraps it: eager warmup calls, one capture,
+        # then replays. "step" captures a step's microbatches. With
+        # "microbatch_group", each microbatch is a group, and its graph is
+        # replayed for each, accumulating into the existing sharded grads.
+        run_forward_backward = forward_backward
+        run_validation = None
+        if accelerator_graph == "step":
+            run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
+                forward_backward,
+                parameters=model.parameters(),
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+            )
+
+            # As the validator with training graphs: after each step, a forward
+            # without grad, eager once, then captured in the training graphs'
+            # pool before the training capture, and replayed.
+            @torch.no_grad()
+            def validate(inputs, labels, model_kwargs) -> torch.Tensor:
+                with parallelism_context.activate_spmd():
+                    output = model(inputs, **model_kwargs)
+                    loss, _ = loss_fn(output, labels, global_loss_token_count)
+                    post_validate_fsdp_for_accelerator_graph(
+                        [model],
+                        flex_shard_enabled=isinstance(
+                            parallelism.fsdp_backend, FlexShardConfig
+                        ),
+                    )
+                return loss
+
+            run_validation = wrap_with_accelerator_graph(
+                validate, num_warmup_iterations=1
+            )
+        elif accelerator_graph == "microbatch_group":
+            run_group = wrap_with_accelerator_graph(
+                forward_backward,
+                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+            )
+
+            def run_forward_backward(prepared_microbatches) -> torch.Tensor:
+                # A replay overwrites the previous replay's outputs.
+                return torch.cat(
+                    [
+                        run_group([prepared]).clone()
+                        for prepared in prepared_microbatches
+                    ]
+                )
+
         # One packed sequence per microbatch, as the data loader produces. CP
         # shards it, and the tp and cp ranks of a data-parallel rank share it.
         seq_len = _SEQ_LEN * parallelism_context.cp
         positions = torch.arange(seq_len, device=self.device_type)
         dp_rank = self.rank // (parallelism_context.cp * parallelism_context.tp)
         history = []
-        for step in range(3):
-            losses = []
+        # With graphs: the warmup calls, the capture and at least one replay.
+        num_steps = (
+            3 if accelerator_graph is None else NUM_ACCELERATOR_GRAPH_WARMUP_STEPS + 2
+        )
+        for step in range(num_steps):
+            prepared_microbatches = []
             for microbatch in range(microbatches):
                 generator = torch.Generator().manual_seed(
                     1000 * step + 10 * microbatch + dp_rank
@@ -241,13 +314,8 @@ class TestFlexShardDecoder(DTensorTestBase):
                             device=self.device_type,
                         ),
                     )
-                    output = model(inputs, **model_kwargs)
-                    loss, _ = loss_fn(
-                        output, labels, torch.tensor(_SEQ_LEN, device=self.device_type)
-                    )
-                    with spmd.no_typecheck():
-                        loss.backward()
-                losses.append(loss.detach())
+                prepared_microbatches.append((inputs, labels, model_kwargs))
+            losses = list(run_forward_backward(prepared_microbatches).clone())
             flex_shard_enabled = isinstance(parallelism.fsdp_backend, FlexShardConfig)
             grad_norm = dist_utils.clip_grad_norm_(
                 list(model.parameters()),
@@ -266,8 +334,16 @@ class TestFlexShardDecoder(DTensorTestBase):
                 if param.grad is not None
             }
             optim.step()
-            optim.zero_grad()
+            # As the training engine: the per-group graph accumulates into
+            # the grads that existed at capture.
+            optim.zero_grad(set_to_none=accelerator_graph != "microbatch_group")
+            if run_validation is not None:
+                model.eval()
+                losses.append(run_validation(*prepared_microbatches[0]).clone())
+                model.train()
             history.append((losses, grad_norm, grads, self._local_params(model)))
+        if accelerator_graph is not None:
+            accelerator_graph_teardown()
         return history
 
     def _local_params(self, model) -> dict[str, torch.Tensor]:
@@ -292,6 +368,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         tp: int = 1,
         cp: int = 1,
         sequence_parallel: bool = False,
+        accelerator_graph: Literal["step", "microbatch_group"] | None = None,
     ) -> None:
         # One context, as in training: both backends shard over its meshes.
         parallelism_context = ParallelismContext(
@@ -308,7 +385,8 @@ class TestFlexShardDecoder(DTensorTestBase):
             context = (
                 f"{flavor} "
                 f"reshard_after_forward={reshard_after_forward} "
-                f"microbatches={microbatches} chunked_loss={chunked_loss}"
+                f"microbatches={microbatches} chunked_loss={chunked_loss} "
+                f"accelerator_graph={accelerator_graph}"
             )
             fsdp2, *fsdp2_setup = self._build(
                 build_config,
@@ -343,7 +421,9 @@ class TestFlexShardDecoder(DTensorTestBase):
                     dist, "reduce_scatter_single", reduce_scatter
                 ):
                     histories.append(
-                        self._train(model, *setup, microbatches, chunked_loss)
+                        self._train(
+                            model, *setup, microbatches, chunked_loss, accelerator_graph
+                        )
                     )
                 num_reduce_scatters.append(reduce_scatter.call_count)
             # Gradients are grouped into reduce-scatters as FSDP2 groups them,
@@ -387,6 +467,46 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ((build_qwen3_config, "debugmodel_moe"), "always", 2),
                 ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2),
             ],
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_accelerator_graphs(self):
+        # As the recipes train by default: in accelerator graphs, with
+        # ChunkedLossWrapper, whose per-chunk backwards run inside the graph,
+        # and with an eval graph in the same pool. EP stays 1: graphs under EP
+        # need HybridEP, and FlexShard under EP supports only the all-to-all
+        # dispatcher.
+        self._check_matches_fsdp2(
+            ep=1,
+            cases=product(
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default",),
+                (1, 2),
+            ),
+            chunked_loss=True,
+            accelerator_graph="step",
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_accelerator_graph_per_microbatch_group(self):
+        # training.accelerator_graph_per_microbatch_group: each replay
+        # reduce-scatters its microbatch's grads and adds them to the sharded
+        # grads in place.
+        self._check_matches_fsdp2(
+            ep=1,
+            cases=product(
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default",),
+                (2,),
+            ),
+            chunked_loss=True,
+            accelerator_graph="microbatch_group",
         )
 
     @with_comms
