@@ -74,6 +74,7 @@ areas:
       - torchtitan/distributed/fsdp.py
       - torchtitan/distributed/FSDP.md
       - torchtitan/distributed/flex_shard/
+      - torchtitan/distributed/flex_shard_fsdp.py
     reviewers: [weifengpy]
 
   - name: spmd_types
