@@ -453,7 +453,6 @@ def validate_flex_shard_training(
     """
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim.optimizer import DistMuon
-    from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
     from torchtitan.models.base.module import Module
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE, RoutedExperts
@@ -543,13 +542,6 @@ def validate_flex_shard_training(
             if entry not in unsupported:
                 unsupported.append(entry)
 
-    if (
-        not config.training.disable_accelerator_graphs
-        and accelerator_graphs_supported()
-    ):
-        unsupported.append(
-            "accelerator graphs (set training.disable_accelerator_graphs=True)"
-        )
     if config.checkpointer is not None:
         # FlexShard's state dicts hold local shards that declare their layouts
         # to DCP. Each of these would lose the layouts and treat every rank's
