@@ -296,10 +296,13 @@ run_core_tests() {
     --durations=20 \
     -vv
 
+  # TODO: Install flex_shard (install_flex_shard.sh) and drop the exclude once
+  # the release torch is 2.16 or later; FlexShard needs ops from 2.16 nightlies.
   python -m tests.integration_tests.run_tests \
     --gpu_arch_type cuda \
     --test_suite features,models \
     --execution_mode real_pg \
+    --exclude llama3_flex_shard+tp+cp,deepseek_v3_flex_shard+ep,deepseek_v3_dist_muon_flex_shard+ep,flex_shard_checkpoint \
     --ngpu 8 \
     "${ARTIFACTS}/integration_tests"
 
