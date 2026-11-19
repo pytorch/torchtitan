@@ -6,22 +6,30 @@
 
 """``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
+import os
 from itertools import product
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 import torch.distributed.distributed_c10d as c10d
 import torch.nn.functional as F
+from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
+from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from torch.distributed.tensor import DTensor
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torch.testing._internal.distributed.checkpoint_utils import with_temp_dir
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
 from torchtitan.config.parallelism import (
@@ -149,8 +157,11 @@ class TestFlexShardDecoder(DTensorTestBase):
         parallelism_context,
         microbatches,
         chunked_loss,
+        *,
+        optim=None,
     ):
-        optim = torch.optim.AdamW(model.parameters(), lr=1e-3, foreach=True)
+        if optim is None:
+            optim = torch.optim.AdamW(model.parameters(), lr=1e-3, foreach=True)
         if chunked_loss:
             # As the training engine sets it up.
             loss_fn = ChunkedLossWrapper.Config().build()
@@ -360,3 +371,152 @@ class TestFlexShardDecoder(DTensorTestBase):
             cases=[((_build_tied_llama3_config, "debugmodel_tied"), "default", 2)],
             chunked_loss=True,
         )
+
+    @with_comms
+    @with_temp_dir
+    def test_checkpoints_match_fsdp2(self):
+        # FlexShard loads FSDP2's checkpoint of the model and its AdamW states,
+        # and saves it again chunk for chunk and bit for bit, also as a bf16
+        # export. With ep=2, the routed experts are split over ep, then over
+        # edp_shard.
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=2,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+
+        def build(fsdp_backend, folder, **config):
+            model, *setup = self._build(
+                build_qwen3_config,
+                "debugmodel_moe",
+                fsdp_backend,
+                "default",
+                parallelism_context,
+            )
+            optimizers = OptimizersContainer(
+                OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=".*", lr=1e-3)]
+                ),
+                model_parts=[model],
+            )
+            checkpointer = CheckpointManager(
+                CheckpointManager.Config(
+                    folder=folder,
+                    interval=1,
+                    keep_latest_k=0,
+                    export_dtype="bfloat16",
+                    **config,
+                ),
+                model_parts=[model],
+                optimizers=optimizers,
+                lr_schedulers=cast(Any, None),
+                ema=None,
+                extra_states={},
+                sd_adapter=None,
+                base_folder=self.temp_dir,
+            )
+            return model, setup, optimizers, checkpointer
+
+        model, setup, optimizers, checkpointer = build(FSDP2Config(), "fsdp2")
+        self._train(model, *setup, 1, False, optim=optimizers)
+        checkpointer.save(3)
+        checkpointer.save(3, last_step=True)
+        checkpointer.close()
+
+        # FlexShard's own initialization differs from FSDP2's, so only a load
+        # gives it FSDP2's values.
+        flex, _, flex_optimizers, checkpointer = build(
+            FlexShardConfig(),
+            "flex",
+            initial_load_path=os.path.join(self.temp_dir, "fsdp2", "step-3"),
+            initial_load_model_only=False,
+        )
+        self.assertTrue(checkpointer.load())
+        # Saving again gives the same checkpoint even if ranks swapped their
+        # shards, so check that each rank loaded FSDP2's.
+        self._assert_equal_tensors(
+            self._local_params(model), self._local_params(flex), "loaded param"
+        )
+        self._assert_equal_tensors(
+            self._optimizer_states(model, optimizers),
+            self._optimizer_states(flex, flex_optimizers),
+            "loaded AdamW state",
+        )
+        checkpointer.save(3)
+        checkpointer.save(3, last_step=True)
+        checkpointer.close()
+        for checkpoint in ("step-3", os.path.join("exports", "step-3")):
+            self._assert_equal_checkpoints(
+                os.path.join(self.temp_dir, "fsdp2", checkpoint),
+                os.path.join(self.temp_dir, "flex", checkpoint),
+            )
+
+    def _optimizer_states(self, model, optimizers) -> dict[str, torch.Tensor]:
+        states = {p: s for o in optimizers.optimizers for p, s in o.state.items()}
+        return {
+            f"{fqn} {name}": _local(value)
+            for fqn, param in model.named_parameters()
+            for name, value in states[param].items()
+        }
+
+    def _assert_equal_checkpoints(self, expected_dir: str, actual_dir: str) -> None:
+        """Assert that two DCP checkpoints hold the same keys, the same chunks
+        of full tensors of the same shapes and dtypes, and the same values.
+
+        Rank 0 compares and shares the outcome, so a mismatch fails every rank
+        at once instead of leaving the others in a collective.
+        """
+        error: list[Exception | None] = [None]
+        if self.rank == 0:
+            key = "keys"
+            try:
+                metadata = [
+                    dcp.FileSystemReader(path).read_metadata().state_dict_metadata
+                    for path in (expected_dir, actual_dir)
+                ]
+                self.assertEqual(sorted(metadata[0]), sorted(metadata[1]))
+                for key, expected in metadata[0].items():
+                    actual = metadata[1][key]
+                    self.assertIs(type(actual), type(expected))
+                    if isinstance(expected, TensorStorageMetadata):
+                        self.assertEqual(
+                            (actual.size, actual.properties.dtype, _chunks(actual)),
+                            (
+                                expected.size,
+                                expected.properties.dtype,
+                                _chunks(expected),
+                            ),
+                        )
+                states = []
+                for path in (expected_dir, actual_dir):
+                    dcp_to_torch_save(path, f"{path}.pt")
+                    states.append(torch.load(f"{path}.pt", weights_only=False))
+                for key, expected in states[0].items():
+                    if isinstance(expected, torch.Tensor):
+                        self.assertTrue(torch.equal(expected, states[1][key]))
+                    else:
+                        self.assertEqual(expected, states[1][key])
+            except Exception as e:
+                error = [AssertionError(f"{actual_dir} vs {expected_dir}, {key}: {e}")]
+        dist.broadcast_object_list(error)
+        if error[0] is not None:
+            raise error[0]
+
+
+def _chunks(
+    metadata: TensorStorageMetadata,
+) -> list[tuple[tuple[int, ...], tuple[int, ...]]]:
+    """A checkpointed tensor's non-empty chunks as (offsets, sizes) pairs.
+
+    FSDP2 also saves an empty chunk for each rank without data.
+    """
+    return sorted(
+        (tuple(chunk.offsets), tuple(chunk.sizes))
+        for chunk in metadata.chunks
+        if all(chunk.sizes)
+    )

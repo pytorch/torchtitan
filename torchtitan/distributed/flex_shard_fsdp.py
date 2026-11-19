@@ -32,6 +32,12 @@ block's expert group unsharded until the whole block finishes.
 ``flex_shard_partial_backwards`` keeps ``lm_head``'s bucket unsharded across
 ``ChunkedLossWrapper``'s chunks, as ``fsdp_partial_backwards`` keeps FSDP2's
 group. FlexShard is imported only when it is selected.
+
+FlexShard's state dicts hold plain local shards too, so each declares where its
+shards sit in the full tensors (DCP's ``CheckpointableTensor``): the model's,
+through ``declare_state_dict_layouts``, and the optimizer's, through
+``declare_optimizer_state_layouts``. DCP then saves the same checkpoints as for
+FSDP2's DTensors, and either backend loads the other's.
 """
 
 import math
@@ -52,6 +58,8 @@ if TYPE_CHECKING:
     from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
+    "declare_optimizer_state_layouts",
+    "declare_state_dict_layouts",
     "flex_shard_bucket",
     "flex_shard_grad_norm",
     "flex_shard_partial_backwards",
@@ -210,6 +218,50 @@ def flex_shard_partial_backwards(
         bucket.reshard()
 
 
+def declare_state_dict_layouts(model: nn.Module) -> None:
+    """Make ``model.state_dict()`` declare where each FlexShard parameter's
+    local shard sits in the full parameter. Call it after ``flex_shard(model)``.
+
+    Without the layouts, DCP saves and loads each local shard as the whole
+    parameter. Every state dict ``CheckpointManager`` saves or loads comes from
+    ``model.state_dict()``, including the one it takes again after a load.
+    """
+    # pyrefly: ignore [missing-import]
+    from flex_shard import set_state_dict_global_layouts
+
+    # TODO: Drop once a FlexShard module's state_dict() declares its layouts.
+    def hook(module, state_dict, prefix, local_metadata) -> None:
+        set_state_dict_global_layouts(
+            module,
+            {
+                key.removeprefix(prefix): value
+                for key, value in state_dict.items()
+                if key.startswith(prefix)
+            },
+        )
+
+    model.register_state_dict_post_hook(hook)
+
+
+def declare_optimizer_state_layouts(
+    optimizer: torch.optim.Optimizer, model: nn.Module
+) -> None:
+    """Make ``optimizer.state_dict()`` declare where each state of a FlexShard
+    parameter sits in the full state, if FlexShard sharded ``model``, which
+    holds the parameters.
+
+    ``step`` declares no layout, so DCP saves it as replicated, as for FSDP2.
+    flex_shard raises ``NotImplementedError`` for optimizers other than Adam
+    and AdamW. Call it outside forward and backward, as for
+    ``holds_flex_shard_params``.
+    """
+    if holds_flex_shard_params(model):
+        # pyrefly: ignore [missing-import]
+        from flex_shard import register_optimizer_checkpoint_hook
+
+        register_optimizer_checkpoint_hook(optimizer, model)
+
+
 def validate_flex_shard_training(
     config: "TrainingEngine.Config", model_config: "BaseModel.Config"
 ) -> None:
@@ -218,6 +270,7 @@ def validate_flex_shard_training(
     ``TrainingEngine.__init__`` calls this for every trainer, with the config
     after recipes and overrides.
     """
+    from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim.optimizer import DistMuon
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
     from torchtitan.models.base.module import Module
@@ -314,7 +367,24 @@ def validate_flex_shard_training(
             "accelerator graphs (set training.disable_accelerator_graphs=True)"
         )
     if config.checkpointer is not None:
-        unsupported.append("checkpointing")
+        # FlexShard's state dicts hold local shards that declare their layouts
+        # to DCP. Each of these would lose the layouts and treat every rank's
+        # shard as the whole tensor, without an error.
+        checkpointer = config.checkpointer
+        if not isinstance(checkpointer, CheckpointManager.Config):
+            # TODO: Allow once torch_checkpointing's resharder reads the
+            # layouts, not only DTensor placements.
+            unsupported.append("checkpointers other than CheckpointManager")
+        elif checkpointer.async_mode == "async_with_pinned_mem":
+            # TODO: Allow once DCP's process-based async save keeps the
+            # layouts, which torch.multiprocessing drops on the way to the save
+            # process.
+            unsupported.append("checkpointer.async_mode='async_with_pinned_mem'")
+        # The state dict adapters need DTensor parameters.
+        if checkpointer.initial_load_in_hf:
+            unsupported.append("checkpointer.initial_load_in_hf=True")
+        if checkpointer.last_save_in_hf:
+            unsupported.append("checkpointer.last_save_in_hf=True")
     if config.optim.ema is not None:
         unsupported.append("optim.ema")
     if any(isinstance(o, DistMuon.Config) for o in config.optim.optimizer.optimizers):
