@@ -21,9 +21,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import reshape_and_cache_flash
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import CircularBufferSpec, FullAttentionSpec
 
-from torchtitan.models.common.attn_gym import paged_sparse_decode, PagedKV
+from torchtitan.distributed.local_compile import local_compile
+from torchtitan.models.common.attn_gym import gather_attn, paged_sparse_decode, PagedKV
 
 # T = packed tokens, S = requests, P = pages, N = tokens per page,
 # Q = query heads, H = KV heads, K = head dimension, B = selected blocks.
@@ -36,26 +38,90 @@ class QSAPagedMetadata(AttentionMetadata):
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
     max_query_len: int
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
+    num_prefill_context_tokens: int = 0
+    _coordinates: tuple[
+        int, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ] | None = None
 
     def token_coordinates(self, num_tokens: int):
         """Return request indices, absolute positions and validity for packed rows."""
-        rows_T = torch.arange(num_tokens, device=self.query_start_loc.device)
-        request_T = torch.searchsorted(
-            self.query_start_loc[1:], rows_T, right=True
-        ).clamp_max(self.seq_lens.numel() - 1)
-        query_lens_S = self.query_start_loc.diff()
-        positions_T = (
-            self.seq_lens[request_T]
-            - query_lens_S[request_T]
-            + rows_T
-            - self.query_start_loc[request_T]
+        return token_coordinates(self.query_start_loc, self.seq_lens, num_tokens)
+
+
+@local_compile("qsa_token_coordinates", batch_invariant=True)
+def token_coordinates(
+    query_start_loc: torch.Tensor, seq_lens: torch.Tensor, num_tokens: int
+):
+    rows_T = torch.arange(num_tokens, device=query_start_loc.device)
+    request_T = torch.searchsorted(query_start_loc[1:], rows_T, right=True).clamp_max(
+        seq_lens.numel() - 1
+    )
+    query_lens_S = query_start_loc.diff()
+    positions_T = (
+        seq_lens[request_T]
+        - query_lens_S[request_T]
+        + rows_T
+        - query_start_loc[request_T]
+    )
+    valid_T = rows_T < query_start_loc[-1]
+    return request_T, positions_T.masked_fill(~valid_T, 0), valid_T
+
+
+def step_coordinates(metadata: QSAPagedMetadata, num_tokens: int):
+    cached = metadata._coordinates
+    if cached is None or cached[0] != num_tokens:
+        cached = (num_tokens, metadata.token_coordinates(num_tokens))
+        metadata._coordinates = cached
+    return cached[1]
+
+
+@local_compile("qsa_prefill_plan", batch_invariant=True)
+def _prefill_plan(
+    key_PNHK,
+    value_PNHK,
+    block_table,
+    query_start_S,
+    context_S,
+    blocks_TB,
+    position_T,
+    num_context: int,
+    block_size: int,
+):
+    cu_seqlens_q = (query_start_S - query_start_S[0]).int()
+    cu_seqlens_k = torch.nn.functional.pad(context_S.cumsum(0), (1, 0))
+    rows_C = torch.arange(num_context, device=context_S.device)
+    request_C = torch.searchsorted(cu_seqlens_k[1:], rows_C, right=True)
+    position_C = rows_C - cu_seqlens_k[request_C]
+    page_size = key_PNHK.shape[1]
+    pages_C = block_table[request_C, position_C // page_size].long()
+    offsets_C = position_C % page_size
+    blocks_TB = blocks_TB.long()
+    tokens_TJ = (
+        (
+            blocks_TB[..., None] * block_size
+            + torch.arange(block_size, device=blocks_TB.device)
         )
-        valid_T = rows_T < self.query_start_loc[-1]
-        return request_T, positions_T.masked_fill(~valid_T, 0), valid_T
+        .masked_fill((blocks_TB < 0)[..., None], -1)
+        .flatten(1)
+    )
+    tail_TR = ((position_T + 1) // block_size * block_size)[:, None] + torch.arange(
+        block_size - 1, device=blocks_TB.device
+    )
+    tail_TR = tail_TR.masked_fill(tail_TR > position_T[:, None], -1)
+    return (
+        key_PNHK[pages_C, offsets_C],
+        value_PNHK[pages_C, offsets_C],
+        torch.cat((tokens_TJ, tail_TR), -1).int(),
+        cu_seqlens_q,
+        cu_seqlens_k.int(),
+    )
 
 
 class QSAPagedMetadataBuilder(AttentionMetadataBuilder[QSAPagedMetadata]):
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    reorder_batch_threshold = 1
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -65,6 +131,17 @@ class QSAPagedMetadataBuilder(AttentionMetadataBuilder[QSAPagedMetadata]):
 
     def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
         metadata = common_attn_metadata
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            metadata, decode_threshold=1
+        )
+        num_prefill_context_tokens = 0
+        if num_prefills:
+            seq_lens_cpu = metadata.seq_lens_cpu_upper_bound
+            if seq_lens_cpu is None:
+                seq_lens_cpu = metadata.seq_lens[: metadata.num_reqs].cpu()
+            num_prefill_context_tokens = int(
+                seq_lens_cpu[num_decodes : metadata.num_reqs].sum()
+            )
         # vLLM aligns table widths for every backend. Unused columns would
         # enlarge the indexer's scoring workspace and launch grid.
         return QSAPagedMetadata(
@@ -75,6 +152,9 @@ class QSAPagedMetadataBuilder(AttentionMetadataBuilder[QSAPagedMetadata]):
             query_start_loc=metadata.query_start_loc[: metadata.num_reqs + 1],
             seq_lens=metadata.seq_lens[: metadata.num_reqs],
             max_query_len=metadata.max_query_len,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefill_context_tokens=num_prefill_context_tokens,
         )
 
 
@@ -173,24 +253,75 @@ class PagedCache(torch.nn.Module, AttentionLayerBase):
             return torch.zeros_like(query_TQK)
         self.write(key_THK, value_THK, metadata)
         key_PNHK, value_PNHK = self.views()
-        output_TQK = paged_sparse_decode(
-            query_TQK,
-            PagedKV(key_PNHK, value_PNHK, metadata.block_table),
-            blocks_TB,
-            metadata.query_start_loc,
-            metadata.seq_lens,
-            max_seqlen_q=metadata.max_query_len,
-            # QSAAttention.Config in qwen3_8_flash_next/attention.py requires
-            # compress_ratio=4 for both the indexer and inner attention.
-            index_block_size=4,
-            window_size=0,
-            scale=scale,
-        )
+        if metadata.num_prefill_context_tokens == 0:
+            output_TQK = paged_sparse_decode(
+                query_TQK,
+                PagedKV(key_PNHK, value_PNHK, metadata.block_table),
+                blocks_TB,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                max_seqlen_q=metadata.max_query_len,
+                # QSAAttention.Config in qwen3_8_flash_next/attention.py requires
+                # compress_ratio=4 for both the indexer and inner attention.
+                index_block_size=4,
+                window_size=0,
+                scale=scale,
+            )
+        else:
+            output_TQK = self._attend_mixed(
+                query_TQK, key_PNHK, value_PNHK, blocks_TB, metadata, scale=scale
+            )
         valid_T = (
             torch.arange(query_TQK.shape[0], device=query_TQK.device)
             < metadata.query_start_loc[-1]
         )
         return output_TQK.masked_fill(~valid_T[:, None, None], 0)
+
+    def _attend_mixed(
+        self, query_TQK, key_PNHK, value_PNHK, blocks_TB, metadata, *, scale
+    ):
+        num_decodes = metadata.num_decodes
+        num_decode_tokens = metadata.num_decode_tokens
+        block_size = 4
+        output_TQK = torch.empty_like(query_TQK)
+        if num_decodes:
+            output_TQK[:num_decode_tokens] = paged_sparse_decode(
+                query_TQK[:num_decode_tokens],
+                PagedKV(key_PNHK, value_PNHK, metadata.block_table[:num_decodes]),
+                blocks_TB[:num_decode_tokens],
+                metadata.query_start_loc[: num_decodes + 1],
+                metadata.seq_lens[:num_decodes],
+                max_seqlen_q=1,
+                index_block_size=block_size,
+                window_size=0,
+                scale=scale,
+            )
+        _, position_T, _ = step_coordinates(metadata, query_TQK.shape[0])
+        key_CHK, value_CHK, indices_TJ, cu_seqlens_q, cu_seqlens_k = _prefill_plan(
+            key_PNHK,
+            value_PNHK,
+            metadata.block_table[num_decodes:],
+            metadata.query_start_loc[num_decodes:],
+            metadata.seq_lens[num_decodes:],
+            blocks_TB[num_decode_tokens:],
+            position_T[num_decode_tokens:],
+            metadata.num_prefill_context_tokens,
+            block_size,
+        )
+        prefill_1QTK = gather_attn(
+            query_TQK[num_decode_tokens:].transpose(0, 1).unsqueeze(0),
+            None,
+            key_CHK.transpose(0, 1).unsqueeze(0),
+            indices_TJ.unsqueeze(0),
+            sliding_window_size=0,
+            cu_seqlens=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            scale=scale,
+            impl="fused",
+            sparse_v=value_CHK.transpose(0, 1).unsqueeze(0),
+        )
+        output_TQK[num_decode_tokens:] = prefill_1QTK.squeeze(0).transpose(0, 1)
+        return output_TQK
 
 
 class PagedRingCache(PagedCache):

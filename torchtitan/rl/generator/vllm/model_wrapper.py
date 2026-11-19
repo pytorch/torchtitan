@@ -220,7 +220,22 @@ def _replace_vllm_layer_configs(model_config):
 
         new_layers.append(new_layer_cfg)
 
-    return dataclasses.replace(model_config, layers=new_layers)
+    model_config = dataclasses.replace(model_config, layers=new_layers)
+    if any(
+        isinstance(getattr(layer, "attention", None), QSAAttention.Config)
+        for layer in new_layers
+    ):
+        qsa_regions = ["qsa_token_coordinates", "qsa_prefill_plan"]
+        if not is_in_batch_invariant_mode():
+            qsa_regions.append("qsa_decode_indexer_prep")
+        model_config = dataclasses.replace(
+            model_config,
+            local_compile=dataclasses.replace(
+                model_config.local_compile,
+                regions=[*model_config.local_compile.regions, *qsa_regions],
+            ),
+        )
+    return model_config
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor

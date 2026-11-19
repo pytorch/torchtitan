@@ -9,15 +9,19 @@
 from dataclasses import dataclass, replace
 
 import torch
-from vllm._custom_ops import concat_and_cache_mla
 from vllm.config import get_current_vllm_config
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.attn_gym import paged_lightning_indexer, require_attn_gym
 from torchtitan.models.qwen3_8_flash_next.attention import QSAIndexer, QSAInnerAttention
-from torchtitan.rl.generator.vllm.attention.qsa import PagedCache, PagedRingCache
+from torchtitan.rl.generator.vllm.attention.qsa import (
+    PagedCache,
+    PagedRingCache,
+    step_coordinates,
+)
 
 # T = packed tokens, D = model dimension, H = query or KV heads,
 # K = head dimension, V = value head dimension, C = projection channels,
@@ -45,17 +49,6 @@ class _QSARawKeyRing(PagedRingCache):
         return replace(super().get_kv_cache_spec(vllm_config), head_size_v=0)
 
 
-def _store_rows(cache_PNHK, rows_TK, slots_T):
-    concat_and_cache_mla(
-        rows_TK,
-        rows_TK[:, :0],
-        cache_PNHK[:, :, 0],
-        slots_T,
-        "auto",
-        rows_TK.new_ones((), dtype=torch.float32),
-    )
-
-
 class VLLMQSAIndexer(QSAIndexer):
     @dataclass(kw_only=True, slots=True)
     class Config(QSAIndexer.Config):
@@ -76,6 +69,82 @@ class VLLMQSAIndexer(QSAIndexer):
             num_kv_heads=1,
             head_dim=config.head_dim,
         )
+        self._index_weights = None
+
+    @local_compile("qsa_decode_indexer_prep", batch_invariant=False)
+    def _decode_prep(
+        self,
+        qk_TC,
+        positions,
+        request_T,
+        position_T,
+        valid_T,
+        query_start_loc,
+        seq_lens,
+        candidate_table,
+        raw_table,
+        raw_cache_PNHK,
+        candidate_page_size: int,
+    ):
+        num_tokens = qk_TC.shape[0]
+        query_TC, raw_key_TK = qk_TC.split(
+            (self.num_heads * self.head_dim, self.head_dim), -1
+        )
+        query_THK = self._rotate(
+            self.q_layernorm(query_TC.unflatten(-1, (self.num_heads, self.head_dim))),
+            positions,
+        )
+        rows_T = torch.arange(num_tokens, device=qk_TC.device)
+        starts_T = query_start_loc[request_T]
+        ring_capacity = raw_cache_PNHK.shape[1]
+        ring_pages_T = raw_table[request_T, 0].long()
+        pooled_TK = (
+            torch.stack(
+                [
+                    torch.where(
+                        (rows_T - shift >= starts_T)[:, None],
+                        raw_key_TK[(rows_T - shift).clamp_min(0)],
+                        raw_cache_PNHK[
+                            ring_pages_T, (position_T - shift) % ring_capacity
+                        ][:, 0],
+                    )
+                    for shift in range(self.compress_ratio - 1, -1, -1)
+                ],
+                dim=1,
+            )
+            .float()
+            .mean(1)
+            .to(raw_key_TK.dtype)
+        )
+        pooled_TK = self._rotate(
+            self.k_layernorm(pooled_TK)[:, None],
+            (position_T - self.compress_ratio + 1).clamp_min(0),
+        )[:, 0]
+        candidate_T = position_T // self.compress_ratio
+        skip_candidate_T = ~valid_T | ((position_T + 1) % self.compress_ratio != 0)
+        candidate_pages_T = (
+            candidate_table[request_T, candidate_T // candidate_page_size]
+            .long()
+            .masked_fill(skip_candidate_T, 0)
+        )
+        candidate_offsets_T = (candidate_T % candidate_page_size).masked_fill(
+            skip_candidate_T, 0
+        )
+        # Only the unfinished block survives the step. Completed blocks are
+        # represented solely by their transformed means in the compressed cache.
+        skip_ring_T = ~valid_T | (
+            position_T
+            < seq_lens[request_T] // self.compress_ratio * self.compress_ratio
+        )
+        return (
+            query_THK,
+            raw_key_TK,
+            pooled_TK,
+            candidate_pages_T,
+            candidate_offsets_T,
+            ring_pages_T.masked_fill(skip_ring_T, 0),
+            (position_T % ring_capacity).masked_fill(skip_ring_T, 0),
+        )
 
     def forward(
         self,
@@ -95,71 +164,46 @@ class VLLMQSAIndexer(QSAIndexer):
                 dtype=torch.int32,
             )
             return blocks_TB, x_TD.new_empty((x_TD.shape[0], 0))
+        num_tokens = x_TD.shape[0]
         qk_TC = self.index_qk_proj(x_TD)
-        query_TC, raw_key_TK = qk_TC.split(
-            (self.num_heads * self.head_dim, self.head_dim), -1
-        )
-        query_THK = self._rotate(
-            self.q_layernorm(query_TC.unflatten(-1, (self.num_heads, self.head_dim))),
-            positions,
-        )
-        request_T, position_T, valid_T = metadata.token_coordinates(x_TD.shape[0])
         raw_metadata = self.raw_cache.metadata()
-        rows_T = torch.arange(x_TD.shape[0], device=x_TD.device)
-        starts_T = metadata.query_start_loc[request_T]
         (raw_cache_PNHK,) = self.raw_cache.views()
-        pooled_TK = (
-            torch.stack(
-                [
-                    torch.where(
-                        (rows_T - shift >= starts_T)[:, None],
-                        raw_key_TK[(rows_T - shift).clamp_min(0)],
-                        self.raw_cache.gather(
-                            raw_cache_PNHK, request_T, position_T - shift, raw_metadata
-                        )[:, 0],
-                    )
-                    for shift in range(self.compress_ratio - 1, -1, -1)
-                ],
-                dim=1,
-            )
-            .float()
-            .mean(1)
-            .to(raw_key_TK.dtype)
-        )
-        pooled_TK = self._rotate(
-            self.k_layernorm(pooled_TK)[:, None],
-            (position_T - self.compress_ratio + 1).clamp_min(0),
-        )[:, 0]
         (pooled_cache_PNHK,) = self.cache.views()
-        candidate_page_size = pooled_cache_PNHK.shape[1]
-        candidate_T = position_T // self.compress_ratio
-        slots_T = (
-            metadata.block_table[request_T, candidate_T // candidate_page_size].long()
-            * candidate_page_size
-            + candidate_T % candidate_page_size
-        ).masked_fill(~valid_T | ((position_T + 1) % self.compress_ratio != 0), -1)
-        _store_rows(pooled_cache_PNHK, pooled_TK, slots_T)
-        # Only the unfinished block survives the step. Completed blocks are
-        # represented solely by their transformed means in the compressed cache.
-        ring_capacity = raw_cache_PNHK.shape[1]
-        raw_slots_T = (
-            raw_metadata.block_table[request_T, 0].long() * ring_capacity
-            + position_T % ring_capacity
-        ).masked_fill(
-            ~valid_T
-            | (
-                position_T
-                < metadata.seq_lens[request_T]
-                // self.compress_ratio
-                * self.compress_ratio
-            ),
-            -1,
+        request_T, position_T, valid_T = step_coordinates(metadata, num_tokens)
+        (
+            query_THK,
+            raw_key_TK,
+            pooled_TK,
+            candidate_pages_T,
+            candidate_offsets_T,
+            ring_pages_T,
+            ring_offsets_T,
+        ) = self._decode_prep(
+            qk_TC,
+            positions,
+            request_T,
+            position_T,
+            valid_T,
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.block_table,
+            raw_metadata.block_table,
+            raw_cache_PNHK,
+            pooled_cache_PNHK.shape[1],
         )
-        _store_rows(raw_cache_PNHK, raw_key_TK, raw_slots_T)
+        pooled_cache_PNHK[candidate_pages_T, candidate_offsets_T] = pooled_TK[:, None]
+        raw_cache_PNHK[ring_pages_T, ring_offsets_T] = raw_key_TK[:, None]
+        if self._index_weights is None or self._index_weights.shape[0] < num_tokens:
+            self._index_weights = torch.ones(
+                num_tokens,
+                self.num_heads,
+                dtype=query_THK.dtype,
+                device=query_THK.device,
+            )
         blocks_TB = paged_lightning_indexer(
             query_THK,
             pooled_cache_PNHK[:, :, 0],
-            query_THK.new_ones(query_THK.shape[:2]),
+            self._index_weights[:num_tokens],
             metadata.block_table,
             metadata.query_start_loc,
             metadata.seq_lens,
