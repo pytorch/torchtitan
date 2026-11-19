@@ -219,6 +219,12 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
     )
 
 
+def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4_flex_shard() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4()
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    return config
+
+
 def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4() -> Trainer.Config:
     config = deepseek_v3_debugmodel(
         attn_backend="flex",
@@ -788,6 +794,18 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="DeepSeek V3 FSDP+CP+PP+EP",
             test_name="deepseek_v3_fsdp+cp+pp+ep",
             ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/real_pg/{gpu_arch}/deepseek_v3_cp_pp.txt"
+            ),
+            loss_compare_seed_config=deepseek_v3_debugmodel,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4_flex_shard],
+            test_descr="DeepSeek V3 FlexShard+CP+PP+EP",
+            test_name="deepseek_v3_flex_shard+cp+pp+ep",
+            ngpu=8,
+            # As for llama3_flex_shard+tp+cp.
             golden_numerics_path=(
                 "tests/assets/losses/real_pg/{gpu_arch}/deepseek_v3_cp_pp.txt"
             ),
