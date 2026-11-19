@@ -17,6 +17,7 @@ import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.base.module import Module
@@ -206,6 +207,7 @@ class NGramEmbedding(Module):
             )
         )
 
+    @local_compile("ple_hash_ids", batch_invariant=True)
     def hash_ids(
         self, input_ids_T: torch.Tensor, *, document_positions_T: torch.Tensor
     ) -> torch.Tensor:
@@ -235,6 +237,9 @@ class NGramEmbedding(Module):
                     self.eos_token_id,
                 )
             )
+        return self.mix_hashes(shifted_T)
+
+    def mix_hashes(self, shifted_T: list[torch.Tensor]) -> torch.Tensor:
         hashes_TN = []
         mixed_T = shifted_T[0] * self.layer_multipliers[0]
         for position in range(1, self.ngram_size):
@@ -262,7 +267,20 @@ class NGramEmbedding(Module):
             if routing is None
             else routing.input_ids
         )
-        embedding_TNE = self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype)
+        return self.lookup(hashes_TN, routing=routing, dtype=dtype)
+
+    def lookup(
+        self,
+        hashes_TN: torch.Tensor,
+        *,
+        routing: RowShardedEmbeddingMetadata | None = None,
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        return self.gather_features(
+            self.ngram_embedding(hashes_TN, routing=routing, dtype=dtype)
+        )
+
+    def gather_features(self, embedding_TNE: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
             # The table shards features over TP; gather the looked-up vectors.
@@ -322,31 +340,63 @@ class PLELayer(Module):
         key_TC = self.key_proj(embedding_TE)
         # The grouped norm reads the projection with bare ops.
         remat.recompute_needs_tensor(key_TC)
-        key_TSD = self.norm_key(key_TC).unflatten(-1, (self.num_streams, self.dim))
-        query_TSD = self.norm_query(x_TC).unflatten(-1, (self.num_streams, self.dim))
-        score_TS = (key_TSD * query_TSD).sum(-1) * self.dim**-0.5
-        score_TS = score_TS.abs().clamp_min(1e-6).sqrt() * score_TS.sign()
         value_TD = self.value_proj(embedding_TE)
         remat.recompute_needs_tensor(value_TD)
-        gated_TC = (score_TS.sigmoid().unsqueeze(-1) * value_TD.unsqueeze(-2)).flatten(
-            -2
-        )
-        normed_TC = self.norm_conv(gated_TC)
+        gated_TC, normed_TC = self.gate(key_TC, x_TC, value_TD)
         remat.recompute_needs_tensor(normed_TC)
         if padding_mask_T is not None:
             gated_TC = gated_TC * (~padding_mask_T).unsqueeze(-1)
             normed_TC = normed_TC * (~padding_mask_T).unsqueeze(-1)
-        indices_T = torch.arange(x_TC.shape[0], device=x_TC.device)
+        return self._conv(gated_TC, normed_TC, document_positions_T)
+
+    @local_compile("ple_gate", batch_invariant=False)
+    def gate(
+        self, key_TC: torch.Tensor, x_TC: torch.Tensor, value_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.gate_apply(self.gate_score(key_TC, x_TC), value_TD)
+
+    def gate_score(self, key_TC: torch.Tensor, x_TC: torch.Tensor) -> torch.Tensor:
+        key_TSD = self.norm_key(key_TC).unflatten(-1, (self.num_streams, self.dim))
+        query_TSD = self.norm_query(x_TC).unflatten(-1, (self.num_streams, self.dim))
+        return (key_TSD * query_TSD).sum(-1) * self.dim**-0.5
+
+    def gate_apply(
+        self, score_TS: torch.Tensor, value_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        score_TS = score_TS.abs().clamp_min(1e-6).sqrt() * score_TS.sign()
+        gated_TC = (score_TS.sigmoid().unsqueeze(-1) * value_TD.unsqueeze(-2)).flatten(
+            -2
+        )
+        return gated_TC, self.norm_conv(gated_TC)
+
+    @local_compile("ple_conv", batch_invariant=True)
+    def _conv(
+        self,
+        gated_TC: torch.Tensor,
+        normed_TC: torch.Tensor,
+        document_positions_T: torch.Tensor,
+    ) -> torch.Tensor:
+        indices_T = torch.arange(gated_TC.shape[0], device=gated_TC.device)
         starts_T = document_starts(document_positions_T)
-        conv_TC = torch.zeros_like(normed_TC, dtype=torch.float32)
-        # Cross-correlation's last coefficient multiplies the current token.
+        taps_TC = []
         # Reset every shift at document boundaries, including under packed PP/SP.
-        for tap in range(self.conv1d.kernel_size[0]):
-            source_T = (
-                indices_T - (self.conv1d.kernel_size[0] - 1 - tap) * self.dilation
+        for shift in self.conv_shifts():
+            source_T = indices_T - shift
+            taps_TC.append(
+                normed_TC[source_T.clamp_min(0)].float()
+                * (source_T >= starts_T).unsqueeze(-1)
             )
-            shifted_TC = normed_TC[source_T.clamp_min(0)].float() * (
-                source_T >= starts_T
-            ).unsqueeze(-1)
+        return self.conv_output(gated_TC, taps_TC)
+
+    def conv_shifts(self) -> list[int]:
+        kernel_size = self.conv1d.kernel_size[0]
+        return [(kernel_size - 1 - tap) * self.dilation for tap in range(kernel_size)]
+
+    def conv_output(
+        self, gated_TC: torch.Tensor, taps_TC: list[torch.Tensor]
+    ) -> torch.Tensor:
+        conv_TC = torch.zeros_like(gated_TC, dtype=torch.float32)
+        # Cross-correlation's last coefficient multiplies the current token.
+        for tap, shifted_TC in enumerate(taps_TC):
             conv_TC = conv_TC + shifted_TC * self.conv1d.weight[:, 0, tap].float()
-        return gated_TC + F.silu(conv_TC.to(normed_TC.dtype))
+        return gated_TC + F.silu(conv_TC.to(gated_TC.dtype))

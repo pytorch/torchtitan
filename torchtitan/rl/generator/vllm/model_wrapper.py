@@ -40,6 +40,7 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention
+from torchtitan.models.qwen3_8_flash_next.embedding import PLELayer
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.local_compile import inference_regions
 from torchtitan.rl.generator.model import (
@@ -204,6 +205,25 @@ def _replace_vllm_layer_configs(model_config):
                     inner_attention=vllm_inner_kda_cfg,
                 ),
             )
+
+        ple_cfg = getattr(layer_cfg, "ple", None)
+        if isinstance(ple_cfg, PLELayer.Config):
+            from torchtitan.rl.generator.vllm.ple import VLLMPLELayer
+
+            if not isinstance(attention_cfg, GDN.Config):
+                raise ValueError(
+                    f"layers[{layer_idx}]: Flash-Next PLE generation keys its history "
+                    "on the same layer's GDN state slots, so the layer needs GDN "
+                    "attention"
+                )
+            ple_cfg = VLLMPLELayer.Config(
+                **{
+                    field.name: getattr(ple_cfg, field.name)
+                    for field in dataclasses.fields(ple_cfg)
+                },
+                state_metadata_prefix=f"model.layers.{layer_idx}.linear_attn",
+            )
+            new_layer_cfg = dataclasses.replace(new_layer_cfg, ple=ple_cfg)
 
         new_layers.append(new_layer_cfg)
 
