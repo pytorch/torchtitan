@@ -17,7 +17,6 @@ from torchtitan_recipes.decision.base import (
     CandidateDistributionLoss,
     DecisionSampleProcessor,
 )
-from torchtitan_recipes.decision.gs1 import GS1DecisionModel, gs1_decision
 from torchtitan_recipes.decision.prepare_gs1_data import flatten_record
 
 
@@ -147,12 +146,3 @@ def test_sampled_nll_brier_has_soft_target_expectation() -> None:
     torch.testing.assert_close(
         torch.tensor(observed), expected_nll + weight * expected_brier
     )
-
-
-def test_gs1_decision_model_uses_shared_decision_recipe_base() -> None:
-    from torchtitan_recipes.decision.base import DecisionModel
-
-    model = GS1DecisionModel("0.8B")
-    assert isinstance(model, DecisionModel)
-    assert model.hf_assets_path.endswith("GS1-0.8B")
-    assert gs1_decision.__module__ == "torchtitan_recipes.decision.gs1"

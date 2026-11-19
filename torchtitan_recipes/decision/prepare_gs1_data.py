@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_NUM_SAMPLES = 3000
+MAX_STATE_CHARS = 12_000
 
 
 def _text(value: Any) -> str:
@@ -38,6 +39,9 @@ def flatten_record(row: dict[str, Any]) -> list[dict[str, Any]]:
 
     rows = []
     if _contains_media(request["state"]):
+        return rows
+    state_text = _text(request["state"])
+    if len(state_text) > MAX_STATE_CHARS:
         return rows
     for question_id, question in questions.items():
         kind = question["type"]
@@ -76,7 +80,7 @@ def flatten_record(row: dict[str, Any]) -> list[dict[str, Any]]:
             )
         rows.append(
             {
-                "state": _text(request["state"]),
+                "state": state_text,
                 "kind": kind,
                 "instructions": _text(question.get("instructions") or question_id),
                 "candidate_ids": candidate_ids,

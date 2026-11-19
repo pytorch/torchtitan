@@ -130,6 +130,8 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
             raise ValueError("candidate_token_ids must contain IDs for A through Z")
         self.candidate_token_ids = config.candidate_token_ids
         self.brier_weight = config.brier_weight
+        self._candidate_ids_by_device: dict[str, torch.Tensor] = {}
+        self._candidate_positions_by_device: dict[str, torch.Tensor] = {}
 
     def __call__(
         self,
@@ -141,12 +143,19 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
-        candidate_ids = torch.tensor(self.candidate_token_ids, device=pred.device)
+        device_key = str(pred.device)
+        candidate_ids = self._candidate_ids_by_device.get(device_key)
+        positions = self._candidate_positions_by_device.get(device_key)
+        if candidate_ids is None:
+            candidate_ids = torch.tensor(self.candidate_token_ids, device=pred.device)
+            positions = torch.arange(MAX_CANDIDATES, device=pred.device)
+            self._candidate_ids_by_device[device_key] = candidate_ids
+            self._candidate_positions_by_device[device_key] = positions
         logits = pred.float().index_select(-1, candidate_ids)
         valid = labels != IGNORE_INDEX
         candidate_counts = candidate_counts.to(device=pred.device, dtype=torch.long)
         candidate_mask = (
-            torch.arange(MAX_CANDIDATES, device=pred.device) < candidate_counts[:, None]
+            positions < candidate_counts[:, None]
         )
         logits = logits.masked_fill(~candidate_mask, float("-inf"))
         log_probs = F.log_softmax(logits, dim=-1)
