@@ -641,7 +641,9 @@ def _run_grouped_eval(rank, port):
         def evaluate(x):
             with torch.no_grad():
                 result, _ = losses[0](model(x), labels)
-                post_validate_fsdp_for_accelerator_graph([model])
+                post_validate_fsdp_for_accelerator_graph(
+                    [model], flex_shard_enabled=False
+                )
                 return result
 
         graph = wrap_with_accelerator_graph(
