@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
+from torchtitan.distributed.flex_shard_fsdp import declare_param_layouts
 from torchtitan.distributed.utils import get_local_tensor
 
 from .optimizer import OptimizersContainer
@@ -515,6 +516,20 @@ class EMA(OptimizersContainer):
     # --- checkpointing ---
 
     def state_dict(self) -> dict[str, Any]:
+        # A FlexShard parameter is its plain local shard, so its copies are
+        # too. Each declares where it sits in the full parameter, as the
+        # model's state dict does, or DCP would save every rank's copy as the
+        # whole tensor. Both paths below hand DCP these copies themselves, so
+        # DCP loads into them in place.
+        for ema_opt, model in zip(self._param_optimizers, self.model_parts):
+            declare_param_layouts(
+                model,
+                (
+                    (param, ema_param)
+                    for param, param_state in ema_opt.state.items()
+                    for ema_param in param_state[_EMA_STATE_KEY].values()
+                ),
+            )
         if not self.offload_to_cpu:
             return super().state_dict()
         # The trailing D2H has to land before DCP reads the EMA copies.
@@ -587,7 +602,8 @@ class EMA(OptimizersContainer):
         # after -- the pinned tensor is never replaced, so the offload
         # invariant is never suspended. The key layout is whatever
         # get_flat_optim_state_dict produces; a test pins that it still
-        # matches super().state_dict().
+        # matches super().state_dict(). A FlexShard parameter's pinned copy is
+        # not rewrapped, so DCP loaded into it, and its copy_ is a no-op.
         for ema_opt in self.optimizers:
             for group in ema_opt.param_groups:
                 for fqn, tensor in zip(group["param_names"], group["params"]):
