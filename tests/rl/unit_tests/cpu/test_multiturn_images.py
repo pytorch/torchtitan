@@ -33,6 +33,7 @@ from torchtitan.models.qwen3_5.renderer import (
     Qwen35ImageRefRendererConfig,
 )
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.rdma_object import RDMAImageFiles
 from torchtitan.rl.rollout import RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
@@ -153,6 +154,7 @@ def test_rollout_keeps_each_image_on_its_placeholders(
     prompts = []
 
     async def generate_fn(prompt, *, request_id, **kwargs):
+        prompt = await prompt.read()
         token_ids = completions[len(prompts)]
         prompts.append(
             (list(prompt.token_ids), prompt.images, prompt.image_placeholders)
@@ -175,6 +177,7 @@ def test_rollout_keeps_each_image_on_its_placeholders(
             message_env=None,
             token_env=None,
             advantage=_Config(None),
+            rdma_min_image_bytes=None,
         )
     )
     env = TokenEnv.Config().build(
@@ -185,6 +188,7 @@ def test_rollout_keeps_each_image_on_its_placeholders(
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             env=env,
+            image_files=RDMAImageFiles(register_rdma_object=None, min_bytes=None),
             sampling=SamplingConfig(),
             group_id=0,
             rollout_id=0,

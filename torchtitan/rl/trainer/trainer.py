@@ -33,11 +33,8 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.rdma_object import RDMAMicrobatch, RDMAMicrobatchPrefetcher
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import (
-    RDMAMicrobatch,
-    RDMAMicrobatchPrefetcher,
-)
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 

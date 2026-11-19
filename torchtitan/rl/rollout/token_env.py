@@ -143,7 +143,7 @@ class TokenEnv(Configurable):
         env = TokenEnv.Config().build(message_env=MyMessageEnv(...), renderer=renderer)
         env_output = await env.init()
         while not env_output.status.is_terminal():
-            completion = await generate_fn(env_output.next_prompt, ...)
+            completion = await generate_fn(RDMAPrompt(env_output.next_prompt), ...)
             env_output = await env.step(completion)
     """
 

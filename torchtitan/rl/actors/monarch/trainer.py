@@ -18,8 +18,8 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.rdma_object import RDMAMicrobatch
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
 from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
