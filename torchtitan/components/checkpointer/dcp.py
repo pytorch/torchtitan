@@ -19,7 +19,11 @@ from typing import Any, cast, Literal, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
+from torch.distributed.checkpoint import (
+    CheckpointableTensor,
+    HuggingFaceStorageWriter,
+    Metadata,
+)
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
@@ -29,6 +33,7 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncSaveResponse,
 )
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.distributed.flex_shard_fsdp import load_hf_into_local_shards
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
@@ -393,6 +398,16 @@ class CheckpointManager(BaseCheckpointManager):
                 "trying to load checkpoint in HF safetensors format, "
                 "but sd_adapter is not provided."
             )
+            # FlexShard's local shards declare their layouts, and the adapters
+            # would take each for the whole tensor.
+            if any(isinstance(v, CheckpointableTensor) for v in state_dict.values()):
+                load_hf_into_local_shards(
+                    self.sd_adapter,
+                    state_dict,
+                    self.sd_adapter.get_hf_storage_reader(checkpoint_id),
+                )
+                states[MODEL].load_state_dict(state_dict)
+                return
 
             hf_state_dict = self.sd_adapter.to_hf(
                 state_dict, to_quantized_layout=from_quantized
