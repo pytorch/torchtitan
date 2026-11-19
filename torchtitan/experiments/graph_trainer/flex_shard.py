@@ -105,7 +105,7 @@ def apply_flex_shard(
             for fqn, param in named_params
         }
 
-    for module in model.modules():
+    for module_fqn, module in model.named_modules():
         if not isinstance(module, Module) or module._sharding_config is None:
             continue
         for name, param in module.named_parameters(recurse=False):
@@ -115,6 +115,25 @@ def apply_flex_shard(
                 include_singleton_axes=True,
             )
             assert mesh is not None
+            for axis_index, axis in enumerate(mesh.mesh_dim_names):
+                if (
+                    param.requires_grad
+                    and axis in ("tp", "ep")
+                    and layout.local_type[axis] is spmd.R
+                    and mesh.size(axis_index) > 1
+                    and not (
+                        layout.partition_spec is not None
+                        and any(
+                            axis in (entry if isinstance(entry, tuple) else (entry,))
+                            for entry in layout.partition_spec
+                        )
+                    )
+                ):
+                    fqn = f"{module_fqn}.{name}".lstrip(".")
+                    raise ValueError(
+                        f"FlexShard tracing does not reduce partial gradients for "
+                        f"{fqn} replicated across {axis}."
+                    )
             spmd_types_to_global_layout(module, {name: layout}, mesh)
     module_buckets = get_default_transformer_block_buckets(
         len(model.config.layers),

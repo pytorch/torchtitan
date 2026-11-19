@@ -444,6 +444,14 @@ class GraphTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
+            if (
+                self.use_flex_shard_instead_simple_fsdp
+                and self.parallelism.data_parallel_replicate_degree > 1
+            ):
+                raise ValueError(
+                    "FlexShard tracing does not reduce gradients across dp_replicate; "
+                    "parallelism.data_parallel_replicate_degree must be 1."
+                )
             if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
