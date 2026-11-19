@@ -518,7 +518,13 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 initial_load_in_hf=True,
             )
-            self.assertTrue(checkpointer.load())
+            # FlexShard loads each parameter alone, so a conversion that needs
+            # another parameter fails here, as it would across the groups of a
+            # larger model.
+            with patch(
+                "torchtitan.distributed.flex_shard_fsdp._HF_LOAD_GROUP_BYTES", 1
+            ):
+                self.assertTrue(checkpointer.load())
             checkpointer.close()
             loaded.append((model, setup))
         (fsdp2, _), (flex, _) = loaded
@@ -554,6 +560,15 @@ class TestFlexShardDecoder(DTensorTestBase):
         # Llama 3 splits the packed QKV and the stacked w13, and permutes the
         # query and key rows for rotary embeddings.
         self._check_hf_loads_match_fsdp2(build_llama3_config, "debugmodel", ep=1)
+
+    @with_comms
+    @with_temp_dir
+    def test_hf_loads_match_fsdp2_with_tied_weights(self):
+        # to_hf gives no tensor for lm_head's weight, which tok_embeddings'
+        # Hugging Face tensor loads.
+        self._check_hf_loads_match_fsdp2(
+            _build_tied_llama3_config, "debugmodel_tied", ep=1
+        )
 
     @with_comms
     @with_temp_dir
@@ -606,15 +621,14 @@ class TestFlexShardDecoder(DTensorTestBase):
             raise error[0]
 
 
-@pytest.mark.parametrize("dp_shard, tp", [(5, 1), (5, 2)])
-def test_hf_load_into_uneven_shards(tmp_path, dp_shard: int, tp: int) -> None:
-    # Each simulated rank of (tp, dp_shard) holds the box torch.chunk gives it
-    # of each parameter: its chunk of the bucket's dim (1 for w13, else 0) and,
-    # with tp > 1, of the last dim, as tensor parallelism splits row-wise
-    # parallel weights. At dp_shard=5, shards end inside attention heads, so
-    # some Hugging Face tensors load in several chunks into a buffer. The
-    # parity tests' shards end on head boundaries. Each rank loads only its
-    # own shards, without a process group.
+@pytest.mark.parametrize("group_bytes", [1 << 30, 1])
+def test_hf_load_into_uneven_shards(tmp_path, group_bytes: int) -> None:
+    # Each of 5 simulated ranks holds the chunk torch.chunk gives it of each
+    # parameter's bucket dim (1 for w13, else 0), so shards are uneven and end
+    # inside attention heads, unlike the parity tests'. Each rank loads its
+    # shards without a process group, with all parameters in one group or each
+    # alone.
+    dp_shard = 5
     model_config = build_llama3_config(
         "debugmodel",
         parallelism=ParallelismConfig(),
@@ -636,12 +650,10 @@ def test_hf_load_into_uneven_shards(tmp_path, dp_shard: int, tp: int) -> None:
         {key: value.contiguous() for key, value in hf_state_dict.items()},
         str(tmp_path / "model.safetensors"),
     )
-    for tp_rank, dp_rank in product(range(tp), range(dp_shard)):
+    for dp_rank in range(dp_shard):
         state_dict, boxes = {}, {}
         for key, value in full.items():
             splits = {1 if key.endswith("w13.weight") else 0: (dp_shard, dp_rank)}
-            if value.ndim > 1:
-                splits[value.ndim - 1] = (tp, tp_rank)
             offsets, sizes = [], []
             for dim, length in enumerate(value.shape):
                 num_chunks, rank = splits.get(dim, (1, 0))
@@ -659,11 +671,17 @@ def test_hf_load_into_uneven_shards(tmp_path, dp_shard: int, tp: int) -> None:
                 ),
             )
             boxes[key] = _box(offsets, sizes)
-        load_hf_into_local_shards(
-            sd_adapter, state_dict, sd_adapter.get_hf_storage_reader(str(tmp_path))
-        )
+        with patch(
+            "torchtitan.distributed.flex_shard_fsdp._HF_LOAD_GROUP_BYTES",
+            group_bytes,
+        ):
+            load_hf_into_local_shards(
+                sd_adapter,
+                state_dict,
+                sd_adapter.get_hf_storage_reader(str(tmp_path)),
+            )
         for key, local in state_dict.items():
-            assert torch.equal(local, full[key][boxes[key]]), (tp_rank, dp_rank, key)
+            assert torch.equal(local, full[key][boxes[key]]), (dp_rank, key)
 
 
 def _box(offsets, sizes) -> tuple[slice, ...]:
