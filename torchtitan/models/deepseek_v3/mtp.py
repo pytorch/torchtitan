@@ -12,12 +12,15 @@ from typing import Any, cast
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import DataParallelMeshDims
+from torch.distributed.fsdp import DataParallelMeshDims, FSDPModule
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.distributed.fsdp import (
+    apply_fsdp_to_decoder,
+    get_fsdp_reshard_after_forward_policy,
+)
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -521,6 +524,70 @@ def apply_fsdp_to_mtp_decoder(
     finally:
         for key in mtp_layer_keys:
             del model.layers[key]
+
+    if (
+        model.mtp_layers is not None
+        and len(model.mtp_layers) > 0
+        and not model.enable_weight_tying
+        and get_fsdp_reshard_after_forward_policy(
+            reshard_after_forward_policy, pp_enabled
+        )
+    ):
+        # Tied, tok_embeddings shares the norm/lm_head unit, which does not
+        # reshard after forward unless the policy is "always".
+        _gather_mtp_embedding_once(
+            model,
+            # apply_fsdp_to_decoder's explicit forward prefetch of the first
+            # decoder layer, set only under EP (unshard_in_current_stream is
+            # rejected above).
+            forward_prefetch=[cast(FSDPModule, next(iter(model.layers.values())))]
+            if ep_degree > 1
+            else [],
+        )
+
+
+def _gather_mtp_embedding_once(
+    model: MTPDecoder, *, forward_prefetch: list[FSDPModule]
+) -> None:
+    """Keep ``tok_embeddings`` unsharded from the first MTP depth to the last.
+
+    The MTP pass calls ``tok_embeddings`` once per depth. FSDP reshards it
+    after each call, so every depth all-gathers the whole table again, with
+    nothing prefetching it. Under explicit prefetching (EP), each call also
+    repeats the embedding's forward prefetch of the first decoder layer,
+    which unshards that layer in the middle of the MTP pass and keeps it
+    whole until its backward.
+
+    From the trunk's final ``norm`` (run between the trunk and the MTP pass)
+    to the end of the last MTP block, the embedding keeps its unsharded
+    weight and prefetches nothing; then it reshards and gets its settings
+    back. One all-gather for the MTP pass instead of one per depth, at the
+    cost of holding the table through the MTP blocks.
+
+    Args:
+        model: The FSDP-wrapped MTP decoder, with ``tok_embeddings`` resharded
+            after forward.
+        forward_prefetch: The modules ``tok_embeddings`` prefetches in
+            forward, restored after the MTP pass.
+    """
+    assert model.mtp_layers is not None
+    embedding = model.tok_embeddings
+    if not isinstance(embedding, FSDPModule) or model.norm is None:
+        return
+
+    def keep_unsharded(*_) -> None:
+        embedding.set_reshard_after_forward(False)
+        embedding.set_modules_to_forward_prefetch([])
+
+    def reshard(*_) -> None:
+        # Also runs on the last MTP block's backward recompute, if any, where
+        # the embedding is already sharded: reshard() is then a no-op.
+        embedding.reshard()
+        embedding.set_reshard_after_forward(True)
+        embedding.set_modules_to_forward_prefetch(forward_prefetch)
+
+    model.norm.register_forward_hook(keep_unsharded)
+    model.mtp_layers[-1].register_forward_hook(reshard)
 
 
 class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
