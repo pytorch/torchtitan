@@ -71,6 +71,8 @@ def _collect_backward_regions(
     # Skip everything up to and including the last loss / lm_head node.
     start_idx = 0
     for idx, node in enumerate(all_nodes):
+        if _is_backward_node(node) and _get_module_fqn(node).startswith("layers."):
+            break
         if _get_module_fqn(node) in _NON_AC_MODULE_FQNS:
             start_idx = idx + 1
 

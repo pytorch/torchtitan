@@ -3185,6 +3185,63 @@ class TestApplySACPass(TestCase):
         ]
         self.assertEqual(mutations, [update])
 
+        for policy_fn in (_make_default_memory_policy(), _make_full_memory_policy()):
+            for through_view, writer_fqn in (
+                (False, ""),
+                (True, ""),
+                (True, "loss"),
+                (True, "lm_head"),
+            ):
+                with self.subTest(
+                    policy_fn=policy_fn,
+                    through_view=through_view,
+                    writer_fqn=writer_fqn,
+                ):
+                    graph = torch.fx.Graph()
+                    x = graph.placeholder("x")
+                    buffer = graph.call_function(
+                        torch.ops.aten.zeros_like.default, (x,)
+                    )
+                    target, source = buffer, x
+                    if through_view:
+                        target = graph.call_function(
+                            torch.ops.aten.view.default, (buffer, [2, 2])
+                        )
+                        source = graph.call_function(
+                            torch.ops.aten.view.default, (x, [2, 2])
+                        )
+                    writer = graph.call_function(
+                        torch.ops.aten._foreach_copy_.default, ([target], [source])
+                    )
+                    writer.meta["custom"] = {_MODULE_FQN: writer_fqn}
+                    fwd = graph.call_function(torch.ops.aten.sin.default, (buffer,))
+                    bwd = graph.call_function(torch.ops.aten.mul.Tensor, (fwd, x))
+                    bwd.meta["autograd_backward"] = True
+                    graph.output(bwd)
+                    gm = torch.fx.GraphModule({}, graph)
+                    inputs = torch.arange(1.0, 5.0)
+                    expected = gm(inputs)
+                    tag_sac_policy(gm, policy_fn=policy_fn)
+                    selective_activation_remat_pass(gm)
+                    self.assertEqual(
+                        buffer.meta["recompute"], CheckpointPolicy.MUST_SAVE
+                    )
+                    self.assertEqual(
+                        target.meta["recompute"], CheckpointPolicy.MUST_SAVE
+                    )
+                    self.assertEqual(
+                        len(
+                            list(
+                                gm.graph.find_nodes(
+                                    op="call_function",
+                                    target=torch.ops.aten.zeros_like.default,
+                                )
+                            )
+                        ),
+                        1,
+                    )
+                    self.assertEqual(gm(inputs), expected, atol=0, rtol=0)
+
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
         gm = self._build_gm(
@@ -6695,17 +6752,25 @@ class TestSelectiveActivationRematPass(TestCase):
         bwd_loss = graph.call_function(torch.ops.aten.add.Tensor, args=(a, a))
         sep = graph.call_function(torch.ops.aten.neg.default, args=(inp1,))
         bwd_layer = graph.call_function(torch.ops.aten.mul.Tensor, args=(b, b))
-        graph.output((bwd_loss, sep, bwd_layer))
+        grad_add = graph.call_function(
+            torch.ops.aten.add.Tensor, args=(bwd_loss, bwd_layer)
+        )
+        graph.output((bwd_loss, sep, bwd_layer, grad_add))
         for node in (a, b):
             node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
         bwd_loss.meta["autograd_backward"] = True
         bwd_loss.meta["custom"] = {"module_fqn": "loss"}
         bwd_layer.meta["autograd_backward"] = True
         bwd_layer.meta["custom"] = {"module_fqn": "layers.0.attention"}
+        grad_add.meta["autograd_backward"] = True
+        grad_add.meta["custom"] = {"module_fqn": "loss"}
         a_name, b_name = a.name, b.name
 
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        inputs = (torch.randn(4), torch.randn(4))
+        expected = gm(*inputs)
         result = selective_activation_remat_pass(gm)
+        self.assertEqual(result(*inputs), expected, atol=0, rtol=0)
 
         nodes = list(result.graph.nodes)
         node_names = [n.name for n in nodes]

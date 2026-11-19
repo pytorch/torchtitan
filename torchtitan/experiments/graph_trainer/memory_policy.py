@@ -52,6 +52,10 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_target_nodes,
+)
 from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
@@ -375,12 +379,16 @@ def tag_sac_policy(
     for node in gm.graph.nodes:
         if (
             _is_backward_node(node)
-            or "recompute" not in node.meta
             or not isinstance(node.target, torch._ops.OpOverload)
             or not node.target._schema.is_mutable
         ):
             continue
-        node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        if "recompute" in node.meta:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        for target in mutation_target_nodes(node):
+            for buffer in (target, base_tensor_for_mutation_target(target)):
+                if "recompute" in buffer.meta:
+                    buffer.meta["recompute"] = CheckpointPolicy.MUST_SAVE
         for user in node.users:
             if not _is_backward_node(user) and "recompute" in user.meta:
                 user.meta["recompute"] = CheckpointPolicy.MUST_SAVE
