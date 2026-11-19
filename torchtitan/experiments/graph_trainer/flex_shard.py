@@ -644,6 +644,26 @@ def flex_shard_fsdp_scheduling(
     for module in gm.modules():
         if not isinstance(module, fx.GraphModule):
             continue
+        aliases = {}
+        for node in module.graph.nodes:
+            base = base_tensor_for_mutation_target(node)
+            aliases[node] = {base} | {
+                value.untyped_storage()
+                for value in tree_leaves(node.meta.get("val"))
+                if isinstance(value, torch.Tensor)
+            }
+            if base is not node:
+                aliases[node] |= aliases[base]
+        reads = {
+            node: set().union(*(aliases[value] for value in node.all_input_nodes))
+            for node in module.graph.nodes
+        }
+        writes = {
+            node: set().union(
+                *(aliases[target] for target in mutation_target_nodes(node))
+            )
+            for node in module.graph.nodes
+        }
         buckets = _collect_bucket_regions(module.graph)
         for (action, _), regions in buckets.items():
             if action not in collectives:
@@ -681,6 +701,17 @@ def flex_shard_fsdp_scheduling(
                     node: index for index, node in enumerate(module.graph.nodes)
                 }
                 moving_set = set(moving)
+                moving_reads = set().union(*(reads[node] for node in moving))
+                moving_writes = set().union(*(writes[node] for node in moving))
+                first = min(positions[anchor], *(positions[node] for node in moving))
+                last = max(positions[anchor], *(positions[node] for node in moving))
+                if any(
+                    (writes[node] & (moving_reads | moving_writes))
+                    or (reads[node] & moving_writes)
+                    for node in tuple(module.graph.nodes)[first : last + 1]
+                    if node not in moving_set
+                ):
+                    continue
                 if action == "unshard":
                     if any(
                         positions[dependency] >= positions[anchor]

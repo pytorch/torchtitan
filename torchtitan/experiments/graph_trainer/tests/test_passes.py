@@ -1499,6 +1499,78 @@ class TestFlexShardScheduling(TestCase):
                 self.schedule(gm)
                 self.assertEqual(list(graph.nodes), before)
 
+    def test_scheduling_preserves_reads_and_writes_through_aliases(self):
+        with tempfile.TemporaryDirectory() as rendezvous:
+            dist.init_process_group(
+                "gloo",
+                init_method=f"file://{rendezvous}/rendezvous",
+                rank=0,
+                world_size=1,
+            )
+            try:
+                for action in ("unshard", "reduce_grad"):
+                    for alias_kind in ("direct", "view", "storage"):
+                        with self.subTest(action=action, alias_kind=alias_kind):
+                            graph = torch.fx.Graph()
+                            x0 = graph.placeholder("x0")
+                            x1 = graph.placeholder("x1")
+                            out = graph.placeholder("out")
+                            sibling = graph.placeholder("sibling")
+                            source = x1 if action == "unshard" else out
+                            source.meta["val"] = torch.empty(4)
+                            sibling.meta["val"] = source.meta["val"]
+                            alias = (
+                                graph.call_function(
+                                    torch.ops.aten.view.default, (source, [4])
+                                )
+                                if alias_kind == "view"
+                                else sibling
+                                if alias_kind == "storage"
+                                else source
+                            )
+                            first = self._bucket(graph, x0, action, fqn="first.weight")
+                            if action == "unshard":
+                                graph.call_function(
+                                    torch.ops.aten.add_.Tensor, (alias, 1)
+                                )
+                                read = first[-1]
+                            else:
+                                copy = graph.call_function(
+                                    torch.ops.aten.copy_.default, (out, first[-1])
+                                )
+                                copy.meta = dict(first[-1].meta)
+                                read = graph.call_function(
+                                    torch.ops.aten.clone.default, (alias,)
+                                )
+                            second = self._bucket(
+                                graph, x1, action, fqn="second.weight"
+                            )
+                            for bucket in (first, second):
+                                launch = bucket[2]
+                                launch.args = (
+                                    (bucket[0], 1, dist.group.WORLD.group_name)
+                                    if action == "unshard"
+                                    else (
+                                        bucket[0],
+                                        "sum",
+                                        1,
+                                        dist.group.WORLD.group_name,
+                                    )
+                                )
+                            graph.output((read, second[-1]))
+                            gm = torch.fx.GraphModule({}, graph)
+
+                            def inputs():
+                                values = [torch.ones(4), torch.zeros(4), torch.zeros(4)]
+                                values.append(values[1 if action == "unshard" else 2])
+                                return values
+
+                            expected = gm(*inputs())
+                            self.schedule(gm)
+                            self.assertEqual(gm(*inputs()), expected, atol=0, rtol=0)
+            finally:
+                dist.destroy_process_group()
+
 
 class TestFlexShardGradientClipper(TestCase):
     def setUp(self):
