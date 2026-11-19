@@ -35,6 +35,7 @@ import importlib
 import json
 
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
@@ -447,7 +448,8 @@ def apply_overrides(
         config_root: The config tree to traverse and mutate in place. The
             trainer passes the top-level ``Trainer.Config``.
 
-    Returns a list of human-readable log lines describing each replacement.
+    Logs equivalent replacements together, listing all matched FQNs. Returns
+    a list of human-readable log lines describing each individual replacement.
     """
     # Each entry is a bare target string or a (target, kwargs) tuple; a target is
     # a module.function path (see OverrideConfig.imports). Resolve each to
@@ -465,6 +467,7 @@ def apply_overrides(
     _check_node_conflicts(claims)
 
     replacements: list[str] = []
+    groups: dict[tuple[str, str], list[str]] = defaultdict(list)
     for c in claims:
         # ``**{}`` for a bare (no-kwargs) entry is just ``factory(cfg)``; a kwarg
         # the factory does not accept raises TypeError here, naming the factory.
@@ -483,15 +486,22 @@ def apply_overrides(
             if c.kwargs
             else ""
         )
-        replacements.append(
-            f"[Override] {c.ov.name}: {c.fqn} "
+        transition = (
             f"{type(c.cfg).__qualname__} -> {type(new_cfg).__qualname__}{kwargs_note}"
         )
+        replacements.append(f"[Override] {c.ov.name}: {c.fqn} {transition}")
+        groups[c.ov.name, transition].append(c.fqn)
 
     if replacements:
-        for line in replacements:
-            logger.info(line)
-        logger.info(f"Applied {len(replacements)} override(s)")
+        for (factory, transition), fqns in groups.items():
+            logger.info(
+                "[Override] %s: %s matched=%d fqns=%s",
+                factory,
+                transition,
+                len(fqns),
+                fqns,
+            )
+        logger.info("Applied %d override(s)", len(replacements))
     elif override_config.imports:
         # The user asked for overrides but nothing matched — likely a wrong
         # `target` class, a `fqns` glob that matches no node, or a module that
