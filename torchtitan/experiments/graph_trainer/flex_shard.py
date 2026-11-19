@@ -544,15 +544,11 @@ def fold_flex_shard_gradient_casts_pass(
             continue
         folded = 0
         positions = {node: index for index, node in enumerate(module.graph.nodes)}
+        _, written_storages = _graph_tensor_storages_and_writes(module.graph)
         writes = [
             (
                 positions[node],
-                frozenset(
-                    value.untyped_storage()
-                    for target in mutation_target_nodes(node)
-                    for value in tree_leaves(target.meta.get("val"))
-                    if isinstance(value, torch.Tensor)
-                ),
+                written_storages[node],
                 frozenset(
                     base_tensor_for_mutation_target(target)
                     for target in mutation_target_nodes(node)
