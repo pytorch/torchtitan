@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,8 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -101,10 +104,6 @@ class InterGeneratorRouter(Configurable):
         idle, so a model state dict load may land mid-rollout and successive turns can run
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
-
-        pull_timeout_s: float | None = None
-        """Seconds a model state dict pull may take before it fails and names the generators
-        that have not loaded it. None waits without a limit."""
 
     def __init__(
         self,
@@ -202,13 +201,14 @@ class InterGeneratorRouter(Configurable):
     async def pull_model_state_dict(self, policy_version: int) -> None:
         """Pull the given policy version's state dict into every generator.
 
+        Once every pull ends, raises a ``RuntimeError`` naming each generator whose pull
+        failed, after logging each failure.
+
         Args:
             policy_version: Trainer policy version whose state dict to pull.
         """
 
-        loaded = [False] * len(self._generators)
-
-        async def _pull_one(index: int, h: _GeneratorHandle) -> None:
+        async def _pull_one(h: _GeneratorHandle) -> None:
             # Transfer over RDMA while the generator remains available. A no-op
             # with model_state_dict_load_mode="gpu_fetch", where the load does it.
             await h.actor.prefetch_model_state_dict.call()
@@ -220,7 +220,6 @@ class InterGeneratorRouter(Configurable):
                 )
             finally:
                 h.draining = False
-            loaded[index] = True
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during model state dict loads, but that's not a priority
@@ -228,23 +227,25 @@ class InterGeneratorRouter(Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        timeout = self._config.pull_timeout_s
-        deadline = asyncio.timeout(timeout)
-        try:
-            async with deadline:
-                await asyncio.gather(
-                    *[_pull_one(index, h) for index, h in enumerate(self._generators)]
-                )
-        except TimeoutError:
-            # A generator's own TimeoutError propagates unchanged.
-            if not deadline.expired():
-                raise
-            # Stops only the router's waits: a late generator's prefetch or load keeps running.
-            late = [index for index, ok in enumerate(loaded) if not ok]
-            raise TimeoutError(
-                f"Generators {late} did not load policy version {policy_version} within "
-                f"pull_timeout_s={timeout}s. Check their engine loops or raise pull_timeout_s."
-            ) from None
+        results = await asyncio.gather(
+            *[_pull_one(h) for h in self._generators], return_exceptions=True
+        )
+        failed = [
+            index
+            for index, result in enumerate(results)
+            if isinstance(result, BaseException)
+        ]
+        for index in failed:
+            logger.error(
+                f"Generator {index} failed to load policy version {policy_version}",
+                exc_info=results[index],
+            )
+        # TODO: report the failed generators to the router's health state (M0). A failed one may
+        #   still be reading the trainer's staging buffer, so stop it before the next push.
+        if failed:
+            raise RuntimeError(
+                f"Generators {failed} failed to load policy version {policy_version}"
+            ) from results[failed[0]]
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""

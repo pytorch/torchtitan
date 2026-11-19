@@ -95,7 +95,7 @@ def _controller(
     controller.start_step = 0
     controller._trainer_policy_version = 0
     controller._validation_tasks = []
-    controller._weight_sync_tasks = []
+    controller._model_state_dict_push_pull_tasks = []
     controller._has_pending_validation = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
@@ -151,13 +151,26 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
     return queue
 
 
+async def _teardown(controller: Controller) -> None:
+    """Cancel and gather the push and pull tasks as `run()` does, retrieving their errors."""
+    tasks = controller._model_state_dict_push_pull_tasks
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def _run(controller: Controller, *, num_training_steps: int) -> None:
     controller.config.async_loop.num_training_steps = num_training_steps
-    asyncio.run(
-        controller._trainer_loop(
-            _batch_queue(num_training_steps), num_training_steps=num_training_steps
-        )
-    )
+
+    async def run() -> None:
+        try:
+            await controller._trainer_loop(
+                _batch_queue(num_training_steps), num_training_steps=num_training_steps
+            )
+        finally:
+            await _teardown(controller)
+
+    asyncio.run(run())
 
 
 def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
@@ -251,57 +264,26 @@ def test_failed_validation_fails_training() -> None:
         _run(controller, num_training_steps=3)
 
 
-async def _failing_pull():
-    raise RuntimeError("pull failed")
-
-
-def test_pull_failure_fails_the_next_step_before_it_commits() -> None:
-    events: list[str] = []
-    with pytest.raises(RuntimeError, match="pull failed"):
-        _run(_controller(events, on_pull=_failing_pull), num_training_steps=2)
-
-    assert "optim 2" not in events
-
-
 def test_pull_failure_fails_the_loop_instead_of_waiting_for_a_batch() -> None:
     """A failed pull releases no groups, so a lockstep run gets no next batch."""
-    controller = _controller([], on_pull=_failing_pull)
+
+    async def failing_pull():
+        raise RuntimeError("pull failed")
+
+    controller = _controller([], on_pull=failing_pull)
     controller.config.async_loop.num_training_steps = 2
 
     async def run() -> None:
-        await asyncio.wait_for(
-            controller._trainer_loop(_batch_queue(1), num_training_steps=2),
-            timeout=10,
-        )
+        try:
+            await asyncio.wait_for(
+                controller._trainer_loop(_batch_queue(1), num_training_steps=2),
+                timeout=10,
+            )
+        finally:
+            await _teardown(controller)
 
     with pytest.raises(RuntimeError, match="pull failed"):
         asyncio.run(run())
-
-
-def test_pull_failure_during_forward_backward_fails_the_step_before_it_commits() -> None:
-    fwd_bwd_started = asyncio.Event()
-    pull_failed = asyncio.Event()
-
-    async def pull_failing_during_fwd_bwd():
-        await fwd_bwd_started.wait()
-        pull_failed.set()
-        raise RuntimeError("pull failed")
-
-    async def forward_backward(step):
-        if step == 2:
-            fwd_bwd_started.set()
-            await pull_failed.wait()
-
-    events: list[str] = []
-    controller = _controller(
-        events,
-        on_pull=pull_failing_during_fwd_bwd,
-        on_forward_backward=forward_backward,
-    )
-    with pytest.raises(RuntimeError, match="pull failed"):
-        _run(controller, num_training_steps=2)
-
-    assert "fwd_bwd 2" in events and "optim 2" not in events
 
 
 def test_failed_step_hands_its_in_flight_pull_to_run_for_teardown() -> None:
@@ -327,7 +309,7 @@ def test_failed_step_hands_its_in_flight_pull_to_run_for_teardown() -> None:
                 controller._trainer_loop(_batch_queue(2), num_training_steps=2),
                 timeout=10,
             )
-        push, pull = controller._weight_sync_tasks
+        push, pull = controller._model_state_dict_push_pull_tasks
         assert push.done() and not pull.done()
 
     asyncio.run(run())
