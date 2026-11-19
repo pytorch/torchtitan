@@ -91,9 +91,7 @@ jobs:
         python -m pip install --force-reinstall --pre \
           torch torchvision --index-url ${{ matrix.index-url }}
         USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
-        # For test_flex_shard_fsdp.py. flex_shard has no release yet, so pin a
-        # commit; --no-deps keeps the nightly torch installed above.
-        python -m pip install --no-deps \
-          "flex-shard @ git+https://github.com/meta-pytorch/flex_shard@d6bb54635b00c55a271d60f45bff7ebef7a03bc4"
+        # For test_flex_shard_fsdp.py.
+        bash .github/scripts/install_flex_shard.sh
 
         pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv

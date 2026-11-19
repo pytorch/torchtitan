@@ -13,6 +13,7 @@ is applied during model parallelization.
 | `parallelism_context.py` | Device mesh construction and named mesh axes for every parallelism. See [PARALLELISM_CONTEXT.md](PARALLELISM_CONTEXT.md). |
 | `spmd_types.py` | SPMD type annotations for tensor-parallel and other sharded regions. |
 | `fsdp.py` | FSDP2 / HSDP application. See [FSDP.md](FSDP.md). |
+| `flex_shard_fsdp.py` | FlexShard in place of FSDP2's `fully_shard`, with `parallelism.fsdp_backend=FlexShardConfig()`. See [FLEX_SHARD_FSDP.md](FLEX_SHARD_FSDP.md). |
 | `pipeline_parallel.py` | Pipeline stages and schedules. See [PIPELINE_PARALLEL.md](PIPELINE_PARALLEL.md). |
 | `context_parallel.py` | Context-parallel sequence sharding. |
 | `deepep/` | DeepEP / HybridEP expert-parallel token dispatch. |
