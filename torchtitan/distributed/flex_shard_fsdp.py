@@ -45,11 +45,17 @@ through ``declare_state_dict_layouts``, the optimizer's, through
 DTensors, and either backend loads the other's.
 ``load_hf_into_local_shards`` loads a Hugging Face checkpoint into those local
 shards, each rank reading only its part of each Hugging Face tensor.
+
+DistMuon plans each step from its parameters' storage layouts, which
+``dist_muon_storage_layouts`` gives for FlexShard's plain local shards: each
+bucket's ``Shard`` on its mesh, with expert parallelism's split of the routed
+experts. Its parameters, grads and momentum stay plain local shards.
 """
 
 import math
 import sys
-from collections.abc import Callable, Iterable, Iterator
+import weakref
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from importlib.util import find_spec
 from typing import Any, cast, TYPE_CHECKING
@@ -63,6 +69,7 @@ from torch.distributed.device_mesh import DeviceMesh
 if TYPE_CHECKING:
     from torch.distributed.fsdp import DataParallelMeshDims
 
+    from torchtitan.distributed.flex_shard import StorageLayout
     from torchtitan.distributed.parallelism_context import ParallelismContext
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
@@ -72,6 +79,7 @@ __all__ = [
     "declare_optimizer_state_layouts",
     "declare_param_layouts",
     "declare_state_dict_layouts",
+    "dist_muon_storage_layouts",
     "flex_shard_bucket",
     "flex_shard_bucket_mesh",
     "flex_shard_grad_norm",
@@ -79,8 +87,15 @@ __all__ = [
     "flex_shard_reduce_meshes",
     "holds_flex_shard_params",
     "load_hf_into_local_shards",
+    "record_expert_mesh",
     "validate_flex_shard_training",
 ]
+
+# For dist_muon_storage_layouts: the mesh with the ep axis whose edp_shard axis
+# is the mesh of the routed experts' FlexShard buckets, keyed by that mesh.
+_EXPERT_MESHES: weakref.WeakKeyDictionary[
+    DeviceMesh, DeviceMesh
+] = weakref.WeakKeyDictionary()
 
 
 def flex_shard_bucket_mesh(
@@ -141,6 +156,16 @@ def flex_shard_reduce_meshes(
             edp_mesh if tp_mesh is not None else edp_mesh._flatten("loss_mesh")
         )
     return meshes
+
+
+def record_expert_mesh(bucket_mesh: DeviceMesh, edp_mesh: DeviceMesh) -> None:
+    """Record that the FlexShard buckets on ``bucket_mesh`` hold routed experts
+    that expert parallelism split over the ``ep`` axis of ``edp_mesh``, whose
+    ``edp_shard`` axis is ``bucket_mesh``, for ``dist_muon_storage_layouts``."""
+    # Meshes compare by value. An equal mesh that an earlier model recorded
+    # would stay the key, and the entry would go when that model does.
+    _EXPERT_MESHES.pop(bucket_mesh, None)
+    _EXPERT_MESHES[bucket_mesh] = edp_mesh
 
 
 def flex_shard_grad_norm(
@@ -332,15 +357,96 @@ def declare_optimizer_state_layouts(
     holds the parameters.
 
     ``step`` declares no layout, so DCP saves it as replicated, as for FSDP2.
-    flex_shard raises ``NotImplementedError`` for optimizers other than Adam
-    and AdamW. Call it outside forward and backward, as for
-    ``holds_flex_shard_params``.
+    DistMuon's momentum declares its parameter's layout. For other optimizers,
+    flex_shard raises ``NotImplementedError`` unless they're Adam or AdamW.
+    Call it outside forward and backward, as for ``holds_flex_shard_params``.
     """
-    if holds_flex_shard_params(model):
+    if not holds_flex_shard_params(model):
+        return
+    from torchtitan.distributed.flex_shard import DistMuon
+
+    if not isinstance(optimizer, DistMuon):
         # pyrefly: ignore [missing-import]
         from flex_shard import register_optimizer_checkpoint_hook
 
         register_optimizer_checkpoint_hook(optimizer, model)
+        return
+
+    # TODO: Use register_optimizer_checkpoint_hook once flex_shard accepts
+    # optimizers other than Adam and AdamW whose states have their parameter's
+    # shape. It already checks each state's shape.
+    def declare_momentum_layouts(_optimizer, state_dict: dict[str, Any]) -> None:
+        # state_dict lists each group's parameters as indices, in the order of
+        # the optimizer's parameter groups.
+        states = state_dict["state"]
+        declare_param_layouts(
+            model,
+            (
+                (param, states[param_id]["momentum_buffer"])
+                for group, saved_group in zip(
+                    optimizer.param_groups, state_dict["param_groups"], strict=True
+                )
+                for param, param_id in zip(
+                    group["params"], saved_group["params"], strict=True
+                )
+                if "momentum_buffer" in states.get(param_id, {})
+            ),
+        )
+
+    optimizer.register_state_dict_post_hook(declare_momentum_layouts)
+
+
+def dist_muon_storage_layouts(
+    names: Sequence[str], params: Sequence[torch.Tensor]
+) -> dict[str, "StorageLayout"]:
+    """DistMuon's ``StorageLayout`` of each FlexShard parameter in ``params``,
+    by its name in ``names``.
+
+    A FlexShard parameter is its bucket's ``Shard`` of the full parameter on the
+    bucket's mesh. A routed expert's is on the mesh ``record_expert_mesh``
+    recorded, with ``ep`` sharding the experts first and ``edp_shard`` each
+    ``ep`` rank's.
+    """
+    flex_shard = sys.modules.get("flex_shard")
+    if flex_shard is None:
+        return {}
+    # pyrefly: ignore [missing-import]
+    from flex_shard.custom_placements.shard import Shard as FlexShardShard
+    from torch.distributed.tensor import Shard
+
+    from torchtitan.distributed.flex_shard import StorageLayout
+
+    layouts = {}
+    for name, param in zip(names, params, strict=True):
+        if not flex_shard.is_flex_shard_param(param):
+            continue
+        (placement,) = flex_shard.get_placements(param)
+        # The buckets apply_fsdp_to_decoder builds hold only Shard placements.
+        assert type(placement) is FlexShardShard, placement
+        shard = Shard(placement.dim)
+        mesh = flex_shard.get_mesh(param)
+        outer_layout = flex_shard.get_outer_layout(param)
+        edp_mesh = _EXPERT_MESHES.get(mesh)
+        if edp_mesh is None:
+            # validate_flex_shard_training rejects DistMuon under tensor
+            # parallelism, the other outer sharding.
+            assert outer_layout is None, name
+            layouts[name] = StorageLayout(
+                mesh=mesh,
+                placements=(shard,),
+                global_shape=tuple(flex_shard.get_global_shape(param)),
+            )
+            continue
+        assert outer_layout is not None, name
+        layouts[name] = StorageLayout(
+            mesh=edp_mesh,
+            placements=(shard, Shard(0)),
+            global_shape=outer_layout.global_shape,
+            shard_order_by_tensor_dim=(
+                {0: ("ep", "edp_shard")} if placement.dim == 0 else {}
+            ),
+        )
+    return layouts
 
 
 def declare_param_layouts(
@@ -592,9 +698,13 @@ def validate_flex_shard_training(
         # The state dict adapters need DTensor parameters.
         if checkpointer.last_save_in_hf:
             unsupported.append("checkpointer.last_save_in_hf=True")
-    if any(isinstance(o, DistMuon.Config) for o in config.optim.optimizer.optimizers):
-        # DistMuon needs DTensor parameters.
-        unsupported.append("DistMuon")
+    if parallelism.tensor_parallel_degree > 1 and any(
+        isinstance(o, DistMuon.Config) for o in config.optim.optimizer.optimizers
+    ):
+        # TODO: dist_muon_storage_layouts gives each parameter its bucket's
+        # split only, not TP's. DistMuon's recipes reject TP for FSDP2 too
+        # (#3353).
+        unsupported.append("DistMuon with tensor parallelism")
     if config.debug.spmd_typechecking:
         unsupported.append("debug.spmd_typechecking")
 

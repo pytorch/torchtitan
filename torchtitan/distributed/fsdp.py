@@ -26,6 +26,7 @@ from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymm
 from torchtitan.distributed.flex_shard_fsdp import (
     declare_state_dict_layouts,
     flex_shard_bucket_mesh,
+    record_expert_mesh,
 )
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -611,6 +612,9 @@ def _apply_flex_shard(
     if edp_mesh is not None:
         assert edp_mesh.mesh_dim_names == ("edp_shard", "ep"), edp_mesh.mesh_dim_names
         expert_mesh = edp_mesh["edp_shard"]
+        # DistMuon plans the routed experts' storage over edp_shard and ep: its
+        # buckets balance their work with that of parameters on dp_shard.
+        record_expert_mesh(expert_mesh, edp_mesh)
         # EP has split each routed-expert parameter's dim 0, the experts, over
         # ep. Declaring this rank's part makes the layouts that the wrapped
         # param_init functions use cover all experts, so each shard is its slice

@@ -7,6 +7,7 @@
 """``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
 import os
+import re
 from itertools import count, product
 from typing import Any, cast, Literal
 from unittest.mock import patch
@@ -20,7 +21,7 @@ import torch.distributed.distributed_c10d as c10d
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -33,7 +34,7 @@ from torch.testing._internal.distributed.checkpoint_utils import with_temp_dir
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optim import AdamW, EMA, OptimizersContainer
+from torchtitan.components.optim import AdamW, DistMuon, EMA, OptimizersContainer
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
 from torchtitan.config.parallelism import (
@@ -48,6 +49,12 @@ from torchtitan.distributed.accelerator_graph import (
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_accelerator_graph,
     wrap_with_accelerator_graph,
+)
+from torchtitan.distributed.flex_shard import (
+    BlockShard,
+    BucketConfig,
+    ComputeLayout,
+    Owned,
 )
 from torchtitan.distributed.flex_shard_fsdp import (
     flex_shard_bucket,
@@ -370,6 +377,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         cp: int = 1,
         sequence_parallel: bool = False,
         accelerator_graph: Literal["step", "microbatch_group"] | None = None,
+        dist_muon: bool = False,
     ) -> None:
         # One context, as in training: both backends shard over its meshes.
         parallelism_context = ParallelismContext(
@@ -387,7 +395,7 @@ class TestFlexShardDecoder(DTensorTestBase):
                 f"{flavor} "
                 f"reshard_after_forward={reshard_after_forward} "
                 f"microbatches={microbatches} chunked_loss={chunked_loss} "
-                f"accelerator_graph={accelerator_graph}"
+                f"accelerator_graph={accelerator_graph} dist_muon={dist_muon}"
             )
             fsdp2, *fsdp2_setup = self._build(
                 build_config,
@@ -423,7 +431,14 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ):
                     histories.append(
                         self._train(
-                            model, *setup, microbatches, chunked_loss, accelerator_graph
+                            model,
+                            *setup,
+                            microbatches,
+                            chunked_loss,
+                            accelerator_graph,
+                            optim=_dist_muon_optimizers(model, ep=ep)
+                            if dist_muon
+                            else None,
                         )
                     )
                 num_reduce_scatters.append(reduce_scatter.call_count)
@@ -591,16 +606,51 @@ class TestFlexShardDecoder(DTensorTestBase):
         )
 
     @with_comms
+    def test_dist_muon_matches_fsdp2(self):
+        # DistMuon plans from FlexShard's storage layouts and steps its plain
+        # local shards, with the collectives and updates it runs for FSDP2's
+        # DTensors.
+        self._check_matches_fsdp2(
+            ep=1,
+            cases=product(
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default",),
+                (2,),
+            ),
+            dist_muon=True,
+        )
+
+    @with_comms
+    def test_dist_muon_matches_fsdp2_with_expert_parallelism(self):
+        # DistMuon computes the routed experts where they're stored, on the
+        # (edp_shard, ep) mesh, as for FSDP2's DTensors.
+        self._check_matches_fsdp2(
+            ep=2,
+            cases=[((build_qwen3_config, "debugmodel_moe"), "default", 2)],
+            chunked_loss=True,
+            dist_muon=True,
+        )
+
+    @with_comms
     @with_temp_dir
     @parametrize("tp", [1, 2])
     def test_checkpoints_match_fsdp2(self, tp: int):
-        # FlexShard loads FSDP2's checkpoint of the model and its AdamW states,
-        # and saves it again chunk for chunk and bit for bit, also as a bf16
-        # export. With ep=2, the routed experts are split over ep, then over
-        # edp_shard. With tp=2, TP splits the dense parameters in dim 0 or 1,
-        # and the buckets shard each tp rank's part. Under sequence
-        # parallelism, the norm weights are replicated over tp, so both
-        # backends save each of their chunks once.
+        # With tp=2, TP splits the dense parameters in dim 0 or 1, and the
+        # buckets shard each tp rank's part. Under sequence parallelism, the
+        # norm weights are replicated over tp, so both backends save each of
+        # their chunks once.
+        self._check_checkpoints_match_fsdp2(tp=tp)
+
+    def _check_checkpoints_match_fsdp2(
+        self, *, tp: int, dist_muon: bool = False
+    ) -> None:
+        # FlexShard loads FSDP2's checkpoint of the model and its optimizer
+        # states, and saves it again chunk for chunk and bit for bit, also as a
+        # bf16 export. With ep=2, the routed experts are split over ep, then
+        # over edp_shard.
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size // tp,
@@ -620,11 +670,15 @@ class TestFlexShardDecoder(DTensorTestBase):
                 "default",
                 parallelism_context,
             )
-            optimizers = OptimizersContainer(
-                OptimizersContainer.Config(
-                    optimizers=[AdamW.Config(pattern=".*", lr=1e-3)]
-                ),
-                model_parts=[model],
+            optimizers = (
+                _dist_muon_optimizers(model, ep=2)
+                if dist_muon
+                else OptimizersContainer(
+                    OptimizersContainer.Config(
+                        optimizers=[AdamW.Config(pattern=".*", lr=1e-3)]
+                    ),
+                    model_parts=[model],
+                )
             )
             checkpointer = CheckpointManager(
                 CheckpointManager.Config(
@@ -667,7 +721,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         self._assert_equal_tensors(
             self._optimizer_states(model, optimizers),
             self._optimizer_states(flex, flex_optimizers),
-            "loaded AdamW state",
+            "loaded optimizer state",
         )
         checkpointer.save(3)
         checkpointer.save(3, last_step=True)
@@ -685,6 +739,14 @@ class TestFlexShardDecoder(DTensorTestBase):
             for fqn, param in model.named_parameters()
             for name, value in states[param].items()
         }
+
+    @with_comms
+    @with_temp_dir
+    def test_dist_muon_checkpoints_match_fsdp2(self):
+        # DistMuon's momentum is a plain local shard with its parameter's
+        # layout, so FlexShard loads and saves FSDP2's DistMuon checkpoints,
+        # the routed experts' momentum split over ep, then over edp_shard.
+        self._check_checkpoints_match_fsdp2(tp=1, dist_muon=True)
 
     @with_comms
     @with_temp_dir
@@ -1016,6 +1078,70 @@ def test_hf_load_into_uneven_shards(tmp_path, group_bytes: int, tp: int) -> None
             )
         for key, local in state_dict.items():
             assert torch.equal(local, full[key][boxes[key]]), (tp_rank, dp_rank, key)
+
+
+def _dist_muon_optimizers(model, *, ep: int) -> OptimizersContainer:
+    """DistMuon for the transformer blocks' matrices, and AdamW for the other
+    parameters, as the DistMuon recipes split them.
+
+    The compute layouts take each of DistMuon's paths: the fused QKV weight per
+    head, in place where its row shards hold whole heads; the other matrices
+    each gathered whole on an owner; a stacked linear's matrices, spread over
+    the ranks from their row shards; and the routed experts where they're
+    stored.
+    """
+
+    def compute_layout(**shardings_by_mesh_axis) -> ComputeLayout:
+        return ComputeLayout(
+            shardings_by_mesh_axis=shardings_by_mesh_axis,
+            compute_dtype=torch.bfloat16,
+        )
+
+    per_expert = (
+        compute_layout(dp_shard=Shard(0))
+        if ep == 1
+        else ComputeLayout(
+            shardings_by_mesh_axis={"edp_shard": Shard(0), "ep": Shard(0)},
+            # EP splits the experts first, then edp_shard each ep rank's.
+            shard_order_by_tensor_dim={0: ("ep", "edp_shard")},
+            compute_dtype=torch.bfloat16,
+        )
+    )
+    head_dim = model.layers["0"].attention.head_dim
+    layouts = {
+        "attention.qkv_linear.wqkv.weight": compute_layout(
+            dp_shard=BlockShard(dim=0, block_sizes=(head_dim,))
+        ),
+        "attention.wo.weight": compute_layout(dp_shard=Owned()),
+        "feed_forward.w13.weight": compute_layout(dp_shard=Shard(0)),
+        "feed_forward.w2.weight": compute_layout(dp_shard=Owned()),
+        "feed_forward.router.gate.weight": compute_layout(dp_shard=Owned()),
+        "feed_forward.routed_experts.w13.weight": per_expert,
+        "feed_forward.routed_experts.w2.weight": per_expert,
+    }
+    compute_sharding_by_fqn = {}
+    bucket_configs = []
+    for layer_id, block in model.layers.items():
+        layer_layouts = {
+            f"layers.{layer_id}.{name}": layouts[name]
+            for name, _ in block.named_parameters()
+            if name in layouts
+        }
+        compute_sharding_by_fqn.update(layer_layouts)
+        bucket_configs.append(BucketConfig(patterns=tuple(layer_layouts)))
+    return OptimizersContainer(
+        OptimizersContainer.Config(
+            optimizers=[
+                DistMuon.Config(
+                    pattern=f"^(?:{'|'.join(map(re.escape, compute_sharding_by_fqn))})$",
+                    compute_sharding_by_fqn=compute_sharding_by_fqn,
+                    bucket_configs=bucket_configs,
+                ),
+                AdamW.Config(pattern=".*", lr=1e-3),
+            ]
+        ),
+        model_parts=[model],
+    )
 
 
 def _box(offsets, sizes) -> tuple[slice, ...]:
