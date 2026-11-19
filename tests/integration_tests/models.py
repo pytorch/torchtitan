@@ -703,8 +703,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             loss_compare_seed_config=llama3_debugmodel,
             # The runner skips the seed checkpoint under Fake PG.
             use_real_pg=True,
-            # FlexShard is unvalidated on ROCm.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
@@ -758,7 +756,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             ),
             loss_compare_seed_config=deepseek_v3_debugmodel_fsdp8_ep8,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_dist_muon_fsdp4_ep2],
@@ -785,7 +782,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             ),
             loss_compare_seed_config=deepseek_v3_debugmodel,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],

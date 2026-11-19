@@ -140,7 +140,7 @@ for these when the training engine is built, before anything else:
 
 | Rejected | Why |
 | --- | --- |
-| HSDP and DDP (`data_parallel_replicate_degree > 1`) | torchtitan's FlexShard buckets don't replicate over a second mesh dim yet. |
+| HSDP and DDP (`data_parallel_replicate_degree > 1`) | torchtitan's FlexShard buckets don't replicate over a second mesh axis yet. |
 | Pipeline parallelism | PyTorch's pipeline schedules drive FSDP through `FSDPModule`, which FlexShard modules aren't. |
 | `fsdp_symm_mem_scope`, `fsdp_enable_cpu_offloading`, `fsdp_unshard_in_current_stream` | torchtitan's FlexShard path has no equivalent of these yet. |
 | `fsdp_defer_gradient_reduction` | FlexShard has no equivalent of FSDP2's `set_is_last_backward`. |
