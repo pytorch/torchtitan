@@ -17,7 +17,8 @@ the indexer loss. `build_model_config(..., indexer_loss_coeff=...)` sets its
 coefficient (default 0.01); 0 turns the loss off.
 
 Sparse attention runs Attention Gym `gather_attn` with `(latent, rope)`
-pairs. Its fused kernel needs 16 to 128 heads, so the debug model has 16.
+pairs. Its fused kernel needs 16 to 128 heads per tensor parallel rank, so the
+debug model has 32.
 
 ## Supported Parallelisms
 
@@ -25,17 +26,13 @@ pairs. Its fused kernel needs 16 to 128 heads, so the debug model has 16.
 |---------|-------|
 | FSDP2 | Tested with EP 2 |
 | Expert parallelism | Tested with FSDP 2 |
-| Tensor / sequence parallelism | Tested TP 2 with EP 2, with a 32-head debug model; each rank needs 16 to 128 query heads for the Attention Gym pair kernel |
+| Tensor / sequence parallelism | Tested TP 2 with EP 2; each rank needs 16 to 128 query heads for the Attention Gym pair kernel |
 | Context parallel | Not supported |
 | Pipeline parallelism | Tested PP 2 (Interleaved1F1B) |
 
-Over 20 steps from the same seed checkpoint, each tested layout matches its
-baseline within run-to-run noise: the loss differs by up to 4.6e-3 to 8.0e-3,
-and two runs of the same baseline differ by up to 4.9e-3 to 6.0e-3.
-
 ## Numerical Parity
 
-`KimiK31StateDictAdapter` maps the released Hugging Face checkpoint, including
+`KimiK3StateDictAdapter` maps the released Hugging Face checkpoint, including
 the indexer weights.
 
 No Hugging Face model code is released for K3.1, so the forward reference is
