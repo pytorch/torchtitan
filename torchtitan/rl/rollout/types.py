@@ -208,6 +208,7 @@ class RolloutStatus(StrEnum):
     """The env ended the episode."""
 
     ERROR = "error"
+    """Any other failure the policy may have caused, e.g. it killed its own agent's process."""
 
     ERROR_INFRA = "error_infra"
     """A failure outside the policy, e.g. an unreachable generator or a crashed env."""
@@ -219,6 +220,10 @@ class RolloutStatus(StrEnum):
     """A deadline passed, e.g. the policy ran a command that never ends. Counts as the policy's
     failure."""
 
+    ERROR_UNKNOWN = "error_unknown"
+    """The env can't tell how the rollout ended, e.g. a stop it doesn't map. Not trained, so a
+    wrong guess can't train."""
+
     FIRST_PROMPT_TOO_LONG = "first_prompt_too_long"
     """The first prompt alone reached `max_rollout_tokens`, so the policy never answered. A data
     problem."""
@@ -227,6 +232,8 @@ class RolloutStatus(StrEnum):
     """Still running."""
 
     TRUNCATED_LENGTH = "truncated_length"
+    """The rollout ran out of tokens: its last completion hit its limit, or the env's token budget
+    ran out."""
 
     TRUNCATED_MAX_TURNS = "truncated_max_turns"
     """The turn limit was reached."""
@@ -248,6 +255,7 @@ class RolloutStatus(StrEnum):
             RolloutStatus.ERROR_INFRA,
             RolloutStatus.ERROR_PARSE,
             RolloutStatus.ERROR_TIMEOUT,
+            RolloutStatus.ERROR_UNKNOWN,
             RolloutStatus.FIRST_PROMPT_TOO_LONG,
         )
 
@@ -256,6 +264,7 @@ class RolloutStatus(StrEnum):
         outside the policy says nothing about the policy."""
         return self not in (
             RolloutStatus.ERROR_INFRA,
+            RolloutStatus.ERROR_UNKNOWN,
             RolloutStatus.FIRST_PROMPT_TOO_LONG,
         )
 
