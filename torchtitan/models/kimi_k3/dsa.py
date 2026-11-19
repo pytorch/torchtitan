@@ -50,6 +50,7 @@ __all__ = [
 # R = head-shared key dimension (qk_rope_head_dim)
 # V = main value head dimension
 # L = KV latent dimension (kv_lora_rank)
+# G = latent and head-shared key channels (L + R)
 # P = packed per-head KV up-projection channels (N + V)
 # I = indexer head count (num_index_heads)
 # E = indexer head dimension (index_head_dim)
@@ -320,14 +321,14 @@ class KimiDSAAttention(KimiMLAAttention):
         remat.recompute_needs_tensor(q_TJ)
         q_THK = local_head_split(q_TJ, self.q_head_dim, cp_shard_dim=0)
 
-        compressed_kv_TC = self.wkv_a(x_TD)
-        remat.recompute_needs_tensor(compressed_kv_TC)
-        kv_latent_TC, k_shared_TR = torch.split(
-            compressed_kv_TC,
+        compressed_kv_TG = self.wkv_a(x_TD)
+        remat.recompute_needs_tensor(compressed_kv_TG)
+        kv_latent_TL, k_shared_TR = torch.split(
+            compressed_kv_TG,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
-        kv_c_normed_TL = self.kv_norm(kv_latent_TC)
+        kv_c_normed_TL = self.kv_norm(kv_latent_TL)
         idx_q_TIE, idx_k_TE, idx_w_TI = self.indexer(
             q_normed_TC.detach(), x_TD.detach()
         )
