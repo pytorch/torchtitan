@@ -54,6 +54,7 @@ from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVFlexInnerAttention,
 )
 from torchtitan.models.common.param_init import skip_param_init
+from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_v3_config
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 
@@ -411,6 +412,20 @@ class TestFlexShardDecoder(DTensorTestBase):
         self._check_matches_fsdp2(
             ep=1,
             cases=[((_build_tied_llama3_config, "debugmodel_tied"), "default", 2)],
+            chunked_loss=True,
+        )
+
+    @with_comms
+    def test_matches_fsdp2_for_deepseek_v3(self):
+        # DeepSeek V3 (without MTP layers) shards through Decoder._apply_fsdp,
+        # as the other decoders do. Its debug model adds MLA attention, a dense
+        # first block before the MoE blocks, and shared experts next to the
+        # routed ones. The loss is ChunkedLossWrapper's, as in its recipes.
+        self._check_matches_fsdp2(
+            ep=2,
+            cases=product(
+                [(build_deepseek_v3_config, "debugmodel")], ("default",), (1, 2)
+            ),
             chunked_loss=True,
         )
 
