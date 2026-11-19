@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+from collections import Counter
 from copy import deepcopy
 from typing import Literal
 
@@ -350,12 +351,6 @@ def extract_fsdp_unshard_graph(
         )
 
     all_outputs = graph_outputs(graph)
-    passthrough_param_inputs = _parameter_inputs_needed_after_boundary(
-        all_outputs,
-        boundary_outputs=unshard_outputs,
-        param_inputs=param_inputs,
-    )
-    compute_param_inputs = [*unshard_outputs, *passthrough_param_inputs]
     output_node = graph.find_nodes(op="output")[0]
     graph_output_descs = pytree.arg_tree_leaves(
         output_node.meta.get("desc", [None] * len(all_outputs))
@@ -374,33 +369,67 @@ def extract_fsdp_unshard_graph(
         unshard_graph = _extract_graph_with_inputs_outputs(
             graph,
             param_inputs,
-            compute_param_inputs,
-            [*unshard_output_descs, *([None] * len(passthrough_param_inputs))],
+            unshard_outputs,
+            unshard_output_descs,
             "unshard",
             ignore_must_be_in_fw_bw=True,
         )
-        if regions is not None:
-            unshard_graph.eliminate_dead_code(
-                is_impure_node=lambda node: (
-                    node.op != "call_function"
-                    or node.name in regions.unshard_node_names
-                )
-                and node.is_impure()
-            )
         unshard_node_names = (
             regions.unshard_node_names
             if regions is not None
             else {node.name for node in unshard_graph.nodes}
         )
-        compute_outputs_and_descs = [
-            (output, desc)
-            for output, desc in zip(all_outputs, graph_output_descs, strict=True)
-            if not (
+        remaining_effects = Counter(side_effect_output_names)
+        compute_outputs_and_descs = []
+        for output, desc in reversed(
+            list(zip(all_outputs, graph_output_descs, strict=True))
+        ):
+            if (
                 isinstance(output, fx.Node)
-                and output.name in side_effect_output_names
+                and remaining_effects[output.name]
                 and output.name in unshard_node_names
+            ):
+                remaining_effects[output.name] -= 1
+            else:
+                compute_outputs_and_descs.append((output, desc))
+        compute_outputs_and_descs.reverse()
+        retained_outputs = [output for output, _ in compute_outputs_and_descs]
+        unshard_outputs = [
+            output
+            for output in unshard_outputs
+            if output in retained_outputs
+            or any(
+                user.op != "output" and user.name not in unshard_node_names
+                for user in output.users
             )
         ]
+        passthrough_param_inputs = _parameter_inputs_needed_after_boundary(
+            tuple(retained_outputs),
+            boundary_outputs=unshard_outputs,
+            param_inputs=param_inputs,
+        )
+        compute_param_inputs = [*unshard_outputs, *passthrough_param_inputs]
+        unshard_nodes_by_name = {node.name: node for node in unshard_graph.nodes}
+        final_unshard_outputs = tuple(
+            unshard_nodes_by_name[node.name] for node in compute_param_inputs
+        )
+        unshard_output_node = unshard_graph.find_nodes(op="output")[0]
+        unshard_output_node.args = (final_unshard_outputs,)
+        unshard_output_node.meta["desc"] = [None] * len(final_unshard_outputs)
+        unshard_output_node.meta["output_stack_traces"] = [
+            node.meta.get("stack_trace") for node in final_unshard_outputs
+        ]
+        if "val" in unshard_output_node.meta:
+            unshard_output_node.meta["val"] = tuple(
+                node.meta.get("val") for node in final_unshard_outputs
+            )
+        unshard_graph.eliminate_dead_code(
+            is_impure_node=lambda node: (
+                node.op != "call_function" or node.name in unshard_node_names
+            )
+            and node.is_impure()
+        )
+        unshard_graph.lint()
         compute_graph = _extract_graph_with_inputs_outputs(
             graph,
             compute_param_inputs + remaining_inputs,

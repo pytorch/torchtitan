@@ -295,7 +295,7 @@ def _saved_values_for_backward(
     for node in joint.graph.nodes:
         if node not in forward_nodes or node.name in backward_only_names:
             continue
-        if any(
+        if node in bwd_outputs or any(
             user in backward_nodes and user not in forward_nodes for user in node.users
         ):
             saved.append(node)
@@ -306,9 +306,8 @@ def _forward_mutations_to_materialize(
     joint: fx.GraphModule,
     *,
     fwd_outputs: Sequence[object],
-    bwd_outputs: Sequence[object],
     backward_only_names: set[str],
-) -> tuple[list[fx.Node], list[fx.Node]]:
+) -> list[fx.Node]:
     """Find forward-side mutations that must execute in the forward callable.
 
     Chunked loss traces populate the hidden-state gradient accumulator with
@@ -327,10 +326,8 @@ def _forward_mutations_to_materialize(
     order = node_order(joint.graph)
     fwd_output_nodes = [value for value in fwd_outputs if isinstance(value, fx.Node)]
     if not fwd_output_nodes:
-        return [], []
+        return []
     fwd_output_barrier = max(order[node] for node in fwd_output_nodes)
-    backward_nodes = _node_closure_with_mutations(bwd_outputs)
-    saved_mutation_bases: list[fx.Node] = []
     mutation_outputs: list[fx.Node] = []
 
     for node in joint.graph.nodes:
@@ -348,13 +345,7 @@ def _forward_mutations_to_materialize(
                     "Forward mutation cannot target a backward-only input: "
                     f"mutation={node.name}, target={mutated_base.name}"
                 )
-            if mutated_base.op != "placeholder" and mutated_base in backward_nodes:
-                saved_mutation_bases.append(mutated_base)
-
-    return (
-        unique_in_order(saved_mutation_bases),
-        unique_in_order(mutation_outputs),
-    )
+    return unique_in_order(mutation_outputs)
 
 
 def _backward_passthrough_placeholders(
@@ -563,10 +554,9 @@ def partition_joint_graph(
     # 1. Include forward mutations in dependency analysis. Mutation ordering
     # is not represented by normal dataflow when a later node reads the mutated
     # buffer instead of the mutation's return value.
-    (mutation_saved_values, fwd_mutation_outputs,) = _forward_mutations_to_materialize(
+    fwd_mutation_outputs = _forward_mutations_to_materialize(
         joint,
         fwd_outputs=fwd_outputs,
-        bwd_outputs=bwd_outputs,
         backward_only_names=backward_only_names,
     )
 
@@ -588,7 +578,7 @@ def partition_joint_graph(
     )
 
     # 4. Preserve mutated bases consumed by backward.
-    saved_values = unique_in_order([*saved_values, *mutation_saved_values])
+    saved_values = unique_in_order(saved_values)
     invalid_saved_names = _invalid_backward_only_value_names(
         saved_values,
         backward_only_names,

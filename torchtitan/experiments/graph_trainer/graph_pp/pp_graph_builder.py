@@ -1027,11 +1027,9 @@ def _build_stage_graphs(
     )
     partition_meta = dataclasses.replace(
         partition_meta,
-        fwd_side_effect_output_names=tuple(
-            name
-            for name in partition_meta.fwd_side_effect_output_names
-            if name in fsdp_fw.compute_output_names
-        ),
+        fwd_side_effect_output_names=fsdp_fw.compute_output_names[
+            partition_meta.num_fwd_user_outputs + partition_meta.num_saved_for_backward :
+        ],
     )
     fsdp_bw = extract_fsdp_reduce_grad_graph(
         bw_module,
