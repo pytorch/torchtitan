@@ -20,14 +20,16 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
     local_head_split,
-    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.attn_gym import AuxRequest, gather_attn
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import LayerNorm
 
-# TODO: move Indexer and SparseIndexerLoss to models/common/ after #5722 and
-# #5863 land; Kimi K3.1 is their second user.
+# TODO: move Indexer, SparseIndexerLoss and their metadata to models/common/
+# after #5863 lands; Kimi K3.1 is their second user.
+from torchtitan.models.deepseek_v4.attention import (
+    DeepSeekV4CompressedSparseAttentionMetadata,
+)
 from torchtitan.models.deepseek_v4.compressor import Indexer, SparseIndexerLoss
 
 from .attention import KimiMLAAttention
@@ -162,12 +164,23 @@ class KimiSparseAttention(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> VarlenAttentionMetadata:
-            return create_varlen_metadata_for_document(
+        ) -> DeepSeekV4CompressedSparseAttentionMetadata:
+            varlen = create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
+            )
+            empty = torch.empty(0, dtype=torch.int32, device=positions.device)
+            return DeepSeekV4CompressedSparseAttentionMetadata(
+                cu_seq_q=varlen.cu_seq_q,
+                cu_seq_k=varlen.cu_seq_k,
+                max_q=varlen.max_q,
+                max_k=varlen.max_k,
+                window_size=varlen.window_size,
+                cu_seq_compressed=varlen.cu_seq_q,
+                group_start=empty,
+                group_first=torch.empty(0, dtype=torch.bool, device=positions.device),
             )
 
     def __init__(self, config: Config) -> None:
@@ -186,7 +199,7 @@ class KimiSparseAttention(InnerAttention):
         idx_q_TIE: torch.Tensor,
         idx_k_TE: torch.Tensor,
         idx_w_TI: torch.Tensor,
-        attention_metadata: VarlenAttentionMetadata,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         scale: float,
         aux_loss_denominator: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
@@ -201,7 +214,7 @@ class KimiSparseAttention(InnerAttention):
                 max_seqlen=attention_metadata.max_k,
                 ratio=1,
                 topk=self.index_topk,
-                cu_seqlens=cu_seqlens,
+                attention_metadata=attention_metadata,
                 return_scores=aux_loss is not None,
             )
 
@@ -245,7 +258,7 @@ class KimiSparseAttention(InnerAttention):
                     topk_indices_TS,
                     topk_scores_TS,
                     aux.lse.squeeze(0).transpose(0, 1).detach(),
-                    cu_seqlens,
+                    attention_metadata,
                     carrier=out_THV,
                     denominator=aux_loss_denominator,
                     padding_mask_T=padding_mask,
@@ -306,7 +319,7 @@ class KimiDSAAttention(KimiMLAAttention):
     def forward(  # pyrefly: ignore[bad-override]
         self,
         x_TD: torch.Tensor,
-        attention_metadata: VarlenAttentionMetadata,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         positions: torch.Tensor | None = None,
         *,
         aux_loss_denominator: torch.Tensor | None = None,
