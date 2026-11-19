@@ -121,6 +121,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller._group_buffer = SimpleNamespace(
         metrics=lambda: [], release_active_groups=release_active_groups
     )
+    controller._event_loop_lag = SimpleNamespace(flush=lambda: [])
     controller.logged_metrics = []
     controller.metrics_processor = SimpleNamespace(
         log=lambda *, step, is_validation, metrics: controller.logged_metrics.append(

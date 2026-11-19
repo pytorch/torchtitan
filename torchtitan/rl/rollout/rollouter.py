@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -114,17 +115,14 @@ class Rollouter(Configurable):
         """Training rollouts in flight per rollout worker process.
         It sets the pool size, rounded up: 300 training rollouts in flight / 128 per worker -> 3 workers."""
 
-        # TODO: at 128 rollouts per worker, renders and parses (`TokenEnv`) may queue on these threads.
-        #   Measure that wait, then size the pool from it.
-        num_threads_per_worker: int = 4
-        """Size of each worker process's default thread pool executor, i.e. the pool
-        behind every `asyncio.to_thread` call in that process."""
+        rollouts_per_thread: int = 4
+        """Rollouts per thread in each worker's `asyncio.to_thread` pool, rounded up: 128 / 4 -> 32
+        threads. Lower it when rollouts block threads, e.g. 1 for one blocking call per rollout."""
 
         def __post_init__(self) -> None:
-            if self.num_threads_per_worker < 1:
+            if self.rollouts_per_thread < 1:
                 raise ValueError(
-                    "num_threads_per_worker must be at least 1, got "
-                    f"{self.num_threads_per_worker}"
+                    f"rollouts_per_thread must be at least 1, got {self.rollouts_per_thread}"
                 )
 
     def __init__(self, config: Config) -> None:
@@ -181,7 +179,9 @@ class Rollouter(Configurable):
         self._worker_actors = await actor_system.spawn_rollout_workers(
             self._config.worker,
             num_workers=num_workers,
-            num_threads=self._config.num_threads_per_worker,
+            num_threads=math.ceil(
+                self._config.rollouts_per_worker / self._config.rollouts_per_thread
+            ),
             **(worker_kwargs or {}),
         )
         await self._worker_actors.setup_async.call(

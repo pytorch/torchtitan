@@ -1015,6 +1015,8 @@ class Controller(Configurable):
         GarbageCollector.freeze(
             "Full GC before freezing the controller's setup objects"
         )
+        # Start measuring after setup and the freeze: both hold the loop.
+        self._event_loop_lag = m.EventLoopLag("controller")
 
         async_loop = self.config.async_loop
         num_training_steps = async_loop.num_training_steps
@@ -1133,6 +1135,7 @@ class Controller(Configurable):
                 *self._validation_tasks,
                 return_exceptions=True,
             )
+            self._event_loop_lag.close()
 
         await self._maybe_validate_after_training(step=num_training_steps)
 
@@ -1258,7 +1261,7 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
+                group.metrics += compute_rollout_metrics(
                     prefix="rollout", rollouts=group.rollouts
                 )
 
@@ -1494,6 +1497,8 @@ class Controller(Configurable):
                         ],
                         *self._group_buffer.metrics(),
                         *time_metrics,
+                        # The event loop's longest delay, and how many ms late it ran per second
+                        *self._event_loop_lag.flush(),
                         *policy_age_panel,
                         # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
                         m.Metric(
