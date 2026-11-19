@@ -73,9 +73,9 @@ class GrainDataLoader(BaseDataLoader):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
         dataset: DatasetConfig
-        per_sample_pad_multiple: int | None = None
+        per_sample_pad_multiple: int = 1
         """Pad each emitted document segment to this multiple after shifting labels
-        and splitting. None or 1 leaves lengths unchanged; larger values require
+        and splitting. 1 leaves lengths unchanged; larger values require
         document-aware packing."""
         collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
@@ -90,13 +90,10 @@ class GrainDataLoader(BaseDataLoader):
 
         def __post_init__(self) -> None:
             BaseDataLoader.Config.__post_init__(self)
-            if (
-                self.per_sample_pad_multiple is None
-                or self.per_sample_pad_multiple == 1
-            ):
-                return
-            if self.per_sample_pad_multiple <= 0:
+            if self.per_sample_pad_multiple < 1:
                 raise ValueError("per_sample_pad_multiple must be positive")
+            if self.per_sample_pad_multiple == 1:
+                return
             if self.max_num_documents is None:
                 raise ValueError(
                     "per_sample_pad_multiple requires max_num_documents so documents "

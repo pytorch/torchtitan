@@ -195,8 +195,8 @@ def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
 def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
     rng = random.Random(42)
     for _ in range(40):
-        pad_multiple = rng.choice([None, 2, 4, 8])
-        seq_len = rng.randint(3, 12) * (pad_multiple or 1)
+        pad_multiple = rng.choice([1, 2, 4, 8])
+        seq_len = rng.randint(3, 12) * pad_multiple
         num_rows = rng.randint(1, 3)
         dp_degree = rng.randint(1, 4)
         num_pp_microbatches = rng.choice([1, 3])
@@ -241,7 +241,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
         ) == list(range(len(samples)))
 
 
-@pytest.mark.parametrize("pad_multiple", [None, 4, 8])
+@pytest.mark.parametrize("pad_multiple", [1, 4, 8])
 def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     """Padding after the label shift must mask every padded RL target and field."""
     samples = _make_samples([5, 3])
@@ -273,7 +273,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     assert not microbatch.advantages[~valid].any()
     assert microbatch.loss_token_counts.tolist() == [6]
     assert microbatch.routing_token_counts.tolist() == [8]
-    lengths = {None: [5, 3], 4: [8, 4], 8: [8, 8]}[pad_multiple]
+    lengths = {1: [5, 3], 4: [8, 4], 8: [8, 8]}[pad_multiple]
     assert [batcher.num_tokens_to_pack(sample) for sample in samples] == lengths
     assert microbatch.positions.tolist() == [
         position

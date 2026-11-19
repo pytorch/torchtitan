@@ -31,7 +31,7 @@ class ConcatThenSplitPackingConfig:
         context: DatasetBuildContext,
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.IterDataset:
-        if context.per_sample_pad_multiple is not None:
+        if context.per_sample_pad_multiple > 1:
             alignment = context.per_sample_pad_multiple
             if (
                 context.max_context_length % alignment
@@ -53,7 +53,7 @@ class ConcatThenSplitPackingConfig:
                 max_num_documents_per_row=context.max_num_documents,
                 max_context_length=context.max_context_length,
                 num_tokens_per_row=context.num_tokens_per_microbatch,
-                per_sample_pad_multiple=context.per_sample_pad_multiple or 1,
+                per_sample_pad_multiple=context.per_sample_pad_multiple,
             )
         dataset = dataset.map(
             partial(

@@ -257,9 +257,9 @@ class Batcher(Configurable):
     class Config(Configurable.Config):
         num_mtp_layers: int = 0
         """Model-derived MTP depth used while preparing token counts."""
-        per_sample_pad_multiple: int | None = None
+        per_sample_pad_multiple: int = 1
         """Pad each sample to this multiple after shifting labels, before packing.
-        None or 1 leaves lengths unchanged. Used by flex attention in batch-invariant mode
+        1 leaves lengths unchanged. Used by flex attention in batch-invariant mode
         so that block boundaries align regardless of batch composition."""
         max_num_documents: int | None = None
         """Maximum non-padding document segments per local trainer microbatch.
@@ -288,10 +288,7 @@ class Batcher(Configurable):
         def __post_init__(self) -> None:
             if self.num_mtp_layers < 0:
                 raise ValueError("num_mtp_layers must be non-negative")
-            if (
-                self.per_sample_pad_multiple is not None
-                and self.per_sample_pad_multiple <= 0
-            ):
+            if self.per_sample_pad_multiple < 1:
                 raise ValueError("per_sample_pad_multiple must be positive")
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
@@ -340,7 +337,7 @@ class Batcher(Configurable):
             )
         self.pad_id = pad_id
         self._temperature = temperature
-        self._per_sample_pad_multiple = config.per_sample_pad_multiple or 1
+        self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
         self._build_mrope_positions = config.build_mrope_positions
@@ -900,7 +897,7 @@ class Batcher(Configurable):
 
         Example:
 
-            # token_ids of length 6, per_sample_pad_multiple=None  -> 5
+            # token_ids of length 6, per_sample_pad_multiple=1     -> 5
             # token_ids of length 6, per_sample_pad_multiple=8     -> 8
         """
         num_tokens = len(training_sample.token_ids) - 1
