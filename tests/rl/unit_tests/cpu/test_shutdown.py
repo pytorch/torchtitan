@@ -634,7 +634,7 @@ def test_monarch_router_supervises_only_current_generators():
     assert not supervise(router(None), "gen1-b")
     assert not supervise(router(GeneratorFaultToleranceConfig(), "setup"), "gen1-b")
     # With it, a current generator's mesh is reported; other meshes (Monarch's logging
-    # mesh, a stopped generator) are absorbed.
+    # mesh, a stopped incarnation) are absorbed.
     r = router(GeneratorFaultToleranceConfig())
     assert supervise(r, "gen1-b") and supervise(r, "log_level-c")
     r._report_failure.assert_called_once()

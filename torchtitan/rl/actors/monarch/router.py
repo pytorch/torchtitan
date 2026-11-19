@@ -56,8 +56,8 @@ class _InterGeneratorRouterActorEndpoints:
         self._placements = placements
         self._generator_config = generator_config
         self._generator_kwargs = generator_kwargs
-        # Per generator index, its proc mesh and the Monarch name of its actor mesh,
-        # which `MeshFailure`s carry.
+        # Per generator index, the current incarnation's proc mesh and the Monarch
+        # name of its actor mesh, which `MeshFailure`s carry.
         self._proc_meshes: list[ProcMesh | None] = [None] * len(placements)
         self._actor_mesh_names: list[str | None] = [None] * len(placements)
 
@@ -169,7 +169,7 @@ class InterGeneratorRouterActor(
         failure to the owner, the controller, which exits. Otherwise, report a failure
         of a current generator's actor mesh and absorb the rest: a killed process also
         fails the other meshes on it, e.g. Monarch's logging meshes, and the meshes of
-        a stopped generator."""
+        a stopped incarnation."""
         if self._config.fault_tolerance is None or self._phase == "setup":
             return False
         if failure.mesh_name in self._actor_mesh_names:
