@@ -506,6 +506,9 @@ def _declare_tensor_parallelism(
     # pyrefly: ignore [missing-import]
     from flex_shard import set_partial_grad_group
 
+    # TODO: Drop once flex_shard() reads the parameters' SPMD types itself, as
+    # fully_shard(..., dp_mesh_dims=...) does. Until then torchtitan declares TP's
+    # layouts, through a flex_shard adapter that flex_shard doesn't export.
     # pyrefly: ignore [missing-import]
     from flex_shard.layout_adapters.spmd_types import spmd_types_to_global_layout
 
