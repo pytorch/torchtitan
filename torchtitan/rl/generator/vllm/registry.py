@@ -45,7 +45,10 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.models.qwen3_8_flash_next.attention import QSAInnerAttention
-from torchtitan.models.qwen3_8_flash_next.model import Qwen38FlashNextModel
+from torchtitan.models.qwen3_8_flash_next.model import (
+    Qwen38FlashNextModel,
+    Qwen38FlashNextMultimodalModel,
+)
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -319,6 +322,11 @@ def register_to_vllm(
     wrapper_cls = VLLMModelWrapper
     wrapper_kwargs = {}
     processor = None
+    if isinstance(model_config, Qwen38FlashNextModel.Config):
+        if vision_processor is not None or isinstance(
+            model_config, Qwen38FlashNextMultimodalModel.Config
+        ):
+            raise ValueError("Flash-Next RL generation currently supports text only")
     if vision_processor is not None:
         from torchtitan.rl.generator.vllm.multimodal_wrapper import (
             VLLMMultimodalModelWrapper,

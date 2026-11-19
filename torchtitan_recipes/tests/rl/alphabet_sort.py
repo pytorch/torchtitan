@@ -1113,3 +1113,69 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
     config.generator = apply_transforms(config.generator, [DistMoeTransform()])
     return config
+
+
+def rl_grpo_qwen3_8_flash_next_debug() -> Controller.Config:
+    """Random-init Flash-Next on four GPUs: FSDP2 trainer and TP2/EP2 generator.
+
+    Exercises FSDP weight publication, trainable PLE and indexer
+    synchronization, compressed QSA caches, and cached PLE in decode graphs.
+    The Dist-MoE scratch factors are the topology maxima, 1.0 for the trainer's
+    EP=1 and 2.0 for the generator's EP=2, because a rank that receives more rows
+    than the plan holds faults instead of raising. Requires SM100+ and the
+    optional ``dist_moe`` package.
+    """
+    from torchtitan_recipes.models.deepseek_v3 import _require_dist_moe
+
+    _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.distributed.activation_remat import ActivationRematConfig
+    from torchtitan.models.common.dist_moe import DistMoeRuntime
+    from torchtitan.models.qwen3_8_flash_next import (
+        build_model_config as build_flash_next_model_config,
+    )
+    from torchtitan.models.qwen3_8_flash_next.attention import QSAIndexerLoss
+
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    config.trainer.parallelism = ParallelismConfig(data_parallel_shard_degree=2)
+    config.generator.parallelism = InferenceParallelismConfig(
+        tensor_parallel_degree=2,
+        expert_parallel_degree=2,
+        enable_sequence_parallel=True,
+    )
+    config.trainer.model, config.generator.model = build_rl_model_configs(
+        build_flash_next_model_config,
+        "debugmodel",
+        seq_len=1024,
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+        # Frozen random indexer weights would be excluded from weight publication.
+        indexer_loss=QSAIndexerLoss.Config(coeff=1.0, reduce_mesh="loss"),
+    )
+    for model in (config.trainer.model, config.generator.model):
+        model.local_compile.regions = []
+    config.trainer.loss.loss_fn.global_vocab_size = decoder_vocab_size(
+        config.trainer.model
+    )
+    config.trainer.activation_remat = ActivationRematConfig(save_regions=[])
+    config.trainer.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=1.0)
+    config.generator.dist_moe_runtime = DistMoeRuntime.Config(
+        scratch_capacity_factor=2.0, inference=True
+    )
+    config.generator.engine.cuda_graph.mode = "FULL_DECODE_ONLY"
+    config.generator.engine.extra_engine_args = {"enable_prefix_caching": False}
+    config.generator.max_num_batched_tokens = 1024
+    config = _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=1024,
+        max_generated_tokens=64,
+        use_hf_assets_from_env=False,
+    )
+    config.trainer = apply_transforms(
+        config.trainer, [DistMoeTransform(expert_precision="bf16")]
+    )
+    config.generator = apply_transforms(
+        config.generator, [DistMoeTransform(expert_precision="bf16")]
+    )
+    return config
