@@ -4,8 +4,8 @@ The rule (SKILL.md §1): every fact in the image is checkable from the PR's body
 base. These are the cases.
 
 In GitHub Actions, skip the fetches, downloads and probes below: you can run only pr-review's `gh` commands and
-the two render commands in SKILL.md "GitHub Actions". The checkout is the PR head, and the base is the `-` and context lines of `gh pr diff`. A fact
-you can't check there leaves the image.
+the two render commands in SKILL.md "GitHub Actions". The checkout is the PR head, and the base is the `-` and
+context lines of `gh pr diff`. A fact you can't check there leaves the image.
 
 - Code outside the diff: read it at the PR's base, after a fetch. An open PR: `git merge-base upstream/main <head>`.
   A stacked PR (`gh pr view <n> --json baseRefName` is not `main`): the parent PR's head. A merged PR: its parent
@@ -19,19 +19,20 @@ you can't check there leaves the image.
 - Stacked PR: check each "what is sent / what runs" claim against this PR's diff, not the stack's end state. A later
   PR in the stack may be the one that changes it (one image claimed a change that only the next PR in the stack made).
 - Probes: a quick CPU probe (`CUDA_VISIBLE_DEVICES=""`, also for the PR's own tests) helps you understand the code.
-  The image still draws only what the body, the diff or the repo code at the base shows: reviewers marked probe
-  facts down even when true and labelled (op counts, matmul counts). If the body needs one anyway, put
-  it there first. Otherwise the image goes without it. Op lists and autograd graphs carry to GPU. Kernel counts and numerics don't (a CPU probe
-  stored sigma in bf16; the GPU kernel keeps fp32). A toy runs on the real code (the merged class, not a copy).
-- A probe that disagrees with the body: fix the body in the same change (example: the probe said 20, the body 19). On a PR you
-  can't edit, leave the number out and log the gap in `SOURCES.md`.
+  The image still draws only what the body, the diff or the repo code at the base shows: a probe fact misleads
+  a reviewer who can't check it, even when it is true and labelled (op counts, matmul counts). If the body needs
+  one anyway, put it there first. Otherwise the image goes without it. Op lists and autograd graphs carry to GPU.
+  Kernel counts and numerics don't (a CPU probe stored sigma in bf16; the GPU kernel keeps fp32). A toy runs on
+  the real code (the merged class, not a copy).
+- A probe that disagrees with the body: fix the body in the same change (example: the probe said 20, the body
+  19). On a PR you can't edit, leave the number out and log the gap in `SOURCES.md`.
 
 ## Numbers in the image
 
 - Label the axes ("log" on a log axis). Two rows on one axis come from the same run. Don't chart a comparison the
   PR calls meaningless.
-- Main vs this PR uses main's measured row, even when the TLDR compares against another (example: the TLDR says 55.7 ms against another build,
-  main's row 77.5 ms). A number sits in the box of the build it was measured on.
+- Main vs this PR uses main's measured row, even when the TLDR compares against another (example: the TLDR says
+  55.7 ms against another build, main's row 77.5 ms). A number sits in the box of the build it was measured on.
 - A derived number keeps its arithmetic in `SOURCES.md`, and the image says the result in words. Or it goes.
   Bytes worked out from shapes say "nominal bytes". A nominal bar next to a measured one says "nominal" on the bar.
   Nominal reservations that never coexist are not stacked (example: four 90% reservations drawn as 360%). Don't draw

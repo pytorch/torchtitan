@@ -20,8 +20,9 @@ The page can't read local files or reach the network, so a drawing can't show wh
 isn't in its own HTML:
 1. Chrome loads it as a `data:` URL, so `file://` iframes and images stay blank.
 2. A Content-Security-Policy tag allows only inline styles, scripts, and `data:` images and fonts.
-3. Chrome resolves no host names and connects to no address, which also stops page
-   navigations (CSP doesn't cover those). Its env has only PATH and an empty HOME.
+3. Chrome resolves no host names and sends no WebRTC packets, which also stops page
+   navigations and STUN requests (CSP covers neither). Its env has only PATH and an
+   empty HOME.
 """
 
 # no-test: needs headless Chrome, and CI runs only tests/. Check it by rendering the 3
@@ -86,7 +87,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Check the name first, so a bad one fails before any render, not at --upload.
+    # The name becomes part of the S3 key: check it before any render.
     if not IMAGE_STEM.fullmatch(args.html.stem):
         raise ValueError(
             f"name the page {IMAGE_STEM.pattern}.html; got {args.html.name}"
@@ -175,6 +176,7 @@ def _render(chrome: str, page_url: str, png: Path, max_height: int) -> Image.Ima
                     "--disable-gpu",
                     "--hide-scrollbars",
                     "--host-resolver-rules=MAP * ~NOTFOUND",
+                    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                     f"--force-device-scale-factor={SCALE}",
                     f"--window-size={WIDTH_CSS_PX},{max_height}",
                     f"--screenshot={png}",
@@ -189,7 +191,7 @@ def _render(chrome: str, page_url: str, png: Path, max_height: int) -> Image.Ima
             raise RuntimeError(
                 f"Chrome took over {CHROME_TIMEOUT_S} s to render {png.stem}; does the page reload?"
             ) from None
-    # Chrome's own error, never the exception text: that holds the whole page URL.
+    # Raise with Chrome's stderr only: its command line holds the whole page URL.
     if chrome_run.returncode != 0:
         stderr_tail = "\n".join(chrome_run.stderr.strip().splitlines()[-5:])
         raise RuntimeError(f"Chrome exited with {chrome_run.returncode}: {stderr_tail}")
@@ -216,8 +218,6 @@ def _upload(png: Path, stem: str) -> str:
     Example, run 44437007501 attempt 1 on PR 6181, page pr_image/lanes.html:
         review-logs/claude-code/pytorch/torchtitan/6181/images/44437007501_1_lanes.png
     """
-    if not IMAGE_STEM.fullmatch(stem):
-        raise ValueError(f"image name {stem!r} must match {IMAGE_STEM.pattern}")
     issue = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()).get("issue")
     if issue is None:
         raise ValueError(
@@ -228,21 +228,25 @@ def _upload(png: Path, stem: str) -> str:
         f"review-logs/claude-code/{os.environ['GITHUB_REPOSITORY']}/{issue['number']}/images/"
         f"{os.environ['GITHUB_RUN_ID']}_{os.environ['GITHUB_RUN_ATTEMPT']}_{stem}.png"
     )
-    copy = subprocess.run(
-        [
-            "aws",
-            "s3",
-            "cp",
-            str(png),
-            f"s3://{BUCKET}/{key}",
-            "--content-type",
-            "image/png",
-            "--no-progress",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    # An empty HOME, so no ~/.aws/cli/alias can turn `s3 cp` into another command. The
+    # credentials and region come from the AWS_* env.
+    with tempfile.TemporaryDirectory() as empty_home:
+        copy = subprocess.run(
+            [
+                "aws",
+                "s3",
+                "cp",
+                str(png),
+                f"s3://{BUCKET}/{key}",
+                "--content-type",
+                "image/png",
+                "--no-progress",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "HOME": empty_home},
+        )
     if copy.returncode != 0:
         raise RuntimeError(f"aws s3 cp of {png} to {key} failed: {copy.stderr.strip()}")
     return f"https://{BUCKET}.s3.amazonaws.com/{key}"

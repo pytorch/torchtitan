@@ -72,7 +72,8 @@ speed                              what changes in the work. Measured times: one
 
 No image when nothing runs differently: a pin, import, golden, log level, pass-through or test-only change, or a
 new flag whose default keeps today's behaviour. A one-line config that changes what runs gets one, and so does a
-pin that fixes a bug in what runs (a deadlock, a crash). A race or hang the body explains only in prose gets lanes. If someone asks for an image anyway, use the row that fits the cause.
+pin that fixes a bug in what runs (a deadlock, a crash). A race or hang the body explains only in prose gets
+lanes. If someone asks for an image anyway, use the row that fits the cause.
 
 These work badly: results first, text tables, numbered step lists, code listings, and call chains as boxes.
 
@@ -92,7 +93,7 @@ Draw the top sketch; draw more only when asked. Check it with §4 as if no one c
 
 ## 3. Draw
 
-- Size: 900 CSS px wide, rendered at 2x. Winners were 500-1040 CSS px tall (median ~780); stay under ~1100.
+- Size: 900 CSS px wide, rendered at 2x. Good images are 500-1040 CSS px tall; stay under ~1100.
 - Opaque light background (`#fbf8f3`), so it reads in dark mode too. Smallest text 13 CSS px. Code in monospace.
 - Text: each item is a name or a number with a plain label (1-4 words: "64 KiB", "14.7 ms"), or one short sentence
   with a subject and a verb. No colon chains, semicolons, "X = ..." or code in place of a sentence. A count may be a
