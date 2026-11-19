@@ -20,6 +20,7 @@ from torchtitan.models.common.attn_gym import (
     l2norm,
     paged_chunk_gdn,
     recurrent_gdn,
+    StateCheckpoints,
 )
 
 
@@ -38,6 +39,8 @@ def paged_gdn(
     head_k_dim: int,
     num_v_heads: int,
     head_v_dim: int,
+    checkpoint_slots: torch.Tensor | None = None,
+    checkpoint_lens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run the recurrence of each ``cu_seqlens`` interval from its slot in
     ``state_indices``, advancing ``state_pool_NHVK`` in place.
@@ -52,6 +55,12 @@ def paged_gdn(
         has_initial_state: Per interval, whether its slot holds a state to resume;
             False starts from zero.
         num_k_heads, num_v_heads: Rank-local head counts.
+        checkpoint_slots: The index of the state-pool slot that receives each
+            sequence's snapshot, for the prefix cache. A non-positive index means that
+            sequence takes no snapshot.
+        checkpoint_lens: The number of each sequence's new tokens in this call to
+            process before its snapshot is taken. It must be a multiple of 64, the
+            kernels' chunk size.
 
     Returns:
         ``(T, H, V)``.
@@ -83,6 +92,11 @@ def paged_gdn(
     query = l2norm(query, cu_seqlens=cu_seqlens)
     key = l2norm(key, cu_seqlens=cu_seqlens)
 
+    checkpoints = (
+        None
+        if checkpoint_slots is None
+        else StateCheckpoints(state_pool_NHVK, checkpoint_lens, checkpoint_slots)
+    )
     if is_in_batch_invariant_mode():
         recurrent_output, _ = recurrent_gdn(
             query,
@@ -98,6 +112,7 @@ def paged_gdn(
             # Triton autotuning breaks batch invariance, and the scan otherwise picks
             # its arithmetic from the batch shape.
             kernel_options={"batch_invariant": True, "autotune": False},
+            state_checkpoints=checkpoints,
         )
     else:
         recurrent_output = paged_chunk_gdn(
@@ -112,5 +127,6 @@ def paged_gdn(
             has_initial_state=has_initial_state,
             scale=head_k_dim**-0.5,
             kernel_options=chunk_kernel_options(query),
+            state_checkpoints=checkpoints,
         )
     return recurrent_output[0]

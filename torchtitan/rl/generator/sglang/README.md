@@ -17,7 +17,6 @@ Generator engine loop (every rank, SPMD)
   SGLangEngine
     add_requests ----> Scheduler.process_input_requests   (no tokenizer/detokenizer procs)
     step ------------> one iteration of Scheduler.event_loop_overlap
-                       (event_loop_normal for GDN and KDA models)
                           ModelRunner -> SGLangModelWrapper.forward(input_ids, positions, forward_batch)
                                            TorchTitan Decoder
                                              Attention -> SGLangInnerAttention -> RadixAttention
@@ -163,28 +162,44 @@ SGLang keeps each request's GDN or KDA conv and recurrent state in its state
 pool, and its radix cache snapshots them, so a session's next turn resumes from
 its cached prefix as with KV. The trainer's Attention Gym kernels advance the
 states (`TorchTitanGDNAttnBackend` and `TorchTitanKDAAttnBackend`, registered
-through SGLang's linear attention model registry). The backends register without
-SGLang's `extra_buffer` mamba cache strategy, which needs the kernels to write
-state snapshots at intermediate positions. SGLang then snapshots a request's
-state only when it caches the request, and disables overlap scheduling: the
-engine steps SGLang's normal event loop for these models.
+through SGLang's linear attention model registry). They use SGLang's
+`extra_buffer` mamba cache strategy, which keeps overlap scheduling: SGLang
+gives each request two track slots, and the backends snapshot the request's
+state into one at the positions the radix cache tracks, so the next batch can
+keep advancing the request's own slot.
+
+- Prefill: at the last 64-token boundary of the new tokens. The conv history is
+  copied from the inputs, and Attention Gym writes the recurrent state
+  (`StateCheckpoints`).
+- Decode: SGLang copies the states every `mamba_track_interval` tokens (64;
+  SGLang's default is 256).
+
+A request with a cached prompt reuses the state at the prompt's last 64-token
+boundary, and a session's next turn resumes from the previous turn's last
+snapshot, at most 63 tokens before its end.
 
 In batch-invariant mode, a KDA state is the state after the last complete
 64-token chunk plus Attention Gym's replay state of the unfinished chunk, as in
 the vLLM engine. SGLang's state pool holds the replay tensors as extra conv
 state entries of each slot (`TorchTitanKDAConfig`), so its radix cache snapshots
 them with the state; at head dim 128, they take 1.25x the memory of the
-recurrent states.
+recurrent states. SGLang counts prefill snapshot positions from the start of an
+extend, which chunked prefill can leave off the 64-token grid, so a KDA prefill
+snapshot is the state at its last complete chunk (`StateCheckpoints`) plus the
+inputs after that chunk as its replay state (`copy_replay_tails`). Decode
+snapshots are at multiples of 64 tokens, where the replay state is empty;
+SGLang does not copy the replay entries, so the backend zeroes the track slot's
+replay count.
 
 ### KV and states share one pool
 
 For GDN and KDA models, the engine turns on SGLang's unified memory: the full
 attention layers' KV cache and the GDN / KDA states share one pool, so memory
 that no state uses can hold KV, and the other way around. A running request
-still takes 3 state slots, so SGLang runs at most `state slots // 3` requests
-(about 714 for Qwen3.5-9B at TP 1, `gpu_memory_limit=0.86`, on GB300); for
-more, raise `max_mamba_cache_size` in `extra_server_args`. Unified memory costs
-about 1 ms of a ~25 ms decode step.
+takes 5 state slots (3, plus the 2 track slots of `extra_buffer`), so SGLang runs
+at most `state slots // 5` requests (about 428 for Qwen3.5-9B at TP 1,
+`gpu_memory_limit=0.86`, on GB300); for more, raise `max_mamba_cache_size` in
+`extra_server_args`. Unified memory costs about 1 ms of a ~25 ms decode step.
 
 ## Multi-turn sessions
 

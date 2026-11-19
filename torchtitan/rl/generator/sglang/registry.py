@@ -331,14 +331,9 @@ def register_to_sglang(
 
         _patch_hybrid_full_attention_v_head_dim()
         _patch_page_major_attention_backend_allow_list()
-        # TODO(https://github.com/sgl-project/sglang/issues/48463): support SGLang's
-        # extra_buffer mamba cache strategy (support_mamba_cache_extra_buffer).
-        # Without it, SGLang turns overlap scheduling off for these models, and
-        # caches a request's state only at the end of its cached prefix, so a prefix
-        # shared at an earlier position (e.g. a rollout group's prompt) is
-        # recomputed. It needs Attention Gym's chunked kernels to return the states
-        # at chunk boundaries, as SGLang's own GDN kernel does (gdn_track_ssm_state):
-        # https://github.com/meta-pytorch/attention-gym/issues/735
+        # SGLang's extra_buffer mamba radix cache strategy keeps overlap scheduling
+        # and snapshots each request's state at chunk boundaries mid-prompt, into the
+        # track slots the backends fill (TorchTitanLinearAttnBackend).
         for config_class, backend_class in (
             (TorchTitanGDNConfig, TorchTitanGDNAttnBackend),
             (TorchTitanKDAConfig, TorchTitanKDAAttnBackend),
@@ -351,6 +346,7 @@ def register_to_sglang(
                     ),
                     uses_mamba_radix_cache=True,
                     support_mamba_cache=True,
+                    support_mamba_cache_extra_buffer=True,
                 )
             )
 

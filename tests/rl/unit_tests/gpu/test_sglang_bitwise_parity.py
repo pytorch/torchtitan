@@ -125,10 +125,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     policy_version = 0
     # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
-    # Whether a request reuses the prompt KV of an earlier request with the same
-    # prompt admitted in the same call. Linear attention models don't (see
-    # SGLangEngine._hold_shared_prompts).
-    reuses_shared_prompt = True
+    # SGLang's chunked prefill budget (Engine max_num_batched_tokens); None: its default.
+    max_num_batched_tokens = None
 
     @classmethod
     def setUpClass(cls):
@@ -165,7 +163,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             precision=config.precision,
             # Leave room for the trainer model in this process.
             gpu_memory_limit=0.5,
-            max_num_batched_tokens=None,
+            max_num_batched_tokens=cls.max_num_batched_tokens,
             checkpointer=(
                 None
                 if cls.sync_weights_from_trainer
@@ -278,7 +276,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         shared_prompt = self.prompt_ids[0][::-1]
         prompt_ids = self.prompt_ids[:-2] + [shared_prompt, shared_prompt]
         results = self._check_trainer_vs_sglang_decode(prompt_ids)
-        if dist.get_rank() == 0 and self.reuses_shared_prompt:
+        if dist.get_rank() == 0:
             self.assertGreater(results[-1].metrics_inputs.num_cached_tokens, 0)
 
     def test_sglang_decode_batch_invariance(self):
@@ -490,10 +488,8 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
-    # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
-    # SGLang's normal event loop.
+    # Tests 4 and 5 then cover the reset path (retract, flush, continue).
     reset_kv_cache_on_model_state_dict_load = True
-    reuses_shared_prompt = False
 
     def test_runs_on_unified_memory(self):
         """The engine runs GDN models on SGLang's unified pool, not on separate KV
@@ -634,7 +630,9 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
-    reuses_shared_prompt = False
+    # Chunked prefill off the 64-token grid: SGLang's prefix cache then snapshots KDA
+    # states mid-chunk, with replay state (TorchTitanKDAAttnBackend).
+    max_num_batched_tokens = 100
 
     @classmethod
     def setUpClass(cls):

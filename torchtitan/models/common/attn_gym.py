@@ -20,6 +20,8 @@ if TYPE_CHECKING:
         paged_chunk_gdn,
         recurrent_gdn,
         recurrent_gdn_decode,
+        ReplayState,
+        StateCheckpoints,
     )
     from attn_gym.linear._delta_rule.gate import _FusedGate, gate_transform
     from attn_gym.linear.context_parallel import (
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
     from attn_gym.linear.kda import (
         bound_gate,
         chunk_kda,
+        copy_replay_tails,
         paged_chunk_kda,
         recurrent_kda_decode,
     )
@@ -69,6 +72,7 @@ __all__ = [
     "chunk_gdn",
     "chunk_kda",
     "context_parallel_conv_history",
+    "copy_replay_tails",
     "context_parallel_gdn",
     "context_parallel_kda",
     "ContextParallelRouting",
@@ -84,6 +88,8 @@ __all__ = [
     "recurrent_gdn",
     "recurrent_gdn_decode",
     "recurrent_kda_decode",
+    "ReplayState",
+    "StateCheckpoints",
     "is_missing_kernel",
     "require_attn_gym",
 ]
@@ -108,6 +114,7 @@ _EXPORTS = {
     "context_parallel_conv_history": "attn_gym.linear.context_parallel",
     "context_parallel_gdn": "attn_gym.linear.gdn.context_parallel",
     "context_parallel_kda": "attn_gym.linear.kda.context_parallel",
+    "copy_replay_tails": "attn_gym.linear.kda",
     "ContextParallelRouting": "attn_gym.linear.context_parallel",
     "gate_transform": "attn_gym.linear._delta_rule.gate",
     "gather_attn": "attn_gym.sparse.gather_attn",
@@ -121,6 +128,8 @@ _EXPORTS = {
     "recurrent_gdn": "attn_gym.linear",
     "recurrent_gdn_decode": "attn_gym.linear",
     "recurrent_kda_decode": "attn_gym.linear.kda",
+    "ReplayState": "attn_gym.linear",
+    "StateCheckpoints": "attn_gym.linear",
 }
 
 
