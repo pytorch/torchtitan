@@ -283,6 +283,7 @@ def compile_time_passes(
     )
     if remat_flex_shard_unshards:
         from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_parameter_transforms_pass,
             inline_flex_shard_unshards_pass,
             outline_flex_shard_unshards_pass,
         )
@@ -310,7 +311,14 @@ def compile_time_passes(
                 defer_n_layers=config.compile.cpu_offload_defer_n_layers,
             ),
             selective_activation_remat_pass,
-            *([inline_flex_shard_unshards_pass] if remat_flex_shard_unshards else []),
+            *(
+                [
+                    inline_flex_shard_unshards_pass,
+                    deduplicate_flex_shard_parameter_transforms_pass,
+                ]
+                if remat_flex_shard_unshards
+                else []
+            ),
             # Paged stash runs after CPU offload (the two claim disjoint nodes)
             # and *after* remat. Remat duplicates recomputed forward ops in
             # front of their backward consumers, and those duplicates read the

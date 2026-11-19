@@ -295,8 +295,10 @@ def resolve_graph_execution_plan(
 
     if not pp_enabled and plan.has_gradient_accumulation:
         _validate_spmd_gradient_accumulation_support(compile_config)
-    if plan.reuse_unsharded_parameters and (
-        parallelism.fsdp_reshard_after_forward == "always"
+    if (
+        plan.reuse_unsharded_parameters
+        and compile_config.memory_policy != "full"
+        and parallelism.fsdp_reshard_after_forward == "always"
     ):
         logger.warning(
             "Ignoring parallelism.fsdp_reshard_after_forward='always': "
@@ -461,6 +463,7 @@ def _make_spmd_graph_runtime(
     """Build the runtime for either SPMD path."""
     if (
         plan.reuse_unsharded_parameters
+        and trainer_config.compile.memory_policy != "full"
         and trainer_config.parallelism.fsdp_reshard_after_forward != "never"
     ):
         # Unsharded parameters live until the final RESHARD, so graph passes

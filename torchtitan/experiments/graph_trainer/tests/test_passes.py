@@ -1305,6 +1305,94 @@ class TestFlexShardScheduling(TestCase):
             )
         gm.graph.lint()
 
+    def test_full_sac_parameter_frontier_preserves_backward_writer_inputs(self):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            get_flex_shard_graph_regions,
+            inline_flex_shard_unshards_pass,
+            outline_flex_shard_unshards_pass,
+        )
+        from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+            extract_fsdp_unshard_graph,
+        )
+
+        gm, original_inputs = self._trace_private_unshard_buffers()
+        for node in gm.graph.nodes:
+            if node.target is torch.ops.aten.empty_like.default:
+                value = node.meta["val"]
+                node.target = torch.ops.aten.empty.memory_format
+                node.args = (list(value.shape),)
+                node.kwargs = {"dtype": value.dtype, "device": value.device}
+        placeholders = list(gm.graph.find_nodes(op="placeholder"))
+        placeholders[0].prepend(placeholders[1])
+        placeholders[0].prepend(placeholders[2])
+        inputs = (original_inputs[1], original_inputs[2], original_inputs[0])
+        regions = get_flex_shard_graph_regions(gm, include_reduce_grad_inputs=False)
+        nodes = {node.name: node for node in gm.graph.nodes}
+        for name in regions.unshard_output_names:
+            root = nodes[name]
+            consumer = next(
+                user
+                for user in root.users
+                if not user.meta.get("custom", {}).get("flex_shard_action")
+            )
+            with gm.graph.inserting_before(consumer):
+                prepared = gm.graph.call_function(torch.ops.aten.clone.default, (root,))
+            prepared.meta = {
+                "val": root.meta["val"].clone(),
+                "custom": {"module_fqn": root.meta["custom"]["module_fqn"]},
+                "autograd_backward": False,
+            }
+            root.replace_all_uses_with(prepared)
+            prepared.args = (root,)
+        gm.graph.lint()
+        gm.recompile()
+        expected = gm(*inputs)
+        self.deduplicate_parameter_transforms(gm)
+        outline_flex_shard_unshards_pass(gm, policy_fn=make_full_memory_policy())
+        tag_sac_policy(gm, policy_fn=make_full_memory_policy())
+        selective_activation_remat_pass(gm)
+        inline_flex_shard_unshards_pass(gm)
+        self.deduplicate_parameter_transforms(gm)
+        self.assertEqual(gm(*inputs), expected, exact_dtype=True, rtol=0, atol=0)
+        regions = get_flex_shard_graph_regions(gm, include_reduce_grad_inputs=False)
+        nodes = {node.name: node for node in gm.graph.nodes}
+        self.assertTrue(
+            all(
+                nodes[name].target is torch.ops.aten.clone.default
+                for name in regions.unshard_output_names
+            )
+        )
+        split = extract_fsdp_unshard_graph(
+            gm,
+            num_params=2,
+            input_names=tuple(
+                node.name for node in gm.graph.find_nodes(op="placeholder")
+            ),
+            flat_input_indices=(0, 1, 2),
+            regions=regions,
+        )
+        self.assertEqual(
+            split.unshard_output_names,
+            (*regions.unshard_output_names, placeholders[1].name, placeholders[2].name),
+        )
+        self.assertEqual(
+            len(
+                split.compute_module.graph.find_nodes(
+                    op="call_function", target=torch.ops.aten.copy_.default
+                )
+            ),
+            2,
+        )
+        prepared = split.unshard_module(*inputs[:2])
+        for activation in (inputs[2], inputs[2] + 1):
+            self.assertEqual(
+                split.compute_module(*prepared, activation),
+                gm(inputs[0], inputs[1], activation),
+                exact_dtype=True,
+                rtol=0,
+                atol=0,
+            )
+
     def test_unshard_outline_preserves_selected_full_policy_regions(self):
         from torchtitan.experiments.graph_trainer.flex_shard import (
             inline_flex_shard_unshards_pass,

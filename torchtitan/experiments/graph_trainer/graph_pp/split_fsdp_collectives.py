@@ -404,7 +404,14 @@ def extract_fsdp_unshard_graph(
             )
         ]
         passthrough_param_inputs = _parameter_inputs_needed_after_boundary(
-            tuple(retained_outputs),
+            tuple(retained_outputs)
+            + tuple(
+                node
+                for node in graph.nodes
+                if node.op not in ("placeholder", "output")
+                and node.name not in unshard_node_names
+                and node.is_impure()
+            ),
             boundary_outputs=unshard_outputs,
             param_inputs=param_inputs,
         )
