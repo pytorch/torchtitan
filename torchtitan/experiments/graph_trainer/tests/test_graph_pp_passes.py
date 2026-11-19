@@ -887,6 +887,74 @@ class GraphPPPartitionTest(unittest.TestCase):
         self.assertTrue(torch.equal(split_inputs[2], joint_inputs[2]))
         self.assertTrue(torch.equal(split_rng_state, joint_rng_state))
 
+    def test_partition_saves_inputs_to_backward_tensor_list_writes(self) -> None:
+        x = torch.randn(2, 4)
+        output_grad = torch.randn_like(x)
+        base_traced = minimal_fx_tracer(lambda a, b: [a, b])(x, output_grad)
+
+        graph = fx.Graph()
+        graph_x = graph.placeholder("x")
+        graph_output_grad = graph.placeholder("output_grad")
+        fwd_value = graph.call_function(torch.ops.aten.sin.default, args=(graph_x,))
+        buffer = graph.call_function(torch.ops.aten.empty.memory_format, args=([2, 4],))
+        rows = [
+            graph.call_function(torch.ops.aten.select.int, args=(buffer, 0, index))
+            for index in range(2)
+        ]
+        full_grad = graph.call_function(
+            torch.ops.aten.mul.Tensor, args=(fwd_value, graph_output_grad)
+        )
+        grad_rows = [
+            graph.call_function(torch.ops.aten.select.int, args=(full_grad, 0, index))
+            for index in range(2)
+        ]
+        writers = [
+            graph.call_function(
+                torch.ops.aten._foreach_copy_.default, args=([row], [grad_row])
+            )
+            for row, grad_row in zip(rows, grad_rows)
+        ]
+        fwd_output = graph.call_function(
+            torch.ops.aten.alias.default, args=(fwd_value,)
+        )
+        bwd_output = graph.call_function(torch.ops.aten.cos.default, args=(buffer,))
+        for node in (buffer, *rows, full_grad, *grad_rows, *writers, bwd_output):
+            node.meta["autograd_backward"] = True
+        graph.output((fwd_output, bwd_output))
+        joint = _make_graph_module(graph)
+        traced = replace(base_traced, gm=joint)
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced, num_fwd_outputs=1, backward_only_input_indices=(1,)
+        )
+
+        self.assertIn(fwd_value.name, meta.saved_for_backward_names)
+        self.assertEqual(meta.backward_grad_input_indices, (0,))
+        self.assertEqual(
+            len(
+                fw_module.graph.find_nodes(
+                    op="call_function", target=torch.ops.aten._foreach_copy_.default
+                )
+            ),
+            0,
+        )
+        self.assertEqual(
+            len(
+                bw_module.graph.find_nodes(
+                    op="call_function", target=torch.ops.aten._foreach_copy_.default
+                )
+            ),
+            2,
+        )
+        joint_outputs = _boxed_run(joint, [x.clone(), output_grad.clone()])
+        fw_outputs = _boxed_run(fw_module, [x.clone()])
+        bw_args = _backward_args_from_partition(
+            meta, fw_outputs, (output_grad.clone(),)
+        )
+        bw_outputs = _boxed_run(bw_module, bw_args)
+        _assert_tensor_sequence_equal(self, fw_outputs[:1], joint_outputs[:1])
+        _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
+
     def test_real_dsv3_moe_block_partition_matches_joint_graph(self) -> None:
         traced_block = _trace_dsv3_moe_block_stage()
 

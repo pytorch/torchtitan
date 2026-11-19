@@ -887,6 +887,19 @@ def graph_pipeline_llm(
         loss_fn=loss_fn,
     )
 
+    if use_flex_shard_instead_simple_fsdp:
+        from flex_shard.flex_shard.flex_shard import FlexShardModule
+
+        def cleanup_native_metadata_state():
+            for model_part in model_parts:
+                cast(FlexShardModule, model_part).reshard()
+                for parameter in model_part.parameters():
+                    parameter.grad = None
+
+        graph_runtime.register_post_metadata_inference_cleanup(
+            cleanup_native_metadata_state
+        )
+
     return (
         graph_runtime,
         model_parts,

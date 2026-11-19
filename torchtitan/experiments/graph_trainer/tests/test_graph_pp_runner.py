@@ -164,6 +164,7 @@ def _build_test_stage_graphs(
         loss_fn=stage.loss_fn,
         config=types.SimpleNamespace(
             compile=stage.compile_config,
+            use_flex_shard_instead_simple_fsdp=False,
             training=types.SimpleNamespace(disable_accelerator_graphs=False),
             parallelism=None,
             model=None,
