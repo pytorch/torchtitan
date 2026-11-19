@@ -235,10 +235,16 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         file_read_workers: int | None = None
         """Checkpoint files each rank reads concurrently when loading. None
         uses the backend's default, which splits a per-host number of reads
-        across the ranks on the host."""
+        across the ranks on the host. That default assumes every rank on the
+        host loads at once; raise it when only some of them do."""
 
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)
+            if self.file_read_workers is not None and self.file_read_workers < 1:
+                raise ValueError(
+                    "file_read_workers must be at least 1, got "
+                    f"{self.file_read_workers}"
+                )
             # Async saves stage into pinned memory and write from a background
             # process; there is no threaded mode.
             if self.async_mode == "async":
