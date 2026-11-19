@@ -91,5 +91,7 @@ jobs:
         python -m pip install --force-reinstall --pre \
           torch torchvision --index-url ${{ matrix.index-url }}
         USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
+        # For test_flex_shard_fsdp.py.
+        bash .github/scripts/install_flex_shard.sh
 
         pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv
