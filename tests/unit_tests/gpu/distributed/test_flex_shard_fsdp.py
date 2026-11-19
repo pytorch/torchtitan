@@ -6,6 +6,8 @@
 
 """``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
+from itertools import product
+
 import pytest
 import spmd_types as spmd
 import torch
@@ -24,6 +26,7 @@ from torchtitan.config.parallelism import (
     ParallelismConfig,
 )
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.flex_shard_fsdp import flex_shard_reduce_meshes
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.param_init import skip_param_init
@@ -66,6 +69,7 @@ class TestFlexShardDecoder(DTensorTestBase):
     ):
         parallelism = ParallelismConfig(
             data_parallel_shard_degree=self.world_size,
+            expert_parallel_degree=parallelism_context.ep,
             fsdp_backend=fsdp_backend,
             fsdp_reshard_after_forward=reshard_after_forward,
         )
@@ -117,9 +121,17 @@ class TestFlexShardDecoder(DTensorTestBase):
         full_params = dict(reference.named_parameters())
         for fqn, param in model.named_parameters():
             (placement,) = flex_shard.get_placements(param)
-            expected = full_params[fqn].chunk(self.world_size, placement.dim)
+            expected = full_params[fqn]
+            mesh = parallelism_context.get_mesh("dp_shard")
+            if parallelism_context.ep > 1 and ".routed_experts." in fqn:
+                # EP splits the experts, and edp_shard shards each EP rank's part.
+                ep_mesh = parallelism_context.get_mesh("ep")
+                expected = expected.chunk(ep_mesh.size())[ep_mesh.get_local_rank()]
+                mesh = parallelism_context.get_mesh("edp_shard")
+            expected = expected.chunk(mesh.size(), placement.dim)
             self.assertTrue(
-                torch.equal(param, expected[self.rank]), msg=f"{context} init {fqn}"
+                torch.equal(param, expected[mesh.get_local_rank()]),
+                msg=f"{context} init {fqn}",
             )
 
     def _train(
@@ -157,12 +169,16 @@ class TestFlexShardDecoder(DTensorTestBase):
                     with spmd.no_typecheck():
                         loss.backward()
                 losses.append(loss.detach())
+            flex_shard_enabled = isinstance(parallelism.fsdp_backend, FlexShardConfig)
             grad_norm = dist_utils.clip_grad_norm_(
                 list(model.parameters()),
                 max_norm=1.0,
                 foreach=True,
-                flex_shard_enabled=isinstance(
-                    parallelism.fsdp_backend, FlexShardConfig
+                flex_shard_enabled=flex_shard_enabled,
+                flex_shard_reduce_meshes=(
+                    flex_shard_reduce_meshes(parallelism_context)
+                    if flex_shard_enabled
+                    else None
                 ),
             )
             grads = {
@@ -188,26 +204,19 @@ class TestFlexShardDecoder(DTensorTestBase):
                 torch.equal(expected_tensor, actual[fqn]), msg=f"{context} {fqn}"
             )
 
-    @with_comms
-    def test_matches_fsdp2(self):
-        # One context, as in training: both backends shard over its dp_shard mesh.
+    def _check_matches_fsdp2(self, *, ep: int, cases) -> None:
+        # One context, as in training: both backends shard over its meshes.
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size,
             cp=1,
             tp=1,
             pp=1,
-            ep=1,
+            ep=ep,
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        # Two microbatches cover one, and the reshard policy doesn't depend on
-        # the model.
-        for (build_config, flavor), reshard_after_forward, microbatches in (
-            ((build_llama3_config, "debugmodel"), "default", 2),
-            ((build_qwen3_config, "debugmodel_moe"), "always", 2),
-            ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2),
-        ):
+        for (build_config, flavor), reshard_after_forward, microbatches in cases:
             context = (
                 f"{flavor} "
                 f"reshard_after_forward={reshard_after_forward} "
@@ -258,3 +267,27 @@ class TestFlexShardDecoder(DTensorTestBase):
                 self._assert_equal_tensors(
                     expected[3], actual[3], f"{step_context} param"
                 )
+
+    @with_comms
+    def test_matches_fsdp2(self):
+        # Two microbatches cover one, and the reshard policy doesn't depend on
+        # the model.
+        self._check_matches_fsdp2(
+            ep=1,
+            cases=[
+                ((build_llama3_config, "debugmodel"), "default", 2),
+                ((build_qwen3_config, "debugmodel_moe"), "always", 2),
+                ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2),
+            ],
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_expert_parallelism(self):
+        # Each MoE block's routed experts shard over edp_shard (dp_shard / ep
+        # ranks) within each EP rank's experts, and the rest over dp_shard.
+        self._check_matches_fsdp2(
+            ep=2,
+            cases=product(
+                [(build_qwen3_config, "debugmodel_moe")], ["default"], (1, 2)
+            ),
+        )

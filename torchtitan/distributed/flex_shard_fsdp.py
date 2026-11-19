@@ -12,16 +12,24 @@ each group it would pass to ``fully_shard``, with the same placements, mixed
 precision and reshard policy. The buckets' collectives then match FSDP2's byte
 for byte, so training from the same parameters is bitwise identical.
 
+With expert parallelism, ``fully_shard`` gives an MoE block one group per mesh,
+and the block gets one bucket per group: its routed experts on ``edp_shard``,
+the rest on ``dp_shard``. EP has already split each routed-expert parameter over
+``ep``, and torchtitan declares that split as the parameter's outer layout.
+
 FlexShard parameters and grads are plain local shards, with no DTensor.
 ``apply_fsdp_to_decoder`` wraps each FlexShard parameter's ``param_init``
 function with flex_shard's ``init_from_full``: it fills the full parameter and
 the shard keeps its part, as one device would initialize it, while each of
 FSDP2's DTensor shards draws its own random values. ``flex_shard_grad_norm``
-reduces a bucket's grad norm as DTensor does. One more difference changes only
-memory and communication: FSDP2 skips the embedding's backward all-gather
+reduces a bucket's grad norm as DTensor does. Two more differences change only
+memory and communication. FSDP2 skips the embedding's backward all-gather
 (``set_unshard_in_backward``), which FlexShard can't yet, so it gathers the
-embedding again in backward, with the same values. FlexShard is imported only
-when it is selected.
+embedding again in backward, with the same values. And an MoE block's expert
+bucket hooks the routed experts, not the block, so FlexShard reshards them as
+soon as the routed experts finish forward or backward, while FSDP2 keeps the
+block's expert group unsharded until the whole block finishes. FlexShard is
+imported only when it is selected.
 """
 
 import math
@@ -33,13 +41,40 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 
 if TYPE_CHECKING:
+    from torchtitan.distributed.parallelism_context import ParallelismContext
     from torchtitan.models.base.model import BaseModel
     from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
     "flex_shard_grad_norm",
+    "flex_shard_reduce_meshes",
     "validate_flex_shard_training",
 ]
+
+
+def flex_shard_reduce_meshes(
+    parallelism_context: "ParallelismContext",
+) -> dict[DeviceMesh, DeviceMesh]:
+    """For each mesh of FlexShard buckets whose parameters another parallelism
+    split before FlexShard sharded them, the 1D mesh to reduce their grad norm
+    over (``flex_shard_grad_norm``), as FSDP2's DTensor grad norm does. The
+    grad norms of other buckets reduce over the buckets' own mesh.
+
+    FlexShard knows only each bucket's mesh, so the meshes come from
+    ``parallelism_context``, resolved as ``apply_fsdp_to_decoder``'s callers
+    resolve the meshes they shard over. Under expert parallelism, EP has split
+    the routed experts over ``ep``, and their buckets are on ``edp_shard``.
+    """
+    from torchtitan.distributed.fsdp import resolve_sparse_fsdp_mesh
+
+    edp_mesh, _ = resolve_sparse_fsdp_mesh(parallelism_context)
+    if edp_mesh is None:
+        return {}
+    # FSDP2's DTensor grad norm reduces routed-expert grads over edp_shard and
+    # ep in one all-reduce, on torchtitan's loss mesh, which spans the same
+    # ranks and which DTensor finds by layout. _flatten returns that mesh, and
+    # raises if its layout differs.
+    return {edp_mesh["edp_shard"]: edp_mesh._flatten("loss_mesh")}
 
 
 def flex_shard_grad_norm(
@@ -49,11 +84,12 @@ def flex_shard_grad_norm(
     error_if_nonfinite: bool,
     foreach: bool | None,
 ) -> torch.Tensor:
-    """The norm of the grads of FlexShard parameters ``params``, whose buckets
-    are on the 1D ``mesh`` (``flex_shard.get_mesh``).
+    """The norm of the grads of FlexShard parameters ``params``, reduced over
+    the 1D ``mesh``: their buckets' mesh (``flex_shard.get_mesh``), or the mesh
+    ``flex_shard_reduce_meshes`` gives for it.
 
-    The grads are plain local shards over ``mesh``. This reduces them in the
-    order ``get_total_norm`` does for DTensor grads sharded over ``mesh``, so the
+    The grads are plain local shards. This reduces them in the order
+    ``get_total_norm`` does for DTensor grads sharded over ``mesh``, so the
     result is bitwise equal: each grad's local norm, reduced over the mesh, then
     the norm of those norms.
     """
@@ -93,6 +129,8 @@ def validate_flex_shard_training(
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
     from torchtitan.models.base.module import Module
     from torchtitan.models.common.decoder import Decoder
+    from torchtitan.models.common.moe import MoE, RoutedExperts
+    from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
     from torchtitan.quantization.utils import has_quantization
     from torchtitan.trainer import Trainer
 
@@ -106,7 +144,6 @@ def validate_flex_shard_training(
             ),
             ("tensor_parallel_degree", parallelism.tensor_parallel_degree),
             ("context_parallel_degree", parallelism.context_parallel_degree),
-            ("expert_parallel_degree", parallelism.expert_parallel_degree),
             ("pipeline_parallel_degree", parallelism.pipeline_parallel_degree),
         )
         if degree != 1
@@ -151,6 +188,28 @@ def validate_flex_shard_training(
     # quantized all-gather that MXFP8 and NVFP4 weights implement for FSDP2.
     if has_quantization(model_config):
         unsupported.append("MXFP8 and NVFP4 weights")
+    if parallelism.expert_parallel_degree > 1:
+        # Only RoutedExperts with AllToAllTokenDispatcher has been checked
+        # against FSDP2 under EP. FlexShard's expert bucket treats every
+        # routed-expert parameter as split over ep, but output_postprocess
+        # parameters are replicated over ep (models/common/moe/SHARDING.md),
+        # so their grads would never be summed over it.
+        for _, moe, _, _ in model_config.traverse(MoE.Config):
+            routed_experts = moe.routed_experts
+            if type(routed_experts) is not RoutedExperts.Config:
+                feature = type(routed_experts).__qualname__
+            elif (
+                type(routed_experts.token_dispatcher)
+                is not AllToAllTokenDispatcher.Config
+            ):
+                feature = type(routed_experts.token_dispatcher).__qualname__
+            elif routed_experts.output_postprocess is not None:
+                feature = "routed-expert output_postprocess"
+            else:
+                continue
+            entry = f"{feature} with expert parallelism"
+            if entry not in unsupported:
+                unsupported.append(entry)
 
     if (
         not config.training.disable_accelerator_graphs
