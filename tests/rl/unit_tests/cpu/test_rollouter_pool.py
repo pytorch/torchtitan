@@ -125,11 +125,7 @@ def _rollouter_without_datasets() -> Rollouter:
 
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
-    rollouter._config = SimpleNamespace(
-        worker=worker_config,
-        worker_pool_size=3,
-        num_threads_per_worker=2,
-    )
+    rollouter._config = SimpleNamespace(worker=worker_config, num_threads_per_worker=2)
     rollouter._worker_actors = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
@@ -146,6 +142,7 @@ async def _setup(
     monkeypatch.setattr(provisioning, "this_host", lambda: host)
     await rollouter.setup_async(
         actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
+        num_workers=3,
         tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
@@ -168,6 +165,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
 
         await rollouter.setup_async(
             actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
+            num_workers=3,
             tokenizer_config="tokenizer_config",
             renderer_config="renderer_config",
             hf_assets_path="hf_assets_path",
