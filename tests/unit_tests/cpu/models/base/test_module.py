@@ -18,6 +18,20 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.linear import Linear
 
 
+def _parallelize_test_context() -> ParallelismContext:
+    """Minimal context for protocol-only ``_parallelize`` tests."""
+    return ParallelismContext(
+        dp_replicate=1,
+        dp_shard=1,
+        cp=1,
+        tp=1,
+        pp=1,
+        ep=1,
+        world_size=1,
+        enable_sequence_parallel=False,
+    )
+
+
 class TestModuleInitStates(unittest.TestCase):
     """Tests for Module.init_states behavior."""
 
@@ -426,7 +440,7 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
                 pass
 
         model = GoodModel()
-        model._parallelize(None)
+        model._parallelize(_parallelize_test_context())
 
     def test_default_raises_for_plain_nn_module(self):
         """A plain stateful nn.Module is rejected during parallelization."""
@@ -447,7 +461,7 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
 
         model = BadModel()
         with self.assertRaises(RuntimeError):
-            model._parallelize(None)
+            model._parallelize(_parallelize_test_context())
 
     def test_stateless_plain_module_is_allowed(self):
         """Stateless PyTorch modules do not need the TorchTitan protocol."""
@@ -467,7 +481,7 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
                 pass
 
         model = ThirdPartyModel()
-        model._parallelize(None)
+        model._parallelize(_parallelize_test_context())
 
 
 class TestBufferDtypeGuard(unittest.TestCase):

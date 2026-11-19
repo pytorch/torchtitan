@@ -47,7 +47,7 @@ shards, each rank reading only its part of each Hugging Face tensor.
 """
 
 import math
-import weakref
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib.util import find_spec
@@ -70,26 +70,15 @@ if TYPE_CHECKING:
 __all__ = [
     "declare_optimizer_state_layouts",
     "declare_state_dict_layouts",
+    "flex_shard_bucket",
     "flex_shard_bucket_mesh",
     "flex_shard_grad_norm",
     "flex_shard_partial_backwards",
     "flex_shard_reduce_meshes",
-    "has_flex_shard_bucket",
+    "holds_flex_shard_params",
     "load_hf_into_local_shards",
-    "record_buckets",
-    "reshard_flex_shard",
     "validate_flex_shard_training",
 ]
-
-# For flex_shard_partial_backwards, reshard_flex_shard and
-# declare_optimizer_state_layouts: the models FlexShard sharded, and for the
-# first, the bucket of each module whose FSDP2 group is one bucket, e.g.
-# lm_head's, which also holds the final norm. A bucket holds its model, which
-# holds the module, so the bucket is referenced weakly to let the entry go.
-_FLEX_SHARD_MODELS: weakref.WeakSet[nn.Module] = weakref.WeakSet()
-_MODULE_BUCKETS: weakref.WeakKeyDictionary[
-    nn.Module, weakref.ref[Any]
-] = weakref.WeakKeyDictionary()
 
 
 def flex_shard_bucket_mesh(
@@ -223,30 +212,53 @@ def is_outer_sharded(param: torch.Tensor) -> bool:
     return get_outer_layout(param) is not None
 
 
-def record_buckets(model: nn.Module, module_buckets: dict[nn.Module, Any]) -> None:
-    """Record that FlexShard sharded ``model``, and the bucket storage of each
-    module in ``module_buckets``, for ``flex_shard_partial_backwards``,
-    ``reshard_flex_shard`` and ``declare_optimizer_state_layouts``. Call it
-    after ``flex_shard(model)``."""
-    _FLEX_SHARD_MODELS.add(model)
-    for module, bucket in module_buckets.items():
-        _MODULE_BUCKETS[module] = weakref.ref(bucket)
+def holds_flex_shard_params(module: nn.Module) -> bool:
+    """Whether FlexShard sharded ``module``'s parameters. Outside forward and
+    backward only: the gathered parameters of a bucket aren't FlexShard's."""
+    # flex_shard is imported only when it is selected, so without it no
+    # parameter is FlexShard's.
+    flex_shard = sys.modules.get("flex_shard")
+    return flex_shard is not None and any(
+        flex_shard.is_flex_shard_param(param) for param in module.parameters()
+    )
 
 
-def has_flex_shard_bucket(module: nn.Module) -> bool:
-    """Whether FlexShard sharded ``module``'s FSDP2 group as one bucket, as it
-    does ``lm_head``'s, for ``flex_shard_partial_backwards``."""
-    return module in _MODULE_BUCKETS
+def flex_shard_bucket(model: nn.Module, module_fqn: str) -> Any:
+    """The FlexShard bucket that holds the parameters of ``model``'s submodule
+    ``module_fqn``, e.g. ``lm_head``'s, which also holds the final norm's, for
+    ``flex_shard_partial_backwards``. FlexShard must have sharded ``model``,
+    and the buckets name their parameters by their names in ``model``. A
+    shared parameter, e.g. ``lm_head``'s tied weight, goes by its first name,
+    ``tok_embeddings.weight``, with the others among its shared names."""
+    # TODO: Use flex_shard's lookup of a module's bucket once it has one, so
+    # fsdp_partial_backwards can find it from the module as for FSDP2.
+    prefix = f"{module_fqn}."
+    buckets = [
+        bucket
+        for bucket in cast(Any, model).sharded_bucket_storages
+        if any(
+            name.startswith(prefix)
+            for fqn, info in bucket.param_infos.items()
+            for name in (fqn, *info.shared_fqns)
+        )
+    ]
+    if len(buckets) != 1:
+        raise ValueError(
+            f"Expected one FlexShard bucket to hold {module_fqn}'s parameters, "
+            f"but {len(buckets)} do."
+        )
+    return buckets[0]
 
 
 @contextmanager
 def flex_shard_partial_backwards(
-    module: nn.Module, *, run_backward: bool, outer_backward_follows: bool
+    bucket: Any, *, run_backward: bool, outer_backward_follows: bool
 ) -> Iterator[Callable[[], None]]:
-    """``fsdp_partial_backwards`` for a module with a FlexShard bucket, with
-    the collectives FSDP2 issues for its group. Yields ``before_last_forward``.
+    """``fsdp_partial_backwards`` for a module whose FSDP2 group is the
+    FlexShard ``bucket`` (``flex_shard_bucket``), with the collectives FSDP2
+    issues for its group. Yields ``before_last_forward``.
 
-    A call of ``module`` on its own leaves its bucket's forward open, so
+    A call of the module on its own leaves its bucket's forward open, so
     FlexShard runs no post-forward for it and finishes the bucket as soon as
     the call's input grads are ready: with gradient sync, it reduce-scatters
     and reshards; without, it keeps the grads, and reshards only with
@@ -266,8 +278,6 @@ def flex_shard_partial_backwards(
             "parallelism.fsdp_backend=FlexShardConfig() does not support "
             "ChunkedLossWrapper with a frozen decoder yet."
         )
-    bucket = _MODULE_BUCKETS[module]()
-    assert bucket is not None, "FlexShard buckets live as long as their model."
     reshard_after_backward = bucket.reshard_after_backward
     # TODO: Gradient sync is set to True, not restored, because FlexShard has
     # no public getter for it, and validate_flex_shard_training rejects
@@ -285,13 +295,6 @@ def flex_shard_partial_backwards(
         # The last call's backward has resharded the bucket, unless there was
         # no backward.
         bucket.reshard()
-
-
-def reshard_flex_shard(model: nn.Module) -> None:
-    """If FlexShard sharded ``model``, reshard all its buckets and close the
-    forwards they left open, with FlexShard's ``reshard()``."""
-    if model in _FLEX_SHARD_MODELS:
-        cast(Any, model).reshard()
 
 
 def declare_state_dict_layouts(model: nn.Module) -> None:
@@ -328,9 +331,10 @@ def declare_optimizer_state_layouts(
 
     ``step`` declares no layout, so DCP saves it as replicated, as for FSDP2.
     flex_shard raises ``NotImplementedError`` for optimizers other than Adam
-    and AdamW.
+    and AdamW. Call it outside forward and backward, as for
+    ``holds_flex_shard_params``.
     """
-    if model in _FLEX_SHARD_MODELS:
+    if holds_flex_shard_params(model):
         # pyrefly: ignore [missing-import]
         from flex_shard import register_optimizer_checkpoint_hook
 
@@ -586,11 +590,6 @@ def validate_flex_shard_training(
             type(model_config).__qualname__ if model_cls is None else model_cls.__name__
         )
         unsupported.append(f"models that override Decoder._apply_fsdp ({name})")
-    if isinstance(model_config, Decoder.Config) and model_config.enable_weight_tying:
-        # TODO: Parallelization unties tok_embeddings and lm_head, and only
-        # init_states ties them again, after FlexShard has captured both.
-        # Allow tied weights once _parallelize keeps them tied.
-        unsupported.append("enable_weight_tying")
     # FlexShard's Shard placement all-gathers a bucket in one dtype.
     if any(
         module_config.preserve_dtype_params
