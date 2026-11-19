@@ -22,6 +22,13 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
+
+from torchtitan.models.kimi_k3.dsa import (
+    AbsorbedKVProjection,
+    KimiDSAAttention,
+    KimiDSAIndexer,
+    KimiSparseAttention,
+)
 from torchtitan.models.kimi_k3.flavors import (
     kimi_k3_config,
     linear,
@@ -29,13 +36,6 @@ from torchtitan.models.kimi_k3.flavors import (
     vision_encoder_config,
 )
 from torchtitan.models.kimi_k3.model import KimiK3Model
-
-from .dsa import (
-    AbsorbedKVProjection,
-    KimiDSAAttention,
-    KimiDSAIndexer,
-    KimiSparseAttention,
-)
 
 __all__ = [
     "build_model_config",

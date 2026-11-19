@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torchtitan.models.common.attention import materialize_mla_kv
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
-from torchtitan.models.kimi_k3_1.dsa import AbsorbedKVProjection, KimiSparseAttention
+from torchtitan.models.kimi_k3.dsa import AbsorbedKVProjection, KimiSparseAttention
 
 
 def _reference(

@@ -9,8 +9,9 @@ Same as [Kimi K3](../kimi_k3/README.md).
 
 ## Architecture
 
-Each DSA layer keeps the Kimi K3 MLA projections and output gate, and adds an
-indexer with 32 heads of dimension 128 that selects 2048 tokens per query.
+The DSA layer is in `torchtitan/models/kimi_k3/dsa.py`. Each DSA layer keeps
+the Kimi K3 MLA projections and output gate, and adds an indexer with 32 heads
+of dimension 128 that selects 2048 tokens per query.
 Top-k selection and the indexer loss come from
 `torchtitan/models/deepseek_v4/compressor.py`. The indexer is trained only by
 the indexer loss. `build_model_config(..., indexer_loss_coeff=...)` sets its

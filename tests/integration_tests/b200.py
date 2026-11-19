@@ -250,6 +250,9 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_name="kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
             ngpu=8,
         ),
+        # TODO: add a golden loss once Attention Gym gather_attn has a
+        # deterministic backward for (latent, rope) pairs:
+        # https://github.com/meta-pytorch/attention-gym/issues/795
         IntegrationTestDefinition(
             configs=[kimi_k3_1_debugmodel_fsdp2_tp2_ep2_pp2_vpp4],
             test_descr="Kimi K3.1 FSDP, TP, EP and PP with 4 VPP stages",
