@@ -20,7 +20,7 @@ The page can't read local files or reach the network, so a drawing can't show wh
 isn't in its own HTML:
 1. Chrome loads it as a `data:` URL, so `file://` iframes and images stay blank.
 2. A Content-Security-Policy tag allows only inline styles, scripts, and `data:` images and fonts.
-3. Chrome resolves no host names and sends no WebRTC packets, which also stops page
+3. Chrome resolves no host names and sends no WebRTC UDP packets, which also stops page
    navigations and STUN requests (CSP covers neither). Its env has only PATH and an
    empty HOME.
 """

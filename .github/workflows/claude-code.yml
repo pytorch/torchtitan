@@ -27,8 +27,9 @@ jobs:
       # `python3` in Claude's commands resolves to it. The renderer is copied out of this
       # default-branch checkout before the action checks out the PR. Both are made
       # root-owned, so Claude's file edits can't change them, even through a symlink a
-      # PR adds. Python is locked before the renderer is installed, so any failure leaves
-      # no renderer. Never fails the job: without it, reviews post without images.
+      # PR adds. Python is made root-owned first, so a failed step leaves no renderer and
+      # no image, never a renderer on a writable Python. Never fails the job: without the
+      # renderer, reviews post without images.
       python-version: "3.12"
       setup_script: >-
         ( python -m pip install pillow==13.0.0 &&
