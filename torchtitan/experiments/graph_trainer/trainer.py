@@ -64,8 +64,13 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
-        if config.optim.enable_accelerator_graph:
-            raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
+        if (
+            config.optim.enable_accelerator_graph
+            and config.parallelism.pipeline_parallel_degree > 1
+        ):
+            raise ValueError(
+                "Optim CUDA graphs are not supported with GraphTrainer pipeline parallelism."
+            )
         if model_config.local_compile.regions:
             raise ValueError(
                 "GraphTrainer traces the whole step into one graph; set "

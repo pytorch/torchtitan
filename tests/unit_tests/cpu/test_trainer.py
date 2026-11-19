@@ -807,8 +807,11 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
     assert not engine._forward_backward_accelerator_graph_enabled
 
 
-def test_graph_training_engine_rejects_optimizer_accelerator_graph() -> None:
-    config = SimpleNamespace(optim=SimpleNamespace(enable_accelerator_graph=True))
+def test_graph_training_engine_rejects_pp_optimizer_accelerator_graph() -> None:
+    config = SimpleNamespace(
+        optim=SimpleNamespace(enable_accelerator_graph=True),
+        parallelism=SimpleNamespace(pipeline_parallel_degree=2),
+    )
 
     with (
         patch.object(TrainingEngine, "__init__") as init,
