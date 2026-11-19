@@ -33,7 +33,7 @@ from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
 from torchtitan.config import PrecisionConfig
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
@@ -278,6 +278,54 @@ def llama3_debugmodel_last_save_model_only_bf16() -> Trainer.Config:
     config = llama3_debugmodel_full_checkpoint_save()
     config.checkpointer.last_save_model_only = True
     config.checkpointer.export_dtype = "bfloat16"
+    return config
+
+
+def llama3_debugmodel_checkpoint_and_hf_save() -> Trainer.Config:
+    """Saves a full checkpoint at step 5 and a Hugging Face export at step 10.
+
+    FlexShard can't save Hugging Face checkpoints yet, so FSDP2 writes the
+    checkpoints that ``flex_shard_checkpoint``'s FlexShard runs load.
+    """
+    config = llama3_debugmodel_full_checkpoint_save()
+    config.checkpointer.interval = 5
+    config.checkpointer.last_save_model_only = True
+    config.checkpointer.last_save_in_hf = True
+    return config
+
+
+def llama3_debugmodel_flex_shard_checkpoint_load() -> Trainer.Config:
+    """Resumes the FSDP2 checkpoint at step 5 with FlexShard, and saves at step 10."""
+    config = llama3_debugmodel(seq_len=2048)
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.checkpointer = CheckpointManager.Config(
+        interval=5,
+        last_save_model_only=False,
+    )
+    return config
+
+
+def llama3_debugmodel_flex_shard_hf_checkpoint_load() -> Trainer.Config:
+    """Loads what ``llama3_debugmodel_checkpoint_and_hf_save`` exported in HF format.
+
+    The integration runner supplies the per-test output directory to each run.
+    """
+    config = llama3_debugmodel(seq_len=2048)
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    # A folder of its own, so that this run doesn't resume the full checkpoints.
+    config.checkpointer = CheckpointManager.Config(folder="hf_load", load_only=True)
+    test_output_dir = os.getenv(
+        "TORCHTITAN_TEST_OUTPUT_DIR",
+        os.path.join(
+            os.getenv("RUNNER_TEMP", ""),
+            "artifacts-to-be-uploaded/flex_shard_checkpoint",
+        ),
+    )
+    config.checkpointer.initial_load_path = os.path.join(
+        test_output_dir,
+        "checkpoint/exports/step-10/",
+    )
+    config.checkpointer.initial_load_in_hf = True
     return config
 
 
@@ -903,6 +951,20 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             configs=[llama3_debugmodel_last_save_model_only_bf16],
             test_descr="Checkpoint Integration Test - Save Model Only bf16",
             test_name="last_save_model_only_bf16",
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                llama3_debugmodel_checkpoint_and_hf_save,
+                llama3_debugmodel_flex_shard_checkpoint_load,
+                llama3_debugmodel_flex_shard_hf_checkpoint_load,
+            ],
+            test_descr=(
+                "FlexShard resumes an FSDP2 checkpoint and loads its HF export, "
+                "with accelerator graphs"
+            ),
+            test_name="flex_shard_checkpoint",
+            ngpu=2,
             use_real_pg=True,
         ),
         IntegrationTestDefinition(

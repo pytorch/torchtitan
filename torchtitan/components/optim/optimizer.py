@@ -27,6 +27,10 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
+from torchtitan.distributed.flex_shard_fsdp import (
+    declare_optimizer_state_layouts,
+    dist_muon_storage_layouts,
+)
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .utils import (
@@ -246,6 +250,15 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
     ) -> None:
         param_groups = tuple(cast(Iterable[dict[str, Any]], params))
+        # FlexShard parameters are plain local shards, so DistMuon plans from
+        # their storage layouts instead of DTensor placements.
+        storage_layout_by_fqn = {
+            fqn: layout
+            for group in param_groups
+            for fqn, layout in dist_muon_storage_layouts(
+                group.get("param_names", ()), group["params"]
+            ).items()
+        }
         bucket_configs = config.bucket_configs
         if config.max_nccl_ctas_for_comms > 0:
             if len(param_groups) != 1:
@@ -263,9 +276,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             # reuse meshes across its buckets without keeping a run-wide cache.
             redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
             for bucket_config in bucket_configs:
-                matched_parameter = next(
+                matched = next(
                     (
-                        parameter
+                        (fqn, parameter)
                         for fqn, parameter in named_parameters
                         if any(
                             fnmatch.fnmatchcase(fqn, pattern)
@@ -274,10 +287,16 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
                     ),
                     None,
                 )
-                if matched_parameter is None:
+                if matched is None:
                     resolved_bucket_configs.append(bucket_config)
                     continue
-                storage_mesh = cast(Any, matched_parameter).device_mesh
+                matched_fqn, matched_parameter = matched
+                storage_layout = storage_layout_by_fqn.get(matched_fqn)
+                storage_mesh = (
+                    cast(Any, matched_parameter).device_mesh
+                    if storage_layout is None
+                    else storage_layout.mesh
+                )
                 if storage_mesh not in redistribution_mesh_by_storage_mesh:
                     redistribution_mesh_by_storage_mesh[
                         storage_mesh
@@ -306,6 +325,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
+            storage_layout_by_fqn=storage_layout_by_fqn,
         )
 
 
@@ -413,6 +433,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                         return state_dict
 
                     optimizer.register_state_dict_post_hook(_save_host_lr)
+                # FlexShard's states are plain local shards, which need to
+                # declare their layouts to DCP, as the model's parameters do.
+                declare_optimizer_state_layouts(optimizer, model)
                 self.optimizers.append(optimizer)
                 self._log_optimizer(
                     optimizer,

@@ -13,7 +13,7 @@ training process, so it must stay importable from this module.
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optim import AdamW, OptimizersContainer
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
@@ -35,6 +35,7 @@ from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_dist_muon,
     deepseek_v3_debugmodel_mtp,
 )
 from torchtitan_recipes.tests.models.gpt_oss import (
@@ -86,6 +87,12 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
             )
         ],
     )
+
+
+def llama3_debugmodel_fsdp2_tp2_cp2_flex_shard() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_tp2_cp2()
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    return config
 
 
 def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
@@ -164,6 +171,30 @@ def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
             parallelism=ParallelismConfig(expert_parallel_degree=8),
         )
     )
+
+
+def deepseek_v3_debugmodel_fsdp8_ep8_flex_shard() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_fsdp8_ep8()
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    return config
+
+
+def deepseek_v3_debugmodel_dist_muon_fsdp4_ep2() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_dist_muon(
+        attn_backend="flex",
+        seq_len=512,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
+    )
+    config.parallelism.data_parallel_shard_degree = 4
+    config.training.num_tokens_per_microbatch_per_dp_rank = 512
+    config.training.steps = 10
+    return config
+
+
+def deepseek_v3_debugmodel_dist_muon_fsdp4_ep2_flex_shard() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_dist_muon_fsdp4_ep2()
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    return config
 
 
 def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
@@ -659,6 +690,21 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             loss_compare_seed_config=llama3_debugmodel,
         ),
         IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_tp2_cp2_flex_shard],
+            test_descr="Llama 3 FlexShard+TP+CP",
+            test_name="llama3_flex_shard+tp+cp",
+            ngpu=8,
+            # FSDP2's golden. From the same weights, FlexShard trains bitwise
+            # identical to FSDP2, but the two initialize shards differently, so
+            # the twin loads the seed checkpoint FSDP2's golden was made from.
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/llama3.txt"
+            ),
+            loss_compare_seed_config=llama3_debugmodel,
+            # The runner skips the seed checkpoint under Fake PG.
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
             configs=[llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
             test_descr="Llama 3 FSDP+TP+CP+ActivationRematConfig",
             test_name="llama3_fsdp+tp+cp+region_ac",
@@ -698,6 +744,44 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/{gpu_arch}/deepseek_v3.txt"
             ),
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_fsdp8_ep8_flex_shard],
+            test_descr="DeepSeek V3 FlexShard+EP",
+            test_name="deepseek_v3_flex_shard+ep",
+            ngpu=8,
+            # As for llama3_flex_shard+tp+cp.
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/deepseek_v3.txt"
+            ),
+            loss_compare_seed_config=deepseek_v3_debugmodel_fsdp8_ep8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_dist_muon_fsdp4_ep2],
+            test_descr="DeepSeek V3 DistMuon FSDP+EP",
+            test_name="deepseek_v3_dist_muon_fsdp+ep",
+            ngpu=4,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/"
+                "deepseek_v3_dist_muon.txt"
+            ),
+            # The same model with AdamW: DistMuon needs sharded parameters,
+            # and the one-GPU seed run doesn't shard them.
+            loss_compare_seed_config=deepseek_v3_debugmodel,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_dist_muon_fsdp4_ep2_flex_shard],
+            test_descr="DeepSeek V3 DistMuon FlexShard+EP",
+            test_name="deepseek_v3_dist_muon_flex_shard+ep",
+            ngpu=4,
+            # As for llama3_flex_shard+tp+cp.
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/"
+                "deepseek_v3_dist_muon.txt"
+            ),
+            loss_compare_seed_config=deepseek_v3_debugmodel,
+            use_real_pg=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],

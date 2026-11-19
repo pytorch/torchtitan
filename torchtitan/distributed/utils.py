@@ -11,7 +11,7 @@ import math
 import os
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -27,6 +27,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
+from torchtitan.distributed.flex_shard_fsdp import flex_shard_grad_norm
 from torchtitan.distributed.parallelism_context import DistributedTopology, MeshAxisName
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
@@ -635,6 +636,8 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
+    flex_shard_enabled: bool = False,
+    flex_shard_reduce_meshes: Mapping[DeviceMesh, DeviceMesh] | None = None,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -666,6 +669,13 @@ def clip_grad_norm_(
             fall back to the slow implementation for other device types.
             Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
+        flex_shard_enabled: Whether FlexShard sharded the parameters
+            (``parallelism.fsdp_backend=FlexShardConfig()``), so their gradients
+            are plain local shards over their buckets' meshes.
+        flex_shard_reduce_meshes: With FlexShard, the mesh to reduce the grad
+            norm over for the parameters of the buckets on each mesh it has, as
+            ``flex_shard_reduce_meshes`` returns. Other buckets reduce over
+            their own mesh.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
@@ -679,33 +689,56 @@ def clip_grad_norm_(
     # FSDP over dp_shard and cp gives a (dp_shard_cp, tp) mesh, while FSDP
     # over dp_shard alone keeps (dp_shard, cp, tp). So group gradients by mesh.
     params_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
-    for p in parameters:
-        if p.grad is not None:
-            mesh = p.grad.device_mesh if isinstance(p.grad, DTensor) else None
-            params_by_mesh[mesh].append(p)
+    if flex_shard_enabled:
+        # validate_flex_shard_training has checked that flex_shard is installed.
+        # pyrefly: ignore [missing-import]
+        import flex_shard
+
+        # FlexShard grads are plain local shards over their bucket's mesh.
+        for p in parameters:
+            if p.grad is not None:
+                mesh = flex_shard.get_mesh(p)
+                if mesh is None:
+                    raise ValueError(
+                        "FlexShard didn't shard a parameter of shape "
+                        f"{tuple(p.shape)}, so its grad norm would be local."
+                    )
+                params_by_mesh[mesh].append(p)
+    else:
+        for p in parameters:
+            if p.grad is not None:
+                mesh = p.grad.device_mesh if isinstance(p.grad, DTensor) else None
+                params_by_mesh[mesh].append(p)
 
     norms = []
-    # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
-    for params in params_by_mesh.values() or [[]]:
-        norm = torch.nn.utils.get_total_norm(
-            [p.grad for p in params if p.grad is not None],
-            norm_type,
-            error_if_nonfinite,
-            foreach,
-        )
-        # If norm is a DTensor, the placements must be
-        # `torch.distributed._tensor.ops.math_ops._NormPartial`. We can simply
-        # reduce the DTensor to get the norm in this tensor's process group
-        # and then convert it to a local tensor.
-        # NOTE: It has two purposes:
-        #       1. to make sure the total norm is computed correctly when PP
-        #          is used (see below)
-        #       2. to return a reduced total_norm tensor whose .item() would
-        #          return the correct value
-        if isinstance(norm, DTensor):
-            # Will reach here if any non-PP parallelism is used.
-            # If only using PP, norm will be a local tensor.
-            norm = norm.full_tensor()
+    # An empty list, with mesh None for either backend, yields tensor(0.), e.g.
+    # on a PP rank without gradients.
+    for mesh, params in params_by_mesh.items() or [(None, [])]:
+        if flex_shard_enabled and mesh is not None:
+            reduce_mesh = (flex_shard_reduce_meshes or {}).get(mesh, mesh)
+            norm = flex_shard_grad_norm(
+                params, reduce_mesh, norm_type, error_if_nonfinite, foreach
+            )
+        else:
+            norm = torch.nn.utils.get_total_norm(
+                [p.grad for p in params if p.grad is not None],
+                norm_type,
+                error_if_nonfinite,
+                foreach,
+            )
+            # If norm is a DTensor, the placements must be
+            # `torch.distributed._tensor.ops.math_ops._NormPartial`. We can simply
+            # reduce the DTensor to get the norm in this tensor's process group
+            # and then convert it to a local tensor.
+            # NOTE: It has two purposes:
+            #       1. to make sure the total norm is computed correctly when PP
+            #          is used (see below)
+            #       2. to return a reduced total_norm tensor whose .item() would
+            #          return the correct value
+            if isinstance(norm, DTensor):
+                # Will reach here if any non-PP parallelism is used.
+                # If only using PP, norm will be a local tensor.
+                norm = norm.full_tensor()
         norms.append(norm)
 
     if len(norms) == 1:

@@ -24,6 +24,11 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
+- `StorageLayout` describes a parameter that is a plain local tensor, not a
+  DTensor: its global shape, and its mesh and placements as a DTensor would
+  hold it. `DistMuon` takes one per plain parameter in
+  `storage_layout_by_fqn`, plans from it as from a DTensor's placements, and
+  keeps the parameter's gradient and momentum as plain local tensors.
 - `BlockShard.block_sizes` is a nonempty tuple describing a repeating sequence
   of independently shardable block sizes. Use `(R,)` for uniform blocks.
   For example, `(128, 64)` partitions
@@ -71,10 +76,11 @@ Compute sharding is construction-time configuration. It is validated and
 frozen when the optimizer is built, but is not stored in its state dict;
 checkpoint restore must rebuild the optimizer with matching values.
 
-## TorchTitan Kimi integration
+## TorchTitan Kimi and DeepSeek V3 integration
 
-The [Kimi test recipes](../../../torchtitan_recipes/tests/models/kimi_k2_7.py)
-provide the first TorchTitan integration. Their shared optimizer configuration:
+The [shared test-recipe configuration](../../../torchtitan_recipes/tests/models/dist_muon.py)
+provides the first TorchTitan integration, for decoders built from DeepSeek
+V3's MLA attention and MoE blocks. It:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
   experts, and routers for DistMuon. Other parameters continue to use
@@ -84,8 +90,7 @@ provide the first TorchTitan integration. Their shared optimizer configuration:
 - Groups layers into buckets so compute-ready work can overlap packed
   redistribution.
 
-The same construction can be used by Kimi-family, Kimi-VL, and Moonlight
-recipes.
+The Kimi K2.x, Kimi-VL, Moonlight and DeepSeek V3 test recipes use it.
 
 ## Package boundary
 

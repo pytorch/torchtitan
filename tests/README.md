@@ -119,6 +119,7 @@ and uses its fixed initialization path.
 | Llama 3 | FSDP 2 x TP 2 x CP 2 |
 | Llama 3 SFT | FSDP 2 |
 | DeepSeek V3 | FSDP 8, EP 8 |
+| DeepSeek V3 DistMuon | FSDP 4, EP 2 |
 | DeepSeek V4 | FSDP 2 x TP 2, EP 2 (Real-PG only) |
 | GPT-OSS | FSDP 4 x TP 2, EP 4 |
 | Qwen3 | FSDP 2 x TP 2 x CP 2, EP 8 |
