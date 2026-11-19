@@ -58,6 +58,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.rope import CosSinVisionRoPE
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -69,6 +70,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from .model import (
@@ -92,10 +94,9 @@ from .sharding import (
     transformer_block_sharding_config,
     vision_encoder_sharding_config,
     vision_merger_sharding_config,
-    vision_rotary_embedding_sharding_config,
 )
 
-from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
+from .vision_encoder import PatchMerger, Qwen35VisionEncoder
 
 __all__ = [
     "Qwen35Model",
@@ -265,6 +266,8 @@ def _qwen35_vision_encoder_config(
     num_position_embeddings: int,
     layer_norm_eps: float = 1e-6,
     rope_theta: float = 10000.0,
+    # The default 16M-pixel budget with aspect ratio < 200 gives <= 3,620 patches per side.
+    max_rope_positions: int = 4096,
     in_channels: int = 3,
 ) -> Qwen35VisionEncoder.Config:
     """Build a fully-specified Qwen35VisionEncoder.Config."""
@@ -294,6 +297,12 @@ def _qwen35_vision_encoder_config(
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=num_heads,
+                rope=CosSinVisionRoPE.Config(
+                    dim=head_dim,
+                    max_context_length=max_rope_positions,
+                    theta=rope_theta,
+                    sharding_config=vision_rope_sharding_config(),
+                ),
                 wq=_linear(
                     dim,
                     dim,
@@ -313,17 +322,12 @@ def _qwen35_vision_encoder_config(
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),
-                sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+                sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
             ),
             mlp=VisionMLP.Config(
                 fc1=_vision_column_parallel_linear(dim, ffn_dim),
                 fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
-        ),
-        rotary_pos_emb=VisionRotaryEmbedding.Config(
-            dim=head_dim // 2,
-            theta=rope_theta,
-            sharding_config=vision_rotary_embedding_sharding_config(),
         ),
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,

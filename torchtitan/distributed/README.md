@@ -23,7 +23,7 @@ is applied during model parallelization.
 
 | Module | Purpose |
 | --- | --- |
-| `activation_remat.py` | Activation remat (activation checkpointing) configs on `torch_remat`. See [REMAT.md](REMAT.md). |
+| `activation_remat.py` | Activation remat (activation checkpointing) configs on `torch_remat`. See [ACTIVATION_REMAT.md](ACTIVATION_REMAT.md). |
 | `accelerator_graph.py` | Accelerator graph capture and replay of the training step. |
 | `local_compile.py` | `torch.compile` of named model regions. |
 | `batch_invariant.py` | Batch-invariant (bitwise-reproducible) kernels. |
