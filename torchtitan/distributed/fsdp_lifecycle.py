@@ -16,6 +16,8 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.fsdp._fully_shard._fsdp_common import FSDPMeshInfo
 from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 
+from torchtitan.distributed.flex_shard_fsdp import flex_shard_partial_backwards
+
 
 class _GroupPolicy(NamedTuple):
     group: FSDPParamGroup
@@ -43,7 +45,11 @@ def complete_fsdp_grouped_forward(module: FSDPModule, output: Any) -> Any:
 
 @contextmanager
 def fsdp_partial_backwards(
-    module: nn.Module, *, run_backward: bool, outer_backward_follows: bool
+    module: nn.Module,
+    *,
+    run_backward: bool,
+    outer_backward_follows: bool,
+    flex_shard_bucket: Any = None,
 ) -> Iterator[_PartialBackwardHooks]:
     """Keep one module unsharded across partial backwards, preserving policy.
 
@@ -58,7 +64,18 @@ def fsdp_partial_backwards(
     Manual finalization owns all reductions, including the first inner pass,
     and leaves parameter residency to the schedule.
     Forward-only calls complete the same scope without running backward.
+    With FlexShard, ``flex_shard_bucket`` is the module's bucket, which goes to
+    ``flex_shard_partial_backwards``.
     """
+    if flex_shard_bucket is not None:
+        with flex_shard_partial_backwards(
+            flex_shard_bucket,
+            run_backward=run_backward,
+            outer_backward_follows=outer_backward_follows,
+        ) as before_last_forward:
+            # The bucket's forward stays open, so outputs need no hooks.
+            yield _PartialBackwardHooks(before_last_forward, lambda output: output)
+        return
     if not isinstance(module, FSDPModule):
         yield _PartialBackwardHooks(lambda: None, lambda output: output)
         return

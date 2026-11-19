@@ -46,15 +46,21 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def post_validate_fsdp_for_accelerator_graph(model_parts: list[nn.Module]) -> None:
+def post_validate_fsdp_for_accelerator_graph(
+    model_parts: list[nn.Module], *, flex_shard_enabled: bool
+) -> None:
     """Finish grouped forwards and release full parameters for pool reuse.
 
     Eager and captured validation use the same cleanup. With ChunkedLossWrapper,
     the model skips lm_head, then the loss calls it after the root forward.
     A group containing norm and lm_head can still have norm pending. Validation
-    has no backward callback to clear this state.
+    has no backward callback to clear this state. With FlexShard
+    (``flex_shard_enabled``), FlexShard's ``reshard()`` on each model part
+    closes the same forward of norm and lm_head's bucket.
     """
     for model in model_parts:
+        if flex_shard_enabled:
+            cast(Any, model).reshard()
         for module in model.modules():
             if not isinstance(module, FSDPModule):
                 continue
