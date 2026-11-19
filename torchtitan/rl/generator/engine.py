@@ -11,12 +11,15 @@ from __future__ import annotations
 import abc
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+
+if TYPE_CHECKING:
+    from torchtitan.rl.model_state_dict_transport import TensorShard
 
 
 ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
@@ -81,6 +84,12 @@ class GenerationEngine(Configurable, abc.ABC):
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
+
+    @property
+    @abc.abstractmethod
+    def model_state_dict_load_groups(self) -> list[dict[str, TensorShard]]:
+        """The ``shard_layout`` of the tensors of each ``fetch`` call of a model state
+        dict load, in load order."""
 
     @abc.abstractmethod
     def add_requests(

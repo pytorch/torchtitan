@@ -986,10 +986,11 @@ def test_gpu_fetch_reads_torchstore_on_the_actor_loop_during_the_load(
     async def run() -> None:
         generator = object.__new__(Generator)
         generator.config = SimpleNamespace(model_state_dict_load_mode="gpu_fetch")
+        generator._model_state_dict_transport = None
         generator._torchstore_loop = asyncio.get_running_loop()
         generator._engine_loop = engine_thread(
             _GPUFetchEngine(),
-            fetch_model_state_dict=generator._fetch_model_state_dict_from_storage_volume,
+            fetch_model_state_dict=generator._fetch_model_state_dict_into_gpu,
         )
         await generator.start_engine_loop()
 

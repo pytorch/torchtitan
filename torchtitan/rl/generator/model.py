@@ -40,6 +40,7 @@ from torchtitan.models.common.moe.token_dispatcher import (
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.model_state_dict_transport import shard_layout, TensorShard
 from torchtitan.tools.utils import set_default_dtype
 
 logger = logging.getLogger(__name__)
@@ -487,6 +488,16 @@ class ModelStateDictLoader:
                             "model_state_dict_load_mode='gpu_fetch' does not support "
                             f"quantized parameters ({key})"
                         )
+        self.model_state_dict_load_groups: list[dict[str, TensorShard]] = [
+            shard_layout({key: fsdp_param.sharded_param for key, fsdp_param in params})
+            for _, params, _ in self._fsdp_load_groups
+        ]
+        """The ``shard_layout`` of the tensors of each ``fetch`` call of a ``load``, in
+        load order."""
+        if self._buffer_keys:
+            self.model_state_dict_load_groups.append(
+                shard_layout({key: model.get_buffer(key) for key in self._buffer_keys})
+            )
 
         self.prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from
