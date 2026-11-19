@@ -24,7 +24,7 @@ from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
-    roll_mtp_sequence,
+    preprocess_mtp_inputs,
 )
 
 from .mhc import HcHead, HcPost, HcPre
@@ -271,41 +271,90 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
-    def preprocess_inputs(self, input_dict: dict[str, Any], **kwargs: Any):
-        """Build the decoder batch and pass token IDs on for hash routing."""
-        inputs, labels, model_kwargs, loss_kwargs = super().preprocess_inputs(
-            input_dict, **kwargs
-        )
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        parallelism_context: ParallelismContext,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        global_routing_token_counts: torch.Tensor | None = None,
+        **kwargs: Any,
+    ):
+        """Build the decoder batch and pass token IDs on for hash routing.
+
+        With MTP layers, prepare one token tensor, validity mask and labels
+        tensor per depth, as ``MTPDecoder`` does.
+        """
+        if len(self.mtp_layers) == 0:
+            inputs, labels, model_kwargs, loss_kwargs = super().preprocess_inputs(
+                input_dict,
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
+                max_num_documents=max_num_documents,
+                global_routing_token_counts=global_routing_token_counts,
+                **kwargs,
+            )
+        else:
+            inputs, labels, model_kwargs, loss_kwargs = preprocess_mtp_inputs(
+                self,
+                input_dict,
+                num_mtp_layers=len(self.mtp_layers),
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
+                max_num_documents=max_num_documents,
+                global_routing_token_counts=global_routing_token_counts,
+            )
         # `inputs` holds the token IDs on every rank here. Under PP, later
         # stages' forward receives the previous stage's hidden state instead,
         # but model kwargs reach every stage unchanged.
-        model_kwargs["input_ids_T"] = inputs
+        model_kwargs["input_ids_T"] = inputs[0] if isinstance(inputs, tuple) else inputs
         return inputs, labels, model_kwargs, loss_kwargs
 
     def forward(
         self,
-        tokens: torch.Tensor,
+        tokens: torch.Tensor | tuple[torch.Tensor, ...],
         positions: torch.Tensor | None = None,
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
         *,
         input_ids_T: torch.Tensor | None = None,
+        mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
     ):
         """Run the DeepSeek V4 decoder.
 
         On a later PP stage, ``tokens`` is the previous stage's ``[T, M, D]``
-        hidden state and ``input_ids_T`` carries the token IDs.
+        hidden state and ``input_ids_T`` carries the token IDs. With MTP layers,
+        ``tokens`` holds the main tokens and one prepared token tensor per MTP
+        depth, and ``mtp_input_valid_masks`` one validity mask per depth (see
+        ``preprocess_inputs``).
         """
         if attention_metadata is None:
             raise ValueError("DeepSeek V4 requires attention metadata.")
-        if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
-            raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
-        if len(self.mtp_layers) > 0 and self._skip_lm_head:
-            raise ValueError(
-                "DeepSeek V4 MTP cannot skip the LM head because chunked "
-                "cross entropy is not supported."
-            )
+        mtp_input_tokens: tuple[torch.Tensor, ...] = ()
+        if len(self.mtp_layers) > 0:
+            if self.tok_embeddings is None:
+                raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
+            if self._skip_lm_head:
+                raise ValueError(
+                    "DeepSeek V4 MTP cannot skip the LM head because chunked "
+                    "cross entropy is not supported."
+                )
+            if (
+                not isinstance(tokens, tuple)
+                or len(tokens) != len(self.mtp_layers) + 1
+                or mtp_input_valid_masks is None
+                or len(mtp_input_valid_masks) != len(self.mtp_layers)
+            ):
+                raise ValueError(
+                    "DeepSeek V4 MTP forward requires the main tokens plus one "
+                    "prepared token tensor and one validity mask per MTP layer."
+                )
+            tokens, *rest = tokens
+            mtp_input_tokens = tuple(rest)
+        elif isinstance(tokens, tuple):
+            raise ValueError("DeepSeek V4 without MTP expects one token tensor.")
 
         if self.tok_embeddings is not None:
             if input_ids_T is None:
@@ -343,9 +392,11 @@ class DeepSeekV4Model(Decoder):
                 return h_TD
             return self.lm_head(h_TD)
 
+        assert mtp_input_valid_masks is not None
         outputs = [h_TD] + self.mtp_forward(
             h_TMD,
-            tokens,
+            mtp_input_tokens,
+            mtp_input_valid_masks,
             attention_metadata,
             positions,
             padding_mask,
@@ -358,23 +409,20 @@ class DeepSeekV4Model(Decoder):
     def mtp_forward(
         self,
         prev_hc_hidden: torch.Tensor,
-        tokens: torch.Tensor,
+        mtp_input_tokens: tuple[torch.Tensor, ...],
+        mtp_input_valid_masks: tuple[torch.Tensor, ...],
         attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
-        """Run auxiliary MTP depths and return prediction hidden states."""
+        """Run auxiliary MTP depths on their prepared tokens and return
+        prediction hidden states."""
         mtp_outputs = []
-        for depth, mtp_block in enumerate(self.mtp_layers, 1):
-            mtp_tokens, valid_mask = roll_mtp_sequence(
-                tokens,
-                shift=depth,
-                fill_value=0,
-                positions=positions,
-                padding_mask=padding_mask,
-                return_valid_mask=True,
-            )
+        for depth, (mtp_block, mtp_tokens, valid_mask) in enumerate(
+            zip(self.mtp_layers, mtp_input_tokens, mtp_input_valid_masks, strict=True),
+            1,
+        ):
             layer_attention_metadata = (
                 None
                 if attention_metadata is None

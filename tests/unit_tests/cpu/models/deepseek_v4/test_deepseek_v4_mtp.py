@@ -4,13 +4,19 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import spmd_types as spmd
 import torch
+import torch.distributed as dist
 
+from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4 import build_model_config
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan_recipes.tests.models.deepseek_v4 import (
@@ -94,6 +100,109 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             symm_mem_scope=None,
             unshard_in_current_stream=False,
         )
+
+
+def _preprocess(model, input_dict, **kwargs):
+    # SPMD annotation needs a device mesh; these tests check the plumbing only.
+    with patch(
+        "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+        side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+    ):
+        return model.preprocess_inputs(
+            input_dict,
+            parallelism_context=SimpleNamespace(
+                cp_enabled=False, activate_spmd=contextlib.nullcontext
+            ),
+            parallelism=SimpleNamespace(),
+            **kwargs,
+        )
+
+
+class TestDeepSeekV4MTPInputs(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
+        self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
+
+    def test_preprocess_inputs_prepares_each_depth(self):
+        with torch.device("meta"):
+            model = deepseek_v4_mtp_debugmodel(seq_len=128).model.build()
+        # Two packed documents (70 and 50 tokens) and 8 padding tokens.
+        positions = torch.cat([torch.arange(70), torch.arange(50), torch.arange(8)])
+        padding_mask = torch.arange(128) >= 120
+        tokens = torch.arange(128) + 1000
+        labels = torch.arange(128)
+        inputs, loss_labels, model_kwargs, _ = _preprocess(
+            model,
+            {
+                "input": tokens,
+                "labels": labels,
+                "positions": positions,
+                "padding_mask": padding_mask,
+            },
+        )
+
+        # Depth 1 is shifted by one inside each document: nothing crosses a
+        # document boundary, enters the padding, or runs past the end.
+        valid = torch.zeros(128, dtype=torch.bool)
+        valid[:69] = True
+        valid[70:119] = True
+        self.assertEqual(len(inputs), 2)
+        self.assertTrue(torch.equal(inputs[0], tokens))
+        self.assertTrue(torch.equal(inputs[1], torch.where(valid, tokens.roll(-1), 0)))
+        self.assertTrue(torch.equal(model_kwargs["input_ids_T"], tokens))
+        self.assertEqual(len(model_kwargs["mtp_input_valid_masks"]), 1)
+        self.assertTrue(torch.equal(model_kwargs["mtp_input_valid_masks"][0], valid))
+        self.assertEqual(len(loss_labels), 2)
+        self.assertTrue(torch.equal(loss_labels[0], labels))
+        self.assertTrue(
+            torch.equal(
+                loss_labels[1], torch.where(valid, labels.roll(-1), IGNORE_INDEX)
+            )
+        )
+
+
+class TestDeepSeekV4MTPInputLayout(unittest.TestCase):
+    def setUp(self):
+        dist.init_process_group("gloo", rank=0, world_size=1, store=dist.HashStore())
+        self.addCleanup(dist.destroy_process_group)
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_mtp_inputs_have_the_main_layouts(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            enable_sequence_parallel=False,
+        )
+        parallelism_context.build_mesh()
+        with torch.device("meta"):
+            model = deepseek_v4_mtp_debugmodel(seq_len=16).model.build()
+        inputs, loss_labels, model_kwargs, _ = model.preprocess_inputs(
+            {
+                "input": torch.zeros(16, dtype=torch.long),
+                "labels": torch.arange(16),
+                "positions": torch.arange(16),
+                "padding_mask": torch.zeros(16, dtype=torch.bool),
+            },
+            parallelism_context=parallelism_context,
+            parallelism=SimpleNamespace(),
+        )
+
+        # On one rank an unannotated tensor also reads as the empty local type,
+        # so check that each per-depth tensor was annotated at all.
+        for depth_tensor, main_tensor in (
+            (inputs[1], inputs[0]),
+            (model_kwargs["mtp_input_valid_masks"][0], inputs[0]),
+            (loss_labels[1], loss_labels[0]),
+        ):
+            self.assertTrue(spmd.has_local_type(depth_tensor))
+            self.assertEqual(
+                spmd.get_local_type(depth_tensor), spmd.get_local_type(main_tensor)
+            )
 
 
 if __name__ == "__main__":
