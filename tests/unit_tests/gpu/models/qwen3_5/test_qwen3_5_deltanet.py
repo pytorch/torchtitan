@@ -214,6 +214,8 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
             fragments=[[(0, 2)], [(2, 4)]],
             cp_rank=0,
             device=varlen.cu_seq_q.device,
+            slots=1,
+            max_subsequences=2,
             conv_history=3,
         )
 

@@ -257,7 +257,10 @@ def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
     """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
-    from torchtitan.distributed.context_parallel import supports_cp_inner_attention
+    from torchtitan.distributed.context_parallel import (
+        PTRRFlexAttentionCPLoadBalancer,
+        supports_cp_inner_attention,
+    )
     from torchtitan.models.common.attention.cp_attention import (
         AllGatherKVVarlen,
         CPInnerAttention,
@@ -308,6 +311,15 @@ def validate_context_parallel(
         # Linear attention either routes states or restores token order using
         # the shared permutation; the full-attention backend selects the balancer.
         if isinstance(attention, LinearAttention.Config):
+            # Linear attention costs the same per token, so PTRR's mask-based
+            # balancing gains nothing, while its scattered token ranges inflate
+            # the fixed CP routing capacity.
+            if isinstance(load_balancer_config, PTRRFlexAttentionCPLoadBalancer.Config):
+                raise ValueError(
+                    f"{fqn}.inner_attention is linear attention, which does not "
+                    "support PTRRFlexAttentionCPLoadBalancer; use "
+                    "HeadTailCPLoadBalancer or no load balancer."
+                )
             continue
         if load_balancer_config is None:
             continue

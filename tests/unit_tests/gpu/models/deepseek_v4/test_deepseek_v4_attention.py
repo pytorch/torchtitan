@@ -73,14 +73,14 @@ def causal_cmp_allowed(ratio):
 )
 def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
     torch.manual_seed(0)
-    module = cls(
-        cls.Config(
-            window_size=WINDOW,
-            compress_ratio=ratio,
-            softmax_scale=SCALE,
-            index_topk=TOPK,
-        )
+    config = cls.Config(
+        window_size=WINDOW,
+        compress_ratio=ratio,
+        softmax_scale=SCALE,
+        index_topk=TOPK,
     )
+    module = cls(config)
+    metadata = config.build_attention_metadata(torch.arange(SEQLEN, device=device))
     n_cmp = 0 if ratio == 1 else SEQLEN // ratio
     # fp64 CPU copies feed the oracle; the module runs on `device` in `dtype`.
     ref_inputs = [
@@ -101,10 +101,10 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
 
     match module:
         case SlidingWindowAttention():
-            out = module(q, swa_k, attn_sink)
+            out = module(q, swa_k, attn_sink, attention_metadata=metadata)
             cmp_allowed = torch.zeros(SEQLEN, 0, dtype=torch.bool)
         case HeavilyCompressedAttention():
-            out = module(q, swa_k, cmp_k, attn_sink)
+            out = module(q, swa_k, cmp_k, attn_sink, attention_metadata=metadata)
             cmp_allowed = causal_cmp_allowed(ratio)
         case CompressedSparseAttention():
             idx_q, idx_k, idx_w = (
@@ -112,7 +112,7 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 for shape in ((SEQLEN, 3, 6), (n_cmp, 6), (SEQLEN, 3))
             )
             idx = [t.to(device) for t in (idx_q, idx_k, idx_w)]
-            out = module(q, swa_k, cmp_k, *idx, attn_sink)
+            out = module(q, swa_k, cmp_k, *idx, attn_sink, attention_metadata=metadata)
             cmp_topk, _ = Indexer.select(
                 idx_q,
                 idx_k,
@@ -120,6 +120,9 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 max_seqlen=SEQLEN,
                 ratio=ratio,
                 topk=TOPK,
+                attention_metadata=config.build_attention_metadata(
+                    torch.arange(SEQLEN)
+                ),
                 return_scores=False,
             )
             cmp_topk = cmp_topk.long()

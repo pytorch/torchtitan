@@ -124,6 +124,10 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
     def test_hybrid_linear_attention_requires_cp_transform(self):
         from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.config.validation import validate_context_parallel
+        from torchtitan.distributed.context_parallel import (
+            HeadTailCPLoadBalancer,
+            PTRRFlexAttentionCPLoadBalancer,
+        )
         from torchtitan.models.common.attention.cp_attention import (
             AllGatherKVFlexInnerAttention,
         )
@@ -153,6 +157,23 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
                     }
                 ).transform(model)
                 validate_context_parallel(model, parallelism)
+                validate_context_parallel(
+                    model,
+                    replace(
+                        parallelism,
+                        context_parallel_load_balancer=HeadTailCPLoadBalancer.Config(),
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "does not support PTRR"):
+                    validate_context_parallel(
+                        model,
+                        replace(
+                            parallelism,
+                            context_parallel_load_balancer=(
+                                PTRRFlexAttentionCPLoadBalancer.Config()
+                            ),
+                        ),
+                    )
                 linear_attention = next(
                     layer.attention
                     for layer in model.layers
