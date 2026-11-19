@@ -7,6 +7,7 @@
 """Kimi K3.1 DeepSeek Sparse Attention components."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -28,7 +29,6 @@ from torchtitan.models.common.nn_modules import LayerNorm
 # TODO: move Indexer and SparseIndexerLoss to models/common/ after #5722 and
 # #5863 land; Kimi K3.1 is their second user.
 from torchtitan.models.deepseek_v4.compressor import Indexer, SparseIndexerLoss
-from torchtitan.tools.utils import has_cuda_capability
 
 from .attention import KimiMLAAttention
 
@@ -145,6 +145,10 @@ class KimiSparseAttention(InnerAttention):
         wkv_b: AbsorbedKVProjection.Config
         index_topk: int
         aux_loss: SparseIndexerLoss.Config | None = None
+        impl: Literal["fused", "reference"] = "fused"
+        """Attention Gym ``gather_attn`` implementation. ``"fused"`` runs the
+        accelerator kernels and raises on inputs they do not support;
+        ``"reference"`` is eager PyTorch on any device, for numerics checks."""
 
         @property
         def is_full_attention(self) -> bool:
@@ -169,6 +173,7 @@ class KimiSparseAttention(InnerAttention):
         super().__init__()
         self.wkv_b = config.wkv_b.build()
         self.index_topk = config.index_topk
+        self.impl = config.impl
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
     def forward(
@@ -199,11 +204,6 @@ class KimiSparseAttention(InnerAttention):
                 return_scores=aux_loss is not None,
             )
 
-        fused = (
-            q_THK.is_cuda
-            and q_THK.dtype == torch.bfloat16
-            and has_cuda_capability(8, 0)
-        )
         nope_dim = q_THK.shape[-1] - k_shared_TR.shape[-1]
         w_uk_HNL, w_uv_HVL = self.wkv_b()
         q_nope_THN, q_shared_THR = q_THK.split(
@@ -227,7 +227,7 @@ class KimiSparseAttention(InnerAttention):
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_k=cu_seqlens,
                 scale=scale,
-                impl="fused" if fused else "reference",
+                impl=self.impl,
                 return_aux=AuxRequest(lse=aux_loss is not None),
             )
             out_THL = out_1HTL.squeeze(0).transpose(0, 1)
