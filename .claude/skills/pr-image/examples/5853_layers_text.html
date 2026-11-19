@@ -1,0 +1,145 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; width: 900px; background: #fbf8f3; color: #222;
+         font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 15px; }
+  .page { padding: 20px 24px 8px 24px; }
+  h1 { font-size: 23px; margin: 0 0 4px 0; }
+  .sub { font-size: 15px; color: #4a4741; margin-bottom: 10px; line-height: 1.45; }
+  code, .mono { font-family: "Liberation Mono", "DejaVu Sans Mono", monospace; font-size: 14px; }
+  .key { display: flex; gap: 22px; align-items: center; font-size: 14px; color: #444; margin: 0 0 12px 2px; }
+  .key span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { display: inline-block; width: 22px; height: 13px; border-radius: 3px; box-sizing: border-box; }
+  .sw.band { background: #e3eef8; border: 1.5px solid #6a93bd; }
+  .sw.eager { background: #f7e1dd; border: 1.5px solid #b5473a; }
+  .sw.dash { background: transparent; border: 1.5px dashed #9a958d; }
+  .panel { border: 2px solid; border-radius: 8px; padding: 8px 12px 8px 12px; margin-bottom: 12px; }
+  .before { border-color: #c98a82; background: #fdf4f2; }
+  .pr { border-color: #86b893; background: #f1f8f2; }
+  .rej { border: 1.5px dashed #b9b3aa; background: #fbf8f3; border-radius: 8px; padding: 8px 12px 8px 12px; margin-bottom: 12px; }
+  .ph { font-size: 16px; font-weight: bold; margin-bottom: 4px; }
+  .before .ph { color: #9c3427; }
+  .pr .ph { color: #23663a; }
+  .rej .ph { color: #444; }
+  .ph code { font-size: 15px; }
+  .close { font-size: 15px; color: #222; margin: 4px 2px 0 2px; }
+  .codeblock { font-family: "Liberation Mono", "DejaVu Sans Mono", monospace; font-size: 13px; white-space: pre;
+               background: #fff; border: 1px solid #c9c2b7; border-radius: 4px; padding: 6px 10px; line-height: 1.5; }
+  .row { display: flex; gap: 16px; align-items: center; margin: 6px 0 2px 0; }
+  .note { font-size: 15px; color: #1f5e35; line-height: 1.4; }
+  svg { font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 14px; fill: #222; }
+  .res { font-size: 15px; color: #333; line-height: 1.5; margin: 2px 2px 0 2px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1><code style="font-size:21px">SGLangEngine</code>'s default prefill CUDA graphs now include attention</h1>
+  <div class="sub">Both panels show one small prefill step of Qwen3-0.6B at TP 1, for one new 300-token prompt.</div>
+  <div class="key">
+    <span><i class="sw band"></i>runs inside a CUDA graph</span>
+    <span><i class="sw eager"></i>runs eagerly, with CPU work on every call</span>
+    <span><i class="sw dash"></i>option not taken</span>
+  </div>
+
+  <div class="panel before">
+    <div class="ph">Before: the default <code>cuda_graph="breakable"</code> runs attention outside the graph.</div>
+    <svg id="sb" width="824" height="176" viewBox="0 0 824 176"></svg>
+    <div class="close">So every prefill step pays about 7-8 ms of CPU, however few tokens it has.</div>
+  </div>
+
+  <div class="panel pr">
+    <div class="ph">This PR: the new default <code>cuda_graph="full"</code> also captures attention.</div>
+    <svg id="sp" width="824" height="66" viewBox="0 0 824 66"></svg>
+    <div class="row">
+      <div class="codeblock">server_kwargs["cuda_graph_config"] = {
+  "prefill": {"backend": "full", "full_prefill_max_req": max_num_seqs}}</div>
+      <div class="note">The graph gets one request slot per running request.</div>
+    </div>
+    <div class="close">So attention costs no eager CPU time.</div>
+  </div>
+
+  <div class="rej">
+    <div class="ph">Not taken: SGLang's default of 32 request slots.</div>
+    <svg id="sr" width="824" height="50" viewBox="0 0 824 50"></svg>
+    <div class="close">A batch with more requests than slots runs eagerly.<br>So 256 prompts of 100 tokens took 0.51 s, slower than breakable graphs (0.39 s).</div>
+  </div>
+
+  <div class="res">A stream of 256 requests, one new per step, now takes about 2.0 s instead of 5.1-5.4 s (Qwen3-0.6B, TP 2, 2 GB300s).<br>
+    vLLM takes 2.1-2.2 s on the same setup.<br>
+    Cost: GDN and KDA models now raise an error with the default.</div>
+</div>
+<script>
+  const NS = "http://www.w3.org/2000/svg";
+  function el(svg, tag, attrs, text) {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e);
+    return e;
+  }
+  const BAND = {fill: "#e3eef8", stroke: "#6a93bd"};
+  const EAGER = {fill: "#f7e1dd", stroke: "#b5473a"};
+  const X0 = 14, SEG = 17, ATT = 10, Y = 26, H = 28, NLAYERS = 28;
+  // x of the k-th attention box (k = 0..27) in the 28-layer strip
+  const attX = k => X0 + (k + 1) * SEG + k * ATT;
+  const stripEnd = X0 + (NLAYERS + 1) * SEG + NLAYERS * ATT;
+
+  // ---------- before: graph segments with eager attention between them ----------
+  const sb = document.getElementById("sb");
+  el(sb, "text", {x: X0, y: 16, fill: "#5d5a55"}, "28 layers");
+  el(sb, "text", {x: stripEnd, y: 16, "text-anchor": "end", "font-weight": "bold", fill: "#8f2f24"}, "14.7 ms per prefill step (median)");
+  for (let k = 0; k <= NLAYERS; k++) {
+    el(sb, "rect", {x: X0 + k * (SEG + ATT) + 0.5, y: Y, width: SEG - 1, height: H, rx: 3,
+                    fill: BAND.fill, stroke: BAND.stroke, "stroke-width": 1.3});
+  }
+  for (let k = 0; k < NLAYERS; k++) {
+    el(sb, "rect", {x: attX(k), y: Y + 3, width: ATT, height: H - 6, rx: 2,
+                    fill: EAGER.fill, stroke: EAGER.stroke, "stroke-width": 1.5});
+  }
+  // zoom on layer 1's attention call
+  const zx = 14, zy = 84, zh = 86, zw = 360;
+  el(sb, "path", {d: `M${attX(0)},${Y + H - 3} L${zx + 126},${zy}`, stroke: "#c98a82", fill: "none", "stroke-width": 1});
+  el(sb, "path", {d: `M${attX(0) + ATT},${Y + H - 3} L${zx + 126 + zw},${zy}`, stroke: "#c98a82", fill: "none", "stroke-width": 1});
+  el(sb, "rect", {x: zx, y: zy + 23, width: 110, height: 40, rx: 4, fill: BAND.fill, stroke: BAND.stroke, "stroke-width": 1.3});
+  el(sb, "text", {x: zx + 55, y: zy + 48, "text-anchor": "middle"}, "graph segment");
+  el(sb, "rect", {x: zx + 126, y: zy, width: zw, height: zh, rx: 5, fill: EAGER.fill, stroke: EAGER.stroke, "stroke-width": 2});
+  el(sb, "text", {x: zx + 126 + zw / 2, y: zy + 24, "text-anchor": "middle", fill: "#8f2f24", "font-weight": "bold"}, "Each attention call costs about 0.27 ms of CPU.");
+  for (const [i, name, cpu] of [[0, "FlashAttention forward", "214 µs"], [1, "varlen wrapper", "51 µs"]]) {
+    el(sb, "text", {x: zx + 146, y: zy + 50 + 22 * i}, name);
+    el(sb, "text", {x: zx + 106 + zw, y: zy + 50 + 22 * i, "text-anchor": "end"}, cpu);
+  }
+  el(sb, "rect", {x: zx + 142 + zw, y: zy + 23, width: 110, height: 40, rx: 4, fill: BAND.fill, stroke: BAND.stroke, "stroke-width": 1.3});
+  el(sb, "text", {x: zx + 197 + zw, y: zy + 48, "text-anchor": "middle"}, "graph segment");
+
+  // ---------- this PR: one full graph, attention inside ----------
+  const sp = document.getElementById("sp");
+  el(sp, "text", {x: X0, y: 16, fill: "#5d5a55"}, "28 layers, one graph");
+  el(sp, "text", {x: stripEnd, y: 16, "text-anchor": "end", "font-weight": "bold", fill: "#1f5e35"}, "4.3 ms per prefill step (median)");
+  el(sp, "rect", {x: X0 - 6, y: Y - 6, width: stripEnd - X0 + 12, height: H + 12, rx: 6,
+                  fill: BAND.fill, stroke: BAND.stroke, "stroke-width": 2});
+  for (let k = 0; k <= NLAYERS; k++) {
+    el(sp, "rect", {x: X0 + k * (SEG + ATT) + 0.5, y: Y, width: SEG - 1, height: H, rx: 3,
+                    fill: "#cfe0f0", stroke: "#cfe0f0", "stroke-width": 1});
+  }
+  for (let k = 0; k < NLAYERS; k++) {
+    el(sp, "rect", {x: attX(k), y: Y + 3, width: ATT, height: H - 6, rx: 2,
+                    fill: "#fff", stroke: BAND.stroke, "stroke-width": 1.3});
+  }
+
+  // ---------- rejected: SGLang's default slot count ----------
+  const sr = document.getElementById("sr");
+  const CX = 0, CY = 22, CW = 12;
+  // one prefill batch with more requests than the 32 slots: the whole batch runs eagerly
+  for (let i = 0; i < 41; i++) {
+    el(sr, "rect", {x: CX + i * CW + 1, y: CY, width: CW - 2, height: 16, rx: 2,
+                    fill: EAGER.fill, stroke: EAGER.stroke, "stroke-width": 1.2});
+  }
+  el(sr, "text", {x: CX + 41 * CW + 6, y: CY + 13, fill: "#8f2f24"}, "...");
+  el(sr, "path", {d: `M${CX + 1},${CY - 4} L${CX + 1},${CY - 9} L${CX + 32 * CW - 1},${CY - 9} L${CX + 32 * CW - 1},${CY - 4}`,
+                  fill: "none", stroke: "#6f6a62", "stroke-width": 1.4});
+  el(sr, "text", {x: CX + 32 * CW + 8, y: CY - 5, fill: "#5d5a55"}, "32 slots");
+</script>
+</body>
+</html>

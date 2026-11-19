@@ -43,14 +43,16 @@ Detected by `<formatted_context>`, `<pr_or_issue_body>`, and `<comments>` tags i
 the prompt. PR metadata, the description, and all comments are already in the
 prompt. The checkout is shallow, so get the diff with `gh pr diff <N>` rather than
 `git diff`. Allowed read-only commands: `gh pr view`, `gh pr diff`, `gh pr list`,
-`gh issue view`. Post the result with `gh pr review` (see "Posting").
+`gh issue view`, plus pr-image's renderer (Step 4b). Post the result with
+`gh pr review` (see "Posting").
 
 ### What was asked
 Read the triggering comment first; it overrides defaults below.
 - **"review" / "review this PR"**: full review.
 - **"review again" / "check again"**: re-review. Report only what changed since
   the last automated review: which earlier must-fix items are resolved (one line
-  each), which remain, and new problems in the new commits.
+  each), which remain, and new problems in the new commits. If Step 4b draws a
+  new image, start with **What this PR does.** and put it there.
 - **"review my review" / "comment on my comments"**: evaluate the maintainer's
   comments one by one (see "Reviewing a maintainer's review").
 - **A specific question** ("is this the proper fix?", "give a concrete example",
@@ -202,14 +204,42 @@ writing anything:
   error, a generic "add tests", a style point CI enforces, or praise.
 - Rank: must-fix (would block a maintainer), then should-consider.
 
+### Step 4b: Image (GitHub Actions mode)
+A picture of the change goes under "What this PR does" on the first review, and
+again only when a later push makes the last picture wrong. Only for "review" and
+"review again": skip this step locally, for "review my review" and for a question.
+1. Find the last review by `claude` (`author.login`) whose body has
+   `<!-- pr-image drawn at <sha> -->`: `gh pr view <N> --json reviews`.
+2. None: draw. Found: check that image's claims (its alt text, and the image
+   sources under that review's Details) against the current diff. All still true:
+   no image and no line. Any false, or the PR's main change moved: draw a new one.
+3. No image when nothing runs differently (pr-image §2: a pin, import, golden or
+   test-only change, a default-off flag), or when the PR is trivial and "Example"
+   is omitted. A pin that fixes a deadlock does run differently.
+4. Draw with the `pr-image` skill; follow its "GitHub Actions" section.
+
+TODO(ghstack): ghstack PRs disable Write, so they get no image and no line about it.
+Rendering a page passed on stdin could cover them; untested.
+
 ### Step 5: Fact-check
 Verify the consolidated must-fix list (not the raw candidates) by re-reading the
 code. Group findings by area; use 1-3 agents for large PRs, or do it yourself
 for small ones. Each finding comes back valid, invalid, or needs rewording. Drop
 the invalid ones. Mark anything you still can't verify as *unverified*.
 
+An image from Step 4b is always checked by one fresh sub-agent, even on a small
+PR: give it the `<form>_900px.png`, the image sources and the diff. It checks each
+label, arrow, count and code token against the diff. Fix what it finds within
+pr-image's render budget, or drop the image.
+
 ### Step 6: Write and post
 Use the output format below, then post (Actions mode) or print (local mode).
+
+With an image from Step 4b, upload it first (pr-image's `--upload` command, which
+prints its URL). Put `![<alt>](<url>)` and `<!-- pr-image drawn at <PR head sha> -->`
+under "What this PR does", and the image sources (label -> `path:line` or diff hunk)
+under Details. A failed render or upload, or a run over the render budget: post
+without the image, with one line under "Not verified": "No image: <the reason>".
 
 ## Reviewing a maintainer's review
 
@@ -232,6 +262,8 @@ under "Not verified" if it matters). Put long detail in a collapsible section.
 **Verdict: Approve | Request changes | Needs discussion** -- <one sentence: the decisive reason>
 
 **What this PR does.** <2-4 plain sentences.>
+
+<the image and its marker, when Step 4b drew one>
 
 **Example.** <5-15 lines: a minimal concrete scenario, before vs. after. For a
 refactor, show one representative call site before/after.>
