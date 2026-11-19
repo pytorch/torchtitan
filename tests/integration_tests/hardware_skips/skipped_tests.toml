@@ -30,5 +30,6 @@ rocm = [
   "llama3_flex_shard+tp+cp",                 # FlexShard is unvalidated on ROCm.
   "deepseek_v3_flex_shard+ep",               # FlexShard is unvalidated on ROCm.
   "deepseek_v3_dist_muon_flex_shard+ep",     # FlexShard is unvalidated on ROCm.
+  "deepseek_v3_flex_shard+cp+pp+ep",         # FlexShard is unvalidated on ROCm.
   "flex_shard_checkpoint",                   # FlexShard is unvalidated on ROCm.
 ]

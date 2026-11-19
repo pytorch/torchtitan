@@ -101,8 +101,8 @@ sharding.
 
 `tests/unit_tests/gpu/distributed/test_flex_shard_fsdp.py` compares the two
 backends bitwise. The integration tests `llama3_flex_shard+tp+cp`,
-`deepseek_v3_flex_shard+ep` and `deepseek_v3_dist_muon_flex_shard+ep` (with
-DistMuon) load the seed checkpoint their FSDP2 counterparts load and must
+`deepseek_v3_flex_shard+ep`, `deepseek_v3_flex_shard+cp+pp+ep` and
+`deepseek_v3_dist_muon_flex_shard+ep` (with DistMuon) load the seed checkpoint their FSDP2 counterparts load and must
 reproduce those counterparts' Real PG goldens, and
 `flex_shard_checkpoint` resumes an FSDP2 checkpoint and loads an FSDP2 Hugging
 Face export. To compare the backends on your own configuration,
@@ -129,7 +129,7 @@ Memory and communication timing differ from FSDP2's in two places:
 | | Supported with `FlexShardConfig()` |
 | --- | --- |
 | Models | Decoders that shard through `Decoder._apply_fsdp`, also with tied embedding and output weights (`enable_weight_tying`). The parity tests cover Llama 3 (also with tied weights), Qwen3 MoE, and DeepSeek V3, also with an MTP layer |
-| Parallelism | FSDP over `dp_shard`; tensor parallelism, with or without sequence parallelism; context parallelism; expert parallelism with `AllToAllTokenDispatcher`; and their combinations |
+| Parallelism | FSDP over `dp_shard`; tensor parallelism, with or without sequence parallelism; context parallelism; expert parallelism with `AllToAllTokenDispatcher`; pipeline parallelism, with a PyTorch whose pipeline schedules accept FlexShard modules (pytorch/pytorch#205659); and their combinations |
 | Training | `ChunkedLossWrapper`, gradient accumulation, activation remat, local compile, validation, EMA (`optim.ema`, also with `offload_to_cpu`), DistMuon without tensor parallelism, and accelerator graphs without expert parallelism (the four capture settings in [ACCELERATOR_GRAPH.md](ACCELERATOR_GRAPH.md)) |
 | Checkpointing | `CheckpointManager` with synchronous or `async_mode="async"` saves, seed checkpoints, `export_dtype`, `initial_load_path` (including FSDP2 checkpoints), and `initial_load_in_hf` |
 
@@ -141,7 +141,6 @@ for these when the training engine is built, before anything else:
 | Rejected | Why |
 | --- | --- |
 | HSDP and DDP (`data_parallel_replicate_degree > 1`) | torchtitan's FlexShard buckets don't replicate over a second mesh axis yet. |
-| Pipeline parallelism | PyTorch's pipeline schedules drive FSDP through `FSDPModule`, which FlexShard modules aren't. |
 | `fsdp_symm_mem_scope`, `fsdp_enable_cpu_offloading`, `fsdp_unshard_in_current_stream` | torchtitan's FlexShard path has no equivalent of these yet. |
 | `fsdp_defer_gradient_reduction` | FlexShard has no equivalent of FSDP2's `set_is_last_backward`. |
 | Models that override `_apply_fsdp`: multimodal models, DeepSeek V4, FLUX and the transformers modeling backend | Only `Decoder._apply_fsdp` passes `fsdp_backend` on, so these would shard with FSDP2. |
@@ -151,6 +150,7 @@ for these when the training engine is built, before anything else:
 | With expert parallelism: Dist-MoE, token dispatchers other than `AllToAllTokenDispatcher`, and `output_postprocess` | The others aren't checked against FSDP2 yet. `output_postprocess` parameters are replicated over `ep`, and the expert bucket wouldn't sum their grads over it. |
 | Checkpointers other than `CheckpointManager` | `torch_checkpointing`'s resharder reads only DTensor placements. |
 | `checkpointer.async_mode="async_with_pinned_mem"` | The save process receives the state dict through `torch.multiprocessing`, which drops the shard layouts. |
+| `checkpointer.initial_load_in_hf` with pipeline parallelism | The Hugging Face load groups and broadcasts over all ranks, which assumes every rank holds the same parameters. Pipeline stages don't. |
 | `checkpointer.initial_load_in_hf_quantized`, `checkpointer.last_save_in_hf` | Not supported yet. The state dict adapters' save path needs DTensor parameters. |
 | DistMuon with tensor parallelism | DistMuon's storage layouts for FlexShard parameters hold the buckets' split, not TP's. DistMuon's recipes reject TP with FSDP2 too. |
 | `debug.spmd_typechecking` | Not checked with FlexShard yet. |

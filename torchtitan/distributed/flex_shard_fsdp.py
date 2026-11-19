@@ -296,10 +296,15 @@ def flex_shard_partial_backwards(
     the call's input grads are ready: with gradient sync, it reduce-scatters
     and reshards; without, it keeps the grads, and reshards only with
     ``reshard_after_backward``. That backward finishes no other bucket, so
-    unlike FSDP2, the other buckets need no changes. Gradient sync is on
-    outside, since ``validate_flex_shard_training`` rejects deferred gradient
-    reduction, so the last call's backward reduce-scatters the grads of all
-    calls, as FSDP2's does.
+    unlike FSDP2, the other buckets need no changes. The calls before the last
+    keep their grads; the last call's backward reduce-scatters the grads of
+    all calls if the caller had gradient sync on, as FSDP2's does.
+
+    Under manual backward finalization, i.e. a pipeline schedule, the schedule
+    owns every reduction and the bucket's residency, as for FSDP2: every call
+    keeps its grads, and the bucket stays unsharded after the calls. It also
+    holds the final norm, whose weight grad the stage's backward computes
+    later, e.g. in a zero-bubble schedule's weight pass.
 
     Without backward, the bucket's forward stays open, as FSDP2 leaves its
     group's; ``post_validate_fsdp_for_accelerator_graph`` closes both.
@@ -311,23 +316,24 @@ def flex_shard_partial_backwards(
             "parallelism.fsdp_backend=FlexShardConfig() does not support "
             "ChunkedLossWrapper with a frozen decoder yet."
         )
+    requires_gradient_sync = bucket.requires_gradient_sync
     reshard_after_backward = bucket.reshard_after_backward
-    # TODO: Gradient sync is set to True, not restored, because FlexShard has
-    # no public getter for it, and validate_flex_shard_training rejects
-    # deferred gradient reduction, so it's always on outside. Allowing deferral
-    # needs the caller's setting restored, and FlexShard's state of grads kept
-    # without sync, to leave the last reduce-scatter to the decoder backward
-    # when earlier microbatches kept grads, as FSDP2 does.
+    manual_finalization = bucket.manual_backward_finalization
     try:
         bucket.set_requires_gradient_sync(False)
         bucket.set_reshard_after_backward(False)
-        yield lambda: bucket.set_requires_gradient_sync(True)
+        yield lambda: (
+            None
+            if manual_finalization
+            else bucket.set_requires_gradient_sync(requires_gradient_sync)
+        )
     finally:
-        bucket.set_requires_gradient_sync(True)
+        bucket.set_requires_gradient_sync(requires_gradient_sync)
         bucket.set_reshard_after_backward(reshard_after_backward)
-        # The last call's backward has resharded the bucket, unless there was
-        # no backward.
-        bucket.reshard()
+        if not manual_finalization:
+            # The last call's backward has resharded the bucket, unless there
+            # was no backward.
+            bucket.reshard()
 
 
 def declare_state_dict_layouts(model: nn.Module) -> None:
@@ -525,7 +531,8 @@ def load_hf_into_local_shards(
         for key, (value, layout) in shards.items()
     } | {key: value.to("meta") for key, value in others.items()}
     # Every rank holds the same keys, and the groups depend only on the keys and
-    # full shapes, so every rank loads as often.
+    # full shapes, so every rank loads as often. Pipeline stages hold different
+    # keys, which validate_flex_shard_training rejects for now.
     groups: list[list[str]] = []
     group_bytes = 0
     for key, (value, layout) in shards.items():
@@ -677,10 +684,21 @@ def validate_flex_shard_training(
                 "data_parallel_replicate_degree",
                 parallelism.data_parallel_replicate_degree,
             ),
-            ("pipeline_parallel_degree", parallelism.pipeline_parallel_degree),
         )
         if degree != 1
     ]
+    if parallelism.pipeline_parallel_degree > 1:
+        from torch.distributed.pipelining import _utils as pipelining_utils
+
+        # TODO: Drop once torchtitan's minimum PyTorch has pytorch/pytorch#205659.
+        # Before it, pipeline schedules recognize a data-parallel stage only by
+        # FSDPModule, so they would neither defer nor finalize FlexShard's
+        # gradient reductions.
+        if not hasattr(pipelining_utils, "_is_sharded_data_parallel"):
+            unsupported.append(
+                "pipeline parallelism with a PyTorch whose pipeline schedules "
+                "don't recognize FlexShard modules (pytorch/pytorch#205659)"
+            )
     if parallelism.fsdp_symm_mem_scope is not None:
         unsupported.append(
             f"parallelism.fsdp_symm_mem_scope={parallelism.fsdp_symm_mem_scope!r}"
@@ -691,8 +709,9 @@ def validate_flex_shard_training(
         unsupported.append("parallelism.fsdp_unshard_in_current_stream=True")
     if parallelism.fsdp_defer_gradient_reduction:
         # FlexShard has no equivalent of FSDP2's set_is_last_backward.
-        # TODO: When allowing it, change flex_shard_partial_backwards, which
-        # sets lm_head's bucket's gradient sync to True instead of restoring it.
+        # TODO: When allowing it, check flex_shard_partial_backwards against
+        # FSDP2's, which leaves the last chunk's reduction to the outer
+        # backward when earlier microbatches kept grads.
         unsupported.append("parallelism.fsdp_defer_gradient_reduction=True")
 
     # Decoder._apply_fsdp is the only path that passes fsdp_backend on, so a
@@ -760,6 +779,13 @@ def validate_flex_shard_training(
             # layouts, which torch.multiprocessing drops on the way to the save
             # process.
             unsupported.append("checkpointer.async_mode='async_with_pinned_mem'")
+        if checkpointer.initial_load_in_hf and parallelism.pipeline_parallel_degree > 1:
+            # TODO: Allow once load_hf_into_local_shards groups and broadcasts
+            # per pipeline stage. It assumes every rank holds the same keys,
+            # which pipeline stages don't.
+            unsupported.append(
+                "checkpointer.initial_load_in_hf=True with pipeline parallelism"
+            )
         # load_hf_into_local_shards doesn't load quantized checkpoints.
         if checkpointer.initial_load_in_hf_quantized:
             unsupported.append("checkpointer.initial_load_in_hf_quantized=True")
