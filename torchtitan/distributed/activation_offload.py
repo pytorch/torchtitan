@@ -42,6 +42,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch_remat as remat
+from torch.distributed.fsdp import FSDPModule
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass
 from torch.utils._pytree import tree_flatten
@@ -316,12 +317,13 @@ class ActivationOffloader:
         # One stream per copy direction: one microbatch's offload and
         # another's reload can run at once (sharing host bandwidth, see
         # ACTIVATION_OFFLOAD.md), and a reload never queues behind an offload.
-        # TODO: order reloads after FSDP2 CPU offload's H2D parameter copies
-        # (its all_gather_copy_in_stream) once FSDP2 exposes that stream, so
-        # the all-gather overlaps the reload instead of following both.
         self._offload_stream = torch.cuda.Stream()
         self._reload_stream = torch.cuda.Stream()
         self._host_buffers = _PinnedBufferPool()
+        # FSDP2's all-gather copy-in stream, which reloads also wait on (see
+        # _reload). Set at each model-part forward: fully_shard runs after
+        # this offloader is installed.
+        self._fsdp_copy_in_stream: torch.Stream | None = None
         # The group whose block forward is running, and its saved-tensor
         # hooks: the block's pre-hook enters them and its post-hook exits
         # them, so they cannot be one ``with`` statement.
@@ -442,6 +444,12 @@ class ActivationOffloader:
             self._hook_blocks(module)
         self._previous_group = None
         self._pending_trigger = None
+        # FSDP2's root pre-forward, prepended, has already run its lazy init.
+        self._fsdp_copy_in_stream = (
+            module.get_all_gather_copy_in_stream()
+            if isinstance(module, FSDPModule)
+            else None
+        )
         self._model_part_input_storages = {
             t.untyped_storage().data_ptr()
             for t in tree_flatten((args, kwargs))[0]
@@ -702,8 +710,8 @@ class ActivationOffloader:
         ``out_i`` (step 1), whichever was registered first. That hook
         unshards block ``i``: its copy-out on the compute stream starts with
         a small H2D copy of ``split_with_sizes_copy``'s metadata, and the
-        reload, which waits on the compute stream, queues behind it. Queued
-        first, the reload could hold that copy, and block ``i``'s backward,
+        reload, which waits on the compute stream (and on FSDP2's copy-in
+        stream, see _reload), queues behind it. Queued first, the reload could hold that copy, and block ``i``'s backward,
         in the copy engine (H100, pytorch/torchtitan#467). A module backward
         pre-hook would also fire before FSDP2's, and it wraps the outputs in
         a custom autograd Function, so an in-place update of an output
@@ -753,6 +761,13 @@ class ActivationOffloader:
         # allocation and after FSDP2's copy-out (see _prefetch_on_grad).
         device_tensor = torch.empty_like(host_buffer, device="cuda")
         self._reload_stream.wait_stream(torch.cuda.current_stream())
+        if self._fsdp_copy_in_stream is not None:
+            # Parameters first: FSDP2's pre-backward queued the previous
+            # block's copy-in (its H2D shard copies under CPU offload) just
+            # before this trigger. Loaded first, their all-gather overlaps
+            # this reload instead of following both. An idle-stream wait when
+            # FSDP2 unshards on the current stream.
+            self._reload_stream.wait_stream(self._fsdp_copy_in_stream)
         with torch.cuda.stream(self._reload_stream):
             device_tensor.copy_(host_buffer, non_blocking=True)
             offloaded.reload_event = self._reload_stream.record_event()

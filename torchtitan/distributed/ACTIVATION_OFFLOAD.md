@@ -269,24 +269,26 @@ pytorch/torchtitan#467; not reproduced on GB300).
 on the CPU-GPU link: parameter shards host-to-device in each unshard's
 copy-in, gradient shards device-to-host after each reduce-scatter. In
 forward, its copies run opposite to the offloads but share the Grace's
-bandwidth (see [Bandwidth](#bandwidth)). In block `i`'s backward,
-block `i - 1`'s parameter shards (prefetch, `all_gather_copy_in_stream`) and
-activations (reload, `_reload_stream`) go the same direction; both become
-ready when block `i`'s copy-out finishes and share the bandwidth in no
-defined order. The two compose (a unit test checks gradients bitwise on two
-ranks), but when the copies do not fit in block `i`'s backward, parameters
-first is better: they still need the all-gather after their copy, the
-activations need nothing more. Shared, both finish after `(P + A) / BW` and
-the all-gather starts only then; parameters first saves up to
-`min(all-gather, A / BW)` (P, A: parameter and activation bytes; BW: link
-bandwidth). Under `set_unshard_in_current_stream` (TorchTitan's
-`fsdp_unshard_in_current_stream`) or a single rank, FSDP2 copies parameters
-on the compute stream, so reloads already follow them.
+bandwidth (see [Bandwidth](#bandwidth)). In block `i`'s backward, block
+`i - 1`'s parameter shards and activations go the same direction, and
+the parameters load first: FSDP2's pre-backward queues their copy-in on
+`all_gather_copy_in_stream` just before the reload trigger runs, and each
+reload waits on that stream (`FSDPModule.get_all_gather_copy_in_stream()`)
+as well as on the compute stream. The parameters still need the all-gather
+after their copy, the activations nothing more, so the all-gather overlaps
+the reload. Sharing the bandwidth instead, both would finish after
+`(P + A) / BW` and the all-gather would start only then; parameters first
+saves up to `min(all-gather, A / BW)` (P, A: parameter and activation bytes;
+BW: link bandwidth).
 
-TODO: make the reload stream also wait on `all_gather_copy_in_stream`, where
-FSDP2 queues block `i - 1`'s parameter copies just before the trigger runs (a
-no-op wait in the modes above). It needs FSDP2 to expose that stream; today
-it is only reachable through FSDP2's private comm context.
+![FSDP2 default streams at a backward block boundary](../../assets/images/activation_offload_fsdp_streams.png)
+
+Under `set_unshard_in_current_stream` (TorchTitan's
+`fsdp_unshard_in_current_stream`) or a single rank, FSDP2 runs the copy-in
+on the compute stream, so the compute-stream wait already orders the reload
+after the parameters, and the copy-in stream is idle:
+
+![FSDP2 unshard_in_current_stream at a backward block boundary](../../assets/images/activation_offload_fsdp_streams_current_stream.png)
 
 ## Pipeline parallelism
 

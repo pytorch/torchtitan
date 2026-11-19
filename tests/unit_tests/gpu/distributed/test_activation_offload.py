@@ -791,10 +791,28 @@ def _run_fsdp_cpu_offload_composition(rank: int, world_size: int, port: int) -> 
 
         expected = _grads(build(_without_offload(remat_config)), inputs)
         model = build(remat_config)
-        actual = _grads(model, inputs)
+        offloader = _offloader(model)
+        # Record which streams the reload stream waits on.
+        waited_on: list[torch.cuda.Stream] = []
+        wait_stream = torch.cuda.Stream.wait_stream
+
+        def recording_wait_stream(self, stream):
+            if self == offloader._reload_stream:
+                waited_on.append(stream)
+            return wait_stream(self, stream)
+
+        with unittest.mock.patch.object(
+            torch.cuda.Stream, "wait_stream", recording_wait_stream
+        ):
+            actual = _grads(model, inputs)
         for e, a in zip(expected, actual, strict=True):
             torch.testing.assert_close(a.to_local(), e.to_local(), rtol=0, atol=0)
-        assert _offloader(model).forward_stats.offloaded_bytes > 0
+        # Every reload waits on FSDP2's copy-in stream, where FSDP2 queued the
+        # previous block's parameter copies, so the parameters load first.
+        copy_in_stream = model.get_all_gather_copy_in_stream()
+        assert waited_on.count(copy_in_stream) > 0
+        assert waited_on.count(copy_in_stream) * 2 == len(waited_on)
+        assert offloader.forward_stats.offloaded_bytes > 0
     finally:
         dist.destroy_process_group()
 
