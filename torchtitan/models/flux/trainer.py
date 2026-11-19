@@ -70,6 +70,11 @@ class FluxTrainer(Trainer):
 
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
+            if self.parallelism.pipeline_parallel_degree > 1:
+                raise ValueError(
+                    "Flux does not support pipeline parallelism. Set "
+                    "parallelism.pipeline_parallel_degree to 1."
+                )
             if (
                 self.parallelism.context_parallel_degree > 1
                 and self.parallelism.context_parallel_load_balancer is not None
