@@ -586,6 +586,54 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
     assert dropped_metric.value.value == 1
 
 
+@pytest.mark.parametrize("rdma", [False, True])
+def test_batcher_logs_the_bytes_each_rank_receives_by_value(rdma: bool) -> None:
+    batcher = Batcher.Config(rdma_min_tensor_bytes=1024 if rdma else None).build(
+        num_tokens_per_microbatch_per_dp_rank=16,
+        max_context_length=16,
+        num_prompts_per_train_step=1,
+        dp_degree=2,
+        pad_id=0,
+        temperature=1.0,
+        register_rdma_object=lambda microbatch, **kwargs: microbatch,
+    )
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_trainable_group(0, num_samples=2)
+    )
+
+    assert batch is not None
+    payload = [
+        metric.value
+        for metric in batch.metrics
+        if metric.key == "payload/forward_backward_bytes_per_dp_rank"
+    ]
+    if rdma:
+        # RDMA microbatches leave their tensors in the batcher.
+        assert payload == []
+        return
+    [microbatch_rank_0, microbatch_rank_1] = batch.microbatch_groups[0][0]
+    # 16 tokens: input and labels int64, the rest of the per-token fields 4 bytes or less.
+    assert microbatch_rank_0.input.nbytes == microbatch_rank_1.input.nbytes == 16 * 8
+    bytes_per_rank = sum(
+        tensor.nbytes
+        for tensor in (
+            microbatch_rank_0.input,
+            microbatch_rank_0.labels,
+            microbatch_rank_0.positions,
+            microbatch_rank_0.padding_mask,
+            microbatch_rank_0.loss_token_counts,
+            microbatch_rank_0.routing_token_counts,
+            microbatch_rank_0.generator_logprobs,
+            microbatch_rank_0.temperature,
+            microbatch_rank_0.loss_mask,
+            microbatch_rank_0.advantages,
+            *microbatch_rank_0.model_kwargs.values(),
+        )
+    )
+    [value] = payload
+    assert (value.value, value.count) == (2 * bytes_per_rank, 2)
+
+
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     time_metrics = [
         m.Metric("timing/step/total", m.Mean.from_list([2.0])),
@@ -821,6 +869,90 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
         assert taker.result().group_id == 6
 
     asyncio.run(run())
+
+
+def test_rollout_loop_keeps_the_rollouter_metrics() -> None:
+    """The rollouter's metrics on a group (e.g. its run_group hop) reach the batcher with the
+    rollout metrics the controller adds."""
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        return RolloutGroup(
+            group_id=group_id,
+            rollouts=[],
+            metrics=[m.Metric("timing/hop/run_group/call_duration", m.Mean(0.1))],
+        )
+
+    async def run() -> RolloutGroup:
+        buffer = _buffer(capacity=1, window_size=None)
+        await _admit(buffer, 0)
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(num_samples_per_prompt=1)
+        )
+        controller._sampling = SamplingConfig()
+        controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+        controller.rollout_recorder = Mock()
+        controller.generator_router = SimpleNamespace(
+            release_groups=SimpleNamespace(call_one=AsyncMock())
+        )
+        loop = asyncio.create_task(
+            controller._rollout_loop(
+                group_buffer=buffer, generate_fn=None, release_session_fn=None
+            )
+        )
+        group = await buffer.take_finalized()
+        await buffer.close()
+        await loop
+        return group
+
+    group = asyncio.run(asyncio.wait_for(run(), timeout=10))
+    keys = {metric.key for metric in group.metrics}
+    assert {"timing/hop/run_group/call_duration", "rollout/response_length"} <= keys
+
+
+def test_batcher_loop_times_each_add_group_call() -> None:
+    """Each add_group call's duration rides with the next batch."""
+    batch = SimpleNamespace(metrics=[])
+
+    async def add_group(*, rollout_group: RolloutGroup):
+        await asyncio.sleep(0.03)
+        # The second call fills a batch.
+        return (batch if rollout_group.group_id == 1 else None), True
+
+    async def run() -> object:
+        buffer = _buffer(capacity=2, window_size=None)
+        for group_id in (0, 1):
+            await _admit(buffer, group_id)
+            await buffer.claim_next()
+            await _finalize(buffer, group_id)
+        controller = object.__new__(Controller)
+        controller._group_buffer = buffer
+        controller.batcher = SimpleNamespace(
+            add_group=SimpleNamespace(call_one=add_group)
+        )
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.create_task(controller._batcher_loop(training_batch_queue=queue))
+        packed = await queue.get()
+        await buffer.close()
+        await loop
+        return packed
+
+    packed = asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+    call_duration = next(
+        metric.value
+        for metric in packed.metrics
+        if metric.key == "timing/hop/add_group/call_duration"
+        and isinstance(metric.value, m.Mean)
+    )
+    # Both calls, not only the one that returned the batch.
+    assert call_duration.count == 2
+    metrics = m.MetricsProcessor._aggregate_metrics(packed.metrics)
+    assert metrics["timing/hop/add_group/call_duration/mean"] >= 0.03
+    assert (
+        metrics["timing/hop/add_group/call_duration/max"]
+        >= metrics["timing/hop/add_group/call_duration/mean"]
+    )
 
 
 async def _block_forever(*args, **kwargs) -> None:

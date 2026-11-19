@@ -9,7 +9,12 @@
 import asyncio
 import functools
 import gc
+from dataclasses import dataclass
 from types import SimpleNamespace
+
+import numpy as np
+import pytest
+from renderers import PlaceholderRange
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch import (
@@ -19,8 +24,16 @@ from torchtitan.rl.actors.monarch import (
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
+from torchtitan.rl.rollout.types import (
+    PromptImage,
+    Rollout,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 
 
 class _ChooseRunGroupEndpoint:
@@ -30,6 +43,8 @@ class _ChooseRunGroupEndpoint:
         self.release = asyncio.Event()
         self.cancelled = asyncio.Event()
         self.error: Exception | None = None
+        # The rollouts of the group the worker returns.
+        self.rollouts: list[Rollout] = []
 
     def choose(self, **kwargs) -> asyncio.Future[RolloutGroup]:
         self.calls.append(kwargs)
@@ -44,7 +59,7 @@ class _ChooseRunGroupEndpoint:
             raise
         if self.error is not None:
             raise self.error
-        return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
+        return RolloutGroup(group_id=kwargs["group_id"], rollouts=self.rollouts)
 
 
 def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
@@ -233,6 +248,68 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         assert actor_mesh.stopped
 
     asyncio.run(run())
+
+
+@dataclass(kw_only=True, slots=True)
+class _TurnWithTopkLogprobs(RolloutTurn):
+    """A turn with one more per-token array, as score centering adds top-k logprobs."""
+
+    completion_topk_logprobs: np.ndarray
+
+
+def test_run_group_rollouts_logs_the_call_duration_and_the_payload(monkeypatch) -> None:
+    async def run() -> dict[str, float]:
+        actor_mesh = _WorkerActorMesh()
+        rollouter = _rollouter_without_datasets()
+        await _setup(rollouter, actor_mesh, monkeypatch)
+        turn = _TurnWithTopkLogprobs(
+            rollout_id=RolloutTurnID(group_id=1, rollout_id=0, turn_id=0),
+            prompt_prefix_len=0,
+            prompt_delta_token_ids=np.zeros(3, dtype=np.int32),  # 12 bytes
+            prompt_delta_images=(
+                PromptImage(
+                    hash_value="h",
+                    source_path="a.png",
+                    grid_thw=(1, 2, 2),
+                    data=b"x" * 100,
+                ),
+            ),
+            prompt_delta_image_placeholders=(PlaceholderRange(offset=0, length=1),),
+            completion_token_ids=np.zeros(2, dtype=np.int32),  # 8 bytes
+            completion_logprobs=np.zeros(2, dtype=np.float32),  # 8 bytes
+            completion_topk_logprobs=np.zeros((2, 4), dtype=np.float32),  # 32 bytes
+        )
+        actor_mesh.run_group.rollouts = [
+            Rollout(
+                group_id=1, rollout_id=0, turns=[turn], status=RolloutStatus.COMPLETED
+            )
+        ]
+        dispatch = asyncio.create_task(
+            rollouter.run_group_rollouts(
+                generate_fn="generate_fn",
+                release_session_fn="release_session_fn",
+                sample="sample",
+                group_id=1,
+                group_size=1,
+                sampling="sampling",
+            )
+        )
+        await actor_mesh.run_group.started.wait()
+        # The reply takes 50 ms to arrive.
+        await asyncio.sleep(0.05)
+        actor_mesh.run_group.release.set()
+        group = await dispatch
+        await rollouter.close()
+        return m.MetricsProcessor._aggregate_metrics(group.metrics)
+
+    metrics = asyncio.run(run())
+
+    assert metrics["timing/hop/run_group/call_duration/mean"] >= 0.05
+    assert metrics["timing/hop/run_group/call_duration/max"] == pytest.approx(
+        metrics["timing/hop/run_group/call_duration/mean"]
+    )
+    # Every array field counts, including ones RolloutTurn itself does not declare.
+    assert metrics["payload/rollout_group_array_bytes/mean"] == 12 + 100 + 8 + 8 + 32
 
 
 async def _dispatch_then_cancel_caller(

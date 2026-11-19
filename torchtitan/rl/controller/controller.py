@@ -117,6 +117,7 @@ from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
+    compute_call_duration_metrics,
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
@@ -1287,8 +1288,8 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
-                    prefix="rollout", rollouts=group.rollouts
+                group.metrics.extend(
+                    compute_rollout_metrics(prefix="rollout", rollouts=group.rollouts)
                 )
 
                 # save rollout for inspection
@@ -1327,6 +1328,8 @@ class Controller(Configurable):
             waits for:    a free training_batch_queue slot (maxsize=1)
             unblocked by: _trainer_loop training_batch_queue.get()
         """
+        # Per add_group call since the last batch; the hop's metrics ride with the next batch.
+        add_group_call_duration_s: list[float] = []
         while True:
             rollout_group = await self._group_buffer.take_finalized()
             if rollout_group is None:  # closed and drained
@@ -1335,15 +1338,25 @@ class Controller(Configurable):
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
             with sl.log_trace_span("batcher_add_group"):
+                start = time.perf_counter()
                 (
                     maybe_training_batch,
                     group_is_trainable,
                 ) = await self.batcher.add_group.call_one(rollout_group=rollout_group)
+                add_group_call_duration_s.append(time.perf_counter() - start)
             if not group_is_trainable:
                 await self._group_buffer.release_active_groups(
                     1, reason="untrainable_group"
                 )
             if maybe_training_batch is not None:
+                # Each call's duration minus the batcher's spans in its structured log is the
+                # transfer.
+                maybe_training_batch.metrics.extend(
+                    compute_call_duration_metrics(
+                        "add_group", add_group_call_duration_s
+                    )
+                )
+                add_group_call_duration_s = []
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)
         # TODO(async-rl): if finite datasets are supported, drain a final partial batch here.

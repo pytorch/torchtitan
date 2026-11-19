@@ -56,6 +56,27 @@ class MetricsTimer:
         ]
 
 
+def compute_call_duration_metrics(
+    hop: str, call_duration_s: list[float]
+) -> list[m.Metric]:
+    """Mean and max duration of calls over one hop between processes, timed by the caller from
+    sending each call to reading its reply.
+
+    A call's duration is the callee's handler plus serializing the request and the reply, the
+    transport, the wait in the callee's endpoint queue, and the wait for the caller's event loop
+    to resume after the reply lands. Where the handler is short, the duration is the transfer;
+    where it is long, subtract the handler's span in the callee's structured log.
+
+    Example:
+        compute_call_duration_metrics("add_group", [0.030, 0.020])
+        # -> timing/hop/add_group/call_duration/mean 0.025, timing/hop/add_group/call_duration/max 0.030
+    """
+    return [
+        m.Metric(f"timing/hop/{hop}/call_duration", m.Mean.from_list(call_duration_s)),
+        m.Metric(f"timing/hop/{hop}/call_duration", m.Max.from_list(call_duration_s)),
+    ]
+
+
 def combine_microbatch_metrics(
     microbatch_metrics: list[dict[str, float]],
 ) -> dict[str, float]:

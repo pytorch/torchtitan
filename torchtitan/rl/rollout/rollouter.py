@@ -10,9 +10,10 @@ import asyncio
 import itertools
 import logging
 import math
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -22,6 +23,8 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.rl.controller.metrics import compute_call_duration_metrics
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rdma_object import RDMAImageFiles, RegisterRDMAObject
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
@@ -260,11 +263,14 @@ class Rollouter(Configurable):
             sampling: Sampling config for every generate call in the group.
 
         Returns:
-            One scored `RolloutGroup`.
+            One scored `RolloutGroup`. Its `metrics` hold the call's
+            `timing/hop/run_group/call_duration` (see `compute_call_duration_metrics`) and
+            `payload/rollout_group_array_bytes`.
         """
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
+        start = time.perf_counter()
         # `choose` (see ActorSystem's call convention) sends the call to the `run_group`
         # endpoint of one worker in the pool.
         call = asyncio.ensure_future(
@@ -280,7 +286,28 @@ class Rollouter(Configurable):
         self._inflight_run_group_calls.add(call)
         call.add_done_callback(self._on_run_group_call_done)
         # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
-        return await asyncio.shield(call)
+        group = await asyncio.shield(call)
+        # The worker's `run_group` span is the handler's share of this duration.
+        group.metrics.extend(
+            compute_call_duration_metrics("run_group", [time.perf_counter() - start])
+        )
+        # Every array field of every turn (tokens, logprobs, and any per-token field a feature
+        # adds) plus the image files. Not the pickled size: messages, metrics and logs are not
+        # counted, and on a text task they can outweigh the arrays.
+        payload_bytes = 0
+        for rollout in group.rollouts:
+            for turn in rollout.turns:
+                for turn_field in fields(turn):
+                    value = getattr(turn, turn_field.name)
+                    if isinstance(value, np.ndarray):
+                        payload_bytes += value.nbytes
+                payload_bytes += sum(
+                    len(image.data) for image in turn.prompt_delta_images
+                )
+        group.metrics.append(
+            m.Metric("payload/rollout_group_array_bytes", m.Mean(payload_bytes))
+        )
+        return group
 
     def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
         self._inflight_run_group_calls.discard(call)
