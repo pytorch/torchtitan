@@ -1979,6 +1979,111 @@ class TestFlexShardScheduling(TestCase):
         wait.meta["val"] = launch.meta["val"]
         finish.meta["val"] = torch.empty(8)
 
+    def test_all_gather_copy_fold_preserves_destination_observations(self):
+        def execute(gm):
+            with (
+                patch.object(
+                    torch.ops._c10d_functional.all_gather_into_tensor,
+                    "default",
+                    side_effect=lambda x, *args: torch.cat((x, x + 1)),
+                ),
+                patch.object(
+                    torch.ops._c10d_functional.all_gather_into_tensor_out,
+                    "default",
+                    side_effect=lambda x, *args, out: out.copy_(torch.cat((x, x + 1))),
+                ),
+                patch.object(
+                    torch.ops._c10d_functional.wait_tensor,
+                    "default",
+                    side_effect=lambda x: x,
+                ),
+            ):
+                return gm(torch.arange(4, dtype=torch.float32))
+
+        for obstruction in (None, "read", "write", "escape", "dtype", "extra_user"):
+            with self.subTest(obstruction=obstruction):
+                graph = torch.fx.Graph()
+                source = graph.placeholder("source")
+                source.meta["val"] = torch.empty(4)
+                bucket = self._bucket(graph, source, "unshard")
+                self._bucket_values(bucket)
+                send, copy_in, launch, wait, copy_out = bucket
+                dtype = torch.float64 if obstruction == "dtype" else torch.float32
+                with graph.inserting_before(send):
+                    destination = graph.call_function(
+                        torch.ops.aten.empty.memory_format, ([8],), {"dtype": dtype}
+                    )
+                    initialize = graph.call_function(
+                        torch.ops.aten.fill_.Scalar, (destination, 9)
+                    )
+                    head = graph.call_function(
+                        torch.ops.aten.slice.Tensor, (destination, 0, 0, 4)
+                    )
+                    tail = graph.call_function(
+                        torch.ops.aten.slice.Tensor, (destination, 0, 4, 8)
+                    )
+                value = torch.empty(8, dtype=dtype)
+                for node, metadata_value in (
+                    (destination, value),
+                    (initialize, value),
+                    (head, value[:4]),
+                    (tail, value[4:]),
+                ):
+                    node.meta = dict(copy_in.meta, val=metadata_value)
+                copy_in.args = (head, source)
+                copy_in.meta["val"] = value[:4]
+                launch.args = (
+                    source if obstruction == "dtype" else copy_in,
+                    2,
+                    "fsdp",
+                )
+                graph.erase_node(send)
+                copy_out.target = torch.ops.aten.copy_.default
+                copy_out.args = (destination, wait)
+                copy_out.meta["val"] = value
+                outputs = []
+                if obstruction in ("read", "write", "extra_user"):
+                    with graph.inserting_before(wait):
+                        observed = launch if obstruction == "extra_user" else tail
+                        if obstruction == "write":
+                            observed = graph.call_function(
+                                torch.ops.aten.add_.Tensor, (tail, 1)
+                            )
+                            observed.meta = dict(copy_out.meta, val=value[4:])
+                        snapshot = graph.call_function(
+                            torch.ops.aten.clone.default, (observed,)
+                        )
+                        snapshot.meta = dict(
+                            copy_out.meta,
+                            val=torch.empty(8 if obstruction == "extra_user" else 4),
+                        )
+                        outputs.append(snapshot)
+                if obstruction == "escape":
+                    tail.meta["custom"] = {}
+                    outputs.append(tail)
+                full = graph.call_function(torch.ops.aten.clone.default, (copy_out,))
+                full.meta = dict(copy_out.meta, val=torch.empty(8, dtype=dtype))
+                graph.output((full, *outputs))
+                gm = torch.fx.GraphModule({}, graph)
+                expected = execute(gm)
+                self.schedule(gm)
+                self.assertEqual(execute(gm), expected, rtol=0, atol=0)
+                if obstruction is None:
+                    self.assertIs(
+                        launch.target,
+                        torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+                    )
+                    self.assertIs(launch.kwargs["out"], destination)
+                    self.assertIs(wait.meta["val"], destination.meta["val"])
+                    self.assertNotIn(copy_out, tuple(graph.nodes))
+                    self.schedule(gm)
+                    self.assertEqual(execute(gm), expected, rtol=0, atol=0)
+                else:
+                    self.assertIs(
+                        launch.target,
+                        torch.ops._c10d_functional.all_gather_into_tensor.default,
+                    )
+
     def test_deduplicates_forward_but_preserves_backward_reductions(self):
         graph = torch.fx.Graph()
         param = graph.placeholder("param")

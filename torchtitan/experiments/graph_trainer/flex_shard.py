@@ -1033,6 +1033,88 @@ def get_flex_shard_graph_regions(
     )
 
 
+def _fold_all_gather_copies(module: fx.GraphModule) -> None:
+    nodes = tuple(module.graph.nodes)
+    positions = {node: index for index, node in enumerate(nodes)}
+    storages, _ = _graph_tensor_storages_and_writes(module.graph)
+    for (action, _), regions in _collect_bucket_regions(module.graph).items():
+        if action != "unshard":
+            continue
+        for region in regions:
+            owned = set(region)
+            for launch in region:
+                if (
+                    launch.target
+                    is not torch.ops._c10d_functional.all_gather_into_tensor.default
+                    or len(launch.users) != 1
+                ):
+                    continue
+                wait = next(iter(launch.users))
+                if (
+                    wait.target is not torch.ops._c10d_functional.wait_tensor.default
+                    or len(wait.users) != 1
+                ):
+                    continue
+                copy = next(iter(wait.users))
+                if (
+                    copy.target is not torch.ops.aten.copy_.default
+                    or copy.args[1] is not wait
+                ):
+                    continue
+                destination = copy.args[0]
+                source_value = launch.args[0].meta.get("val")
+                result_value = launch.meta.get("val")
+                destination_value = destination.meta.get("val")
+                if (
+                    destination.target is not torch.ops.aten.empty.memory_format
+                    or not {destination, wait, copy} <= owned
+                    or not positions[destination] < positions[launch] < positions[copy]
+                    or not isinstance(source_value, torch.Tensor)
+                    or not isinstance(result_value, torch.Tensor)
+                    or not isinstance(destination_value, torch.Tensor)
+                ):
+                    continue
+                if (
+                    result_value.shape != destination_value.shape
+                    or result_value.stride() != destination_value.stride()
+                    or not destination_value.is_contiguous()
+                    or not source_value.layout
+                    == result_value.layout
+                    == destination_value.layout
+                    == torch.strided
+                    or not source_value.dtype
+                    == result_value.dtype
+                    == destination_value.dtype
+                    or not source_value.device
+                    == result_value.device
+                    == destination_value.device
+                ):
+                    continue
+                destination_storages = storages[destination]
+                aliases = {
+                    node for node in nodes if storages[node] & destination_storages
+                }
+                if not aliases <= owned or any(
+                    user not in owned for node in aliases for user in node.users
+                ):
+                    continue
+                if any(
+                    storages[dependency] & destination_storages
+                    for node in nodes[positions[launch] + 1 : positions[copy]]
+                    for dependency in node.all_input_nodes
+                ):
+                    continue
+                launch.target = (
+                    torch.ops._c10d_functional.all_gather_into_tensor_out.default
+                )
+                launch.kwargs = dict(launch.kwargs, out=destination)
+                launch.meta["val"] = destination_value
+                wait.meta["val"] = destination_value
+                storages[launch] = storages[wait] = destination_storages
+                copy.replace_all_uses_with(wait)
+                module.graph.erase_node(copy)
+
+
 def flex_shard_fsdp_scheduling(
     gm: fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -1116,6 +1198,7 @@ def flex_shard_fsdp_scheduling(
     for module in gm.modules():
         if not isinstance(module, fx.GraphModule):
             continue
+        _fold_all_gather_copies(module)
         aliases = {}
         for node in module.graph.nodes:
             base = base_tensor_for_mutation_target(node)
