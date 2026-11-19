@@ -170,12 +170,17 @@ def construct_mandatory_normalization_passes(*, use_flex_shard: bool) -> list[Ca
     passes = [eliminate_dead_code_pass, canonicalize_graph_pass]
     if use_flex_shard:
         from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_parameter_transforms_pass,
             deduplicate_flex_shard_unshard_pass,
             fold_flex_shard_gradient_casts_pass,
         )
 
         passes.extend(
-            [deduplicate_flex_shard_unshard_pass, fold_flex_shard_gradient_casts_pass]
+            [
+                deduplicate_flex_shard_unshard_pass,
+                deduplicate_flex_shard_parameter_transforms_pass,
+                fold_flex_shard_gradient_casts_pass,
+            ]
         )
     else:
         passes.append(deduplicate_fsdp_unshard_chains_pass)

@@ -1190,14 +1190,212 @@ class TestFlexShardScheduling(TestCase):
         if importlib.util.find_spec("flex_shard") is None:
             self.skipTest("FlexShard is not installed")
         from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_parameter_transforms_pass,
             deduplicate_flex_shard_unshard_pass,
             flex_shard_fsdp_scheduling,
             fold_flex_shard_gradient_casts_pass,
         )
 
         self.deduplicate = deduplicate_flex_shard_unshard_pass
+        self.deduplicate_parameter_transforms = (
+            deduplicate_flex_shard_parameter_transforms_pass
+        )
         self.schedule = flex_shard_fsdp_scheduling
         self.fold_gradient_casts = fold_flex_shard_gradient_casts_pass
+
+    def _mark_parameter_transform_root(self, gm):
+        root = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.aten.clone.default
+        )
+        root.meta["custom"] = {
+            "flex_shard_action": "unshard",
+            "flex_shard_phase": "execute",
+            "flex_shard_param_fqns": ("layer.weight",),
+            "flex_shard_mesh_axis_names": ("fsdp",),
+        }
+        return root
+
+    def test_parameter_transforms_preserve_mutations_aliases_and_context(self):
+        cases = (
+            "reuse",
+            "source_write",
+            "source_view_write",
+            "tuple_write",
+            "tuple_view_write",
+            "signed_zero",
+            "rng",
+            "output_alias",
+            "stream",
+            "chunk",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+
+                def forward(weight, activation):
+                    param = weight.clone()
+                    if case in ("tuple_write", "tuple_view_write"):
+                        a = torch.max(param, dim=1)
+                        (
+                            a.values.view(-1)
+                            if case == "tuple_view_write"
+                            else a.values
+                        ).add_(2)
+                        b = torch.max(param, dim=1)
+                        return a.values.sum() + b.values.sum()
+                    if case == "signed_zero":
+                        return (
+                            torch.signbit(param * 0.0).sum(),
+                            torch.signbit(param * -0.0).sum(),
+                        )
+                    if case == "rng":
+                        return (
+                            torch.rand_like(param).sum() + torch.rand_like(param).sum()
+                        )
+                    view = param.view(-1) if case == "source_view_write" else param
+                    a = torch.sin(view)
+                    if case in ("source_write", "source_view_write"):
+                        param.copy_(activation)
+                    else:
+                        activation.copy_(torch.ones_like(activation))
+                    b = torch.sin(view)
+                    return (a, b) if case == "output_alias" else a.sum() + b.sum()
+
+                inputs = (torch.ones(4, 5), torch.full((4, 5), 3.0))
+                gm = make_fx(forward)(*inputs)
+                self._mark_parameter_transform_root(gm)
+                sins = list(
+                    gm.graph.find_nodes(
+                        op="call_function", target=torch.ops.aten.sin.default
+                    )
+                )
+                if case in ("stream", "chunk"):
+                    for index, node in enumerate(sins):
+                        if case == "stream":
+                            node.meta["custom"] = {"stream": index}
+                        else:
+                            node.meta["chunk_id"] = index
+                torch.manual_seed(44)
+                expected = gm(*(value.clone() for value in inputs))
+                self.deduplicate_parameter_transforms(gm)
+                torch.manual_seed(44)
+                actual = gm(*(value.clone() for value in inputs))
+                self.assertEqual(actual, expected, atol=0, rtol=0)
+                if case == "reuse":
+                    self.assertEqual(
+                        len(
+                            list(
+                                gm.graph.find_nodes(
+                                    op="call_function",
+                                    target=torch.ops.aten.sin.default,
+                                )
+                            )
+                        ),
+                        1,
+                    )
+                if case in (
+                    "source_write",
+                    "source_view_write",
+                    "stream",
+                    "chunk",
+                    "output_alias",
+                ):
+                    self.assertEqual(
+                        len(
+                            list(
+                                gm.graph.find_nodes(
+                                    op="call_function",
+                                    target=torch.ops.aten.sin.default,
+                                )
+                            )
+                        ),
+                        2,
+                    )
+                if case in ("tuple_write", "tuple_view_write"):
+                    self.assertEqual(
+                        len(
+                            list(
+                                gm.graph.find_nodes(
+                                    op="call_function", target=torch.ops.aten.max.dim
+                                )
+                            )
+                        ),
+                        2,
+                    )
+                if case == "rng":
+                    self.assertEqual(
+                        len(
+                            list(
+                                gm.graph.find_nodes(
+                                    op="call_function",
+                                    target=torch.ops.aten.rand_like.default,
+                                )
+                            )
+                        ),
+                        2,
+                    )
+                if case == "output_alias":
+                    self.assertIsNot(
+                        actual[0].untyped_storage(), actual[1].untyped_storage()
+                    )
+
+    def test_parameter_transform_tensor_getter_remains_a_view(self):
+        def forward(weight):
+            param = weight.clone()
+            view = param[:]
+            a = torch.sin(view)
+            param.add_(2)
+            b = torch.sin(view)
+            return a.sum() + b.sum()
+
+        inputs = torch.ones(4, 5)
+        gm = make_fx(forward)(inputs)
+        root = self._mark_parameter_transform_root(gm)
+        view = next(
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.aten.slice.Tensor
+        )
+        view.target = operator.getitem
+        view.args = (root, slice(None))
+        gm.recompile()
+        expected = gm(inputs)
+        self.deduplicate_parameter_transforms(gm)
+        self.assertEqual(gm(inputs), expected, atol=0, rtol=0)
+
+    def test_parameter_transforms_preserve_symbolic_definitions(self):
+        def forward(weight):
+            param = weight.clone()
+            a = param[0].clone().to(torch.int64).item()
+            b = param[0].clone().to(torch.int64).item()
+            return torch.zeros(a) + 1, torch.zeros(b) + 2
+
+        inputs = torch.tensor([3.0])
+        gm = make_fx(forward, tracing_mode="symbolic")(inputs)
+        self._mark_parameter_transform_root(gm)
+        expected = gm(inputs)
+        definitions = [
+            node.name
+            for node in gm.graph.find_nodes(
+                op="call_function", target=torch.ops.aten._local_scalar_dense.default
+            )
+        ]
+        metadata = {node.name: repr(node.meta.get("val")) for node in gm.graph.nodes}
+        self.deduplicate_parameter_transforms(gm)
+        self.assertEqual(gm(inputs), expected, atol=0, rtol=0)
+        self.assertEqual(
+            definitions,
+            [
+                node.name
+                for node in gm.graph.find_nodes(
+                    op="call_function",
+                    target=torch.ops.aten._local_scalar_dense.default,
+                )
+            ],
+        )
+        for node in gm.graph.nodes:
+            self.assertEqual(repr(node.meta.get("val")), metadata[node.name])
 
     def test_folds_lossless_upcasts_into_annotated_gradient_packing(self):
         for dtype in (torch.bfloat16, torch.float16):

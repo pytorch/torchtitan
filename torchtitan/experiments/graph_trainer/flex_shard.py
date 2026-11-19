@@ -29,6 +29,7 @@ from flex_shard import (
 )
 from flex_shard.custom_placements.shard import Shard
 from flex_shard.layout_adapters.spmd_types import spmd_types_to_global_layout
+from torch._functorch.compile_utils import fx_graph_cse
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard as DTensorShard
 from torch.distributed.tensor.placement_types import (
@@ -58,6 +59,14 @@ from .common_utils import get_default_transformer_block_buckets
 
 
 logger = logging.getLogger(__name__)
+
+_CHUNK_OWNERSHIP_KEYS = (
+    "chunk_id",
+    "chunked_region_fqn",
+    "chunked_region_is_backward",
+    "chunked_region_producer",
+    "chunked_region_role",
+)
 
 
 def apply_flex_shard(
@@ -344,6 +353,24 @@ def _collect_bucket_regions(graph: fx.Graph):
     return buckets
 
 
+def _graph_tensor_storages_and_writes(graph: fx.Graph):
+    storages = {}
+    for node in graph.nodes:
+        storages[node] = frozenset(
+            value.untyped_storage()
+            for value in tree_leaves(node.meta.get("val"))
+            if isinstance(value, torch.Tensor)
+        )
+        base = base_tensor_for_mutation_target(node)
+        if base is not node:
+            storages[node] |= storages[base]
+    writes = {
+        node: set().union(*(storages[target] for target in mutation_target_nodes(node)))
+        for node in graph.nodes
+    }
+    return storages, writes
+
+
 def fold_flex_shard_gradient_casts_pass(
     gm: fx.GraphModule, example_inputs: tuple | None = None
 ) -> fx.GraphModule:
@@ -426,33 +453,11 @@ def deduplicate_flex_shard_unshard_pass(
     gm: fx.GraphModule, example_inputs: tuple | None = None
 ) -> fx.GraphModule:
     del example_inputs
-    chunk_keys = (
-        "chunk_id",
-        "chunked_region_fqn",
-        "chunked_region_is_backward",
-        "chunked_region_producer",
-        "chunked_region_role",
-    )
     for module in gm.modules():
         if not isinstance(module, fx.GraphModule):
             continue
         graph = module.graph
-        storages = {}
-        for node in graph.nodes:
-            storages[node] = frozenset(
-                value.untyped_storage()
-                for value in tree_leaves(node.meta.get("val"))
-                if isinstance(value, torch.Tensor)
-            )
-            base = base_tensor_for_mutation_target(node)
-            if base is not node:
-                storages[node] |= storages[base]
-        writes = {
-            node: set().union(
-                *(storages[target] for target in mutation_target_nodes(node))
-            )
-            for node in graph.nodes
-        }
+        storages, writes = _graph_tensor_storages_and_writes(graph)
         regions = _collect_bucket_regions(graph).get(("unshard", False), [])
         starts = {region[0]: region for region in regions}
         epochs = defaultdict(int)
@@ -514,7 +519,7 @@ def deduplicate_flex_shard_unshard_pass(
                             ),
                             tuple(
                                 value.meta.get(name, value.meta["custom"].get(name))
-                                for name in chunk_keys
+                                for name in _CHUNK_OWNERSHIP_KEYS
                             ),
                         )
                         for value in region
@@ -536,6 +541,165 @@ def deduplicate_flex_shard_unshard_pass(
             graph.lint()
             module.recompile()
             logger.info("Removed %s duplicate FlexShard unshard nodes", len(removable))
+    return gm
+
+
+def deduplicate_flex_shard_parameter_transforms_pass(
+    gm: fx.GraphModule, example_inputs: tuple | None = None
+) -> fx.GraphModule:
+    del example_inputs
+    for module in gm.modules():
+        if not isinstance(module, fx.GraphModule):
+            continue
+        nodes = list(module.graph.nodes)
+        positions = {node: index for index, node in enumerate(nodes)}
+        roots = get_flex_shard_graph_regions(
+            module, include_reduce_grad_inputs=False
+        ).unshard_output_names
+        roots = {node for node in nodes if node.name in roots}
+        storages, writes = _graph_tensor_storages_and_writes(module.graph)
+
+        def owners(node):
+            owned = set()
+            pending = [node]
+            while pending:
+                value = pending.pop()
+                if value in owned:
+                    continue
+                owned.add(value)
+                base = base_tensor_for_mutation_target(value)
+                if base is not value:
+                    pending.append(base)
+                if value.target is operator.getitem and isinstance(
+                    value.args[0], fx.Node
+                ):
+                    pending.append(value.args[0])
+            return owned
+
+        output_owners = set().union(
+            *(owners(node) for node in nodes[-1].all_input_nodes)
+        )
+        output_storages = set().union(
+            *(storages[node] for node in nodes[-1].all_input_nodes)
+        )
+        written_owners = defaultdict(lambda: -1)
+        last_writer = defaultdict(lambda: -1)
+        for node in nodes:
+            for storage in writes[node]:
+                last_writer[storage] = positions[node]
+            for target in mutation_target_nodes(node):
+                for owner in owners(target):
+                    written_owners[owner] = positions[node]
+        graph = fx.Graph()
+        env = {}
+        inputs = {}
+        epochs = defaultdict(int)
+        originals = []
+        for node in nodes:
+            schema = getattr(node.target, "_schema", None)
+            eligible = (
+                node.op == "call_function"
+                and not node.meta.get("autograd_backward", False)
+                and not node.meta.get("custom", {}).get(FLEX_SHARD_META_ACTION)
+                and bool(node.all_input_nodes)
+                and all(
+                    dependency in roots or dependency in env
+                    for dependency in node.all_input_nodes
+                )
+                and (
+                    (
+                        node.target is operator.getitem
+                        and isinstance(node.args[0], fx.Node)
+                        and isinstance(node.args[0].meta.get("val"), (tuple, list))
+                    )
+                    or (schema is not None and not schema.is_mutable)
+                )
+                and bool(tree_leaves(node.meta.get("val")))
+                and all(
+                    isinstance(value, torch.Tensor)
+                    for value in tree_leaves(node.meta.get("val"))
+                )
+                and not node.is_impure()
+                and not (
+                    schema is not None
+                    and any(result.alias_info is not None for result in schema.returns)
+                    and base_tensor_for_mutation_target(node) is node
+                )
+                and not any(
+                    tag in getattr(node.target, "tags", ())
+                    for tag in (
+                        torch.Tag.nondeterministic_seeded,
+                        torch.Tag.nondeterministic_bitwise,
+                        torch.Tag.data_dependent_output,
+                        torch.Tag.dynamic_output_shape,
+                    )
+                )
+                and (
+                    schema is None
+                    or not schema.name.startswith(("_c10d", "c10d::", "aten::empty"))
+                )
+                and all(
+                    last_writer[storage] <= positions[node]
+                    for storage in storages[node]
+                )
+                and written_owners[node] <= positions[node]
+                and node not in output_owners
+                and not (storages[node] & output_storages)
+            )
+            if eligible:
+
+                def argument(dependency):
+                    if dependency in roots:
+                        key = (
+                            dependency,
+                            tuple(
+                                sorted(
+                                    epochs[storage] for storage in storages[dependency]
+                                )
+                            ),
+                        )
+                        if key not in inputs:
+                            inputs[key] = graph.placeholder(f"parameter_{len(inputs)}")
+                        return inputs[key]
+                    return env[dependency]
+
+                copy = graph.node_copy(node, argument)
+                copy.meta = {
+                    "custom": dict(node.meta.get("custom", {})),
+                    "recompute": node.meta.get("recompute"),
+                    "source": node,
+                    "chunk_ownership": tuple(
+                        node.meta.get(field, node.meta.get("custom", {}).get(field))
+                        for field in _CHUNK_OWNERSHIP_KEYS
+                    ),
+                }
+                env[node] = copy
+                originals.append(node)
+            for storage in writes[node]:
+                epochs[storage] += 1
+        if not originals:
+            continue
+        graph.output([env[node] for node in originals])
+        graph = fx_graph_cse(
+            graph,
+            extra_node_key=lambda node: (
+                repr(node.meta.get("custom", {})),
+                node.meta.get("recompute"),
+                node.meta.get("chunk_ownership"),
+            ),
+        )
+        outputs = list(graph.nodes)[-1].args[0]
+        removed = 0
+        for original, replacement in zip(originals, outputs, strict=True):
+            canonical = replacement.meta["source"]
+            if original is not canonical:
+                original.replace_all_uses_with(canonical)
+                removed += 1
+        if removed:
+            module.graph.eliminate_dead_code()
+            module.graph.lint()
+            module.recompile()
+            logger.info("Removed %s duplicate FlexShard parameter transforms", removed)
     return gm
 
 
