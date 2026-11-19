@@ -24,6 +24,11 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
+- `StorageLayout` describes a parameter that is a plain local tensor, not a
+  DTensor: its global shape, and its mesh and placements as a DTensor would
+  hold it. `DistMuon` takes one per plain parameter in
+  `storage_layout_by_fqn`, plans from it as from a DTensor's placements, and
+  keeps the parameter's gradient and momentum as plain local tensors.
 - `BlockShard.block_sizes` is a nonempty tuple describing a repeating sequence
   of independently shardable block sizes. Use `(R,)` for uniform blocks.
   For example, `(128, 64)` partitions

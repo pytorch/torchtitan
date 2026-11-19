@@ -84,6 +84,12 @@ optimizer states are plain `torch.Tensor` local shards, not DTensors:
 - **Grad-norm clipping.** `clip_grad_norm_` reduces the local shards' norms
   over each bucket's mesh in the order DTensor uses, so the norm matches
   FSDP2's.
+- **DistMuon.** DistMuon plans its redistributions from each parameter's
+  storage layout. For a FlexShard parameter, torchtitan gives it a
+  `StorageLayout` (mesh, placements and global shape) derived from the
+  parameter's bucket, which matches FSDP2's DTensor spec, so DistMuon runs the
+  same collectives and updates. Its momentum is a plain local shard that
+  declares its parameter's layout to DCP.
 
 ## Parity with FSDP2
 
@@ -123,7 +129,7 @@ Memory and communication timing differ from FSDP2's in two places:
 | --- | --- |
 | Models | Decoders that shard through `Decoder._apply_fsdp`, also with tied embedding and output weights (`enable_weight_tying`). The parity tests cover Llama 3 (also with tied weights), Qwen3 MoE, and DeepSeek V3 without MTP layers |
 | Parallelism | FSDP over `dp_shard`; tensor parallelism, with or without sequence parallelism; context parallelism; expert parallelism with `AllToAllTokenDispatcher`; and their combinations |
-| Training | `ChunkedLossWrapper`, gradient accumulation, activation remat, local compile, validation, EMA (`optim.ema`, also with `offload_to_cpu`), and accelerator graphs without expert parallelism (the four capture settings in [ACCELERATOR_GRAPH.md](ACCELERATOR_GRAPH.md)) |
+| Training | `ChunkedLossWrapper`, gradient accumulation, activation remat, local compile, validation, EMA (`optim.ema`, also with `offload_to_cpu`), DistMuon without tensor parallelism, and accelerator graphs without expert parallelism (the four capture settings in [ACCELERATOR_GRAPH.md](ACCELERATOR_GRAPH.md)) |
 | Checkpointing | `CheckpointManager` with synchronous or `async_mode="async"` saves, seed checkpoints, `export_dtype`, `initial_load_path` (including FSDP2 checkpoints), and `initial_load_in_hf` |
 
 ## What it rejects
@@ -146,7 +152,7 @@ for these when the training engine is built, before anything else:
 | Checkpointers other than `CheckpointManager` | `torch_checkpointing`'s resharder reads only DTensor placements. |
 | `checkpointer.async_mode="async_with_pinned_mem"` | The save process receives the state dict through `torch.multiprocessing`, which drops the shard layouts. |
 | `checkpointer.initial_load_in_hf_quantized`, `checkpointer.last_save_in_hf` | Not supported yet. The state dict adapters' save path needs DTensor parameters. |
-| DistMuon | It needs DTensor parameters. |
+| DistMuon with tensor parallelism | DistMuon's storage layouts for FlexShard parameters hold the buckets' split, not TP's. DistMuon's recipes reject TP with FSDP2 too. |
 | `debug.spmd_typechecking` | Not checked with FlexShard yet. |
 | GraphTrainer, FaultTolerantTrainer, the RL trainer, and any trainer other than `torchtitan.trainer.Trainer` | GraphTrainer shards with SimpleFSDP, TorchFT hooks FSDP2's parameter groups, and the RL trainer would publish local shards as full weights. |
 

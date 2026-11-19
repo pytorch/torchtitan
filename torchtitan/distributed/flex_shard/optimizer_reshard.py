@@ -16,7 +16,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Replicate, Shard
 
-__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned"]
+__all__ = ["BlockShard", "BucketConfig", "ComputeLayout", "Owned", "StorageLayout"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +282,71 @@ class ComputeLayout:
     def to_dict(self) -> dict:
         """Serialize for JSON logging."""
         return {"repr": repr(self)}
+
+
+@dataclass(frozen=True, slots=True)
+class StorageLayout:
+    """Describe where a plain-tensor parameter's local shard sits in the full
+    parameter, for a parameter that isn't a DTensor.
+
+    The parameter is this rank's shard of a full tensor of ``global_shape``,
+    sharded over ``mesh`` with one ``placements`` entry per mesh axis, as a
+    DTensor with that mesh and those placements would hold it. DistMuon plans
+    from the layout and computes on the local shard, so the parameter, its
+    gradient and its optimizer state stay plain tensors.
+
+    ``shard_order_by_tensor_dim`` orders the mesh axes that shard one tensor
+    dimension, outermost first, as in ``ComputeLayout``. For example, routed
+    experts that expert parallelism splits over ``ep``, and data parallelism
+    then shards over ``edp_shard`` within each ``ep`` rank's experts::
+
+        StorageLayout(
+            mesh=edp_mesh,  # axes ("edp_shard", "ep")
+            placements=(Shard(0), Shard(0)),
+            global_shape=(num_experts, out_features, in_features),
+            shard_order_by_tensor_dim={0: ("ep", "edp_shard")},
+        )
+    """
+
+    mesh: DeviceMesh
+    placements: tuple[Replicate | Shard, ...]
+    global_shape: tuple[int, ...]
+    shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]] = _DEFAULT_SHARD_ORDER
+
+    def __post_init__(self) -> None:
+        placements = tuple(self.placements)
+        axis_names = self.mesh.mesh_dim_names
+        if axis_names is None:
+            raise ValueError("StorageLayout.mesh requires named axes")
+        if len(placements) != self.mesh.ndim or any(
+            type(placement) not in (Replicate, Shard) for placement in placements
+        ):
+            raise ValueError(
+                "StorageLayout.placements must hold one Replicate or Shard per "
+                "mesh axis"
+            )
+        shard_order = {}
+        for tensor_dim, ordered_axis_names in dict(
+            self.shard_order_by_tensor_dim
+        ).items():
+            ordered_axis_names = tuple(ordered_axis_names)
+            if any(
+                name not in axis_names
+                or placements[axis_names.index(name)] != Shard(tensor_dim)
+                for name in ordered_axis_names
+            ):
+                raise ValueError(
+                    "StorageLayout.shard_order_by_tensor_dim requires "
+                    f"Shard({tensor_dim}) on mesh axes {list(ordered_axis_names)}"
+                )
+            shard_order[tensor_dim] = ordered_axis_names
+        object.__setattr__(self, "placements", placements)
+        object.__setattr__(self, "global_shape", tuple(self.global_shape))
+        object.__setattr__(
+            self,
+            "shard_order_by_tensor_dim",
+            _ShardOrderByTensorDim(dict(sorted(shard_order.items()))),
+        )
 
 
 @dataclass(frozen=True, slots=True)
