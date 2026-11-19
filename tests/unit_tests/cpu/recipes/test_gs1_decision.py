@@ -81,6 +81,19 @@ def test_preparation_skips_multimodal_states() -> None:
     assert flatten_record(record) == []
 
 
+def test_structured_type_metadata_is_text() -> None:
+    record = {
+        "request": {
+            "state": {"metadata": {"type": "image"}},
+            "questions": {
+                "q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}
+            },
+        },
+        "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
+    }
+    assert len(flatten_record(record)) == 1
+
+
 def test_processor_carries_candidate_count_and_samples_target_label() -> None:
     context = DatasetBuildContext(
         tokenizer=_Tokenizer(),
@@ -95,6 +108,17 @@ def test_processor_carries_candidate_count_and_samples_target_label() -> None:
     assert sequence.labels[-2] == -3
     assert sequence.labels[-1] in {10, 11, 12}
     assert sequence.input_ids[-1] == 40
+
+
+def test_processor_drops_overlength_rows() -> None:
+    context = DatasetBuildContext(
+        tokenizer=_Tokenizer(),
+        max_context_length=2,
+        num_tokens_per_microbatch=2,
+        read_options=grain.ReadOptions(num_threads=1),
+    )
+    processor = DecisionSampleProcessor(DecisionSampleProcessor.Config(), context=context)
+    assert processor(_sample(), np.random.default_rng(0)) is None
 
 
 def test_sampled_nll_brier_has_soft_target_expectation() -> None:

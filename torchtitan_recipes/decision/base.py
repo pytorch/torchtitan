@@ -69,7 +69,7 @@ class DecisionSampleProcessor(SampleProcessor):
 
     def __call__(
         self, sample: dict[str, Any], rng: np.random.Generator
-    ) -> TextSequence:
+    ) -> TextSequence | None:
         candidate_ids = sample["candidate_ids"]
         options = sample["options"]
         target_probs = np.asarray(sample["target_probs"], dtype=np.float64)
@@ -107,10 +107,7 @@ class DecisionSampleProcessor(SampleProcessor):
         prompt_ids = self._tokenizer.encode(prompt, add_bos=False, add_eos=False)
         input_ids = np.asarray([*prompt_ids, self._readout_token_id], dtype=np.int64)
         if len(input_ids) > self._max_context_length:
-            raise ValueError(
-                f"Decision row has {len(input_ids)} tokens, more than "
-                f"max_context_length={self._max_context_length}"
-            )
+            return None
 
         labels = np.full(len(input_ids), IGNORE_INDEX, dtype=np.int64)
         labels[-2] = -num_candidates
@@ -174,7 +171,7 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         loss = (nll + self.brier_weight * brier) / denominator
         return loss, {
             "decision_nll/mean": nll.detach() / denominator,
-            "decision_brier/mean": brier.detach() / denominator,
+            "decision_sampled_brier/mean": brier.detach() / denominator,
         }
 
 
@@ -317,6 +314,7 @@ class DecisionModel(ABC):
                             load_dataset_kwargs={"data_files": data_path},
                         ),
                         processor=DecisionSampleProcessor.Config(),
+                        post_filters=(lambda sample: sample is not None,),
                     ),
                 ),
                 max_num_documents=max_num_questions,

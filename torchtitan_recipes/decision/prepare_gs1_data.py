@@ -13,6 +13,8 @@ import random
 from pathlib import Path
 from typing import Any
 
+DEFAULT_NUM_SAMPLES = 3000
+
 
 def _text(value: Any) -> str:
     if isinstance(value, str):
@@ -21,13 +23,10 @@ def _text(value: Any) -> str:
 
 
 def _contains_media(value: Any) -> bool:
-    if isinstance(value, dict):
-        if value.get("type") in {"image", "video"}:
-            return True
-        return any(_contains_media(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_contains_media(item) for item in value)
-    return False
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and item.get("type") in ("image", "video")
+        for item in value
+    )
 
 
 def flatten_record(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -94,7 +93,7 @@ def main() -> None:
     parser.add_argument(
         "--out", type=Path, default=Path("./assets/hf/gs1-distribution/train.jsonl")
     )
-    parser.add_argument("--num-samples", type=int, default=3000)
+    parser.add_argument("--num-samples", type=int, default=DEFAULT_NUM_SAMPLES)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     if args.num_samples < 1:
