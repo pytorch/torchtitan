@@ -7,6 +7,7 @@
 """``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
 import os
+from contextlib import nullcontext
 from itertools import product
 from typing import Any, cast
 from unittest.mock import patch
@@ -464,6 +465,131 @@ class TestFlexShardDecoder(DTensorTestBase):
             for name, value in states[param].items()
         }
 
+    def _check_hf_loads_match_fsdp2(self, *, ep: int, cases) -> None:
+        # For each case, FSDP2 trains three steps and exports a Hugging Face
+        # checkpoint. A fresh FlexShard model, from its own initialization,
+        # loads it, with groups of at most group_bytes (None: the default), and
+        # each shard must equal its box of the exported parameters.
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=ep,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+
+        def build(build_config, flavor, fsdp_backend, folder, **config):
+            model, *setup = self._build(
+                build_config, flavor, fsdp_backend, "default", parallelism_context
+            )
+            checkpointer = CheckpointManager(
+                CheckpointManager.Config(folder=os.path.join(flavor, folder), **config),
+                model_parts=[model],
+                optimizers=cast(Any, None),
+                lr_schedulers=cast(Any, None),
+                ema=None,
+                extra_states={},
+                sd_adapter=type(model).state_dict_adapter_cls(model.config, None),
+                base_folder=self.temp_dir,
+            )
+            return model, setup, checkpointer
+
+        for (build_config, flavor), group_bytes in cases:
+            fsdp2, setup, export = build(
+                build_config, flavor, FSDP2Config(), "fsdp2", last_save_in_hf=True
+            )
+            self._train(fsdp2, *setup, 1, False)
+            export.save(3, last_step=True)
+            export.close()
+            flex, _, checkpointer = build(
+                build_config,
+                flavor,
+                FlexShardConfig(),
+                "flex",
+                initial_load_path=os.path.join(
+                    self.temp_dir, flavor, "fsdp2", "exports", "step-3"
+                ),
+                initial_load_in_hf=True,
+            )
+            with (
+                patch(
+                    "torchtitan.distributed.flex_shard_fsdp._HF_LOAD_GROUP_BYTES",
+                    group_bytes,
+                )
+                if group_bytes is not None
+                else nullcontext(),
+                patch.object(dcp, "load", wraps=dcp.load) as load,
+            ):
+                self.assertTrue(checkpointer.load())
+            checkpointer.close()
+            # One rank reads each Hugging Face tensor.
+            reads: list[Any] = [None] * self.world_size
+            dist.all_gather_object(
+                reads, [key for call in load.call_args_list for key in call.args[0]]
+            )
+            read_keys = [key for keys in reads for key in keys]
+            self.assertEqual(
+                len(read_keys), len(set(read_keys)), msg=f"{flavor} reads"
+            )
+            exported = {
+                fqn: cast(DTensor, param).full_tensor()
+                for fqn, param in fsdp2.named_parameters()
+            }
+            layouts = flex_shard.get_flex_shard_global_layouts(flex)
+            mismatches = [
+                fqn
+                for fqn, param in flex.named_parameters()
+                if not all(
+                    torch.equal(
+                        param[_box(local_offset, size)],
+                        exported[fqn][_box(global_offset, size)],
+                    )
+                    for global_offset, local_offset, size in zip(
+                        layouts[fqn].global_offsets,
+                        layouts[fqn].local_offsets,
+                        layouts[fqn].local_sizes,
+                        strict=True,
+                    )
+                )
+            ]
+            # Fail on every rank together. Otherwise a rank whose shards match
+            # would wait in the next case's collectives for one that failed.
+            all_mismatches: list[Any] = [None] * self.world_size
+            dist.all_gather_object(all_mismatches, mismatches)
+            self.assertFalse(
+                any(all_mismatches),
+                msg=f"{flavor} FlexShard shards, by rank: {all_mismatches}",
+            )
+
+    @with_comms
+    @with_temp_dir
+    def test_hf_loads_match_fsdp2(self):
+        # Llama 3 splits the packed QKV and the stacked w13, and permutes the
+        # query and key rows for rotary embeddings. The plain debug model loads
+        # in one group. With tied weights, to_hf gives no tensor for lm_head's
+        # weight, whose shard tok_embeddings' Hugging Face tensor fills. Each of
+        # its parameters loads alone, so a conversion that needs another
+        # parameter fails, as it would across the groups of a larger model.
+        self._check_hf_loads_match_fsdp2(
+            ep=1,
+            cases=[
+                ((build_llama3_config, "debugmodel"), None),
+                ((_build_tied_llama3_config, "debugmodel_tied"), 1),
+            ],
+        )
+
+    @with_comms
+    @with_temp_dir
+    def test_hf_loads_match_fsdp2_with_expert_parallelism(self):
+        # Qwen3 splits the routed experts into one tensor per expert, which
+        # ep=2 splits over EP ranks, then edp_shard. Each parameter loads alone.
+        self._check_hf_loads_match_fsdp2(
+            ep=2, cases=[((build_qwen3_config, "debugmodel_moe"), 1)]
+        )
+
     def _assert_equal_checkpoints(self, expected_dir: str, actual_dir: str) -> None:
         """Assert that two DCP checkpoints hold the same keys, the same chunks
         of full tensors of the same shapes and dtypes, and the same values.
@@ -506,6 +632,13 @@ class TestFlexShardDecoder(DTensorTestBase):
         dist.broadcast_object_list(error)
         if error[0] is not None:
             raise error[0]
+
+
+def _box(offsets, sizes) -> tuple[slice, ...]:
+    return tuple(
+        slice(offset, offset + size)
+        for offset, size in zip(offsets, sizes, strict=True)
+    )
 
 
 def _chunks(

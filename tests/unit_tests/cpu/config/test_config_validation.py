@@ -335,7 +335,7 @@ def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
             CheckpointManager.Config(
                 initial_load_in_hf=True, initial_load_path="/checkpoint"
             ),
-            "checkpointer.initial_load_in_hf=True",
+            None,
         ),
         (
             CheckpointManager.Config(last_save_in_hf=True),
