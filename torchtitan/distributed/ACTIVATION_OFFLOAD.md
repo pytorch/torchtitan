@@ -32,8 +32,8 @@ GPU or sent to CPU, in `ActivationRematConfig`:
 
 Both can differ per block through `block_overrides`
 ([ACTIVATION_REMAT.md](ACTIVATION_REMAT.md#per-block-policies)), e.g. to
-offload only some blocks, or to keep the last block on GPU (see
-[The last block](#the-last-block)).
+offload only some blocks. The block that runs last stays on GPU
+automatically (see [The last block](#the-last-block)).
 Offloading in place of recomputing is `save_regions=["*"]` plus offload: only
 the cheap code outside regions is recomputed. Tensors recomputation needs but
 no region retains (`recompute_needs_tensor`) stay on GPU; the first-forward
@@ -43,8 +43,8 @@ at a missing region.
 When the policy offloads anything, `ActivationRematConfig.apply` checkpoints
 the blocks and installs an `ActivationOffloader` on the model part; its
 forward hooks keep it alive, so nothing holds a handle to it. Offloading requires CUDA: `apply` raises on other accelerators. Every
-block `apply` checkpoints is offloaded according to its policy; no block is
-special-cased.
+block `apply` checkpoints is offloaded according to its policy, except the
+one that runs last.
 
 **Encoders.** In a multimodal model, `apply` runs once more for each encoder
 (`module_fqn="vision_encoder"`). Each call records the full FQN of every block
@@ -155,21 +155,23 @@ need finer remat checkpoints (Megatron does both per submodule).
 ### The last block
 
 Only the loss runs between the last block's forward and its backward, so
-offloading it pays two transfers to free memory for almost no time: its free
-point waits on copies just queued, and its backward waits on its reload. The
-offloader treats it like any other block, since which block runs last
-depends on the model (an MTP head, a pipeline stage split). To keep it on
-GPU, give it a block override with its offload fields off, e.g.
-`BlockRematOverride(blocks=["layers.31"], offload_block_input=False,
-offload_regions=[])`. Offloading it pays off only when the peak falls between
-its forward and backward, e.g. a large-vocabulary loss: its activations are
-freed before the logits are allocated. Its reload is queued before the
-previous block's, since its backward runs first.
+offloading it would pay two transfers to free memory for almost no time: its
+free point would wait on copies just queued, and its backward on its reload.
+So the block that runs last in a model part stays on GPU. Which block that is
+depends on the model (an MTP head runs after the decoder blocks, a pipeline
+stage split moves it), so the offloader learns it from the model part's first
+forward instead of a config: that forward keeps the last group's GPU copies
+rather than freeing them (its copies to CPU are the only waste), and later
+forwards open no group for that block. The block before it then runs last
+among offloaded blocks: it is freed after the whole last block's forward and
+reloaded during its backward, so both overlap compute. With gradient
+accumulation only the first microbatch's forward learns it, and a CUDA graph
+captured after warmup sees the steady state.
 
 Under PP every stage has this problem, at every stage boundary: the forward
 leaves the stage right after its last block, and that block's backward starts
-as soon as the gradient arrives. Keeping each stage's last block on GPU takes
-an override for each stage's last block.
+as soon as the gradient arrives. Each stage's offloader learns its own last
+block, so one block per in-flight microbatch stays on GPU on every stage.
 
 ## Bandwidth
 
