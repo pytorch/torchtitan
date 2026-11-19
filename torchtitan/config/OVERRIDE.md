@@ -225,9 +225,9 @@ In `Trainer.__init__`, before any component is built:
    re-traversed). An override that changes a module's sharding contract must set
    the replacement's `sharding_config`; `derive()` preserves it when the contract
    is unchanged.
-7. Log one entry per factory, source and replacement config class names, and
-   factory arguments, listing the match count and every replaced FQN.
-   `apply_overrides()` still returns the individual replacement details.
+7. Log one line per distinct (override, source class -> replacement class,
+   kwargs) group, with the match count and every replaced FQN.
+   `apply_overrides()` returns one line per replaced node.
 
 ```
 INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=2 fqns=['model.layers.0.feed_forward', 'model.layers.1.feed_forward']

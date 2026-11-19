@@ -501,7 +501,7 @@ def apply_overrides(
                 len(fqns),
                 fqns,
             )
-        logger.info(f"Applied {len(replacements)} override(s)")
+        logger.info("Applied %d override(s)", len(replacements))
     elif override_config.imports:
         # The user asked for overrides but nothing matched — likely a wrong
         # `target` class, a `fqns` glob that matches no node, or a module that
