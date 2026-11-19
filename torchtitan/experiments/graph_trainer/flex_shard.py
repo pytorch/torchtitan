@@ -224,9 +224,57 @@ class FlexShardGradientClipper(GradientClipper):
     def __init__(self, config):
         super().__init__(config)
         self._gradient_views = {}
+        self._norm_layouts = {}
 
     @torch.no_grad()
     def clip_grad_norm_(self, parameters, max_norm, *, parallelism_context):
+        parameters = list(parameters)
+        params_by_mesh = defaultdict(list)
+        for param in parameters:
+            if param.grad is not None:
+                norm_param = param._graph_trainer_dtensor_param
+                mesh = norm_param.device_mesh
+                key = (mesh, norm_param.placements)
+                if key not in self._norm_layouts:
+                    self._norm_layouts[key] = torch.linalg.vector_norm(
+                        torch.empty_like(norm_param, device="meta"), 2
+                    ).placements
+                params_by_mesh[mesh].append((param, self._norm_layouts[key]))
+        for items in params_by_mesh.values():
+            first, layout = items[0]
+            if any(
+                candidate != layout
+                or param.grad.dtype != first.grad.dtype
+                or param.grad.device != first.grad.device
+                for param, candidate in items
+            ):
+                return self._clip_grad_norm_with_views_(
+                    parameters, max_norm, parallelism_context=parallelism_context
+                )
+        norms = []
+        for mesh, items in params_by_mesh.items():
+            local_norms = torch._foreach_norm([param.grad for param, _ in items], 2)
+            norm_inputs = DTensor.from_local(
+                torch.stack(local_norms), mesh, items[0][1], run_check=False
+            )
+            norms.append(torch.linalg.vector_norm(norm_inputs, 2).full_tensor())
+        if len(norms) == 1:
+            total_norm = norms[0]
+        elif norms:
+            total_norm = sum(norm**2 for norm in norms) ** 0.5
+        else:
+            total_norm = torch.tensor(0.0)
+        if (pp_mesh := parallelism_context.get_optional_mesh("pp")) is not None:
+            total_norm **= 2
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
+            total_norm **= 0.5
+        for items in params_by_mesh.values():
+            torch.nn.utils.clip_grads_with_norm_(
+                [param for param, _ in items], max_norm, total_norm, foreach=True
+            )
+        return total_norm
+
+    def _clip_grad_norm_with_views_(self, parameters, max_norm, *, parallelism_context):
         norm_parameters = []
         bound_views = []
         try:
@@ -235,7 +283,15 @@ class FlexShardGradientClipper(GradientClipper):
                     continue
                 norm_param = param._graph_trainer_dtensor_param
                 grad = param.grad
-                key = (id(norm_param), grad.dtype, grad.device)
+                key = (
+                    id(norm_param),
+                    grad.dtype,
+                    grad.device,
+                    norm_param.device_mesh,
+                    norm_param.placements,
+                    norm_param.shape,
+                    norm_param.stride(),
+                )
                 view = self._gradient_views.get(key)
                 if view is None:
                     view = DTensor.from_local(

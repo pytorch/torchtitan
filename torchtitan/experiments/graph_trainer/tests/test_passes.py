@@ -1634,54 +1634,59 @@ class TestFlexShardGradientClipper(TestCase):
         self.rendezvous.cleanup()
         super().tearDown()
 
-    def test_reuses_gradient_view_and_invalidates_changed_storage(self):
+    def test_reads_updated_gradient_values_and_storage(self):
         grad = torch.tensor([3.0, 4.0])
         self.param.grad = grad
-        with patch.object(
-            DTensor, "from_local", wraps=DTensor.from_local
-        ) as from_local:
-            norm = self.clipper.clip_grad_norm_(
-                [self.param], 100.0, parallelism_context=self.context
-            )
-            self.assertEqual(norm.item(), 5.0)
-            grad.mul_(2)
-            norm = self.clipper.clip_grad_norm_(
-                [self.param], 100.0, parallelism_context=self.context
-            )
-            self.assertEqual(norm.item(), 10.0)
-            self.assertEqual(from_local.call_count, 1)
-            grad.set_(torch.tensor([5.0, 12.0]))
-            norm = self.clipper.clip_grad_norm_(
-                [self.param], 100.0, parallelism_context=self.context
-            )
-            self.assertEqual(norm.item(), 13.0)
-            self.assertEqual(from_local.call_count, 1)
-            self.param.grad = torch.tensor([8.0, 15.0])
-            norm = self.clipper.clip_grad_norm_(
-                [self.param], 100.0, parallelism_context=self.context
-            )
-            self.assertEqual(norm.item(), 17.0)
-            self.assertEqual(from_local.call_count, 1)
-
-    def test_cached_gradient_view_does_not_retain_eager_source(self):
-        grad = torch.tensor([3.0, 4.0])
-        self.param.grad = grad
-        self.clipper.clip_grad_norm_(
-            [self.param], 1.0, parallelism_context=self.context
+        norm = self.clipper.clip_grad_norm_(
+            [self.param], 100.0, parallelism_context=self.context
         )
-        self.assertEqual(grad, torch.tensor([3.0, 4.0]) / (5.0 + 1e-6))
-        source_ref = weakref.ref(grad)
-        view = next(iter(self.clipper._gradient_views.values()))
-        self.param.grad = None
-        del grad
-        gc.collect()
-        self.assertIsNone(source_ref())
-        with torch.no_grad():
-            self.assertEqual(view.to_local().untyped_storage().nbytes(), 0)
-        self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
+        self.assertEqual(norm.item(), 5.0)
+        grad.mul_(2)
+        norm = self.clipper.clip_grad_norm_(
+            [self.param], 100.0, parallelism_context=self.context
+        )
+        self.assertEqual(norm.item(), 10.0)
+        grad.set_(torch.tensor([5.0, 12.0]))
+        norm = self.clipper.clip_grad_norm_(
+            [self.param], 100.0, parallelism_context=self.context
+        )
+        self.assertEqual(norm.item(), 13.0)
+        self.param.grad = torch.tensor([8.0, 15.0])
+        norm = self.clipper.clip_grad_norm_(
+            [self.param], 100.0, parallelism_context=self.context
+        )
+        self.assertEqual(norm.item(), 17.0)
+
+    def test_cached_clipper_does_not_retain_gradient_storage(self):
+        for heterogeneous in (False, True):
+            with self.subTest(heterogeneous=heterogeneous):
+                grad = torch.tensor([3.0, 4.0])
+                self.param.grad = grad
+                parameters = [self.param]
+                if heterogeneous:
+                    other = torch.nn.Parameter(torch.zeros(2, dtype=torch.bfloat16))
+                    other._graph_trainer_dtensor_param = torch.nn.Parameter(
+                        DTensor.from_local(other.detach(), self.mesh, (Shard(0),)),
+                        requires_grad=False,
+                    )
+                    other.grad = torch.zeros_like(other)
+                    parameters.append(other)
+                self.clipper.clip_grad_norm_(
+                    parameters, 1.0, parallelism_context=self.context
+                )
+                self.assertEqual(grad, torch.tensor([3.0, 4.0]) / (5.0 + 1e-6))
+                source_ref = weakref.ref(grad)
+                storage = grad.untyped_storage()
+                storage_ref = weakref.ref(storage)
+                self.param.grad = None
+                del grad, storage
+                gc.collect()
+                self.assertIsNone(source_ref())
+                self.assertIsNone(storage_ref())
+                self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
 
     def test_releases_bound_gradient_views_if_setup_fails(self):
-        other_param = torch.nn.Parameter(torch.zeros(2))
+        other_param = torch.nn.Parameter(torch.zeros(2, dtype=torch.bfloat16))
         other_param._graph_trainer_dtensor_param = torch.nn.Parameter(
             DTensor.from_local(other_param.detach(), self.mesh, (Shard(0),)),
             requires_grad=False,
@@ -1707,6 +1712,75 @@ class TestFlexShardGradientClipper(TestCase):
         with torch.no_grad():
             self.assertEqual(view.to_local().untyped_storage().nbytes(), 0)
         self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
+
+    def test_preserves_mixed_dtype_reduction_order(self):
+        for dtypes in ((torch.float32, torch.bfloat16), (torch.float32, torch.float64)):
+            with self.subTest(dtypes=dtypes):
+                torch.manual_seed(0)
+                parameters = []
+                expected_parameters = []
+                for index in range(90):
+                    dtype = dtypes[index % len(dtypes)]
+                    grad = torch.randn(17 + index % 7, 23, dtype=dtype) * (
+                        10.0 ** (index % 13 - 6)
+                    )
+                    param = torch.nn.Parameter(torch.zeros_like(grad))
+                    param.grad = grad.clone()
+                    param._graph_trainer_dtensor_param = torch.nn.Parameter(
+                        DTensor.from_local(param.detach(), self.mesh, (Shard(0),)),
+                        requires_grad=False,
+                    )
+                    expected = torch.nn.Parameter(
+                        param._graph_trainer_dtensor_param.clone(), requires_grad=False
+                    )
+                    expected.grad = DTensor.from_local(
+                        grad.clone(), self.mesh, (Shard(0),)
+                    )
+                    parameters.append(param)
+                    expected_parameters.append(expected)
+                expected_norm = GradientClipper(
+                    GradientClipper.Config()
+                ).clip_grad_norm_(
+                    expected_parameters, 1.0, parallelism_context=self.context
+                )
+                actual_norm = self.clipper.clip_grad_norm_(
+                    parameters, 1.0, parallelism_context=self.context
+                )
+                self.assertEqual(actual_norm, expected_norm, atol=0, rtol=0)
+                for param, expected in zip(
+                    parameters, expected_parameters, strict=True
+                ):
+                    self.assertEqual(
+                        param.grad, expected.grad.to_local(), atol=0, rtol=0
+                    )
+
+    def test_norm_setup_failure_does_not_clip_other_mesh(self):
+        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("other_fsdp",))
+        other = torch.nn.Parameter(torch.zeros(2))
+        other._graph_trainer_dtensor_param = torch.nn.Parameter(
+            DTensor.from_local(other.detach(), mesh, (Shard(0),)), requires_grad=False
+        )
+        self.param.grad = torch.ones_like(self.param)
+        other.grad = torch.ones_like(other)
+        from_local = DTensor.from_local
+        calls = 0
+
+        def fail_second_norm(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("norm setup failed")
+            return from_local(*args, **kwargs)
+
+        with patch.object(DTensor, "from_local", side_effect=fail_second_norm):
+            with self.assertRaisesRegex(RuntimeError, "norm setup failed"):
+                self.clipper.clip_grad_norm_(
+                    [self.param, other], 0.01, parallelism_context=self.context
+                )
+        self.assertEqual(self.param.grad, torch.ones_like(self.param))
+        self.assertEqual(other.grad, torch.ones_like(other))
+        self.assertIsNone(self.param._graph_trainer_dtensor_param.grad)
+        self.assertIsNone(other._graph_trainer_dtensor_param.grad)
 
 
 class TestFsdpDenseSchedulerPass(TestCase):
