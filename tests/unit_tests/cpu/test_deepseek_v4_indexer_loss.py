@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import bisect
+import itertools
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from torchtitan.models.deepseek_v4 import build_model_config
 from torchtitan.models.deepseek_v4.attention import CompressedSparseAttention
 from torchtitan.models.deepseek_v4.compressor import (
     compressed_cu_seqlens,
+    compressed_gather_indices,
     Indexer,
     SparseIndexerLoss,
 )
@@ -92,6 +94,13 @@ class TestSparseIndexerLoss(unittest.TestCase):
             **kwargs,
         ).build()
 
+    def selected_indices(self, indices, cu):
+        return (
+            compressed_gather_indices(indices, cu, 4)
+            .masked_fill(indices < 0, -1)
+            .unsqueeze(-1)
+        )
+
     def test_teacher_matches_independent_dense_attention_and_kernel(self):
         for packed in (False, True):
             with self.subTest(packed=packed):
@@ -110,9 +119,61 @@ class TestSparseIndexerLoss(unittest.TestCase):
                 torch.testing.assert_close(out, expected_out)
                 torch.testing.assert_close(lse, expected_lse)
                 teacher = self.loss()._teacher(
-                    self.q, self.compressed, indices, lse, cu
+                    self.q,
+                    self.compressed[:, None],
+                    self.selected_indices(indices, cu),
+                    lse,
                 )
                 torch.testing.assert_close(teacher, expected_teacher)
+
+    def test_block_teacher_max_pools_grouped_head_probabilities(self):
+        num_heads, num_kv_heads, block, scale = 4, 2, 4, 8**-0.5
+        q, keys = torch.randn(13, num_heads, 8), torch.randn(13, num_kv_heads, 8)
+        for cu, padded in itertools.product(
+            (None, torch.tensor([0, 5, 5, 13], dtype=torch.int32)), (False, True)
+        ):
+            with self.subTest(packed=cu is not None, padded=padded):
+                offsets = [0, 13] if cu is None else cu.tolist()
+                padding = torch.zeros(13, dtype=torch.bool)
+                if padded:
+                    padding[[1, 6]] = True
+                indices = torch.full((13, 2, block), -1, dtype=torch.int32)
+                rows, lse = [], torch.zeros(13, num_heads)
+                for token in range(13):
+                    if padding[token]:
+                        rows.append([])
+                        continue
+                    start = offsets[bisect.bisect_right(offsets, token) - 1]
+                    valid = [j for j in range(start, token + 1) if not padding[j]]
+                    complete = len(valid) // block
+                    chosen = list(range(complete))[::-1][:2]
+                    rows.append([valid[b * block : (b + 1) * block] for b in chosen])
+                    for slot, block_rows in enumerate(rows[-1]):
+                        indices[token, slot] = torch.tensor(block_rows)
+                    tail = valid[complete * block :]
+                    attended = [r for blk in rows[-1] for r in blk] + tail
+                    for head in range(num_heads):
+                        logits = keys[attended, head // 2] @ q[token, head] * scale
+                        lse[token, head] = logits.logsumexp(0)
+                expected = torch.zeros(13, 2)
+                for token in range(13):
+                    for slot, block_rows in enumerate(rows[token]):
+                        mass = torch.zeros(block)
+                        for head in range(num_heads):
+                            logits = keys[block_rows, head // 2] @ q[token, head]
+                            mass += (logits * scale - lse[token, head]).exp()
+                        expected[token, slot] = mass.max() / num_heads
+                teacher = (
+                    SparseIndexerLoss.Config(
+                        coeff=0.01,
+                        softmax_scale=scale,
+                        num_heads=num_heads,
+                        chunk_size=5,
+                    )
+                    .build()
+                    ._teacher(q, keys, indices, lse, padding)
+                )
+                torch.testing.assert_close(teacher, expected)
 
     def test_padding_gradient_and_metric_match_independent_kl(self):
         indices, cu = self.case(True)
@@ -135,11 +196,10 @@ class TestSparseIndexerLoss(unittest.TestCase):
                 carrier = torch.randn_like(self.q, requires_grad=True)
                 out = loss(
                     self.q,
-                    self.compressed,
-                    indices,
+                    self.compressed[:, None],
+                    self.selected_indices(indices, cu),
                     scores.masked_fill(indices < 0, -torch.inf),
                     lse,
-                    cu,
                     carrier=carrier,
                     denominator=torch.tensor(10.0),
                     padding_mask_T=~valid_tokens,
@@ -168,9 +228,10 @@ class TestSparseIndexerLoss(unittest.TestCase):
         indices, cu = self.case(True)
         _, lse = self.kernel(indices, cu)
         loss = self.loss()
-        small = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        selected = self.selected_indices(indices, cu)
+        small = loss._teacher(self.q, self.compressed[:, None], selected, lse)
         loss.chunk_size = 128
-        large = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        large = loss._teacher(self.q, self.compressed[:, None], selected, lse)
         torch.testing.assert_close(small, large)
 
     def test_bfloat16_teacher_dot_products_accumulate_in_float32(self):
@@ -188,7 +249,9 @@ class TestSparseIndexerLoss(unittest.TestCase):
             cu,
         )
         with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-            actual = self.loss()._teacher(q, compressed, indices, lse, cu)
+            actual = self.loss()._teacher(
+                q, compressed[:, None], self.selected_indices(indices, cu), lse
+            )
         torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
 
     def test_configuration_defaults_to_unweighted_kl(self):
