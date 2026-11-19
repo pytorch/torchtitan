@@ -26,7 +26,7 @@ _PackHook = Callable[[torch.Tensor], object]
 _UnpackHook = Callable[[object], torch.Tensor]
 
 
-_BLOCK_FQN = re.compile(r"([A-Za-z_]\w*\.)?(mtp_)?layers\.\d+")
+_BLOCK_FQN = re.compile(r"([A-Za-z_]\w*\.)+\d+")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -69,7 +69,8 @@ class BlockRematOverride:
             if _BLOCK_FQN.fullmatch(block_fqn) is None:
                 raise ValueError(
                     "BlockRematOverride.blocks must name transformer blocks "
-                    "as 'layers.<id>', 'mtp_layers.<id>' or '<encoder>.layers.<id>'; got "
+                    "as '<container>.<id>', e.g. 'layers.3' or "
+                    "'vision_encoder.layers.3'; got "
                     f"{block_fqn!r}."
                 )
 
@@ -169,26 +170,25 @@ class ActivationRematConfig:
         module: Module,
         *,
         module_fqn: str = "",
+        blocks_name: str = "layers",
         saved_tensors_hooks: (
             Callable[[nn.Module, str], tuple[_PackHook, _UnpackHook] | None] | None
         ) = None,
     ) -> None:
         """Checkpoint every transformer block of ``module`` with ``torch_remat``.
 
-        The blocks are the children of ``module.layers`` and, on models with
-        multi-token prediction, of ``module.mtp_layers`` (``mtp_layers.<id>``),
-        whose activations would otherwise all be retained for backward.
-
         Args:
-            module: Module whose ``layers`` (and ``mtp_layers``) children are
-                the transformer blocks: the root model or an encoder within it.
+            module: Module whose ``blocks_name`` children are the transformer
+                blocks: the root model or an encoder within it.
             module_fqn: FQN of ``module`` within the full model, such as
                 ``"vision_encoder"``; empty for the root model. Prefixes the
                 block FQNs that ``block_overrides`` are matched against.
+            blocks_name: Name of the submodule of ``module`` that holds the
+                blocks, e.g. ``"mtp_layers"`` for multi-token prediction
+                blocks. Blocks are named ``<blocks_name>.<id>``.
             saved_tensors_hooks: Optional callable returning the saved-tensor
                 hook pair for one block, given the block and its FQN
-                (``layers.<id>`` or ``mtp_layers.<id>``), or None to leave that
-                block unhooked. The
+                (``<blocks_name>.<id>``), or None to leave that block unhooked. The
                 pair is passed to
                 ``torch_remat.checkpoint(saved_tensors_hooks=...)``: ``pack``
                 replaces each tensor the block retains for backward with an
@@ -202,16 +202,8 @@ class ActivationRematConfig:
                 around the block. See torchtitan/distributed/ACTIVATION_REMAT.md and
                 https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
         """
-        transformer_blocks = [
-            (f"layers.{layer_id}", block)
-            for layer_id, block in module.get_submodule("layers").named_children()
-        ]
-        mtp_layers = getattr(module, "mtp_layers", None)
-        if mtp_layers is not None:
-            transformer_blocks += [
-                (f"mtp_layers.{layer_id}", block)
-                for layer_id, block in mtp_layers.named_children()
-            ]
+        layers = module.get_submodule(blocks_name)
+        transformer_blocks = list(layers.named_children())
         if not transformer_blocks:
             logger.info(
                 "%s found no transformer blocks in this model part",
@@ -223,8 +215,9 @@ class ActivationRematConfig:
         # validation can account for all pipeline stages instead of only this
         # model part.
         overridden = []
-        for base_fqn, transformer_block in transformer_blocks:
+        for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
+            base_fqn = f"{blocks_name}.{layer_id}"
             block_fqn = f"{module_fqn}.{base_fqn}" if module_fqn else base_fqn
             save_regions, recompute_regions = self.save_regions, self.recompute_regions
             override = next(

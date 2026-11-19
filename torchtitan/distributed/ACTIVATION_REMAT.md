@@ -94,9 +94,10 @@ ActivationRematConfig(
 ```
 
 Block names are exact FQNs in the original model: `layers.<id>` for decoder
-blocks and `<encoder>.layers.<id>` (e.g. `vision_encoder.layers.3`) for
-encoder blocks, which `apply(encoder, module_fqn="vision_encoder")` matches
-against. Pipeline splitting keeps original layer ids, so an override follows
+blocks, `mtp_layers.<id>` for multi-token prediction blocks, which
+`apply(model, blocks_name="mtp_layers")` checkpoints, and
+`<encoder>.layers.<id>` (e.g. `vision_encoder.layers.3`) for encoder blocks,
+which `apply(encoder, module_fqn="vision_encoder")` matches against. Pipeline splitting keeps original layer ids, so an override follows
 its block to whichever stage holds it. Malformed names, empty overrides and a
 block named by two overrides raise at config time; a name the model lacks is
 not detected, since each pipeline stage holds only some blocks. Within a

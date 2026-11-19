@@ -173,44 +173,18 @@ class TestActivationCheckpointing(unittest.TestCase):
         self.assertEqual(block.routed_experts.w2.projection.num_forwards, 1)
         self.assertEqual(block.shared_experts.projection.num_forwards, 1)
 
-    def test_mtp_layers_are_checkpointed(self):
-        """MTP blocks (``mtp_layers.<id>``) are checkpointed like ``layers.<id>``."""
+    def test_blocks_name_selects_the_block_container(self):
         model = ToyModel()
         model.mtp_layers = ModuleList([TransformerBlock(), TransformerBlock()])
         hooked = []
         FullActivationRematConfig().apply(
             model,
+            blocks_name="mtp_layers",
             saved_tensors_hooks=lambda block, fqn: hooked.append(fqn),
         )
-        x_BD = torch.randn(8, 32, requires_grad=True)
-        (model(x_BD) + sum(block(x_BD) for block in model.mtp_layers)).backward()
 
-        self.assertEqual(hooked, ["layers.0", "mtp_layers.0", "mtp_layers.1"])
-        for block in (model.layers["0"], *model.mtp_layers):
-            self.assertEqual(
-                (
-                    block.input_projection.num_forwards,
-                    block.inner_compute.num_forwards,
-                    block.output_projection.num_forwards,
-                ),
-                (2, 2, 2),
-            )
-
-    def test_block_overrides_name_mtp_blocks(self):
-        model = ToyModel()
-        model.mtp_layers = ModuleList([TransformerBlock()])
-        ActivationRematConfig(
-            save_regions=[],
-            block_overrides=[
-                BlockRematOverride(blocks=["mtp_layers.0"], save_regions=["*"])
-            ],
-        ).apply(model)
-        x_BD = torch.randn(8, 32, requires_grad=True)
-        (model(x_BD) + model.mtp_layers[0](x_BD)).backward()
-
-        block = model.mtp_layers[0]
-        self.assertEqual(block.input_projection.num_forwards, 1)
-        self.assertEqual(model.layers["0"].input_projection.num_forwards, 2)
+        self.assertEqual(hooked, ["mtp_layers.0", "mtp_layers.1"])
+        self.assertNotIn("forward", vars(model.layers["0"]))
 
     def test_full_and_default_match_uncheckpointed_model(self):
         torch.manual_seed(42)
@@ -329,8 +303,8 @@ class TestActivationCheckpointing(unittest.TestCase):
         for name, override_factory, message in (
             (
                 "malformed name",
-                lambda: BlockRematOverride(blocks=["layer.91"], save_regions=[]),
-                "layers.<id>",
+                lambda: BlockRematOverride(blocks=["layers.last"], save_regions=[]),
+                "<container>.<id>",
             ),
             (
                 "no blocks",

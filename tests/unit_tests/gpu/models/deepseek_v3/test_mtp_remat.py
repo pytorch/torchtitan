@@ -77,6 +77,7 @@ class TestDeepSeekV3MTPRemat(unittest.TestCase):
             with self.subTest(policy=type(policy).__qualname__):
                 model = copy.deepcopy(baseline)
                 policy.apply(model)
+                policy.apply(model, blocks_name="mtp_layers")
                 self.assertTrue(
                     all("forward" in vars(block) for block in model.mtp_layers)
                 )
