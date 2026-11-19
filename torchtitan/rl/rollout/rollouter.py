@@ -27,7 +27,9 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rdma_object import RDMAImageFiles, RegisterRDMAObject
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
+from torchtitan.rl.rollout.finished_group import FinishedRolloutGroup
 from torchtitan.rl.rollout.message_env import MessageEnv
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
@@ -69,10 +71,10 @@ class Rollouter(Configurable):
     batch.
 
         index, sample = rollouter.get_training_sample()
-        group = await rollouter.run_group_rollouts(     # one worker runs and scores the group
+        finished = await rollouter.run_group_rollouts(  # one worker runs and scores the group
             generate_fn=generate_fn, release_session_fn=release_session_fn,
             sample=sample, group_id=index,
-            group_size=N, sampling=sampling)
+            group_size=N, sampling=sampling, for_training=True)
 
     Example:
         rollouter = Rollouter.Config(
@@ -92,8 +94,11 @@ class Rollouter(Configurable):
         Rollouter supports customization at several levels:
           - Sample source: provide source configs for training and validation.
           - Group execution, coarse: override `run_group_rollouts` for your own
-            orchestration. The worker then becomes optional -- but override
-            `setup_async` too, or the worker pool is still spawned unused.
+            orchestration. It must return `finish_rollout_group(group,
+            for_training=for_training, encoder=RolloutSampleEncoder(rollout_recorder_config))`
+            (the config `setup_async` receives): the controller logs the rollout metrics
+            and records the lines that call adds. The worker then becomes optional -- but
+            override `setup_async` too, or the worker pool is still spawned unused.
           - Group execution, fine: keep the stock orchestration and point `worker`
             at a `MessageEnvRolloutWorker.Config` subclass, overriding only what you need
             (`make_env_group`, `score_group`, `run_group`). A worker whose env isn't a
@@ -143,7 +148,7 @@ class Rollouter(Configurable):
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
         self._inflight_run_group_calls: set[
-            asyncio.Future[tuple[RolloutGroup, float]]
+            asyncio.Future[tuple[FinishedRolloutGroup, float]]
         ] = set()
 
     def get_training_sample(self) -> tuple[int, object]:
@@ -172,13 +177,18 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        rollout_recorder_config: RolloutSampleRecorder.Config,
         vision_processor_config: VisionProcessor.Config | None = None,
         # Constructor args of each rollout worker known only at setup, e.g. a server address.
         # TODO: VerifiersRollouter is the only user. Once its env runs in the rollout worker, remove
         # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn the rollout worker pool through ``actor_system`` and initialize it.
+
+        ``rollout_recorder_config``: the controller's recorder config; each worker encodes the
+        recorder lines of its training groups with it.
+        """
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
@@ -193,6 +203,7 @@ class Rollouter(Configurable):
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            rollout_recorder_config=rollout_recorder_config,
             vision_processor_config=vision_processor_config,
         )
 
@@ -239,7 +250,8 @@ class Rollouter(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
-    ) -> RolloutGroup:
+        for_training: bool,
+    ) -> FinishedRolloutGroup:
         """Send one prompt group to a rollout worker and return its scored group.
 
         Args:
@@ -250,10 +262,14 @@ class Rollouter(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
+            for_training: The worker computes the group's rollout metrics and recorder lines
+                and returns the slim group (see `finish_rollout_group`); False for validation,
+                which gets the full group.
 
         Returns:
-            One scored `RolloutGroup`. Its `metrics` hold the call's `timing/hop/run_group/*`
-            (see `compute_hop_metrics`) and `payload/rollout_group_array_bytes`.
+            The worker's `FinishedRolloutGroup`. Its `group.metrics` also hold the call's
+            `timing/hop/run_group/*` (see `compute_hop_metrics`) and
+            `payload/rollout_group_array_bytes`.
         """
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
@@ -269,36 +285,41 @@ class Rollouter(Configurable):
                 group_id=group_id,
                 group_size=group_size,
                 sampling=sampling,
+                for_training=for_training,
             )
         )
         self._inflight_run_group_calls.add(call)
         call.add_done_callback(self._on_run_group_call_done)
         # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
-        group, handler_s = await asyncio.shield(call)
+        finished, handler_s = await asyncio.shield(call)
         wall_s = time.perf_counter() - start
+        group = finished.group
         group.metrics.extend(
             compute_hop_metrics("run_group", wall_s=[wall_s], handler_s=[handler_s])
         )
         # Every array field of every turn (tokens, logprobs, and any per-token field a feature
-        # adds) plus the image files. Not the pickled size: messages, metrics and logs are not
-        # counted, and on a text task they can outweigh the arrays.
+        # adds) plus each image file once (pickle writes a shared `bytes` object once). Not the
+        # pickled size: messages, metrics and logs are not counted, and on a text task they can
+        # outweigh the arrays.
         payload_bytes = 0
+        image_data_ids: set[int] = set()
         for rollout in group.rollouts:
             for turn in rollout.turns:
                 for turn_field in fields(turn):
                     value = getattr(turn, turn_field.name)
                     if isinstance(value, np.ndarray):
                         payload_bytes += value.nbytes
-                payload_bytes += sum(
-                    len(image.data) for image in turn.prompt_delta_images
-                )
+                for image in turn.prompt_delta_images:
+                    if id(image.data) not in image_data_ids:
+                        image_data_ids.add(id(image.data))
+                        payload_bytes += len(image.data)
         group.metrics.append(
             m.Metric("payload/rollout_group_array_bytes", m.Mean(payload_bytes))
         )
-        return group
+        return finished
 
     def _on_run_group_call_done(
-        self, call: asyncio.Future[tuple[RolloutGroup, float]]
+        self, call: asyncio.Future[tuple[FinishedRolloutGroup, float]]
     ) -> None:
         self._inflight_run_group_calls.discard(call)
         # A cancelled caller never reads the error; read it so asyncio does not log it.

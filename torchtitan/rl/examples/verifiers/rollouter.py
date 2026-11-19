@@ -35,6 +35,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import RewardFn
 from torchtitan.rl.rollout.types import (
@@ -137,6 +138,7 @@ class VerifiersRollouter(Rollouter):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        rollout_recorder_config: RolloutSampleRecorder.Config,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
         """Start the EnvServer, then the rollout workers that connect to it."""
@@ -155,6 +157,7 @@ class VerifiersRollouter(Rollouter):
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            rollout_recorder_config=rollout_recorder_config,
             worker_kwargs={"env_server_address": env_server_address},
         )
 
