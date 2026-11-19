@@ -234,7 +234,7 @@ class RolloutStatus(StrEnum):
 class RolloutTurn:
     """One turn: the prompt fed to the generator + the sampled completion +
     the env's reply, in both token and message space. Rubrics score it and
-    `rollout_to_training_samples` packs the rollout into training tokens.
+    `TrainingSampleBuilder` turns the rollout into training samples.
 
     A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
     turn's prompt + completion, then its new tokens and the images among them (`prompt_messages` stay
@@ -420,3 +420,88 @@ class RolloutGroup:
 
     metrics: list[m.Metric] = field(default_factory=list)
     """Rollout-origin metrics that ride with this group to the trainer (a failed group carries its failure metric)."""
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutTurnLengths:
+    """The lengths of a turn's arrays that deciding and planning read instead of the arrays."""
+
+    num_prompt_delta_tokens: int
+    """`len(prompt_delta_token_ids)`."""
+
+    num_completion_tokens: int
+    """`len(completion_token_ids)`."""
+
+    completion_nonfinite_logprob_offsets: tuple[int, ...]
+    """Positions in the completion whose generator logprob is not finite (no loss there);
+    usually empty. Positions, not a count: an MTP depth's loss-token count skips a sample's
+    first positions, so it depends on where they are."""
+
+
+def rollout_turn_lengths(rollout: Rollout) -> tuple[RolloutTurnLengths, ...]:
+    """The lengths of each of `rollout`'s turns' arrays, in turn order."""
+    turn_lengths = []
+    for turn in rollout.turns:
+        finite = np.isfinite(turn.completion_logprobs)
+        turn_lengths.append(
+            RolloutTurnLengths(
+                num_prompt_delta_tokens=len(turn.prompt_delta_token_ids),
+                num_completion_tokens=len(turn.completion_token_ids),
+                completion_nonfinite_logprob_offsets=(
+                    () if finite.all() else tuple(np.flatnonzero(~finite).tolist())
+                ),
+            )
+        )
+    return tuple(turn_lengths)
+
+
+def check_prompt_prefixes(rollout: Rollout) -> None:
+    """Raise if a turn of `rollout` reuses more of the previous turn's tokens than there are, or
+    fewer than it could.
+
+    Too many: e.g. previous = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6. Too few: where a
+    turn reuses fewer tokens than the previous turn's prompt + completion has, its first new
+    token must differ from the previous turn's token at that position, as `split_prompt` makes
+    it. E.g. previous = [0, 1, 2, 3], stored (0, [0, 1, 9, 3]): 0 == previous[0], and
+    `split_prompt` gives (2, [9, 3]). This catches a full prompt stored as the delta. Not when a
+    changed image starts the delta: `split_prompt` ends the prefix at it, and its placeholder
+    tokens equal the previous image's.
+    """
+    # The previous turn's prompt + completion, as chunks (views, never joined).
+    previous: list[np.ndarray] = []
+    previous_len = 0
+    for turn_id, turn in enumerate(rollout.turns):
+        prompt_prefix_len = turn.prompt_prefix_len
+        delta = turn.prompt_delta_token_ids
+        if prompt_prefix_len > previous_len:
+            raise ValueError(
+                f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_id} "
+                f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
+                f"{previous_len}; build it with `split_prompt`"
+            )
+        if prompt_prefix_len < previous_len:
+            kept: list[np.ndarray] = []
+            num_kept = 0
+            for chunk in previous:
+                if num_kept + len(chunk) > prompt_prefix_len:
+                    could_reuse_one_more = (
+                        len(delta) > 0
+                        and delta[0] == chunk[prompt_prefix_len - num_kept]
+                        and not any(
+                            placeholder.offset == prompt_prefix_len
+                            for placeholder in turn.prompt_delta_image_placeholders
+                        )
+                    )
+                    if could_reuse_one_more:
+                        raise ValueError(
+                            f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn "
+                            f"{turn_id} reuses {prompt_prefix_len} tokens but could reuse "
+                            "more; build it with `split_prompt`"
+                        )
+                    kept.append(chunk[: prompt_prefix_len - num_kept])
+                    break
+                kept.append(chunk)
+                num_kept += len(chunk)
+            previous = kept
+        previous += [delta, turn.completion_token_ids]
+        previous_len = prompt_prefix_len + len(delta) + len(turn.completion_token_ids)
