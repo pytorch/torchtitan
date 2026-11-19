@@ -966,8 +966,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="flex_shard_checkpoint",
             ngpu=2,
             use_real_pg=True,
-            # FlexShard is unvalidated on ROCm.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_pp2_1f1b],
