@@ -14,12 +14,11 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_remat import (
-    BlockRematOverride,
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.llama3 import build_model_config, Llama3Model
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
 from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
@@ -81,21 +80,12 @@ def llama3_8b_activation_offload(seq_len: int | None = None) -> Trainer.Config:
     graph and NUMA binding: 8.4 GiB less peak memory at unchanged throughput.
     Without CUDA graphs or NUMA binding the copies compete with the CPU that
     launches kernels (2 x GB300: 8.5 GiB less, 5% lower throughput); see
-    torchtitan/distributed/ACTIVATION_OFFLOAD.md.
-    The last block stays on GPU: only the loss runs between its forward and its
-    backward, so its copies could not overlap compute.
+    torchtitan/distributed/ACTIVATION_OFFLOAD.md. The offloader keeps the last
+    block on GPU by itself.
     """
     config = llama3_8b(seq_len)
-    assert isinstance(config.model, Llama3Model.Config)
-    last_block = f"layers.{len(config.model.layers) - 1}"
     config.activation_remat = DefaultActivationRematConfig(
-        offload_block_input=True,
-        offload_regions=["attention.*"],
-        block_overrides=[
-            BlockRematOverride(
-                blocks=[last_block], offload_block_input=False, offload_regions=[]
-            ),
-        ],
+        offload_block_input=True, offload_regions=["attention.*"]
     )
     return config
 

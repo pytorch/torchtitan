@@ -130,6 +130,8 @@ class _OffloadedStorage:
     host_buffer: torch.Tensor | None
     # Why remat retained the tensor that first packed this storage.
     kind: remat.SavedTensorKind
+    # Its save region, or "block input", for forward_stats.
+    region: str = ""
     state: _State = _State.OFFLOADING
     # Recorded on the reload stream right after this storage's H2D copy. It
     # syncs the reload with its consumers on the GPU: _unpack makes the compute
@@ -343,6 +345,9 @@ class ActivationOffloader:
         # Stats of the latest (or in-progress) forward of this model part.
         self.forward_stats = OffloadStats()
         self._logged_summary = False
+        # The block whose group ran last in this model part's first forward,
+        # kept on GPU from then on (see _model_part_post_forward).
+        self._last_block_fqn: str | None = None
         self._remat_config = remat_config
         # Which retained tensors each hooked block sends to CPU; empty until
         # the first forward hooks the blocks.
@@ -387,6 +392,8 @@ class ActivationOffloader:
         # Under remat, the checkpoint's replay in backward calls the block's
         # forward again; that replay saves nothing to offload.
         if not torch.is_grad_enabled() or remat.is_recomputing():
+            return
+        if fqn == self._last_block_fqn:
             return
         assert (
             self._current_group is None
@@ -453,17 +460,35 @@ class ActivationOffloader:
         self, module: nn.Module, args: Any, output: Any
     ) -> None:
         """Model-part post-forward hook: free the last group and install its
-        reload trigger on the model part's output."""
-        # The last group runs first in backward, so the model part's output
-        # triggers its reload. Only the loss (or, on a non-last pipeline
-        # stage, the gradient's arrival) separates this from its backward, so
-        # the free and the reload barely overlap compute; a recipe can keep
-        # the last block on GPU with a BlockRematOverride.
+        reload trigger on the model part's output.
+
+        The block that runs last stays on GPU. Only the loss (or, on a
+        non-last pipeline stage, the gradient's arrival) separates its
+        forward from its backward, so freeing it would wait on copies just
+        queued and its backward would wait on its reload. Which block runs
+        last depends on the model (decoder, MTP head, pipeline stage split),
+        so it is learned from the first forward rather than configured: that
+        forward keeps the last group's GPU copies instead of freeing them,
+        and later forwards open no group for that block. The group that runs
+        last then is the one before it, freed here after the whole last
+        block's forward and reloaded during its backward.
+        """
         last_group = self._previous_group
         if last_group is not None:
             self._previous_group = None
-            self._free_gpu_copies(last_group)
-            self._prefetch_on_grad(output, group_to_reload=last_group)
+            if self._last_block_fqn is None:
+                self._last_block_fqn = last_group.module_fqn
+                logger.info(
+                    "Activation offloading keeps %s, the last block to run, "
+                    "on GPU from the next forward on",
+                    last_group.module_fqn,
+                )
+                self._keep_gpu_copies(last_group)
+            else:
+                # The last group runs first in backward, so the model part's
+                # output triggers its reload.
+                self._free_gpu_copies(last_group)
+                self._prefetch_on_grad(output, group_to_reload=last_group)
         self._register_pending_trigger()
         if not self._logged_summary and torch.is_grad_enabled():
             self._logged_summary = True
@@ -579,6 +604,7 @@ class ActivationOffloader:
         offloaded = group.storages.get(storage.data_ptr())
         if offloaded is None:
             offloaded = self._offload(storage, kind)
+            offloaded.region = region
             group.storages[storage.data_ptr()] = offloaded
             by_region = self.forward_stats.offloaded_bytes_by_region
             by_region[region] = by_region.get(region, 0) + storage.nbytes()
@@ -656,6 +682,27 @@ class ActivationOffloader:
                     resident = self.forward_stats.still_resident_bytes
                     source = f"{group.module_fqn} {offloaded.kind.name}"
                     resident[source] = resident.get(source, 0) + nbytes
+
+    def _keep_gpu_copies(self, group: _OffloadGroup) -> None:
+        """Keep ``group`` on GPU instead of freeing it: backward reads the
+        GPU copies (still OFFLOADING), so the D2H copies were only wasted
+        bandwidth. Their pinned buffers go back to the pool once written,
+        and forward_stats counts them as kept, as later forwards will."""
+        stats = self.forward_stats
+        for offloaded in group.storages.values():
+            assert offloaded.host_buffer is not None
+            assert offloaded.device_tensor is not None
+            assert group.copy_done_event is not None
+            self._host_buffers.release(offloaded.host_buffer, group.copy_done_event)
+            offloaded.host_buffer = None
+            nbytes = offloaded.device_tensor.untyped_storage().nbytes()
+            stats.offloaded_bytes -= nbytes
+            by_region = stats.offloaded_bytes_by_region
+            by_region[offloaded.region] -= nbytes
+            if not by_region[offloaded.region]:
+                del by_region[offloaded.region]
+            reason = "last block to run"
+            stats.skipped_bytes[reason] = stats.skipped_bytes.get(reason, 0) + nbytes
 
     # ----------------------------------------------------------- backward
     def _prefetch_on_grad(self, output: Any, *, group_to_reload: _OffloadGroup) -> None:

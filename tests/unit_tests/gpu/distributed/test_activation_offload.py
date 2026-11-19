@@ -421,12 +421,13 @@ class TestActivationOffload(unittest.TestCase):
     def test_offloads_only_selected_regions(self):
         self.reference = _Model(_TwoRegionBlock)
         activation_bytes = _NUM_TOKENS * _DIM * 4
-        # Per block (0..5): "sin" retains x * 2; "cos" retains sin_TD, which
-        # "sin" also persists, and its own output. Block inputs are offloaded
-        # for blocks 1..5 (block 0's is the model input).
+        # Per offloaded block (0..4; the last runs last, so stays on GPU):
+        # "sin" retains x * 2; "cos" retains sin_TD, which "sin" also
+        # persists, and its own output. Block inputs are offloaded for blocks
+        # 1..4 (block 0's is the model input).
         expected = {
-            "sin": {"sin": 6 * activation_bytes, "block input": 5 * activation_bytes},
-            "cos": {"cos": 12 * activation_bytes, "block input": 5 * activation_bytes},
+            "sin": {"sin": 5 * activation_bytes, "block input": 4 * activation_bytes},
+            "cos": {"cos": 10 * activation_bytes, "block input": 4 * activation_bytes},
         }
         for region, expected_by_region in expected.items():
             with self.subTest(offload_regions=[region]):
@@ -482,27 +483,28 @@ class TestActivationOffload(unittest.TestCase):
         for e, a in zip(expected, actual, strict=True):
             torch.testing.assert_close(a, e, rtol=0, atol=0)
         # Block inputs offloaded per forward: encoder blocks 1..2 (block 0's
-        # is the model input) and every decoder block.
+        # is the model input) and decoder blocks 0..4 (the last runs last, so
+        # stays on GPU).
         activation_bytes = _NUM_TOKENS * _DIM * 4
         self.assertEqual(
             _offloader(model).forward_stats.offloaded_bytes,
-            (_NUM_ENCODER_LAYERS - 1 + _NUM_LAYERS) * activation_bytes,
+            (_NUM_ENCODER_LAYERS - 1 + _NUM_LAYERS - 1) * activation_bytes,
         )
         # The encoder's last group is freed by decoder block 0's forward.
         blocks = [f"vision_encoder.layers.{i}" for i in range(_NUM_ENCODER_LAYERS)]
-        blocks += [f"layers.{i}" for i in range(_NUM_LAYERS)]
+        blocks += [f"layers.{i}" for i in range(_NUM_LAYERS - 1)]
         self.assertEqual(freed[: len(blocks)], blocks)
 
     def test_never_offloads_parameters(self):
         self.reference = _Model(_InternalWeightBlock)
         model = self._assert_bitwise_equal(_save_all(["*"]))
-        # Offloaded per forward: each block's proj output (blocks 0..5) and
-        # block input (blocks 1..5; block 0's is the model input). Offloading
-        # the (D, D) weights would add 6 * _DIM * _DIM * 4 bytes.
+        # Offloaded per forward: each offloaded block's proj output (blocks
+        # 0..4) and block input (blocks 1..4; block 0's is the model input).
+        # Offloading the (D, D) weights would add 5 * _DIM * _DIM * 4 bytes.
         activation_bytes = _NUM_TOKENS * _DIM * 4
         self.assertEqual(
             _offloader(model).forward_stats.offloaded_bytes,
-            (_NUM_LAYERS + _NUM_LAYERS - 1) * activation_bytes,
+            (_NUM_LAYERS - 1 + _NUM_LAYERS - 2) * activation_bytes,
         )
 
     def test_keeps_tensor_subclass_saves_on_gpu(self):
@@ -528,30 +530,47 @@ class TestActivationOffload(unittest.TestCase):
                 ],
             )
         )
-        # Blocks 1, 3, 4 and 5: block 0's input is the model input, and
-        # block 2 is overridden.
+        # Blocks 1, 3 and 4: block 0's input is the model input, block 2 is
+        # overridden, and the last block runs last, so stays on GPU.
         input_bytes = _NUM_TOKENS * _DIM * 4
         self.assertEqual(
-            _offloader(model).forward_stats.offloaded_bytes, 4 * input_bytes
+            _offloader(model).forward_stats.offloaded_bytes, 3 * input_bytes
         )
 
-    def test_override_keeps_the_last_block_on_gpu(self):
-        last_block = f"layers.{_NUM_LAYERS - 1}"
-        model = self._assert_bitwise_equal(
-            FullActivationRematConfig(
-                offload_block_input=True,
-                block_overrides=[
-                    BlockRematOverride(blocks=[last_block], offload_block_input=False)
-                ],
-            )
-        )
-        # Blocks 1..4: block 0's input is the model input, and the override
-        # keeps the last block's on GPU.
+    def test_last_block_to_run_stays_on_gpu(self):
+        """The first forward learns which block runs last and keeps its GPU
+        copies; later forwards do not offload it."""
+        baseline = _build(FullActivationRematConfig(), self.reference)
+        model = _build(_full_remat_offloading_inputs(), self.reference)
+        offloader = _offloader(model)
+        freed = []
+        free_gpu_copies = ActivationOffloader._free_gpu_copies
+
+        def record_free(offloader, group):
+            freed.append(group.module_fqn)
+            free_gpu_copies(offloader, group)
+
         input_bytes = _NUM_TOKENS * _DIM * 4
-        self.assertEqual(
-            _offloader(model).forward_stats.offloaded_bytes,
-            (_NUM_LAYERS - 2) * input_bytes,
-        )
+        with unittest.mock.patch.object(
+            ActivationOffloader, "_free_gpu_copies", record_free
+        ):
+            for step in range(2):
+                freed.clear()
+                for e, a in zip(
+                    _grads(baseline, self.inputs[:1]),
+                    _grads(model, self.inputs[:1]),
+                    strict=True,
+                ):
+                    torch.testing.assert_close(a, e, rtol=0, atol=0)
+                self.assertEqual(offloader._last_block_fqn, f"layers.{_NUM_LAYERS - 1}")
+                # Neither forward frees the last block: the first keeps its
+                # GPU copies, the second opens no group for it.
+                self.assertEqual(freed, [f"layers.{i}" for i in range(_NUM_LAYERS - 1)])
+                # Both forwards report the inputs of blocks 1..4 as offloaded.
+                self.assertEqual(
+                    offloader.forward_stats.offloaded_bytes,
+                    (_NUM_LAYERS - 2) * input_bytes,
+                )
 
     def test_detects_in_place_updates_after_the_save(self):
         """Autograd does not check saves that saved-tensor hooks pack; the
@@ -610,10 +629,10 @@ class TestActivationOffload(unittest.TestCase):
 
     def test_forward_frees_offloaded_block_inputs(self):
         saved, stats = self._forward_memory_saved(_full_remat_offloading_inputs())
-        # Block 0's input is the model input, so the inputs of blocks 1..5
-        # move to CPU.
+        # Block 0's input is the model input and the last block stays on
+        # GPU, so the inputs of blocks 1..4 move to CPU.
         input_bytes = _NUM_TOKENS * _DIM * 4
-        self.assertEqual(stats.offloaded_bytes, (_NUM_LAYERS - 1) * input_bytes)
+        self.assertEqual(stats.offloaded_bytes, (_NUM_LAYERS - 2) * input_bytes)
         self.assertEqual(stats.still_resident_bytes, {})
         self.assertEqual(saved, stats.offloaded_bytes)
 
@@ -750,18 +769,16 @@ class TestActivationOffload(unittest.TestCase):
             offloader, "_reload_group", side_effect=record_reload
         ):
             _grads(model, self.inputs[:1])
-        # Block i's output triggers the reload of group i - 1; the model
-        # part's output, block 5's, triggers the last group's, which backward
-        # needs first, so it is queued before group 4's.
-        last = _NUM_LAYERS - 1
+        # Block i's output triggers the reload of group i - 1; block 5, the
+        # last to run, stays on GPU and has no group.
         self.assertEqual(
             events,
-            [f"hook {last}", f"reload {last}"]
-            + [
+            [
                 event
-                for i in range(last, 0, -1)
-                for event in (f"reload {i - 1}", f"hook {i - 1}")
-            ],
+                for i in range(_NUM_LAYERS - 1, 0, -1)
+                for event in (f"hook {i}", f"reload {i - 1}")
+            ]
+            + ["hook 0"],
         )
 
 

@@ -7,10 +7,9 @@
 from torchtitan_recipes.models import llama3 as recipes
 
 
-def test_activation_offload_recipe_keeps_the_last_block_on_gpu():
+def test_activation_offload_recipe_offloads_every_block():
+    # The offloader itself keeps the block that runs last on GPU.
     config = recipes.llama3_8b_activation_offload()
     remat = config.activation_remat
-    num_layers = len(config.model.layers)
-    assert remat.block_policy("layers.0").offloads_activations
-    assert remat.block_policy(f"layers.{num_layers - 2}").offloads_activations
-    assert not remat.block_policy(f"layers.{num_layers - 1}").offloads_activations
+    for i in range(len(config.model.layers)):
+        assert remat.block_policy(f"layers.{i}").offloads_activations
