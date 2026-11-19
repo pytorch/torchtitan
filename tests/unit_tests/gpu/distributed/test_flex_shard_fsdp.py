@@ -18,10 +18,13 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 import torch.distributed.distributed_c10d as c10d
-import torch.nn.functional as F
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 from torch.distributed.tensor import DTensor
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -29,7 +32,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torch.testing._internal.distributed.checkpoint_utils import with_temp_dir
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
@@ -38,6 +41,7 @@ from torchtitan.config.parallelism import (
     FSDP2Config,
     ParallelismConfig,
 )
+from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.flex_shard_fsdp import (
     flex_shard_bucket,
@@ -45,6 +49,10 @@ from torchtitan.distributed.flex_shard_fsdp import (
 )
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.attention.cp_attention import (
+    AllGatherKVFlexInnerAttention,
+)
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
@@ -53,6 +61,7 @@ flex_shard = pytest.importorskip("flex_shard")
 
 pytestmark = pytest.mark.multi_gpu
 
+# Tokens per cp rank: CP's flex attention needs a 128-token block on each.
 _SEQ_LEN = 128
 
 
@@ -69,6 +78,7 @@ def _local(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.to_local() if isinstance(tensor, DTensor) else tensor
 
 
+@instantiate_parametrized_tests
 class TestFlexShardDecoder(DTensorTestBase):
     @property
     def world_size(self) -> int:
@@ -84,7 +94,10 @@ class TestFlexShardDecoder(DTensorTestBase):
         parallelism_context: ParallelismContext,
     ):
         parallelism = ParallelismConfig(
-            data_parallel_shard_degree=self.world_size,
+            data_parallel_shard_degree=parallelism_context.dp_shard,
+            tensor_parallel_degree=parallelism_context.tp,
+            enable_sequence_parallel=parallelism_context.enable_sequence_parallel,
+            context_parallel_degree=parallelism_context.cp,
             expert_parallel_degree=parallelism_context.ep,
             fsdp_backend=fsdp_backend,
             fsdp_reshard_after_forward=reshard_after_forward,
@@ -92,9 +105,14 @@ class TestFlexShardDecoder(DTensorTestBase):
         model_config = build_config(
             flavor,
             parallelism=parallelism,
-            seq_len=_SEQ_LEN,
+            seq_len=_SEQ_LEN * parallelism_context.cp,
             attn_backend="flex",
         )
+        if parallelism_context.cp_enabled:
+            # As the CP recipes convert it.
+            model_config = ContextParallelTransform(
+                inner_attention_map={FlexInnerAttention: AllGatherKVFlexInnerAttention}
+            ).transform(model_config)
         with parallelism_context.activate_spmd(), torch.device("meta"):
             model = model_config.build()
         model = model.parallelize(
@@ -135,20 +153,31 @@ class TestFlexShardDecoder(DTensorTestBase):
             with torch.no_grad():
                 reference.init_weights(buffer_device=None)
         full_params = dict(reference.named_parameters())
+        # Ranks are laid out (dp_shard, cp, tp), and the buckets shard over
+        # dp_shard and cp flattened.
+        tp = parallelism_context.tp
+        tp_rank, bucket_rank = self.rank % tp, self.rank // tp
         for fqn, param in model.named_parameters():
             (placement,) = flex_shard.get_placements(param)
             expected = full_params[fqn]
-            mesh = parallelism_context.get_mesh("dp_shard")
             if parallelism_context.ep > 1 and ".routed_experts." in fqn:
                 # EP splits the experts, and edp_shard shards each EP rank's part.
                 ep_mesh = parallelism_context.get_mesh("ep")
                 expected = expected.chunk(ep_mesh.size())[ep_mesh.get_local_rank()]
-                mesh = parallelism_context.get_mesh("edp_shard")
-            expected = expected.chunk(mesh.size(), placement.dim)
-            self.assertTrue(
-                torch.equal(param, expected[mesh.get_local_rank()]),
-                msg=f"{context} init {fqn}",
-            )
+                edp_shard = parallelism_context.get_mesh("edp_shard")
+                expected = expected.chunk(edp_shard.size(), placement.dim)
+                expected = expected[edp_shard.get_local_rank()]
+            else:
+                # TP splits a parameter in the dim where its tp rank's shape
+                # differs, and the bucket shards that shard.
+                for dim, (full, local) in enumerate(
+                    zip(expected.shape, flex_shard.get_global_shape(param))
+                ):
+                    if full != local:
+                        expected = expected.chunk(tp, dim)[tp_rank]
+                expected = expected.chunk(self.world_size // tp, placement.dim)
+                expected = expected[bucket_rank]
+            self.assertTrue(torch.equal(param, expected), msg=f"{context} init {fqn}")
 
     def _train(
         self,
@@ -163,9 +192,11 @@ class TestFlexShardDecoder(DTensorTestBase):
     ):
         if optim is None:
             optim = torch.optim.AdamW(model.parameters(), lr=1e-3, foreach=True)
+        # Vocab-parallel under TP, as in the recipes.
+        loss_config = CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size)
         if chunked_loss:
             # As the training engine sets it up.
-            loss_fn = ChunkedLossWrapper.Config().build()
+            loss_fn = ChunkedLossWrapper.Config(loss_fn=loss_config).build()
             loss_fn.set_lm_head(
                 model.lm_head,
                 flex_shard_bucket=(
@@ -175,41 +206,44 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
             )
             model._skip_lm_head = True
-        # One packed sequence per microbatch, as the data loader produces.
-        positions = torch.arange(_SEQ_LEN, device=self.device_type)
+        else:
+            loss_fn = loss_config.build()
+        # One packed sequence per microbatch, as the data loader produces. CP
+        # shards it, and the tp and cp ranks of a data-parallel rank share it.
+        seq_len = _SEQ_LEN * parallelism_context.cp
+        positions = torch.arange(seq_len, device=self.device_type)
+        dp_rank = self.rank // (parallelism_context.cp * parallelism_context.tp)
         history = []
         for step in range(3):
             losses = []
             for microbatch in range(microbatches):
                 generator = torch.Generator().manual_seed(
-                    1000 * step + 10 * microbatch + self.rank
+                    1000 * step + 10 * microbatch + dp_rank
                 )
                 tokens, labels = (
                     torch.randint(
-                        model_config.vocab_size, (_SEQ_LEN,), generator=generator
+                        model_config.vocab_size, (seq_len,), generator=generator
                     ).to(self.device_type)
                     for _ in range(2)
                 )
-                inputs, labels, model_kwargs, _ = model.preprocess_inputs(
-                    {"input": tokens, "labels": labels, "positions": positions},
-                    parallelism_context=parallelism_context,
-                    parallelism=parallelism,
-                    # The trainer's count for MoE load balancing, without padding.
-                    global_routing_token_counts=torch.tensor(
-                        [_SEQ_LEN * self.world_size * microbatches],
-                        device=self.device_type,
-                    ),
-                )
+                # In the SPMD context, as the trainer does, so that CP shards
+                # the inputs.
                 with parallelism_context.activate_spmd():
+                    inputs, labels, model_kwargs, _ = model.preprocess_inputs(
+                        {"input": tokens, "labels": labels, "positions": positions},
+                        parallelism_context=parallelism_context,
+                        parallelism=parallelism,
+                        # The trainer's count for MoE load balancing, without
+                        # padding.
+                        global_routing_token_counts=torch.tensor(
+                            [seq_len * parallelism_context.dp_shard * microbatches],
+                            device=self.device_type,
+                        ),
+                    )
                     output = model(inputs, **model_kwargs)
-                    if chunked_loss:
-                        loss, _ = loss_fn(
-                            output,
-                            labels,
-                            torch.tensor(_SEQ_LEN, device=self.device_type),
-                        )
-                    else:
-                        loss = F.cross_entropy(output.float(), labels)
+                    loss, _ = loss_fn(
+                        output, labels, torch.tensor(_SEQ_LEN, device=self.device_type)
+                    )
                     with spmd.no_typecheck():
                         loss.backward()
                 losses.append(loss.detach())
@@ -249,18 +283,25 @@ class TestFlexShardDecoder(DTensorTestBase):
             )
 
     def _check_matches_fsdp2(
-        self, *, ep: int, cases, chunked_loss: bool = False
+        self,
+        *,
+        ep: int,
+        cases,
+        chunked_loss: bool = False,
+        tp: int = 1,
+        cp: int = 1,
+        sequence_parallel: bool = False,
     ) -> None:
         # One context, as in training: both backends shard over its meshes.
         parallelism_context = ParallelismContext(
             dp_replicate=1,
-            dp_shard=self.world_size,
-            cp=1,
-            tp=1,
+            dp_shard=self.world_size // (tp * cp),
+            cp=cp,
+            tp=tp,
             pp=1,
             ep=ep,
             world_size=self.world_size,
-            enable_sequence_parallel=False,
+            enable_sequence_parallel=sequence_parallel,
         )
         for (build_config, flavor), reshard_after_forward, microbatches in cases:
             context = (
@@ -374,21 +415,90 @@ class TestFlexShardDecoder(DTensorTestBase):
         )
 
     @with_comms
+    def test_matches_fsdp2_with_tensor_parallelism(self):
+        # TP splits a parameter in one dim, which the bucket shards within each
+        # tp rank's shard when it is the bucket's dim too. Under sequence
+        # parallelism, the norm weights are typed R on tp, as are Qwen3's QK
+        # norms and router: each tp rank's grad is partial, and both backends
+        # all-reduce it over tp before the reduce-scatter. The grad norm reduces
+        # over dp_shard, then tp. Qwen3 MoE needs ep >= tp, and the experts'
+        # norm reduces over edp_shard, then ep.
+        self._check_matches_fsdp2(
+            ep=2,
+            tp=2,
+            sequence_parallel=True,
+            cases=product(
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default",),
+                (1, 2),
+            ),
+            chunked_loss=True,
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_tensor_parallelism_without_sequence_parallelism(
+        self,
+    ):
+        # Without sequence parallelism, the norm weights are typed I on tp: each
+        # tp rank computes their whole grad, so neither backend all-reduces it.
+        self._check_matches_fsdp2(
+            ep=1,
+            tp=2,
+            cases=product([(build_llama3_config, "debugmodel")], ("default",), (1, 2)),
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_tensor_and_context_parallelism(self):
+        # Needs 4 ranks. The buckets shard over dp_shard and cp, flattened, and
+        # the grad norm of the dense parameters reduces over that mesh, then tp.
+        self._check_matches_fsdp2(
+            ep=1,
+            tp=2,
+            cp=2,
+            cases=product([(build_llama3_config, "debugmodel")], ("default",), (1,)),
+        )
+
+    @with_comms
+    def test_matches_fsdp2_with_context_parallelism(self):
+        # Each cp rank's grads cover its own tokens. FSDP2 sums them in its
+        # reduce-scatter over dp_shard and cp, flattened into one axis, and so
+        # do FlexShard's buckets. Qwen3's routed experts shard over it too.
+        self._check_matches_fsdp2(
+            ep=1,
+            cp=2,
+            cases=product(
+                (
+                    (build_llama3_config, "debugmodel"),
+                    (build_qwen3_config, "debugmodel_moe"),
+                ),
+                ("default",),
+                (1, 2),
+            ),
+        )
+
+    @with_comms
     @with_temp_dir
-    def test_checkpoints_match_fsdp2(self):
+    @parametrize("tp", [1, 2])
+    def test_checkpoints_match_fsdp2(self, tp: int):
         # FlexShard loads FSDP2's checkpoint of the model and its AdamW states,
         # and saves it again chunk for chunk and bit for bit, also as a bf16
         # export. With ep=2, the routed experts are split over ep, then over
-        # edp_shard.
+        # edp_shard. With tp=2, TP splits the dense parameters in dim 0 or 1,
+        # and the buckets shard each tp rank's part. Under sequence
+        # parallelism, the norm weights are replicated over tp, so both
+        # backends save each of their chunks once.
         parallelism_context = ParallelismContext(
             dp_replicate=1,
-            dp_shard=self.world_size,
+            dp_shard=self.world_size // tp,
             cp=1,
-            tp=1,
+            tp=tp,
             pp=1,
             ep=2,
             world_size=self.world_size,
-            enable_sequence_parallel=False,
+            enable_sequence_parallel=tp > 1,
         )
 
         def build(fsdp_backend, folder, **config):
@@ -465,20 +575,22 @@ class TestFlexShardDecoder(DTensorTestBase):
             for name, value in states[param].items()
         }
 
-    def _check_hf_loads_match_fsdp2(self, *, ep: int, cases) -> None:
+    def _check_hf_loads_match_fsdp2(
+        self, *, ep: int, cases, tp: int = 1
+    ) -> None:
         # For each case, FSDP2 trains three steps and exports a Hugging Face
         # checkpoint. A fresh FlexShard model, from its own initialization,
         # loads it, with groups of at most group_bytes (None: the default), and
         # each shard must equal its box of the exported parameters.
         parallelism_context = ParallelismContext(
             dp_replicate=1,
-            dp_shard=self.world_size,
+            dp_shard=self.world_size // tp,
             cp=1,
-            tp=1,
+            tp=tp,
             pp=1,
             ep=ep,
             world_size=self.world_size,
-            enable_sequence_parallel=False,
+            enable_sequence_parallel=tp > 1,
         )
 
         def build(build_config, flavor, fsdp_backend, folder, **config):
@@ -566,20 +678,21 @@ class TestFlexShardDecoder(DTensorTestBase):
 
     @with_comms
     @with_temp_dir
-    def test_hf_loads_match_fsdp2(self):
+    @parametrize("tp", [1, 2])
+    def test_hf_loads_match_fsdp2(self, tp: int):
         # Llama 3 splits the packed QKV and the stacked w13, and permutes the
         # query and key rows for rotary embeddings. The plain debug model loads
         # in one group. With tied weights, to_hf gives no tensor for lm_head's
         # weight, whose shard tok_embeddings' Hugging Face tensor fills. Each of
         # its parameters loads alone, so a conversion that needs another
-        # parameter fails, as it would across the groups of a larger model.
-        self._check_hf_loads_match_fsdp2(
-            ep=1,
-            cases=[
-                ((build_llama3_config, "debugmodel"), None),
-                ((_build_tied_llama3_config, "debugmodel_tied"), 1),
-            ],
-        )
+        # parameter fails, as it would across the groups of a larger model. TP
+        # splits wo and w2 in their last dim, so each shard holds columns of its
+        # rows of o_proj and down_proj, and the other weights in a leading dim.
+        # The buckets then shard each tp rank's part.
+        cases = [((build_llama3_config, "debugmodel"), None if tp == 1 else 1)]
+        if tp == 1:
+            cases.append(((_build_tied_llama3_config, "debugmodel_tied"), 1))
+        self._check_hf_loads_match_fsdp2(ep=1, cases=cases, tp=tp)
 
     @with_comms
     @with_temp_dir
