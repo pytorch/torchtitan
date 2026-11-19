@@ -89,6 +89,7 @@ def _native_row_sum(
     TOKENS: tl.constexpr,
     SIZE: tl.constexpr,
     OUTPUT_MAJOR: tl.constexpr = False,
+    ALIGNMENT_OFFSET: tl.constexpr = 0,
 ):
     """Preserve ATen's FP32 virtual-thread, accumulator and warp reduction order.
 
@@ -126,7 +127,7 @@ def _native_row_sum(
     third = tl.full((WIDTH,), 0.0, tl.float32)
     fourth = tl.full((WIDTH,), 0.0, tl.float32)
     if VECTORIZED:
-        shift = (token * SIZE) % 4
+        shift = (token * SIZE + ALIGNMENT_OFFSET) % 4
         prefix = tl.where(shift > 0, 4 - shift, 0)
         head = _row_gather(values, (lanes - shift) % values.shape[0], SIZE)
         first = tl.where((shift > 0) & (lanes >= shift) & (lanes < 4), head, 0.0)
