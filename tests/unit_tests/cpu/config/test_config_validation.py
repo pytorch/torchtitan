@@ -5,11 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import re
 from unittest import mock
 
 import pytest
 
 from torchtitan.components.checkpointer.dcp import CheckpointManager
+from torchtitan.components.checkpointer.torch_checkpointing import (
+    TorchCheckpointingManager,
+)
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
@@ -317,6 +321,50 @@ def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
         ValueError, match=r"modules initialized by reset_parameters\(\)"
     ):
         validate(config)
+
+
+@pytest.mark.parametrize(
+    "checkpointer, unsupported",
+    [
+        (CheckpointManager.Config(), None),
+        (
+            CheckpointManager.Config(async_mode="async_with_pinned_mem"),
+            "checkpointer.async_mode='async_with_pinned_mem'",
+        ),
+        (
+            CheckpointManager.Config(
+                initial_load_in_hf=True, initial_load_path="/checkpoint"
+            ),
+            "checkpointer.initial_load_in_hf=True",
+        ),
+        (
+            CheckpointManager.Config(last_save_in_hf=True),
+            "checkpointer.last_save_in_hf=True",
+        ),
+        (
+            TorchCheckpointingManager.Config(),
+            "checkpointers other than CheckpointManager",
+        ),
+    ],
+)
+@mock.patch("torchtitan.distributed.flex_shard_fsdp.find_spec", mock.Mock())
+def test_flex_shard_rejects_checkpointers_that_drop_shard_layouts(
+    checkpointer, unsupported: str | None
+) -> None:
+    # Each rejected checkpointer would save every rank's local shard as the
+    # whole tensor, without an error.
+    config = llama3_debugmodel()
+    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.loss = CrossEntropyLoss.Config()
+    config.training.disable_accelerator_graphs = True
+    config.checkpointer = checkpointer
+    if unsupported is None:
+        validate_flex_shard_training(config, config.model)
+        return
+    with pytest.raises(
+        ValueError, match=rf"does not support {re.escape(unsupported)} yet"
+    ):
+        validate_flex_shard_training(config, config.model)
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
