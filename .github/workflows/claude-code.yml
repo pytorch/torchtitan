@@ -23,14 +23,17 @@ jobs:
       # Branch on event_name so an issue/PR body mentioning "fable" doesn't affect
       # an unrelated @claude comment.
       model: ${{ ((github.event_name == 'issue_comment' && contains(github.event.comment.body, 'fable')) || (github.event_name == 'issues' && contains(github.event.issue.body, 'fable'))) && 'global.anthropic.claude-fable-5' || 'global.anthropic.claude-opus-5-5' }}
-      # The review's image (pr-review "Image"): Pillow, and the renderer copied out of
-      # this default-branch checkout before the action checks out the PR. Claude can't
-      # edit files outside the checkout, so it runs this copy, not a PR's. Never fails
-      # the job: without the renderer, reviews post without images.
+      # The review's image (pr-review Step 4b). setup-python's Python gets Pillow, and
+      # `python3` in Claude's commands resolves to it. The renderer is copied out of this
+      # default-branch checkout before the action checks out the PR. Both are made
+      # root-owned, so Claude's file edits can't change them, even through a symlink a
+      # PR adds. Never fails the job: without the renderer, reviews post without images.
       python-version: "3.12"
       setup_script: >-
-        ( python -m pip install pillow==13.0.0 && mkdir -p /tmp/pr-image &&
-        cp .claude/skills/pr-image/scripts/render_html.py /tmp/pr-image/ ) ||
+        ( python -m pip install pillow==13.0.0 &&
+        sudo install -D -o root -g root -m 0644
+        .claude/skills/pr-image/scripts/render_html.py /tmp/pr-image/render_html.py &&
+        sudo chown -R root:root "$(python -c 'import sys; print(sys.prefix)')" ) ||
         echo "pr-image setup failed; reviews post without images"
       # Keep the comment text out of claude_args: only these hardcoded effort values
       # can reach the CLI. "effort=max" wins if multiple values appear.
@@ -41,7 +44,7 @@ jobs:
       # write anything.
       # The renderer's page can't read files or reach the network, and --upload writes
       # only under the workflow's public review-logs prefix. An image is one more public
-      # channel that secret redaction doesn't cover; Claude can already post text.
+      # channel, and the action redacts secrets only from text. Claude can already post text.
       additional_claude_args: >-
         --allowedTools "Skill,Bash(python3 -I /tmp/pr-image/render_html.py:*),Bash(gh issue view:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr review:*),mcp__github_inline_comment__create_inline_comment,mcp__github__create_pending_pull_request_review,mcp__github__add_comment_to_pending_review,mcp__github__submit_pending_pull_request_review,mcp__github__delete_pending_pull_request_review,mcp__github__create_and_submit_pull_request_review" --effort
         ${{

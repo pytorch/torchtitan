@@ -20,11 +20,13 @@ The page can't read local files or reach the network, so a drawing can't show wh
 isn't in its own HTML:
 1. Chrome loads it as a `data:` URL, so `file://` iframes and images stay blank.
 2. A Content-Security-Policy tag allows only inline styles, scripts, and `data:` images and fonts.
-3. Chrome resolves no host names, and its env has only PATH and an empty HOME.
+3. Chrome resolves no host names and connects to no address, which also stops page
+   navigations (CSP doesn't cover those). Its env has only PATH and an empty HOME.
 """
 
-# no-test: needs headless Chrome. Check it by rendering the 3 files in ../examples/
-# and looking at each PNG.
+# no-test: needs headless Chrome, and CI runs only tests/. Check it by rendering the 3
+# files in ../examples/ and looking at each PNG. Then check that it refuses a symlink
+# x.html -> /proc/self/environ, and an --upload after the page changed.
 
 import argparse
 import base64
@@ -51,15 +53,21 @@ CSP_TAG = (
     "style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:\">"
 )
 # The CSP tag goes right after the doctype: any tag before the doctype puts Chrome in
-# quirks mode, which shifts layouts.
+# quirks mode, which shifts layouts. Each leading comment ends at its first `-->`, so
+# a page of comments with no doctype can't make the match backtrack for minutes.
 LEADING_DOCTYPE = re.compile(
-    r"\A(\s*(?:<!--.*?-->\s*)*<!doctype html[^>]*>)", re.IGNORECASE | re.DOTALL
+    r"\A(\s*(?:<!--(?:(?!-->).)*-->\s*)*<!doctype html[^>]*>)",
+    re.IGNORECASE | re.DOTALL,
 )
 # Linux caps one command-line argument at 128 KiB, and Chrome gets the page as one.
 MAX_PAGE_URL_BYTES = 120 * 1024
 
 BUCKET = "ossci-raw-job-status"
+# The page's file name becomes part of the S3 key.
 IMAGE_STEM = re.compile(r"[a-z0-9_-]{1,40}")
+PAD_CSS_PX = 24
+# The examples render in under a second; a page that keeps reloading stops here.
+CHROME_TIMEOUT_S = 30
 
 
 def main() -> None:
@@ -76,10 +84,13 @@ def main() -> None:
         default=3000,
         help="page height in CSS px before the crop",
     )
-    parser.add_argument(
-        "--pad", type=int, default=24, help="CSS px kept below the content"
-    )
     args = parser.parse_args()
+
+    # Check the name first, so a bad one fails before any render, not at --upload.
+    if not IMAGE_STEM.fullmatch(args.html.stem):
+        raise ValueError(
+            f"name the page {IMAGE_STEM.pattern}.html; got {args.html.name}"
+        )
 
     # A PR can plant a symlink such as x.html -> /proc/self/environ: refuse a path
     # that doesn't resolve to an .html file.
@@ -91,7 +102,7 @@ def main() -> None:
             f"--upload renders pages inside {Path.cwd()} only; {args.html} resolves to {html}"
         )
 
-    page = html.read_text()
+    page = html.read_text(encoding="utf-8")
     doctype = LEADING_DOCTYPE.match(page)
     if doctype:
         page = doctype.group(1) + CSP_TAG + page[doctype.end() :]
@@ -109,7 +120,7 @@ def main() -> None:
     chrome = _find_chrome()
     png = args.html.absolute().with_suffix(".png")
     if not args.upload:
-        image = _render(chrome, page_url, png, args.max_height, args.pad)
+        image = _render(chrome, page_url, png, max_height=args.max_height)
         preview = png.with_name(f"{png.stem}_900px.png")
         preview.unlink(missing_ok=True)
         image.resize(
@@ -123,7 +134,7 @@ def main() -> None:
     checked = Image.open(png).convert("RGB")
     with tempfile.TemporaryDirectory() as temp_dir:
         fresh_png = Path(temp_dir) / png.name
-        fresh = _render(chrome, page_url, fresh_png, args.max_height, args.pad)
+        fresh = _render(chrome, page_url, fresh_png, max_height=args.max_height)
         if (
             fresh.size != checked.size
             or ImageChops.difference(fresh, checked).getbbox() is not None
@@ -135,7 +146,7 @@ def main() -> None:
 
 
 def _find_chrome() -> str:
-    """Return the newest Playwright headless Chrome, else the first Chrome on PATH."""
+    """Return a cached Playwright headless Chrome, else the first Chrome on PATH."""
     cached = sorted(glob.glob(os.path.expanduser(PLAYWRIGHT_CHROME_GLOB)))
     if cached:
         return cached[-1]
@@ -149,32 +160,39 @@ def _find_chrome() -> str:
     )
 
 
-def _render(
-    chrome: str, page_url: str, png: Path, max_height: int, pad: int
-) -> Image.Image:
+def _render(chrome: str, page_url: str, png: Path, max_height: int) -> Image.Image:
     """Screenshot `page_url` into `png`, crop it below the content, and return it."""
     # Delete first: a symlink a PR planted at this path would make the screenshot
     # overwrite its target.
     png.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory() as empty_home:
-        subprocess.run(
-            [
-                chrome,
-                "--headless",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--hide-scrollbars",
-                "--host-resolver-rules=MAP * ~NOTFOUND",
-                f"--force-device-scale-factor={SCALE}",
-                f"--window-size={WIDTH_CSS_PX},{max_height}",
-                f"--screenshot={png}",
-                page_url,
-            ],
-            check=True,
-            capture_output=True,
-            timeout=120,
-            env={"PATH": os.environ["PATH"], "HOME": empty_home},
-        )
+        try:
+            chrome_run = subprocess.run(
+                [
+                    chrome,
+                    "--headless",
+                    "--no-sandbox",
+                    "--disable-gpu",
+                    "--hide-scrollbars",
+                    "--host-resolver-rules=MAP * ~NOTFOUND",
+                    f"--force-device-scale-factor={SCALE}",
+                    f"--window-size={WIDTH_CSS_PX},{max_height}",
+                    f"--screenshot={png}",
+                    page_url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=CHROME_TIMEOUT_S,
+                env={"PATH": os.environ["PATH"], "HOME": empty_home},
+            )
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"Chrome took over {CHROME_TIMEOUT_S} s to render {png.stem}; does the page reload?"
+            ) from None
+    # Chrome's own error, never the exception text: that holds the whole page URL.
+    if chrome_run.returncode != 0:
+        stderr_tail = "\n".join(chrome_run.stderr.strip().splitlines()[-5:])
+        raise RuntimeError(f"Chrome exited with {chrome_run.returncode}: {stderr_tail}")
 
     image = Image.open(png).convert("RGB")
     background = Image.new("RGB", image.size, image.getpixel((0, image.height - 1)))
@@ -186,7 +204,7 @@ def _render(
             f"content reaches the bottom of a {max_height} px page; pass a larger --max-height"
         )
     cropped = image.crop(
-        (0, 0, image.width, min(image.height, content_box[3] + pad * SCALE))
+        (0, 0, image.width, min(image.height, content_box[3] + PAD_CSS_PX * SCALE))
     )
     cropped.save(png)
     return cropped

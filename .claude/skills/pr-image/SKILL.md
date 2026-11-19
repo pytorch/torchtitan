@@ -45,7 +45,7 @@ outside the diff, library versions, stacked PRs, probes) are in [references/fact
 
 ## 2. Pick the form before drawing
 
-Write 6 one-line sketches. In 100 tested PRs, drawings of the PR's own data and timelines won. Pick by the cause:
+Write 6 one-line sketches. Drawings of the PR's own data and timelines work best. Pick by the cause:
 
 ```text
 the cause is...                    draw
@@ -71,10 +71,10 @@ speed                              what changes in the work. Measured times: one
 ```
 
 No image when nothing runs differently: a pin, import, golden, log level, pass-through or test-only change, or a
-new flag whose default keeps today's behaviour. A one-line config that changes what runs gets one. A race or
-hang the body explains only in prose gets lanes. If someone asks for an image anyway, use the row that fits the cause.
+new flag whose default keeps today's behaviour. A one-line config that changes what runs gets one, and so does a
+pin that fixes a bug in what runs (a deadlock, a crash). A race or hang the body explains only in prose gets lanes. If someone asks for an image anyway, use the row that fits the cause.
 
-These lost in tests: results first, text tables, numbered step lists, code listings, and call chains as boxes.
+These work badly: results first, text tables, numbered step lists, code listings, and call chains as boxes.
 
 Checklist for each sketch:
 - Does it show something the TLDR's code block can't: the data, the timing or the cause? If not, drop it.
@@ -88,8 +88,7 @@ Checklist for each sketch:
   score 0)? Give it a mark in the drawing, not a footnote, and a line in the body.
 - Hide the sentences: do the shapes and short labels still tell it? More than ~8 crossing lines: draw less.
 
-Draw the top sketch; draw more only when asked. In tests, picking your own best of 3 drawings did no better than
-drawing one. Check it with §4 as if no one checks it after you.
+Draw the top sketch; draw more only when asked. Check it with §4 as if no one checks it after you.
 
 ## 3. Draw
 
@@ -124,7 +123,7 @@ drawing one. Check it with §4 as if no one checks it after you.
 - Each arrow means one thing (data moves, calls, waits for); label it when unclear. Number steps only in real order.
 - Numbers (axes, derived, nominal, "schematic", rates): [facts.md](references/facts.md#numbers-in-the-image).
 
-Tools: HTML/CSS + inline SVG, rendered by `python3 -I ${CLAUDE_SKILL_DIR}/scripts/render_html.py <form>.html`.
+Tools: HTML/CSS + inline SVG, rendered by `python3 -I .claude/skills/pr-image/scripts/render_html.py <form>.html`.
 Locally also matplotlib or graphviz. Gotchas in [references/tools.md](references/tools.md). Winning sources:
 [examples/](examples/README.md).
 
@@ -144,6 +143,7 @@ Locally also matplotlib or graphviz. Gotchas in [references/tools.md](references
   per case gets one label per case. Check "only", "never", "every", platforms and prefill vs decode.
 - Stacked PR (its base is not `main`): no "main" in the image. Label that side "before" or by the parent PR.
 - Glance test: cover the PR text. Can you say the problem and the fix in 10 seconds?
+- Alt text: one sentence with the image's message and numbers. A later review checks it against the new diff.
 
 ## 5. Put it in the PR (local)
 
@@ -151,7 +151,6 @@ Locally also matplotlib or graphviz. Gotchas in [references/tools.md](references
   github.com, which hosts it. Put `<!-- pr-image drawn at <PR head sha> -->` right after the image.
 - In the description, the image goes right after the TLDR line. Keep the TLDR's code block. Body edits start from
   the live body and change only your own sections.
-- Alt text: one sentence with the image's message and numbers.
 - When the PR head moves past the "drawn at" sha, run §4 on the new diff: passes, update the sha; fails, redraw.
 
 ## GitHub Actions
@@ -160,8 +159,8 @@ Locally also matplotlib or graphviz. Gotchas in [references/tools.md](references
 
 - Folder: `pr_image/` in the checkout, because writes elsewhere are denied. Never commit it. No `SKETCHES.md`.
   `SOURCES.md` means the image sources that the review lists under Details.
-- HTML only. Run each command from the checkout root exactly as written, with no `cd`, pipe or redirect, or it is
-  denied:
+- HTML only. Name the page `[a-z0-9_-]{1,40}.html` (it becomes part of the image URL), e.g. `lanes.html`. Run each
+  command from the checkout root exactly as written, with no `cd`, pipe or redirect, or it is denied:
   ```bash
   python3 -I /tmp/pr-image/render_html.py pr_image/<form>.html
   python3 -I /tmp/pr-image/render_html.py pr_image/<form>.html --upload
@@ -169,10 +168,10 @@ Locally also matplotlib or graphviz. Gotchas in [references/tools.md](references
   The first writes `<form>.png` and `<form>_900px.png`. The second renders the page again, refuses unless the result
   is pixel-equal to `<form>.png`, uploads it and prints its URL. `/tmp/pr-image/` holds the default branch's copy of
   `scripts/render_html.py`, put there by the workflow's setup step.
-- Facts: no probes, downloads or other commands. The checkout is the PR head; the base is the `-` and context lines
-  of `gh pr diff`.
+- Facts: no probes or downloads. The only commands are pr-review's `gh` ones and the two above. The checkout is the
+  PR head; the base is the `-` and context lines of `gh pr diff`.
 - The review's **Example** is the code block: the image shows what it can't.
 - Never edit the PR body.
-- At most 3 renders before `--upload`, including fixes after pr-review's fact-check. Read the last
+- At most 5 renders before `--upload`, including fixes after pr-review's fact-check. Read the last
   `<form>_900px.png` after your last fix, then upload the unchanged page. Over budget, or a command fails: no image,
   and tell pr-review why.

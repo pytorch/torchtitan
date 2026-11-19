@@ -43,8 +43,8 @@ Detected by `<formatted_context>`, `<pr_or_issue_body>`, and `<comments>` tags i
 the prompt. PR metadata, the description, and all comments are already in the
 prompt. The checkout is shallow, so get the diff with `gh pr diff <N>` rather than
 `git diff`. Allowed read-only commands: `gh pr view`, `gh pr diff`, `gh pr list`,
-`gh issue view`, plus pr-image's renderer (Step 4b). Post the result with
-`gh pr review` (see "Posting").
+`gh issue view`. Also allowed: pr-image's renderer (Step 4b), which writes PNGs in
+`pr_image/` and uploads one. Post the result with `gh pr review` (see "Posting").
 
 ### What was asked
 Read the triggering comment first; it overrides defaults below.
@@ -206,20 +206,23 @@ writing anything:
 
 ### Step 4b: Image (GitHub Actions mode)
 A picture of the change goes under "What this PR does" on the first review, and
-again only when a later push makes the last picture wrong. Only for "review" and
-"review again": skip this step locally, for "review my review" and for a question.
+again only after a major change. Only for a full review or a re-review (see "What
+was asked"). Skip this step locally, for "review my review", for a question, and
+on ghstack PRs (Write is disabled there): no image and no line about it.
 1. Find the last review by `claude` (`author.login`) whose body has
    `<!-- pr-image drawn at <sha> -->`: `gh pr view <N> --json reviews`.
-2. None: draw. Found: check that image's claims (its alt text, and the image
-   sources under that review's Details) against the current diff. All still true:
-   no image and no line. Any false, or the PR's main change moved: draw a new one.
-3. No image when nothing runs differently (pr-image §2: a pin, import, golden or
-   test-only change, a default-off flag), or when the PR is trivial and "Example"
-   is omitted. A pin that fixes a deadlock does run differently.
+2. None: draw. Found: check that image against the current diff (its alt text, and
+   the image sources under that review's Details).
+   - Its main claim still holds, even if a name or line number changed: no image and
+     no line.
+   - Its main claim is false, or the PR's main change moved: draw a new one.
+3. No image and no line when pr-image §2 says nothing runs differently, or when the
+   PR is trivial and "Example" is omitted.
 4. Draw with the `pr-image` skill; follow its "GitHub Actions" section.
 
-TODO(ghstack): ghstack PRs disable Write, so they get no image and no line about it.
-Rendering a page passed on stdin could cover them; untested.
+TODO(ghstack): ghstack PRs (32 of 300 recent ones) get no image, because Write is
+disabled there. A render flag that takes the page as an argument could cover them
+(stdin would need a pipe or a redirect, which are denied). Untested.
 
 ### Step 5: Fact-check
 Verify the consolidated must-fix list (not the raw candidates) by re-reading the
@@ -238,8 +241,9 @@ Use the output format below, then post (Actions mode) or print (local mode).
 With an image from Step 4b, upload it first (pr-image's `--upload` command, which
 prints its URL). Put `![<alt>](<url>)` and `<!-- pr-image drawn at <PR head sha> -->`
 under "What this PR does", and the image sources (label -> `path:line` or diff hunk)
-under Details. A failed render or upload, or a run over the render budget: post
-without the image, with one line under "Not verified": "No image: <the reason>".
+under Details. A failed render or upload, a run over the render budget, or an image
+Step 5 dropped: post without it, with one line under "Not verified": "No image:
+<the reason>".
 
 ## Reviewing a maintainer's review
 

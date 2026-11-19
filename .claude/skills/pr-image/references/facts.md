@@ -3,8 +3,8 @@
 The rule (SKILL.md §1): every fact in the image is checkable from the PR's body, its diff, or the repo code at its
 base. These are the cases.
 
-In GitHub Actions, skip the fetches, downloads and probes below: you can run only the commands in SKILL.md
-"GitHub Actions". The checkout is the PR head, and the base is the `-` and context lines of `gh pr diff`. A fact
+In GitHub Actions, skip the fetches, downloads and probes below: you can run only pr-review's `gh` commands and
+the two render commands in SKILL.md "GitHub Actions". The checkout is the PR head, and the base is the `-` and context lines of `gh pr diff`. A fact
 you can't check there leaves the image.
 
 - Code outside the diff: read it at the PR's base, after a fetch. An open PR: `git merge-base upstream/main <head>`.

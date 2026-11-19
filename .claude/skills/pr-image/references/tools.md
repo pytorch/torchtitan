@@ -1,7 +1,8 @@
 # pr-image tools
 
 - HTML/CSS with inline SVG for arrows (default; boxes, code and tables are easy):
-  `python3 -I ${CLAUDE_SKILL_DIR}/scripts/render_html.py <form>.html` writes `<form>.png` and `<form>_900px.png`.
+  `python3 -I .claude/skills/pr-image/scripts/render_html.py <form>.html` writes `<form>.png` and `<form>_900px.png`.
+  Name the page `[a-z0-9_-]{1,40}.html`, e.g. `lanes.html`: the renderer refuses other names.
   It needs Pillow and a headless Chrome on Linux: Playwright's (`npx playwright install chromium-headless-shell`)
   or `google-chrome`/`chromium` on PATH. The page can't load files or reach the network: inline every image and font.
   SVG arrowheads: `<marker markerUnits="userSpaceOnUse" ...>`, or they grow with the stroke width. In inline JS,
