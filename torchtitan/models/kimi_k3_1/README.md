@@ -1,7 +1,9 @@
 # Kimi K3.1
 
 Kimi K3.1 Pro keeps the Kimi K3 backbone and replaces its 24 Gated MLA layers
-with Gated DeepSeek Sparse Attention (DSA) at the same layer positions.
+with Gated DeepSeek Sparse Attention (DSA) at the same layer positions. This
+folder holds only the K3.1 flavors; the model and the DSA layer
+(`torchtitan/models/kimi_k3/dsa.py`) live in `torchtitan/models/kimi_k3/`.
 
 ## Prerequisites
 
@@ -9,27 +11,24 @@ Same as [Kimi K3](../kimi_k3/README.md).
 
 ## Architecture
 
-The DSA layer is in `torchtitan/models/kimi_k3/dsa.py`. Each DSA layer keeps
-the Kimi K3 MLA projections and output gate, and adds an indexer with 32 heads
-of dimension 128 that selects 2048 tokens per query.
+Each DSA layer keeps the Kimi K3 MLA projections and output gate, and adds an
+indexer with 32 heads of dimension 128 that selects 2048 tokens per query.
 Top-k selection and the indexer loss come from
 `torchtitan/models/deepseek_v4/compressor.py`. The indexer is trained only by
 the indexer loss. `build_model_config(..., indexer_loss_coeff=...)` sets its
 coefficient (default 0.01); 0 turns the loss off.
 
-Sparse attention runs Attention Gym `gather_attn` with `(latent, rope)`
-pairs. Its fused kernel needs 16 to 128 heads per tensor parallel rank, so the
-debug model has 32.
+Sparse attention runs Attention Gym `gather_attn` with `(latent, rope)` pairs.
 
 ## Supported Parallelisms
 
 | Feature | Notes |
 |---------|-------|
-| FSDP2 | Tested with EP 2 |
-| Expert parallelism | Tested with FSDP 2 |
-| Tensor / sequence parallelism | Tested TP 2 with EP 2; each rank needs 16 to 128 query heads for the Attention Gym pair kernel |
+| FSDP2 | Supported |
+| Tensor / sequence parallelism | Supported; each rank needs 16 to 128 query heads for the Attention Gym pair kernel |
+| Expert parallelism | Supported |
+| Pipeline parallelism | Supported |
 | Context parallel | Not supported |
-| Pipeline parallelism | Tested PP 2 (Interleaved1F1B) |
 
 ## Numerical Parity
 
