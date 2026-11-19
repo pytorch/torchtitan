@@ -28,7 +28,7 @@ Actions, your reply locally.
 
 ```text
 <folder>        /tmp/pr_image/<pr>/ locally, pr_image/ in the checkout in GitHub Actions
-  SKETCHES.md   line 1: the PR head sha you drew from. Then 6 sketches, the 2 you drew, the pick and why (local only)
+  SKETCHES.md   line 1: the PR head sha you drew from. Then 6 sketches, the 2 you drew, the pick and why
   <form>.html   the source of each drawn image (locally also <form>.py for matplotlib, <form>.dot for graphviz)
   <form>.png    1800 px wide (900 CSS px at 2x), up to ~1100 CSS px tall; <form>_900px.png is the copy to check
   SOURCES.md    each label, number and arrow -> the body line, diff hunk or path:line it comes from
@@ -172,8 +172,10 @@ Locally also matplotlib or graphviz. Gotchas in [references/tools.md](references
 
 `pr-review` calls this skill and posts the image in its review. What changes:
 
-- Folder: `pr_image/` in the checkout, because writes elsewhere are denied. Never commit it. No `SKETCHES.md`:
-  the sketches stay in your reasoning. `SOURCES.md` means the image sources that the review lists under Details.
+- Folder: `pr_image/` in the checkout, because writes elsewhere are denied. Never commit it. `SOURCES.md` means
+  the image sources that the review lists under Details.
+- Write the 6 sketches to `pr_image/SKETCHES.md` before any HTML. Then draw the top 2 as two pages, render both,
+  and pick one. Upload only the pick.
 - HTML only. Name the page `[a-z0-9_-]{1,40}.html` (it becomes part of the image URL), e.g. `lanes.html`. Run each
   command from the checkout root exactly as written, with no `cd`, pipe or redirect, or it is denied:
   ```bash

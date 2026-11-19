@@ -211,14 +211,16 @@ for small ones. Each finding comes back valid, invalid, or needs rewording. Drop
 the invalid ones. Mark anything you still can't verify as *unverified*.
 
 ### Step 6: Write
-Write the review in the output format below. Don't post it yet.
+Write the whole review in the output format below. In Actions mode, write it to
+`review_body.md` in the working directory (never commit it). Don't post it yet.
 
 ### Step 7: Image (GitHub Actions mode)
-Only after the review is written, so drawing never shapes it. A picture of the
-change goes under "What this PR does" on the first review, and again only after a
-major change. Only for a full review or a re-review (see "What was asked"). Skip
-this step locally, for "review my review", for a question, and on ghstack PRs
-(Write is disabled there): no image and no line about it.
+Only after `review_body.md` is written, so drawing never shapes the review. Don't
+open pr-image's files before this step. A picture of the change goes under "What
+this PR does" on the first review, and again only after a major change. Only for
+a full review or a re-review (see "What was asked"). Skip this step locally, for
+"review my review", for a question, and on ghstack PRs (Write is disabled there):
+no image and no line about it.
 1. Find the last review by `claude` (`author.login`) whose body has
    `<!-- pr-image drawn at <sha> -->`: `gh pr view <N> --json reviews`.
 2. None: draw. Found: check that image against the current diff (its alt text, and
@@ -230,9 +232,9 @@ this step locally, for "review my review", for a question, and on ghstack PRs
 4. Only now load the `pr-image` skill, and draw with its "GitHub Actions" section.
    When its §2 says nothing runs differently: no image and no line.
 5. Upload the picked image (pr-image's `--upload` command, which prints its URL).
-   Put `![<alt>](<url>)` and `<!-- pr-image drawn at <PR head sha> -->` under "What
-   this PR does", and the image sources (label -> `path:line` or diff hunk) under
-   Details.
+   In `review_body.md`, put `![<alt>](<url>)` and `<!-- pr-image drawn at <PR head
+   sha> -->` under "What this PR does", and the image sources (label -> `path:line`
+   or diff hunk) under Details.
 6. A failed render or upload, or a run over the render budget: no image, and one
    line under "Not verified": "No image: <the reason>".
 
@@ -241,7 +243,7 @@ disabled there. A render flag that takes the page as an argument could cover the
 (stdin would need a pipe or a redirect, which are denied). Untested.
 
 ### Step 8: Post
-Post (Actions mode, see "Posting") or print (local mode).
+Post `review_body.md` (Actions mode, see "Posting") or print the review (local mode).
 
 ## Reviewing a maintainer's review
 
