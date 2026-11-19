@@ -35,7 +35,13 @@ encoder.
 
 The released vision encoder has 27 layers, width 1,152 and 16-pixel patches.
 Its merger produces 2,560-wide decoder embeddings. The text vocabulary has
-248,320 entries. Released-model training capacity and throughput are unqualified.
+248,320 entries. The
+[`qwen38_flash_next_125b_dist_moe`](../../../torchtitan_recipes/models/qwen3_8_flash_next.py)
+recipe fine-tunes the released decoder on 16 GB300s (8 x 16K-token
+microbatches per GPU per step) with Dist-MoE and accelerator graphs at 379
+TFLOP/s per GPU with natural routing, and 416 TFLOP/s per GPU (16.7% MFU)
+when expert routing is forced to round-robin (perfect load balance); longer
+contexts and the multimodal model at this scale are unqualified.
 
 ## PLE: Lexical Features and Sharding
 
@@ -138,7 +144,7 @@ The multimodal recipe keeps vision on AdamW.
 | Feature | Notes |
 | --- | --- |
 | FSDP | Per-layer backbone sharding; persistent row ownership for PLE |
-| EP | Existing routed-expert placements and all-to-all dispatcher |
+| EP | Existing routed-expert placements; all-to-all dispatcher by default, Dist-MoE with accelerator graphs in the 125B recipe and the B200 graph test |
 
 EP shards experts independently of PLE: at FSDP8/EP4 each rank owns one eighth
 of the PLE rows and one fourth of the experts, with FSDP2 within each expert
@@ -148,8 +154,10 @@ shard. CPU offload and deferred FSDP reduction for PLE are unsupported.
 
 QSA attention uses Attention Gym's fused `gather_attn` kernel on CUDA. With
 separate values and grouped KV heads it supports only SM100/SM103 (Blackwell)
-in BF16; other GPUs raise in Attention Gym. The GPU integration test therefore
-runs in the B200 suite, and CPU tests use Attention Gym's reference kernels.
+in BF16; other GPUs raise in Attention Gym. The GPU integration tests therefore
+run in the B200 suite (including an FSDP2 + EP2 Dist-MoE test that captures and
+replays forward/backward as one accelerator graph), and CPU tests use Attention
+Gym's reference kernels.
 
 Results for reduced models using identical weights, measured on GB300 with the
 [HF parity script](../../../scripts/checkpoint_conversion/numerical_tests_qwen3_8_flash_next.py):
@@ -180,5 +188,5 @@ dynamic shapes from the process's history
 - Replace the model-local indexer teacher with
   [the shared teacher](https://github.com/pytorch/torchtitan/pull/5863) once it
   lands.
-- Qualify released-model capacity and throughput, including table offload and
-  longer-context attention.
+- Qualify the released model beyond the 16K-token, 16-GB300 fine-tuning
+  recipe: table offload, longer-context attention, and the multimodal model.
