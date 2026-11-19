@@ -250,7 +250,13 @@ total_loss = main_loss + mtp_scale * mean(mtp_losses)
 
 Preprocessing also produces separate target-token and routed-token count
 vectors ordered as `(main, depth 1, ..., depth N)`. The trainer sums both
-vectors over the optimizer step and reduces them together. Each prediction
+vectors over the optimizer step. Routing counts reduce on every MoE stage;
+loss counts reduce only on loss-owning pipeline stages. Non-owners pass no
+loss denominator (`None`) to the engine and retain a `-1` logging sentinel;
+local counts are not substituted for a global loss denominator. The routing
+count collective still runs on every MoE stage during training; this reduces
+its loss payload, not its collective count. Validation skips loss-only
+reductions on non-owners. Each prediction
 loss uses its target count, while each MoE auxiliary loss uses the routed-token
 count for the block that owns it. This keeps instruction-style label masking
 independent from MoE routing.
