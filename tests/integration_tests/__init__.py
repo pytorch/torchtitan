@@ -33,7 +33,6 @@ class IntegrationTestDefinition:
     test_name: str = "default"
     ngpu: int = 4
     disabled: bool = False
-    skip_rocm_test: bool = False
     timeout: int | None = None
     golden_numerics_path: str | None = None
     """Run through loss_compare.py using this mode-specific golden path."""

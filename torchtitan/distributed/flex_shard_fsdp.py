@@ -168,11 +168,6 @@ def validate_flex_shard_training(
             type(model_config).__qualname__ if model_cls is None else model_cls.__name__
         )
         unsupported.append(f"models that override Decoder._apply_fsdp ({name})")
-    if isinstance(model_config, Decoder.Config) and model_config.enable_weight_tying:
-        # TODO: Parallelization unties tok_embeddings and lm_head, and only
-        # init_states ties them again, after FlexShard has captured both.
-        # Allow tied weights once _parallelize keeps them tied.
-        unsupported.append("enable_weight_tying")
     # FlexShard's Shard placement all-gathers a bucket in one dtype.
     if any(
         module_config.preserve_dtype_params

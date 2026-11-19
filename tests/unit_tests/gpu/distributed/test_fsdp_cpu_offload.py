@@ -214,9 +214,6 @@ class TestConditionalVisionFSDP(DTensorTestBase):
         with torch.no_grad():
             for parameter in encoder.parameters():
                 nn.init.normal_(parameter, std=0.02)
-            encoder.rope_freq.init_states(
-                buffer_device=torch.device(self.device_type) if cpu_offload else None
-            )
 
         has_image = self.rank == 0
         pixel_values, grid_thw = _vision_inputs(
@@ -282,7 +279,6 @@ class TestVisionHSDP(DTensorTestBase):
         with torch.no_grad():
             for parameter in encoder.parameters():
                 nn.init.normal_(parameter, std=0.02)
-            encoder.rope_freq.init_states()
 
         for microbatch_index, image_active in enumerate((True, False)):
             encoder.set_requires_all_reduce(microbatch_index == 1)
