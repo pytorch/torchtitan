@@ -474,6 +474,9 @@ Learned routing uses256 experts, top-k8, eight groups/four selected groups,
 scale2.5, expert-bias update0.001 and unbiased sequence auxiliary coefficient0.01.
 `center_expert_bias_update=False` selects NVIDIA's raw sign-based increment;
 the default True retains TorchTitan's mean-centered increment.
+The recipes activate the [fused router, unbiased loss and MTP CE overrides](../../../torchtitan_recipes/overrides/FUSED_DSV3.md)
+with required-fusion checks. They adapt Yidi Wu's implementations to NVIDIA's
+numerical contracts; they do not import Transformer Engine's kernels.
 Sequence balancing counts unbiased, ungrouped top-k choices,
 independently of dispatch bias and the forced-routing benchmark path, and
 reuses the existing microbatch loss normalization and gradient injection.
