@@ -33,6 +33,7 @@ from torch_checkpointing.config import (
     AsyncCheckpointSaverConfig,
     SyncCheckpointSaverConfig,
 )
+from torch_checkpointing.default_load_plan_executor import DefaultLoadPlanExecutor
 from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.hf.metadata import (
     HuggingFaceSafetensorsDistributedMetadataFormat,
@@ -375,6 +376,18 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertEqual(1, len(backend_manager.save_calls))
         self.assertIsNone(manager.save_future)
         manager.maybe_wait_for_saving()
+        manager.close()
+
+    def test_file_read_workers_configures_the_load_plan_executor(self) -> None:
+        config = TorchCheckpointingManager.Config(
+            keep_latest_k=0, load_only=True, file_read_workers=5
+        )
+
+        manager, _ = self._build_manager(config)
+
+        executor = manager._manager_config.load.load_plan_executor
+        self.assertIsInstance(executor, DefaultLoadPlanExecutor)
+        self.assertEqual(executor._file_read_workers, 5)
         manager.close()
 
     def test_load_only_does_not_construct_checkpoint_barrier(self) -> None:
