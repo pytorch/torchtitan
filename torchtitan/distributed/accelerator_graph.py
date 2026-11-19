@@ -548,9 +548,6 @@ class AcceleratorGraphWrapper:
         if self._graph is None:
             if self._prepare_for_capture is not None:
                 _run_eager_on_accelerator_graph_stream(self._prepare_for_capture, *args)
-            accelerator_graph_manager.log_memory(self.name, "before_empty_cache")
-            torch.accelerator.empty_cache()
-            accelerator_graph_manager.log_memory(self.name, "after_empty_cache")
             self._args = args
             self._record_static_input_addresses(args)
             self._graph, self._output = accelerator_graph_manager.capture(
