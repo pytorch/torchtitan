@@ -607,7 +607,13 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 initial_load_in_hf=True,
             )
-            self.assertTrue(checkpointer.load())
+            # FlexShard loads each parameter alone, so a conversion that needs
+            # another parameter fails here, as it would across the groups of a
+            # larger model.
+            with patch(
+                "torchtitan.distributed.flex_shard_fsdp._HF_LOAD_GROUP_BYTES", 1
+            ):
+                self.assertTrue(checkpointer.load())
             checkpointer.close()
             loaded.append((model, setup))
         (fsdp2, _), (flex, _) = loaded
@@ -656,6 +662,15 @@ class TestFlexShardDecoder(DTensorTestBase):
         # down_proj, and the other weights in a leading dim. The buckets then
         # shard each tp rank's part.
         self._check_hf_loads_match_fsdp2(build_llama3_config, "debugmodel", ep=1, tp=tp)
+
+    @with_comms
+    @with_temp_dir
+    def test_hf_loads_match_fsdp2_with_tied_weights(self):
+        # to_hf gives no tensor for lm_head's weight, which tok_embeddings'
+        # Hugging Face tensor loads.
+        self._check_hf_loads_match_fsdp2(
+            _build_tied_llama3_config, "debugmodel_tied", ep=1
+        )
 
     @with_comms
     @with_temp_dir
@@ -708,15 +723,16 @@ class TestFlexShardDecoder(DTensorTestBase):
             raise error[0]
 
 
-@pytest.mark.parametrize("dp_shard, tp", [(5, 1), (5, 2)])
-def test_hf_load_into_uneven_shards(tmp_path, dp_shard: int, tp: int) -> None:
-    # Each simulated rank of (tp, dp_shard) holds the box torch.chunk gives it
+@pytest.mark.parametrize("tp", [1, 2])
+@pytest.mark.parametrize("group_bytes", [1 << 30, 1])
+def test_hf_load_into_uneven_shards(tmp_path, group_bytes: int, tp: int) -> None:
+    # Each simulated rank of (tp, dp_shard=5) holds the box torch.chunk gives it
     # of each parameter: its chunk of the bucket's dim (1 for w13, else 0) and,
     # with tp > 1, of the last dim, as tensor parallelism splits row-wise
-    # parallel weights. At dp_shard=5, shards end inside attention heads, so
-    # some Hugging Face tensors load in several chunks into a buffer. The
-    # parity tests' shards end on head boundaries. Each rank loads only its
-    # own shards, without a process group.
+    # parallel weights. Shards are uneven and end inside attention heads,
+    # unlike the parity tests'. Each rank loads its shards without a process
+    # group, with all parameters in one group or each alone.
+    dp_shard = 5
     model_config = build_llama3_config(
         "debugmodel",
         parallelism=ParallelismConfig(),
@@ -761,9 +777,15 @@ def test_hf_load_into_uneven_shards(tmp_path, dp_shard: int, tp: int) -> None:
                 ),
             )
             boxes[key] = _box(offsets, sizes)
-        load_hf_into_local_shards(
-            sd_adapter, state_dict, sd_adapter.get_hf_storage_reader(str(tmp_path))
-        )
+        with patch(
+            "torchtitan.distributed.flex_shard_fsdp._HF_LOAD_GROUP_BYTES",
+            group_bytes,
+        ):
+            load_hf_into_local_shards(
+                sd_adapter,
+                state_dict,
+                sd_adapter.get_hf_storage_reader(str(tmp_path)),
+            )
         for key, local in state_dict.items():
             assert torch.equal(local, full[key][boxes[key]]), (tp_rank, dp_rank, key)
 

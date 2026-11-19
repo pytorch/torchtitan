@@ -341,6 +341,11 @@ def declare_optimizer_state_layouts(
         register_optimizer_checkpoint_hook(optimizer, model)
 
 
+# The full tensors of one group of parameters in a Hugging Face load take at most
+# this many bytes, unless the group is one parameter that takes more.
+_HF_LOAD_GROUP_BYTES = 1 << 30
+
+
 def load_hf_into_local_shards(
     sd_adapter: "BaseStateDictAdapter",
     state_dict: dict[str, Any],
@@ -351,189 +356,91 @@ def load_hf_into_local_shards(
     layouts, as FlexShard's does (``declare_state_dict_layouts``).
 
     The state dict adapters convert full tensors (and FSDP2's DTensors), so
-    they would take each local shard for the whole tensor. Their conversions
-    only move rows: each Hugging Face tensor holds rows of one parameter, its
-    leading dims re-indexed and its last dim kept whole and in order. For each
-    local shard, ``to_hf`` runs on a small probe of the full parameter that
-    holds row indices, which says which row of the parameter each Hugging Face
-    row holds (``_hf_local_tensors``). Each region of the shard is a box of the
-    parameter, which holds only some columns of its rows if the shard splits
-    the last dim, as tensor parallelism does for row-wise parallel weights. So
-    this rank's part of a Hugging Face tensor is, for each region, the rows
-    that hold the region's rows, with the region's columns. That part becomes
-    a plain tensor that declares it to DCP as rectangular chunks, so
-    ``dcp.load`` reads only those elements. If it comes from one region whose
-    rows it holds in order, the tensor is a view of the shard, which the load
-    fills in place; otherwise it's a buffer whose rows are then copied into the
-    shard. Entries without a layout go through ``to_hf`` and ``from_hf``, as
+    they would take each local shard for the whole tensor. Instead, the
+    parameters load as full tensors, a group at a time, through the adapters'
+    conversions of full tensors, and each shard keeps its regions of its full
+    tensor. Each conversion sees every key, as in a full load: the full tensors
+    of the group, and meta tensors of the same shapes, which hold no data, for
+    the other keys. A key without Hugging Face tensors of its own, such as
+    ``lm_head.weight`` with tied weights, shares its shard with a key that has
+    them. Entries without a layout go through ``to_hf`` and ``from_hf``, as
     for FSDP2.
     """
     # pyrefly: ignore [missing-import]
     from flex_shard import get_global_layout
 
-    hf_state_dict: dict[str, torch.Tensor] = {}
-    copies = []
-    others = {}
+    shards, others = {}, {}
     for key, value in state_dict.items():
         layout = get_global_layout(value)
         if layout is None:
             others[key] = value
-            continue
-        for hf_key, hf_tensor, hf_copies in _hf_local_tensors(
-            sd_adapter, key, value, layout
-        ):
-            hf_state_dict[hf_key] = hf_tensor
-            copies += hf_copies
-    # from_hf runs even without entries, for its checks of the model config,
-    # e.g. Llama 3's of its rotary embeddings.
-    others_hf = sd_adapter.to_hf(others)
-    assert not others_hf.keys() & hf_state_dict.keys()
-    dcp.load({**hf_state_dict, **others_hf}, storage_reader=storage_reader)
-    for dest, index, source in copies:
-        dest.index_copy_(0, index, source)
-    state_dict.update(sd_adapter.from_hf(others_hf))
-
-
-def _hf_local_tensors(
-    sd_adapter: "BaseStateDictAdapter",
-    key: str,
-    local: torch.Tensor,
-    layout: Any,
-) -> list[tuple[str, torch.Tensor, list[tuple[torch.Tensor, ...]]]]:
-    """``(hf_key, tensor, copies)`` for each Hugging Face tensor that holds rows
-    of ``local``, the local shard of ``key`` with ``layout``.
-
-    ``tensor`` holds this rank's part of the Hugging Face tensor and declares
-    it as chunks. ``copies`` is empty if ``tensor`` is a view of ``local``,
-    else it lists ``(dest, index, source)``, where ``dest`` is a view of
-    ``local`` and ``source`` of ``tensor``, for ``dest.index_copy_`` after the
-    load.
-    """
-    # pyrefly: ignore [missing-import]
-    from flex_shard import GlobalLayout, set_global_layout
-
-    shape = layout.global_shape
-    regions = list(
-        zip(
-            layout.global_offsets, layout.local_offsets, layout.local_sizes, strict=True
-        )
-    )
-    # A row runs along the last dim, unless there's no other dim. Then each
-    # element is a row. A region holds the same columns of each of its rows:
-    # all of them, unless the shard splits the last dim.
-    by_row = len(shape) > 1
-    row_shape = shape[:-1] if by_row else shape
-    row_dims = len(row_shape)
-    if by_row:
-        # Column c of row r holds 2 * r + c, so a conversion that changes the
-        # last dim shows up.
-        probe = torch.arange(2 * math.prod(row_shape)).view(*row_shape, 2)
-        local_rows = local.view(-1, local.shape[-1])
-    else:
-        probe = torch.arange(math.prod(shape)).view(shape)
-        local_rows = local.view(-1)
-    local_row_shape = local.shape[:row_dims]
-    hf_probes = sd_adapter.to_hf({key: probe})
-    if not hf_probes:
-        raise ValueError(
-            f"{type(sd_adapter).__name__}.to_hf gives no Hugging Face tensor for "
-            f"{key}, so FlexShard can't load it."
-        )
-
-    hf_tensors = []
-    # How often each region's local rows are loaded.
-    hits = torch.zeros(len(regions), local_rows.shape[0], dtype=torch.int64)
-    for hf_key, hf_probe in hf_probes.items():
-        rows = hf_probe[..., 0] // 2 if by_row else hf_probe
-        if by_row and not torch.equal(
-            hf_probe, torch.stack([2 * rows, 2 * rows + 1], dim=-1)
-        ):
-            raise ValueError(
-                f"{type(sd_adapter).__name__}.to_hf changes the last dim of {key} "
-                f"in {hf_key}, so FlexShard can't load it."
-            )
-        if rows.ndim != 1:
-            raise NotImplementedError(
-                f"FlexShard can't load {hf_key}, which holds rows of {key} in "
-                "more than one dim."
-            )
-        # For each region, which of the rows it holds and where each is in
-        # local_rows. zip stops at the row dims.
-        coords = torch.unravel_index(rows, row_shape)
-        blocks = []
-        for region, (global_offset, local_offset, size) in enumerate(regions):
-            inside = torch.ones_like(rows, dtype=torch.bool)
-            index = torch.zeros_like(rows)
-            for coord, start, local_start, length, local_length in zip(
-                coords, global_offset, local_offset, size, local_row_shape
-            ):
-                inside &= (coord >= start) & (coord < start + length)
-                index = index * local_length + coord - start + local_start
-            if not inside.any():
-                continue
-            # Each run of the rows, with the region's columns, is one chunk.
-            zero = torch.zeros(1, dtype=torch.int8)
-            change = torch.diff(inside.to(torch.int8), prepend=zero, append=zero)
-            starts = (change == 1).nonzero().flatten().tolist()
-            ends = (change == -1).nonzero().flatten().tolist()
-            index = torch.cat([index[start:end] for start, end in zip(starts, ends)])
-            hits[region].index_add_(0, index, torch.ones_like(index))
-            blocks.append((starts, ends, index, global_offset, local_offset, size))
-        if not blocks:
-            continue
-        # The runs lie one after another in the tensor, region by region, each
-        # with its region's columns from column 0.
-        global_offsets, local_offsets, local_sizes, copies = [], [], [], []
-        num_rows = 0
-        for starts, ends, index, global_offset, local_offset, size in blocks:
-            width = size[row_dims:]
-            local_columns = tuple(
-                slice(start, start + length)
-                for start, length in zip(local_offset[row_dims:], width)
-            )
-            dest = local_rows[(slice(None), *local_columns)]
-            copies.append((dest, index, num_rows, width))
-            for start, end in zip(starts, ends, strict=True):
-                global_offsets.append((start, *global_offset[row_dims:]))
-                local_offsets.append((num_rows, *(0 for _ in width)))
-                local_sizes.append((end - start, *width))
-                num_rows += end - start
-        dest, index, _, _ = copies[0]
-        first = int(index[0])
-        if len(copies) == 1 and torch.equal(
-            index, torch.arange(first, first + len(index))
-        ):
-            tensor, copies = dest[first : first + len(index)], []
         else:
-            widest = tuple(map(max, zip(*(width for *_, width in copies))))
-            tensor = local_rows.new_empty((num_rows, *widest))
-            copies = [
-                (
-                    dest,
-                    index.to(local.device),
-                    tensor[
-                        (slice(row, row + len(index)), *(slice(0, w) for w in width))
-                    ],
-                )
-                for dest, index, row, width in copies
-            ]
-        set_global_layout(
-            tensor,
-            GlobalLayout(
-                global_shape=(len(rows), *shape[row_dims:]),
-                global_offsets=tuple(global_offsets),
-                local_offsets=tuple(local_offsets),
-                local_sizes=tuple(local_sizes),
-            ),
+            shards[key] = (value, layout)
+    meta = {
+        key: torch.empty(layout.global_shape, dtype=value.dtype, device="meta")
+        for key, (value, layout) in shards.items()
+    }
+    # Which keys have Hugging Face tensors depends only on the keys and the full
+    # shapes, so every rank groups the same keys and loads as often.
+    own = [key for key in shards if sd_adapter.to_hf({key: meta[key]})]
+    groups: list[list[str]] = []
+    group_bytes = 0
+    for key in own:
+        value, layout = shards[key]
+        nbytes = math.prod(layout.global_shape) * value.element_size()
+        if not groups or group_bytes + nbytes > _HF_LOAD_GROUP_BYTES:
+            groups.append([])
+            group_bytes = 0
+        groups[-1].append(key)
+        group_bytes += nbytes
+    # TODO: Every rank reads each group's Hugging Face tensors whole, so the
+    # reads grow with the ranks that share a parameter. For large models, one
+    # rank could read each group and scatter the regions.
+    for group in groups:
+        hf_state_dict = sd_adapter.to_hf(
+            meta | {key: shards[key][0].new_empty(meta[key].shape) for key in group}
         )
-        hf_tensors.append((hf_key, tensor, copies))
-    num_local_rows = sum(math.prod(size[:row_dims]) for *_, size in regions)
-    if not (hits <= 1).all() or hits.sum() != num_local_rows:
-        raise ValueError(
-            f"{type(sd_adapter).__name__}.to_hf doesn't give each row of {key} "
-            "exactly once, so FlexShard can't load it."
+        dcp.load(
+            {k: v for k, v in hf_state_dict.items() if not v.is_meta},
+            storage_reader=storage_reader,
         )
-    return hf_tensors
+        full = sd_adapter.from_hf(hf_state_dict)
+        if missing := [key for key in group if key not in full or full[key].is_meta]:
+            raise ValueError(
+                f"{type(sd_adapter).__name__} doesn't convert {missing} back from "
+                "their own Hugging Face tensors, so FlexShard can't load them."
+            )
+        with torch.no_grad():
+            for key in group:
+                local, layout = shards[key]
+                for global_offset, local_offset, size in zip(
+                    layout.global_offsets,
+                    layout.local_offsets,
+                    layout.local_sizes,
+                    strict=True,
+                ):
+                    local[_box(local_offset, size)].copy_(
+                        full[key][_box(global_offset, size)]
+                    )
+    loaded = {shards[key][0].data_ptr() for key in own}
+    for key in shards.keys() - set(own):
+        value = shards[key][0]
+        if value.numel() and value.data_ptr() not in loaded:
+            raise ValueError(
+                f"{type(sd_adapter).__name__}.to_hf gives no Hugging Face tensor "
+                f"for {key}, so FlexShard can't load it."
+            )
+    if others:
+        others_hf = sd_adapter.to_hf(others)
+        dcp.load(others_hf, storage_reader=storage_reader)
+        state_dict.update(sd_adapter.from_hf(others_hf))
+
+
+def _box(offsets, sizes) -> tuple[slice, ...]:
+    return tuple(
+        slice(offset, offset + size)
+        for offset, size in zip(offsets, sizes, strict=True)
+    )
 
 
 def validate_flex_shard_training(
@@ -551,8 +458,6 @@ def validate_flex_shard_training(
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE, RoutedExperts
     from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
-    from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-    from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
     from torchtitan.quantization.utils import has_quantization
     from torchtitan.trainer import Trainer
 
@@ -654,15 +559,6 @@ def validate_flex_shard_training(
             # layouts, which torch.multiprocessing drops on the way to the save
             # process.
             unsupported.append("checkpointer.async_mode='async_with_pinned_mem'")
-        # load_hf_into_local_shards has been checked against FSDP2 for these
-        # adapters only.
-        adapter_cls = getattr(model_cls, "state_dict_adapter_cls", None)
-        if checkpointer.initial_load_in_hf and adapter_cls not in (
-            Llama3StateDictAdapter,
-            Qwen3StateDictAdapter,
-        ):
-            name = getattr(adapter_cls, "__name__", "no state dict adapter")
-            unsupported.append(f"checkpointer.initial_load_in_hf=True with {name}")
         if checkpointer.initial_load_in_hf_quantized:
             unsupported.append("checkpointer.initial_load_in_hf_quantized=True")
         # The state dict adapters need DTensor parameters.
