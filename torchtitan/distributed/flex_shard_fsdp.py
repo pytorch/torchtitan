@@ -39,16 +39,17 @@ group. FlexShard is imported only when it is selected.
 
 FlexShard's state dicts hold plain local shards too, so each declares where its
 shards sit in the full tensors (DCP's ``CheckpointableTensor``): the model's,
-through ``declare_state_dict_layouts``, and the optimizer's, through
-``declare_optimizer_state_layouts``. DCP then saves the same checkpoints as for
-FSDP2's DTensors, and either backend loads the other's.
+through ``declare_state_dict_layouts``, the optimizer's, through
+``declare_optimizer_state_layouts``, and EMA's, through
+``declare_param_layouts``. DCP then saves the same checkpoints as for FSDP2's
+DTensors, and either backend loads the other's.
 ``load_hf_into_local_shards`` loads a Hugging Face checkpoint into those local
 shards, each rank reading only its part of each Hugging Face tensor.
 """
 
 import math
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from importlib.util import find_spec
 from typing import Any, cast, TYPE_CHECKING
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "declare_optimizer_state_layouts",
+    "declare_param_layouts",
     "declare_state_dict_layouts",
     "flex_shard_bucket",
     "flex_shard_bucket_mesh",
@@ -341,6 +343,35 @@ def declare_optimizer_state_layouts(
         register_optimizer_checkpoint_hook(optimizer, model)
 
 
+def declare_param_layouts(
+    model: nn.Module, tensors: Iterable[tuple[torch.Tensor, torch.Tensor]]
+) -> None:
+    """For each ``(param, tensor)`` of ``tensors``, where ``tensor`` has the
+    shape of ``param``'s local shard, declare on ``tensor`` where that shard
+    sits in the full parameter, if ``param`` is a FlexShard parameter of
+    ``model``.
+
+    The layouts are the ones ``model.state_dict()`` declares, so DCP saves and
+    loads each ``tensor``, e.g. an EMA copy of ``param``, as the same shard of a
+    full tensor.
+    """
+    # FlexShard parameters exist only once flex_shard is imported, which
+    # happens only when it is selected.
+    flex_shard = sys.modules.get("flex_shard")
+    if flex_shard is None:
+        return
+    layouts = flex_shard.get_flex_shard_global_layouts(model)
+    param_layouts = {
+        param: layouts[fqn]
+        for fqn, param in model.named_parameters(remove_duplicate=False)
+        if fqn in layouts
+    }
+    for param, tensor in tensors:
+        layout = param_layouts.get(param)
+        if layout is not None:
+            flex_shard.set_global_layout(tensor, layout)
+
+
 # The full tensors of one group of parameters in a Hugging Face load take at most
 # this many bytes, unless the group is one parameter that takes more.
 _HF_LOAD_GROUP_BYTES = 1 << 30
@@ -561,8 +592,6 @@ def validate_flex_shard_training(
         # The state dict adapters need DTensor parameters.
         if checkpointer.last_save_in_hf:
             unsupported.append("checkpointer.last_save_in_hf=True")
-    if config.optim.ema is not None:
-        unsupported.append("optim.ema")
     if any(isinstance(o, DistMuon.Config) for o in config.optim.optimizer.optimizers):
         # DistMuon needs DTensor parameters.
         unsupported.append("DistMuon")

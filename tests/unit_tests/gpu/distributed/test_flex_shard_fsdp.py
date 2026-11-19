@@ -7,7 +7,7 @@
 """``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
 
 import os
-from itertools import product
+from itertools import count, product
 from typing import Any, cast, Literal
 from unittest.mock import patch
 
@@ -33,7 +33,7 @@ from torch.testing._internal.distributed.checkpoint_utils import with_temp_dir
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optim import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, EMA, OptimizersContainer
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
 from torchtitan.config.parallelism import (
@@ -685,6 +685,99 @@ class TestFlexShardDecoder(DTensorTestBase):
             for fqn, param in model.named_parameters()
             for name, value in states[param].items()
         }
+
+    @with_comms
+    @with_temp_dir
+    def test_ema_checkpoints_match_fsdp2(self):
+        # FlexShard's EMA copies are plain local shards, which its checkpoints
+        # place in the full tensors as FSDP2's do. Trained from FSDP2's initial
+        # weights, it saves FSDP2's checkpoint, EMA included. It also loads
+        # FSDP2's checkpoint into an EMA in GPU memory and into one offloaded
+        # to pinned CPU memory, and saves it again. With ep=2, the routed
+        # experts are split over ep, then over edp_shard.
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=2,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+
+        def build(
+            fsdp_backend, folder, *, initial_params=None, offload_to_cpu=False, **config
+        ):
+            model, *setup = self._build(
+                build_qwen3_config,
+                "debugmodel_moe",
+                fsdp_backend,
+                "default",
+                parallelism_context,
+            )
+            if initial_params is not None:
+                with torch.no_grad():
+                    for fqn, param in model.named_parameters():
+                        param.copy_(initial_params[fqn])
+            optimizers = OptimizersContainer(
+                OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=".*", lr=1e-3)]
+                ),
+                model_parts=[model],
+            )
+            ema = EMA.Config(decays=[0.9], offload_to_cpu=offload_to_cpu).build(
+                model_parts=[model]
+            )
+            # As Optim.step updates it, after each optimizer step.
+            steps = count(1)
+            optimizers.register_step_post_hook(lambda *_: ema.step(next(steps)))
+            checkpointer = CheckpointManager(
+                CheckpointManager.Config(
+                    folder=folder, interval=1, keep_latest_k=0, **config
+                ),
+                model_parts=[model],
+                optimizers=optimizers,
+                lr_schedulers=cast(Any, None),
+                ema=ema,
+                extra_states={},
+                sd_adapter=None,
+                base_folder=self.temp_dir,
+            )
+            return model, setup, optimizers, checkpointer
+
+        model, setup, optimizers, checkpointer = build(FSDP2Config(), "fsdp2")
+        initial_params = self._local_params(model)
+        self._train(model, *setup, 1, False, optim=optimizers)
+        checkpointer.save(3)
+        checkpointer.close()
+        expected = os.path.join(self.temp_dir, "fsdp2", "step-3")
+
+        model, setup, optimizers, checkpointer = build(
+            FlexShardConfig(), "flex", initial_params=initial_params
+        )
+        self._train(model, *setup, 1, False, optim=optimizers)
+        checkpointer.save(3)
+        checkpointer.close()
+        self._assert_equal_checkpoints(
+            expected, os.path.join(self.temp_dir, "flex", "step-3")
+        )
+
+        for offload_to_cpu in (False, True):
+            folder = f"flex_loaded_offload_to_cpu_{offload_to_cpu}"
+            *_, checkpointer = build(
+                FlexShardConfig(),
+                folder,
+                offload_to_cpu=offload_to_cpu,
+                initial_load_path=expected,
+                initial_load_model_only=False,
+            )
+            self.assertTrue(checkpointer.load())
+            checkpointer.save(3)
+            checkpointer.close()
+            self._assert_equal_checkpoints(
+                expected, os.path.join(self.temp_dir, folder, "step-3")
+            )
 
     def _check_hf_loads_match_fsdp2(
         self, build_config, flavor: str, *, ep: int, tp: int = 1
