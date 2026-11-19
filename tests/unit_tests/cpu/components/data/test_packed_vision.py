@@ -320,8 +320,8 @@ class TestPackedVision(unittest.TestCase):
         torch.testing.assert_close(merged_MK, expected_MK)
 
     def test_scatter_vision_embeds_uses_packed_layout(self) -> None:
-        inputs_TD = torch.zeros(5, 2)
-        vision_TD = torch.arange(8, dtype=torch.float32).view(4, 2)
+        inputs_TD = torch.zeros(5, 2, requires_grad=True)
+        vision_TD = torch.arange(8, dtype=torch.float64).view(4, 2).requires_grad_()
 
         result_TD = scatter_vision_embeds(
             inputs_TD,
@@ -329,11 +329,18 @@ class TestPackedVision(unittest.TestCase):
             vision_positions=[(0, 0, 2), (1, 3, 2)],
         )
 
-        torch.testing.assert_close(result_TD[:2], vision_TD[:2])
-        torch.testing.assert_close(result_TD[3:], vision_TD[2:])
+        torch.testing.assert_close(result_TD[:2], vision_TD[:2].float())
+        torch.testing.assert_close(result_TD[3:], vision_TD[2:].float())
         torch.testing.assert_close(result_TD[2], torch.zeros(2))
         # The input can alias a no-op TP gather's input, so it is not written.
         torch.testing.assert_close(inputs_TD, torch.zeros(5, 2))
+
+        grad_TD = torch.arange(10, dtype=inputs_TD.dtype).view(5, 2)
+        result_TD.backward(grad_TD)
+        expected_text_grad = torch.zeros_like(grad_TD)
+        expected_text_grad[2] = grad_TD[2]
+        torch.testing.assert_close(inputs_TD.grad, expected_text_grad)
+        torch.testing.assert_close(vision_TD.grad, grad_TD[[0, 1, 3, 4]].double())
 
     def test_gather_vision_embeds_uses_packed_bank_indices(self) -> None:
         inputs_TD = torch.tensor(
@@ -379,13 +386,13 @@ class TestPackedVision(unittest.TestCase):
 
         torch.testing.assert_close(result_TD, inputs_TD)
 
-    def test_gather_vision_embeds_preserves_token_sharding(self) -> None:
+    def test_vision_fusion_preserves_token_sharding(self) -> None:
         dp_axis = spmd.MeshAxis.of(2, 4)
         cp_axis = spmd.MeshAxis.of(2, 2)
         tp_axis = spmd.MeshAxis.of(2, 1)
-        inputs_TD = torch.zeros(2, 2)
+        inputs_TD = torch.zeros(3, 2)
         vision_bank_VD = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-        vision_bank_indices_T = torch.tensor([0, 1])
+        vision_bank_indices_T = torch.tensor([0, -1, 1])
         token_type = {dp_axis: spmd.V, cp_axis: spmd.V, tp_axis: spmd.V}
         token_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis), None)
         index_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis))
@@ -405,14 +412,21 @@ class TestPackedVision(unittest.TestCase):
                 index_spec,
             )
             with typecheck(strict_mode="strict", local=False):
-                result_TD = gather_vision_embeds(
+                gathered_TD = gather_vision_embeds(
                     inputs_TD,
                     vision_bank_VD=vision_bank_VD,
                     vision_bank_indices_T=vision_bank_indices_T,
                 )
 
-        self.assertEqual(spmd.get_local_type(result_TD), token_type)
-        self.assertEqual(spmd.get_partition_spec(result_TD), token_spec)
+                scattered_TD = scatter_vision_embeds(
+                    inputs_TD,
+                    vision_embeds=vision_bank_VD,
+                    vision_positions=[(0, 0, 1), (1, 2, 1)],
+                )
+
+        for result_TD in (gathered_TD, scattered_TD):
+            self.assertEqual(spmd.get_local_type(result_TD), token_type)
+            self.assertEqual(spmd.get_partition_spec(result_TD), token_spec)
 
 
 if __name__ == "__main__":
