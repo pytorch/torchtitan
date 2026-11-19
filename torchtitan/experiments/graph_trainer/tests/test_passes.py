@@ -1367,7 +1367,16 @@ class TestFlexShardScheduling(TestCase):
         self.assertIs(packing.args[0][0], cast)
         self.assertEqual(gm(grad.clone()), grad[0].float().view(2, 2), atol=0, rtol=0)
 
-    def _bucket(self, graph, source, action, *, fqn="layer.weight", backward=False):
+    def _bucket(
+        self,
+        graph,
+        source,
+        action,
+        *,
+        fqn="layer.weight",
+        backward=False,
+        all_gather_out=False,
+    ):
         first_node = list(graph.nodes)[-1]
         send = graph.call_function(torch.ops.aten.empty_like.default, (source,))
         copy = graph.call_function(torch.ops.aten.copy_.default, (send, source))
@@ -1377,7 +1386,12 @@ class TestFlexShardScheduling(TestCase):
             else torch.ops._c10d_functional.reduce_scatter_tensor.default
         )
         args = (send, 2, "fsdp") if action == "unshard" else (send, "sum", 2, "fsdp")
-        launch = graph.call_function(collective, args)
+        kwargs = {}
+        if all_gather_out:
+            collective = torch.ops._c10d_functional.all_gather_into_tensor_out.default
+            out = graph.call_function(torch.ops.aten.empty.memory_format, ([8],))
+            kwargs["out"] = out
+        launch = graph.call_function(collective, args, kwargs)
         wait = graph.call_function(
             torch.ops._c10d_functional.wait_tensor.default, (launch,)
         )
@@ -1388,7 +1402,9 @@ class TestFlexShardScheduling(TestCase):
                 "flex_shard_action": action,
                 "flex_shard_param_fqns": (fqn,),
                 "flex_shard_mesh_axis_names": ("fsdp",),
-                "flex_shard_phase": "prepare" if node in (send, copy) else "execute",
+                "flex_shard_phase": "prepare"
+                if node in (send, copy, kwargs.get("out"))
+                else "execute",
             }
             node.meta["autograd_backward"] = backward
         return send, copy, launch, wait, finish
@@ -1451,13 +1467,29 @@ class TestFlexShardScheduling(TestCase):
                 self.assertIn(second[2], list(graph.nodes))
 
     def test_moves_buffer_writes_with_launch_and_unpacking_with_wait(self):
-        for action in ("unshard", "reduce_grad"):
-            with self.subTest(action=action):
+        for action, all_gather_out in (
+            ("unshard", False),
+            ("unshard", True),
+            ("reduce_grad", False),
+        ):
+            with self.subTest(action=action, all_gather_out=all_gather_out):
                 graph = torch.fx.Graph()
                 param = graph.placeholder("param")
-                first = self._bucket(graph, param, action, fqn="first.weight")
+                first = self._bucket(
+                    graph,
+                    param,
+                    action,
+                    fqn="first.weight",
+                    all_gather_out=all_gather_out,
+                )
                 compute = graph.call_function(torch.ops.aten.sin.default, (param,))
-                second = self._bucket(graph, param, action, fqn="second.weight")
+                second = self._bucket(
+                    graph,
+                    param,
+                    action,
+                    fqn="second.weight",
+                    all_gather_out=all_gather_out,
+                )
                 graph.output((first[-1], second[-1], compute))
                 gm = torch.fx.GraphModule({}, graph)
                 self.schedule(gm)

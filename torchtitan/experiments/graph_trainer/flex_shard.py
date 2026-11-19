@@ -646,13 +646,16 @@ def flex_shard_fsdp_scheduling(
     """
 
     def _is_coll(node: fx.Node, collective) -> bool:
-        return node.target in (collective, collective.default)
+        return any(node.target in (op, op.default) for op in collective)
 
     collectives = {}
     if schedule_all_gathers:
-        collectives["unshard"] = torch.ops._c10d_functional.all_gather_into_tensor
+        collectives["unshard"] = (
+            torch.ops._c10d_functional.all_gather_into_tensor,
+            torch.ops._c10d_functional.all_gather_into_tensor_out,
+        )
     if schedule_reduce_scatters:
-        collectives["reduce_grad"] = torch.ops._c10d_functional.reduce_scatter_tensor
+        collectives["reduce_grad"] = (torch.ops._c10d_functional.reduce_scatter_tensor,)
     wait_tensor = torch.ops._c10d_functional.wait_tensor
 
     def _is_wait_for(node: fx.Node, launch: fx.Node) -> bool:
