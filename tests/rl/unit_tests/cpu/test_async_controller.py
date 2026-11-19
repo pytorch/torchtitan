@@ -837,7 +837,7 @@ def _run_with_generator_watcher(
     )
     controller.start_step = 0
     controller._validation_tasks = []
-    controller._weight_sync_tasks = []
+    controller._model_state_dict_push_pull_tasks = []
     controller._has_pending_validation = False
     controller.metrics_processor = Mock()
     controller.trainer = None
@@ -984,7 +984,7 @@ def test_validation_schedule(
         )
     )
     controller._validation_tasks = []
-    controller._weight_sync_tasks = []
+    controller._model_state_dict_push_pull_tasks = []
     controller._has_pending_validation = False
     controller.validate = validate
     controller.metrics_processor = Mock()
@@ -1099,7 +1099,7 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     assert "math_verify/timeouts/sum" not in keys
 
 
-def test_run_cancels_an_in_flight_pull_before_it_releases_groups_into_a_closed_buffer() -> None:
+def test_run_cancels_the_in_flight_pull_when_the_trainer_loop_fails() -> None:
     events: list[str] = []
     buffer_closed = asyncio.Event()
 
@@ -1108,7 +1108,7 @@ def test_run_cancels_an_in_flight_pull_before_it_releases_groups_into_a_closed_b
         events.append("released groups after close")
 
     async def failing_trainer_loop(self, *args, **kwargs) -> None:
-        self._weight_sync_tasks = [asyncio.create_task(pull())]
+        self._model_state_dict_push_pull_tasks = [asyncio.create_task(pull())]
         raise RuntimeError("forward/backward failed")
 
     with pytest.raises(RuntimeError, match="forward/backward failed"):
