@@ -25,8 +25,8 @@ from torchtitan.models.kimi_k3 import (
     KIMI_K3_SPECIAL_TOKENS,
     KIMI_K3_VISION_PROCESSOR_KWARGS,
 )
+from torchtitan.models.kimi_k3.dsa import KimiDSAAttention
 from torchtitan.models.kimi_k3_1 import build_model_config
-from torchtitan.models.kimi_k3_1.dsa import KimiDSAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 

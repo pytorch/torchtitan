@@ -24,9 +24,13 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attn_gym import AuxRequest, gather_attn
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import LayerNorm
+
+# TODO: move Indexer and SparseIndexerLoss to models/common/ after #5722 and
+# #5863 land; Kimi K3.1 is their second user.
 from torchtitan.models.deepseek_v4.compressor import Indexer, SparseIndexerLoss
-from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.tools.utils import has_cuda_capability
+
+from .attention import KimiMLAAttention
 
 __all__ = [
     "AbsorbedKVProjection",
