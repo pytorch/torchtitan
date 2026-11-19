@@ -50,8 +50,8 @@ _batcher_loop
                         v  |                           v
 Batcher (own process)                                training_batch_queue
 +-------------------------------------------------+   +----------------------------------------------+
-| build_from_group -> add_training_samples        |   | size 1; holds TrainerStepBatch | None        |
-| pack at num_prompts_per_train_step               |   +---------------------+------------------------+
+| decide specs per group from lengths             |   | size 1; holds TrainerStepBatch | None        |
+| at P groups: plan -> materialize -> pack        |   +---------------------+------------------------+
 +-------------------------------------------------+                         |
                                                                          | packed = training_batch_queue.get()
                                                                          v
