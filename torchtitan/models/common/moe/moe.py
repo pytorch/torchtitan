@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cache
 from typing import cast, Protocol
 
 import spmd_types as spmd
@@ -46,6 +48,78 @@ from .token_dispatcher import (
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
 )
+
+
+@cache
+def _expert_compute_streams(
+    device: torch.device,
+) -> tuple[torch.cuda.Stream, torch.cuda.Stream]:
+    """Share one higher-priority routed and lowest-priority shared stream per device.
+
+    The caller stream may already have the lowest priority. Separate routed
+    compute avoids changing the caller's or the trainer's global stream policy.
+
+    Args:
+        device: Indexed CUDA device that owns both branches and the cache key.
+
+    Returns:
+        Higher-priority routed and lowest-priority shared compute streams.
+    """
+    if device.type != "cuda":
+        raise ValueError("Shared-expert stream overlap requires a CUDA device")
+    if device.index is None:
+        raise ValueError("Shared-expert stream cache requires an indexed CUDA device")
+    routed = torch.cuda.Stream(device=device, priority=-1)
+    shared = torch.cuda.Stream(device=device, priority=0)
+    if routed.priority >= shared.priority:
+        raise RuntimeError(
+            "Shared-expert overlap requires distinct CUDA stream priorities"
+        )
+    return routed, shared
+
+
+@torch._dynamo.allow_in_graph
+class _ExpertInputs(torch.autograd.Function):
+    """Fork storage-free inputs and preserve sequential BF16 gradient fan-in.
+
+    Moving shared forward earlier reverses autograd's branch readiness order.
+    Explicit shared+routed+router accumulation preserves the original rounding
+    and returns the complete input gradient on the caller's forward stream.
+    """
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(
+        ctx, shared_x_TD: torch.Tensor, routed_x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return alias-only shared, routed and router inputs without a copy."""
+        ctx.same_input = shared_x_TD is routed_x_TD
+        ctx.set_materialize_grads(False)
+        return shared_x_TD, routed_x_TD, routed_x_TD
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def backward(
+        ctx,
+        shared_grad_TD: torch.Tensor | None,
+        routed_grad_TD: torch.Tensor | None,
+        router_grad_TD: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Merge existing contributions in the original sequential branch order."""
+        contributions = (
+            (shared_grad_TD, routed_grad_TD, router_grad_TD)
+            if ctx.same_input
+            else (routed_grad_TD, router_grad_TD)
+        )
+        gradient: torch.Tensor | None = None
+        for contribution in contributions:
+            if contribution is not None:
+                gradient = contribution if gradient is None else gradient + contribution
+        return (gradient, None) if ctx.same_input else (shared_grad_TD, gradient)
+
+
+spmd.register_local_autograd_function(_ExpertInputs)
+
 
 # Shape suffix legend
 # (https://medium.com/@NoamShazeer/shape-suffixes-good-coding-style-f836e72e24fd):
@@ -782,10 +856,10 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
 class MoE(FeedForward):
     """Mixture of Experts layer.
 
-    The forward pass proceeds as:
+    Without overlap, the forward pass proceeds as:
     1. Router computes expert assignments.
     2. RoutedExperts.forward() enters a local SPMD region, then handles:
-       a. dispatch (TokenDispatcher) — reorder tokens by expert assignment.
+       a. dispatch (TokenDispatcher) -- reorder tokens by expert assignment.
           With EP, also performs all-to-all communication to send tokens
           to expert-owning ranks.
        b. expert computation (W13, activation, and W2 on local tensors)
@@ -796,6 +870,12 @@ class MoE(FeedForward):
           - HybridEP: synchronous combine_tokens.
     3. Shared experts compute their output.
     4. Routed and shared expert outputs are summed.
+
+    With ``overlap_shared_experts``, enqueue shared experts first on a separate
+    lower-priority CUDA stream while router and routed work use a higher-priority
+    stream. Both join the caller before the sum and TP output transition.
+    Backward uses the forward streams and explicitly preserves shared+routed+
+    router input-gradient accumulation order, including BF16 rounding.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -814,6 +894,15 @@ class MoE(FeedForward):
         """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
         ``load_balance_coeff=None`` instead removes the bias from routing."""
         shared_experts: DenseFeedForward.Config | None = None
+        overlap_shared_experts: bool = False
+        """Enqueue independent shared experts before higher-priority routed compute.
+
+        Both branches join the caller stream before combination. Dist-MoE
+        transforms enable this automatically. CUDA is required when shared
+        experts are present; without shared experts this has no effect.
+        GraphTrainer needs its own
+        parallel-branch lowering; that integration is not provided here.
+        """
 
         def __post_init__(self) -> None:
             expert_counts = {
@@ -838,6 +927,7 @@ class MoE(FeedForward):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.overlap_shared_experts = config.overlap_shared_experts
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: router.tokens_per_expert_E is accumulated in the router forward pass.
@@ -855,6 +945,55 @@ class MoE(FeedForward):
             )
         else:
             self.expert_bias_E = None
+
+    @contextmanager
+    def _shared_expert_streams(
+        self, x_TD: torch.Tensor
+    ) -> Iterator[torch.Tensor | None]:
+        """Fork both expert branches and join them before caller-stream consumers.
+
+        Stream waits establish input/FSDP readiness and output completion.
+        record_stream protects cross-stream allocator ownership, including
+        forward-only execution where autograd does not retain intermediates.
+        """
+        if not self.overlap_shared_experts or self.shared_experts is None:
+            yield None
+            return
+        routed, shared = _expert_compute_streams(x_TD.device)
+        caller = torch.cuda.current_stream(x_TD.device)
+        routed.wait_stream(caller)
+        shared.wait_stream(caller)
+        x_TD.record_stream(routed)
+        x_TD.record_stream(shared)
+        shared_TD = None
+        try:
+            with torch.cuda.stream(shared):
+                shared_TD = self.shared_experts(x_TD)
+            with torch.cuda.stream(routed):
+                yield shared_TD
+        finally:
+            caller.wait_stream(shared)
+            caller.wait_stream(routed)
+            if shared_TD is not None:
+                shared_TD.record_stream(caller)
+
+    def _forward_routed_experts(
+        self,
+        x_TD: torch.Tensor,
+        scores_TK: torch.Tensor,
+        expert_ids_TK: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Compute the routed branch; latent MoE variants override this boundary."""
+        return self.routed_experts(
+            x_TD,
+            scores_TK,
+            expert_ids_TK,
+            routing_map_TE,
+            padding_mask_T=padding_mask_T,
+        )
 
     def forward(
         self,
@@ -882,27 +1021,39 @@ class MoE(FeedForward):
             routed_padding_mask_T,
         ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
 
-        # topk scores and expert IDs have shape (T, K); the routing map (T, E)
-        # marks the experts each token is routed to (built inside the router).
-        (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
-            routed_x_TD,
-            self.expert_bias_E,
-            padding_mask_T=routed_padding_mask_T,
-            aux_loss_denominator=aux_loss_denominator,
-            **router_kwargs,
+        shared_x_TD = x_TD
+        router_x_TD = routed_x_TD
+        if self.overlap_shared_experts and self.shared_experts is not None:
+            shared_x_TD, routed_x_TD, router_x_TD = _ExpertInputs.apply(
+                x_TD, routed_x_TD
+            )
+        with self._shared_expert_streams(shared_x_TD) as shared_TD:
+            topk_scores_TK, topk_expert_ids_TK, routing_map_TE = self.router(
+                router_x_TD,
+                self.expert_bias_E,
+                padding_mask_T=routed_padding_mask_T,
+                aux_loss_denominator=aux_loss_denominator,
+                **router_kwargs,
+            )
+            out_TD = self._forward_routed_experts(
+                routed_x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                routing_map_TE,
+                padding_mask_T=routed_padding_mask_T,
+            )
+        if shared_TD is not None:
+            out_TD.record_stream(torch.cuda.current_stream(out_TD.device))
+        return self._add_shared_experts_and_reduce_across_tp(
+            out_TD, x_TD, shared_TD=shared_TD
         )
-
-        out_TD = self.routed_experts(
-            routed_x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            routing_map_TE,
-            padding_mask_T=routed_padding_mask_T,
-        )
-        return self._add_shared_experts_and_reduce_across_tp(out_TD, x_TD)
 
     def _add_shared_experts_and_reduce_across_tp(
-        self, routed_out_TD: torch.Tensor, x_TD: torch.Tensor
+        self,
+        routed_out_TD: torch.Tensor,
+        x_TD: torch.Tensor,
+        *,
+        shared_TD: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Add the shared experts' output of ``x_TD`` to the routed output and
         materialize the MoE output across TP.
@@ -921,15 +1072,16 @@ class MoE(FeedForward):
                 self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD),
                 region_name="tp_routed_reduction",
             )
-            shared_TD = self._maybe_all_reduce_moe_output_across_tp(
-                self.shared_experts(x_TD)
-            )
+            if shared_TD is None:
+                shared_TD = self.shared_experts(x_TD)
+            shared_TD = self._maybe_all_reduce_moe_output_across_tp(shared_TD)
             return remat.region(
                 torch.add, self.remat_region_name("shared_add"), recompute=False
             )(routed_out_TD, shared_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(routed_out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            if shared_TD is None:
+                shared_TD = self.shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(
@@ -1035,6 +1187,7 @@ class MoE(FeedForward):
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        """Initialize expert bias and shared-stream resources before graph capture."""
         if buffer_device is None:
             # After ``to_empty()``, the existing buffer records the target device.
             # Reinitialize MoE buffers there when no explicit buffer device is passed.
@@ -1046,6 +1199,10 @@ class MoE(FeedForward):
                     self.router.num_experts,
                     dtype=torch.float32,
                 )
+        if self.overlap_shared_experts and self.shared_experts is not None:
+            if buffer_device.type == "cuda" and buffer_device.index is None:
+                buffer_device = torch.device("cuda", torch.cuda.current_device())
+            _expert_compute_streams(buffer_device)
 
 
 class _MoERouterLike(Protocol):
