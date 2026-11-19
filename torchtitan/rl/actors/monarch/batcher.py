@@ -8,11 +8,12 @@
 
 from __future__ import annotations
 
-from monarch.actor import Actor, endpoint
+from monarch.actor import endpoint
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
+from torchtitan.rl.actors.monarch.actor import TitanActor
 from torchtitan.rl.actors.monarch.rdma_microbatch import (
     create_cuda_context_to_silence_monarch_log,
     MonarchRDMAMicrobatch,
@@ -77,7 +78,7 @@ class _BatcherActorEndpoints:
         sl.set_step(step)
 
 
-class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
+class BatcherActor(TitanActor, _BatcherActorEndpoints, Batcher):
     """Expose a :class:`Batcher` through Monarch endpoints, in its own process.
 
     Why not batch in the controller, whose busy event loop holds the GIL:

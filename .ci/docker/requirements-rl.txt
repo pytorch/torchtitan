@@ -1,6 +1,6 @@
 # RL runtime dependencies. Canonical file: torchtitan/rl/requirements.txt and
 # the `rl` extra in pyproject.toml point here.
-torchmonarch>=0.7.0
+torchmonarch>=0.8.0
 opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie

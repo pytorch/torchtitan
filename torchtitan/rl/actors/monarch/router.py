@@ -12,8 +12,9 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint, current_size
+from monarch.actor import concurrent_endpoint, current_size
 
+from torchtitan.rl.actors.monarch.actor import TitanActor
 from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
@@ -69,6 +70,6 @@ class _InterGeneratorRouterActorEndpoints:
 
 
 class InterGeneratorRouterActor(
-    Actor, _InterGeneratorRouterActorEndpoints, InterGeneratorRouter
+    TitanActor, _InterGeneratorRouterActorEndpoints, InterGeneratorRouter
 ):
     """Expose the singleton :class:`InterGeneratorRouter` through Monarch endpoints."""

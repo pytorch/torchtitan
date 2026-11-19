@@ -11,18 +11,19 @@ import functools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint, current_rank
+from monarch.actor import concurrent_endpoint, current_rank
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.actors.monarch.actor import TitanActor
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
 
-class RolloutWorkerActor(Actor):
+class RolloutWorkerActor(TitanActor):
     """Monarch adapter that owns a configurable standalone rollout worker."""
 
     def __init__(

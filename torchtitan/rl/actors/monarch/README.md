@@ -10,7 +10,7 @@ allocates its own hosts subclasses `Controller` and overrides
 hosts from a cluster scheduler, use a launch recipe (see
 [Launchers](#launchers)).
 
-Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
+Each adapter is a thin `TitanActor` (a Monarch `Actor`) subclass of a service with no Monarch
 dependency of its own: it declares the service's methods as
 `@concurrent_endpoint`s and supplies Monarch-specific constructor arguments
 (rank, actor name, `Channel.open`). Domain behavior stays in the service.
@@ -18,6 +18,7 @@ dependency of its own: it declares the service's methods as
 | Module | Purpose |
 | --- | --- |
 | `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client (or the `ModelStateDictTransport`), and stops the meshes. |
+| `actor.py` | `TitanActor`, the base of every actor here: drops a message it sends to a stopped or failed actor instead of failing (Monarch's default). |
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
