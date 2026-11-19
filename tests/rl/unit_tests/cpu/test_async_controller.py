@@ -1004,24 +1004,41 @@ def test_validation_schedule(
     ] == logged
 
 
+def _controller_with_router(*, generate_calls, retry, fault_tolerance=None):
+    """A controller whose router reserves generators whose `generate` runs
+    `generate_calls` in turn, and answers `retry` when a failed call releases."""
+    generators = [
+        SimpleNamespace(generate=SimpleNamespace(call_one=AsyncMock(side_effect=call)))
+        for call in generate_calls
+    ]
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        num_generators=len(generators),
+        generator_router=SimpleNamespace(fault_tolerance=fault_tolerance),
+    )
+    controller.generator_router = SimpleNamespace(
+        reserve=SimpleNamespace(call_one=AsyncMock(side_effect=generators)),
+        release_reservation=SimpleNamespace(
+            broadcast=Mock(), call_one=AsyncMock(return_value=retry)
+        ),
+    )
+    return controller, generators
+
+
 def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
     """A failed call releases its reserved load, or the router would keep counting it."""
+    error = RuntimeError("generator failed")
 
     async def generate_call(*args, **kwargs) -> None:
         # The load stays reserved while the generator runs the call.
-        release.assert_not_called()
-        raise RuntimeError("generator failed")
+        release.broadcast.assert_not_called()
+        raise error
 
-    generate_call = AsyncMock(side_effect=generate_call)
-    reserve = AsyncMock(
-        return_value=SimpleNamespace(generate=SimpleNamespace(call_one=generate_call))
+    controller, generators = _controller_with_router(
+        generate_calls=[generate_call], retry=False
     )
-    release = Mock()
-    controller = object.__new__(Controller)
-    controller.generator_router = SimpleNamespace(
-        reserve=SimpleNamespace(call_one=reserve),
-        release_reservation=SimpleNamespace(broadcast=release),
-    )
+    router = controller.generator_router
+    release = router.release_reservation
     generate = controller._make_generate_fn()
     prompt = Prompt(token_ids=[1, 2])
 
@@ -1031,15 +1048,57 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
         )
 
     # The session reaches both routing layers: the router and the generator's DP routing.
-    reserve.assert_awaited_once_with("r0", routing_session_id="s0")
-    generate_call.assert_awaited_once_with(
+    router.reserve.call_one.assert_awaited_once_with("r0", routing_session_id="s0")
+    generators[0].generate.call_one.assert_awaited_once_with(
         prompt,
         request_id="r0",
         group_id=0,
         routing_session_id="s0",
         sampling_config=None,
     )
-    release.assert_called_once_with("r0")
+    # Without fault tolerance, the failed call releases without waiting for the router.
+    release.broadcast.assert_called_once_with("r0")
+    release.call_one.assert_not_called()
+
+
+async def _gone(*args, **kwargs):
+    raise RuntimeError("generator is gone")
+
+
+async def _served(*args, **kwargs):
+    return "completion"
+
+
+@pytest.mark.parametrize(
+    "retry, generate_calls, num_reported, num_broadcast",
+    [
+        # The router says gen0 is gone: the retry on gen1 succeeds and releases.
+        (True, [_gone, _served], 1, 1),
+        # Every generator is gone: one attempt per generator, then the error.
+        (True, [_gone, _gone], 2, 0),
+        # The router says the error is the call's own (e.g. a rejected prompt): no retry.
+        (False, [_gone, _served], 1, 0),
+    ],
+)
+def test_generate_fn_retries_a_call_whose_generator_is_gone(
+    retry, generate_calls, num_reported, num_broadcast
+) -> None:
+    controller, _ = _controller_with_router(
+        generate_calls=generate_calls, retry=retry, fault_tolerance=object()
+    )
+    generate = controller._make_generate_fn()
+
+    call = generate(Prompt(token_ids=[1]), request_id="r0", group_id=0)
+    if num_broadcast:
+        assert asyncio.run(call) == "completion"
+    else:
+        with pytest.raises(RuntimeError, match="generator is gone"):
+            asyncio.run(call)
+
+    # Every failure goes through the router, which frees the reservation.
+    release = controller.generator_router.release_reservation
+    assert release.call_one.await_count == num_reported
+    assert release.broadcast.call_count == num_broadcast
 
 
 def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:

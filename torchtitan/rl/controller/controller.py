@@ -692,12 +692,15 @@ class Controller(Configurable):
     def _make_generate_fn(self) -> GenerateFn:
         """Build the rollouter's `GenerateFn`: reserve a generator from the generator router, pinning sticky
         routing on `routing_session_id` (a sample's turns reuse one generator's prefix KV), and call it
-        directly."""
+        directly. With generator fault tolerance, a call whose generator is gone is retried on another
+        generator, in up to `num_generators` attempts."""
         # TODO: make this a pluggable config (a GenerateFn factory) so non-router generate backends can be swapped in.
         # Bind the router handle to a local so the closure captures it instead of
         # `self`. A GenerateFn may be shipped to another process, where an actor
         # handle serializes cheaply and the whole controller does not.
         generator_router = self.generator_router
+        fault_tolerant = self.config.generator_router.fault_tolerance is not None
+        num_generators = self.config.num_generators
 
         @sl.log_trace_span("generate")
         async def generate(
@@ -711,19 +714,38 @@ class Controller(Configurable):
             # TODO: a cancelled caller releases while the generator still runs its call,
             #   and a caller that dies never releases. Moot today: nothing cancels a
             #   generate call, and a dead rollout worker fails the run.
-            generator = await generator_router.reserve.call_one(
-                request_id, routing_session_id=routing_session_id
-            )
-            try:
-                return await generator.generate.call_one(
-                    prompt,
-                    request_id=request_id,
-                    group_id=group_id,
-                    routing_session_id=routing_session_id,
-                    sampling_config=sampling_config,
+            for attempt in range(1, num_generators + 1):
+                generator = await generator_router.reserve.call_one(
+                    request_id, routing_session_id=routing_session_id
                 )
-            finally:
-                generator_router.release_reservation.broadcast(request_id)
+                try:
+                    completion = await generator.generate.call_one(
+                        prompt,
+                        request_id=request_id,
+                        group_id=group_id,
+                        routing_session_id=routing_session_id,
+                        sampling_config=sampling_config,
+                    )
+                except Exception as error:
+                    if not fault_tolerant:
+                        generator_router.release_reservation.broadcast(request_id)
+                        raise
+                    # The router frees the reservation and tells whether the call failed
+                    # because its generator is gone, so that another may serve it.
+                    retry = await generator_router.release_reservation.call_one(
+                        request_id, error=error
+                    )
+                    if not retry or attempt == num_generators:
+                        raise
+                    logger.warning(
+                        f"Retrying generate {request_id}, whose generator is gone: {error}"
+                    )
+                except BaseException:
+                    generator_router.release_reservation.broadcast(request_id)
+                    raise
+                else:
+                    generator_router.release_reservation.broadcast(request_id)
+                    return completion
 
         return generate
 
