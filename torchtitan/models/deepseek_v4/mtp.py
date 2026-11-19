@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
+import torch_remat as remat
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -64,8 +65,11 @@ class MTPBlock(DeepSeekV4TransformerBlock):
             dtype=prev_hc_hidden.dtype
         )
 
-        hidden = self.e_proj(self.enorm(mtp_input_embed)).unsqueeze(1)
-        hidden = hidden + self.h_proj(self.hnorm(prev_hc_hidden))
+        embed_hidden = self.e_proj(self.enorm(mtp_input_embed))
+        prev_hidden = self.h_proj(self.hnorm(prev_hc_hidden))
+        # The unsqueeze and the add read both projection outputs with bare ops.
+        remat.recompute_needs_tensor(embed_hidden, prev_hidden)
+        hidden = embed_hidden.unsqueeze(1) + prev_hidden
         next_hc_hidden = super().forward(
             hidden,
             mtp_input_ids_T,
