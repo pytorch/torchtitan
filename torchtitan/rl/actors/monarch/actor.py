@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import logging
 
-from monarch.actor import Actor, InvalidReferenceReason, UndeliverableMessageEnvelope
+from monarch.actor import (
+    Actor as MonarchActor,
+    InvalidReferenceReason,
+    UndeliverableMessageEnvelope,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class TitanActor(Actor):
+class Actor(MonarchActor):
     """A Monarch ``Actor`` that drops messages it sends to a stopped or failed actor."""
 
     # Sync, not async: Monarch rejects an async hook on an actor with sync endpoints.

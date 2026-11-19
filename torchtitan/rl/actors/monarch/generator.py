@@ -12,7 +12,7 @@ from monarch.actor import Channel, concurrent_endpoint, context, current_rank
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import PrecisionConfig
-from torchtitan.rl.actors.monarch.actor import TitanActor
+from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
@@ -118,5 +118,5 @@ class _GeneratorActorEndpoints:
         await super().close()
 
 
-class GeneratorActor(TitanActor, _GeneratorActorEndpoints, Generator):
+class GeneratorActor(Actor, _GeneratorActorEndpoints, Generator):
     """Expose a standalone :class:`Generator` through Monarch endpoints."""
