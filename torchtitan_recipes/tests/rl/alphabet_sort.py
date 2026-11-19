@@ -867,6 +867,8 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    # Covers ModelStateDictTransport reads straight into generator GPU weights.
+    config.generator.model_state_dict_load_mode = "gpu_fetch"
     # Covers validations beside training, then the validation after training.
     config.async_loop.validation = ValidationConfig(
         steps=20, freq=2, validate_after_training=True
@@ -996,7 +998,7 @@ def rl_grpo_checkpoint_resume() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 1
     config.trainer.parallelism.tensor_parallel_degree = 2
     config.generator.parallelism.tensor_parallel_degree = 4
-    # TorchStore is still the only path for gpu_fetch; keep it covered.
+    # Keep the TorchStore path covered.
     # TODO: drop with the TorchStore path.
     config.model_state_dict_transport = None
     return _configure_ci(
