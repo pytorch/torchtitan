@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,6 +22,8 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -198,6 +201,9 @@ class InterGeneratorRouter(Configurable):
     async def pull_model_state_dict(self, policy_version: int) -> None:
         """Pull the given policy version's state dict into every generator.
 
+        Once every pull ends, raises a ``RuntimeError`` naming each generator whose pull
+        failed, after logging each failure.
+
         Args:
             policy_version: Trainer policy version whose state dict to pull.
         """
@@ -221,7 +227,25 @@ class InterGeneratorRouter(Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        results = await asyncio.gather(
+            *[_pull_one(h) for h in self._generators], return_exceptions=True
+        )
+        failed = [
+            index
+            for index, result in enumerate(results)
+            if isinstance(result, BaseException)
+        ]
+        for index in failed:
+            logger.error(
+                f"Generator {index} failed to load policy version {policy_version}",
+                exc_info=results[index],
+            )
+        # TODO: report the failed generators to the router's health state (M0). A failed one may
+        #   still be reading the trainer's staging buffer, so stop it before the next push.
+        if failed:
+            raise RuntimeError(
+                f"Generators {failed} failed to load policy version {policy_version}"
+            ) from results[failed[0]]
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""

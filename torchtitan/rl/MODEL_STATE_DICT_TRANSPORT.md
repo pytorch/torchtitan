@@ -89,8 +89,8 @@ does not cover every element of a generator shard, or on `Partial` and uneven
    sends the push before the next forward/backward and Monarch starts them in
    that order, so every rank issues it before its training collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
-   raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
-   restart the job.
+   raising after 60s plus its bytes at `min_read_bytes_per_s`. A timeout leaves
+   the reads in flight; restart the job.
 
 The controller finishes pull N before push N+1, so a single staging buffer is
 enough.
