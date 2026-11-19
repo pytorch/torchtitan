@@ -1,0 +1,14 @@
+# config: deepseek_v3_debugmodel_dist_muon_fsdp4_ep2
+# ngpu: 4
+# parallelism: FSDP=4, EP=2
+# step loss grad_norm
+1 0 0
+2 0 0
+3 0 0
+4 0 0
+5 0 0
+6 0 0
+7 0 0
+8 0 0
+9 0 0
+10 0 0

@@ -6,6 +6,8 @@
 
 """DeepSeek V3 model configurations used by tests."""
 
+import dataclasses
+
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -44,6 +46,10 @@ from torchtitan_recipes.models.deepseek_v3 import (
     _dist_moe_runtime_config,
     _require_dist_moe,
     deepseek_v3_mxfp8_linear_converter_config,
+)
+from torchtitan_recipes.tests.models.dist_muon import (
+    mla_dist_muon_optimizer,
+    MLADistMuonTrainerConfig,
 )
 
 
@@ -127,6 +133,33 @@ def deepseek_v3_debugmodel_mtp(
         ),
     )
     return config
+
+
+def deepseek_v3_debugmodel_dist_muon(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
+) -> Trainer.Config:
+    """The debug model with DistMuon for its matrices and AdamW for the rest,
+    set up as in the Kimi K2.7 recipes."""
+    config = deepseek_v3_debugmodel(
+        seq_len=seq_len, parallelism=parallelism, attn_backend=attn_backend
+    )
+    config.optim.optimizer = mla_dist_muon_optimizer(
+        config.model,
+        muon_lr=8e-4,
+        adamw_lr=8e-4,
+        parallelism=config.parallelism,
+    )
+    # MLADistMuonTrainerConfig realigns the routed-expert layouts when a
+    # variant changes the parallelism.
+    return MLADistMuonTrainerConfig(
+        **{
+            field.name: getattr(config, field.name)
+            for field in dataclasses.fields(config)
+        }
+    )
 
 
 def deepseek_v3_debugmodel_mxfp8(
