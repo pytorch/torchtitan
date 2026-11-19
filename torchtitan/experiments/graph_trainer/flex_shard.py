@@ -77,6 +77,7 @@ _CHUNK_OWNERSHIP_KEYS = (
 )
 
 _UNSHARD_REMAT_REGION = "flex_shard_unshard_remat_region"
+_PARAMETER_TRANSFORM_ROOTS_META = "flex_shard_parameter_transform_roots"
 
 
 def apply_flex_shard(
@@ -364,7 +365,7 @@ def _collect_bucket_regions(graph: fx.Graph):
 
 
 def _graph_tensor_storages_and_writes(graph: fx.Graph):
-    storages = {}
+    storages: dict[fx.Node, frozenset[torch.UntypedStorage]] = {}
     for node in graph.nodes:
         storages[node] = frozenset(
             value.untyped_storage()
@@ -712,11 +713,15 @@ def deduplicate_flex_shard_parameter_transforms_pass(
         if not isinstance(module, fx.GraphModule):
             continue
         nodes = list(module.graph.nodes)
+        for node in nodes:
+            node.meta.pop(_PARAMETER_TRANSFORM_ROOTS_META, None)
         positions = {node: index for index, node in enumerate(nodes)}
-        roots = get_flex_shard_graph_regions(
+        native_regions = get_flex_shard_graph_regions(
             module, include_reduce_grad_inputs=False
-        ).unshard_output_names
-        roots = {node for node in nodes if node.name in roots}
+        )
+        roots = {
+            node for node in nodes if node.name in native_regions.unshard_output_names
+        }
         storages, writes = _graph_tensor_storages_and_writes(module.graph)
 
         def owners(node):
@@ -736,6 +741,21 @@ def deduplicate_flex_shard_parameter_transforms_pass(
                     pending.append(value.args[0])
             return owned
 
+        external_storages = set().union(
+            *(
+                writes[node]
+                for node in nodes
+                if node.name not in native_regions.unshard_node_names
+            )
+        )
+        external_owners = set().union(
+            *(
+                owners(target)
+                for node in nodes
+                if node.name not in native_regions.unshard_node_names
+                for target in mutation_target_nodes(node)
+            )
+        )
         output_owners = set().union(
             *(owners(node) for node in nodes[-1].all_input_nodes)
         )
@@ -825,6 +845,21 @@ def deduplicate_flex_shard_parameter_transforms_pass(
 
                 copy = graph.node_copy(node, argument)
                 copy.meta = {
+                    _PARAMETER_TRANSFORM_ROOTS_META: tuple(
+                        sorted(
+                            {
+                                name
+                                for dependency in node.all_input_nodes
+                                for name in (
+                                    (dependency.name,)
+                                    if dependency in roots
+                                    else env[dependency].meta[
+                                        _PARAMETER_TRANSFORM_ROOTS_META
+                                    ]
+                                )
+                            }
+                        )
+                    ),
                     "custom": dict(node.meta.get("custom", {})),
                     "recompute": node.meta.get("recompute"),
                     "source": node,
@@ -852,6 +887,14 @@ def deduplicate_flex_shard_parameter_transforms_pass(
         removed = 0
         for original, replacement in zip(originals, outputs, strict=True):
             canonical = replacement.meta["source"]
+            source_roots = replacement.meta[_PARAMETER_TRANSFORM_ROOTS_META]
+            source_values = [node for node in roots if node.name in source_roots]
+            if source_values and all(
+                not (storages[node] & external_storages)
+                and not (owners(node) & external_owners)
+                for node in source_values
+            ):
+                canonical.meta[_PARAMETER_TRANSFORM_ROOTS_META] = source_roots
             if original is not canonical:
                 original.replace_all_uses_with(canonical)
                 removed += 1
@@ -880,11 +923,38 @@ def get_flex_shard_graph_regions(
                 }
                 if execution:
                     reduce_regions.append(execution)
+    native_outputs = {
+        node.name
+        for node in unshard_nodes
+        if isinstance(node.meta.get("val"), torch.Tensor)
+        and any(user not in unshard_nodes for user in node.users)
+    }
+    parameter_transforms = set()
+    for node in gm.graph.nodes:
+        roots = node.meta.get(_PARAMETER_TRANSFORM_ROOTS_META, ())
+        if (
+            roots
+            and not node.meta.get("autograd_backward", False)
+            and set(roots) <= native_outputs
+            and all(dependency in unshard_nodes for dependency in node.all_input_nodes)
+        ):
+            unshard_nodes.add(node)
+            parameter_transforms.add(node)
     unshard_outputs = tuple(
         node.name
         for node in gm.graph.nodes
         if node in unshard_nodes
-        and isinstance(node.meta.get("val"), torch.Tensor)
+        and (
+            isinstance(node.meta.get("val"), torch.Tensor)
+            or (
+                node in parameter_transforms
+                and tree_leaves(node.meta.get("val"))
+                and all(
+                    isinstance(value, torch.Tensor)
+                    for value in tree_leaves(node.meta.get("val"))
+                )
+            )
+        )
         and any(user not in unshard_nodes for user in node.users)
     )
     if not include_reduce_grad_inputs:

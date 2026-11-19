@@ -1463,6 +1463,18 @@ class TestFlexShardScheduling(TestCase):
                 torch.manual_seed(44)
                 actual = gm(*(value.clone() for value in inputs))
                 self.assertEqual(actual, expected, atol=0, rtol=0)
+                if case in ("source_write", "source_view_write"):
+                    from torchtitan.experiments.graph_trainer.flex_shard import (
+                        get_flex_shard_graph_regions,
+                    )
+
+                    regions = get_flex_shard_graph_regions(
+                        gm, include_reduce_grad_inputs=False
+                    )
+                    self.assertEqual(
+                        regions.unshard_output_names,
+                        (self._mark_parameter_transform_root(gm).name,),
+                    )
                 if case == "reuse":
                     self.assertEqual(
                         len(
@@ -1577,6 +1589,89 @@ class TestFlexShardScheduling(TestCase):
         )
         for node in gm.graph.nodes:
             self.assertEqual(repr(node.meta.get("val")), metadata[node.name])
+
+    def test_parameter_tuple_frontier_survives_extraction_and_normalization(self):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            get_flex_shard_graph_regions,
+        )
+        from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+            extract_fsdp_unshard_graph,
+        )
+
+        def forward(weight, activation):
+            param = weight.clone()
+            result = torch.max(param, dim=1)
+            return (result.values * activation).sum() + activation[result.indices].sum()
+
+        inputs = (torch.tensor([[1.0, 2.0], [4.0, 3.0]]), torch.tensor([2.0, 3.0]))
+        gm = make_fx(forward)(*inputs)
+        root = self._mark_parameter_transform_root(gm)
+        for node in gm.graph.nodes:
+            if node.target is operator.getitem and node.args[1] == 1:
+                node.meta["autograd_backward"] = True
+        expected = gm(*inputs)
+        original_code = gm.code
+        for _ in range(2):
+            self.deduplicate_parameter_transforms(gm)
+        self.assertEqual(gm.code, original_code)
+        regions = get_flex_shard_graph_regions(gm, include_reduce_grad_inputs=False)
+        nodes_by_name = {node.name: node for node in gm.graph.nodes}
+        self.assertNotIn(root.name, regions.unshard_output_names)
+        self.assertTrue(
+            any(
+                isinstance(nodes_by_name[name].meta.get("val"), tuple)
+                for name in regions.unshard_output_names
+            )
+        )
+        split = extract_fsdp_unshard_graph(
+            gm,
+            num_params=1,
+            input_names=tuple(
+                node.name for node in gm.graph.find_nodes(op="placeholder")
+            ),
+            flat_input_indices=(0, 1),
+            regions=regions,
+        )
+        self.assertIsNotNone(split.unshard_module)
+        prepared = split.unshard_module(inputs[0])
+        self.assertEqual(
+            split.compute_module(*prepared, inputs[1])[0], expected, atol=0, rtol=0
+        )
+        self.assertFalse(
+            any(
+                node.target is torch.ops.aten.max.dim
+                for node in split.compute_module.graph.nodes
+            )
+        )
+
+    def test_parameter_frontier_rejects_backward_and_stale_input_tags(self):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            get_flex_shard_graph_regions,
+        )
+
+        def forward(weight, activation):
+            return weight.clone().sin() * activation.cos()
+
+        gm = make_fx(forward)(torch.ones(4), torch.ones(4))
+        root = self._mark_parameter_transform_root(gm)
+        self.deduplicate_parameter_transforms(gm)
+        param = next(
+            node for node in gm.graph.nodes if node.target is torch.ops.aten.sin.default
+        )
+        activation = next(
+            node for node in gm.graph.nodes if node.target is torch.ops.aten.cos.default
+        )
+        key = "flex_shard_parameter_transform_roots"
+        activation.meta[key] = param.meta[key]
+        regions = get_flex_shard_graph_regions(gm, include_reduce_grad_inputs=False)
+        self.assertNotIn(activation.name, regions.unshard_node_names)
+        param.meta["autograd_backward"] = True
+        regions = get_flex_shard_graph_regions(gm, include_reduce_grad_inputs=False)
+        self.assertEqual(regions.unshard_output_names, (root.name,))
+        param.meta["autograd_backward"] = False
+        param.meta[key] = ("deleted_unshard_root",)
+        regions = get_flex_shard_graph_regions(gm, include_reduce_grad_inputs=False)
+        self.assertEqual(regions.unshard_output_names, (root.name,))
 
     def test_folds_lossless_upcasts_into_annotated_gradient_packing(self):
         for dtype in (torch.bfloat16, torch.float16):
