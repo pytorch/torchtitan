@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -63,6 +63,8 @@ class GraphTrainerModel:
         annotate_graph_trainer_model(self)
         self._parallelize(parallelism_context)
         if use_flex_shard_instead_simple_fsdp:
+            from flex_shard.flex_shard.flex_shard import FlexShardModule
+
             from .flex_shard import apply_flex_shard
 
             model = apply_flex_shard(
@@ -70,6 +72,8 @@ class GraphTrainerModel:
                 parallelism_context=parallelism_context,
                 precision=precision,
             )
+            if compile_config.enable_fsdp_ag_rs_overlap:
+                cast(FlexShardModule, model).set_separate_reduce_scatter_group()
         else:
             model = apply_simple_fsdp(
                 self,

@@ -340,7 +340,10 @@ def compile_time_passes(
                     )
                 )
 
-    if config.compile.enable_fsdp_ag_rs_overlap:
+    if (
+        config.compile.enable_fsdp_ag_rs_overlap
+        and not config.use_flex_shard_instead_simple_fsdp
+    ):
         passes.append(reassign_collective_pgs_pass)
     if config.use_flex_shard_instead_simple_fsdp:
         from torchtitan.experiments.graph_trainer.flex_shard import (
