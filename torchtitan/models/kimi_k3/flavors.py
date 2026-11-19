@@ -627,10 +627,6 @@ def kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config | None,
     parallelism: ParallelismConfig,
-    config_cls: type[KimiK3Model.Config] = KimiK3Model.Config,
-    multimodal_config_cls: type[
-        KimiK3MultimodalModel.Config
-    ] = KimiK3MultimodalModel.Config,
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
@@ -740,8 +736,8 @@ def kimi_k3_config(
         output_res_proj=residual_proj(),
     )
     if vision_encoder is None:
-        return config_cls(**fields)
-    return multimodal_config_cls(vision_encoder=vision_encoder, **fields)
+        return KimiK3Model.Config(**fields)
+    return KimiK3MultimodalModel.Config(vision_encoder=vision_encoder, **fields)
 
 
 def _debugmodel(

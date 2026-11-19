@@ -36,12 +36,9 @@ from .dsa import (
     KimiDSAIndexer,
     KimiSparseAttention,
 )
-from .model import KimiK31Model, KimiK31MultimodalModel
 
 __all__ = [
     "build_model_config",
-    "KimiK31Model",
-    "KimiK31MultimodalModel",
     "MODEL_FLAVORS",
 ]
 
@@ -133,8 +130,6 @@ def _debugmodel(
 ) -> KimiK3Model.Config:
     dim = 256
     return kimi_k3_config(
-        config_cls=KimiK31Model.Config,
-        multimodal_config_cls=KimiK31MultimodalModel.Config,
         max_context_length=seq_len,
         dim=dim,
         vocab_size=2048,
@@ -148,7 +143,7 @@ def _debugmodel(
             indexer_loss_coeff=indexer_loss_coeff,
         ),
         attn_res_block_size=4,
-        num_heads=16,
+        num_heads=32,
         q_lora_rank=128,
         kv_lora_rank=512,
         qk_nope_head_dim=128,
@@ -189,8 +184,6 @@ def _kimi_k3_1_pro(
 ) -> KimiK3Model.Config:
     dim = 7168
     return kimi_k3_config(
-        config_cls=KimiK31Model.Config,
-        multimodal_config_cls=KimiK31MultimodalModel.Config,
         max_context_length=seq_len,
         dim=dim,
         vocab_size=163840,
