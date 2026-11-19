@@ -11,6 +11,7 @@ from functools import partial
 from typing import Any
 
 import torch
+from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     PipelineScheduleMulti,
@@ -37,6 +38,8 @@ from torchtitan.distributed.accelerator_graph import (
 )
 from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
 from torchtitan.distributed.pipeline_parallel import (
+    _build_get_mesh_callback,
+    _build_pipeline_schedule,
     prepare_pipeline_schedule_for_accelerator_graph,
 )
 from torchtitan.models.base.model import BaseModel
@@ -73,6 +76,10 @@ class BaseValidator(Configurable):
     def should_validate(self, step: int) -> bool:
         return step == 1 or step % self.config.freq == 0
 
+    def close(self) -> None:
+        """Release resources retained across validation events."""
+        pass
+
 
 class Validator(BaseValidator):
     # TODO: Simplify validation by limiting its options and matching the training
@@ -95,8 +102,15 @@ class Validator(BaseValidator):
         pp_has_last_stage: Whether this rank has the last PP stage (optional)
     """
 
+    _validation_dataloader: BaseDataLoader | None = None
+    _validation_num_microbatches: int | None = None
+    _pipeline_handles: tuple = ()
+
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
+        global_batch_size: int | None = None
+        """Global context rows per validation step; ``None`` inherits training."""
+
         steps: int = -1
         """
         Number of validation steps. -1 consumes the finite dataset once
@@ -122,6 +136,8 @@ class Validator(BaseValidator):
                 raise ValueError(
                     f"validation steps must be positive or -1, got {self.steps}"
                 )
+            if self.global_batch_size is not None and self.global_batch_size <= 0:
+                raise ValueError("validation.global_batch_size must be positive")
 
     # TODO: improve the constructor signature
     def __init__(
@@ -170,6 +186,20 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
+        if config.global_batch_size is not None:
+            num_microbatches, remainder = divmod(
+                config.global_batch_size * seq_len,
+                dp_world_size * num_tokens_per_microbatch,
+            )
+            if remainder or num_microbatches < 1:
+                raise ValueError(
+                    "validation.global_batch_size must be divisible by the "
+                    "data-parallel degree times context rows per microbatch"
+                )
+            self._validation_num_microbatches = num_microbatches
+            if parallelism_context.pp_enabled:
+                assert pp_schedule is not None
+                self._build_validation_schedule(pp_schedule, num_microbatches)
         self._run_eval = None
         self._cuda_graph_annotation_config = cuda_graph_annotation_config
         self._accelerator_graph_enabled = (
@@ -183,6 +213,59 @@ class Validator(BaseValidator):
                 "Graph capture is unavailable on this accelerator; "
                 "using eager validation."
             )
+
+    def _build_validation_schedule(
+        self, source: _PipelineSchedule, num_microbatches: int
+    ) -> None:
+        """Isolate eval metadata/buffers while sharing model and P2P ownership.
+
+        Reusing the same stage objects would let eval replace receive buffers
+        retained by training's graph. Fresh wrappers share only modules and
+        registered forward contexts; PyTorch caches their edge communicators.
+        """
+        if not isinstance(source, (PipelineScheduleSingle, PipelineScheduleMulti)):
+            raise NotImplementedError(
+                "Independent validation batches require eager pipeline schedules; "
+                "GraphTrainer support is a TODO."
+            )
+        if self.parallelism.pipeline_parallel_schedule_csv:
+            raise ValueError(
+                "Independent validation batches do not support CSV schedules"
+            )
+        source_stages = (
+            source._stages
+            if isinstance(source, PipelineScheduleMulti)
+            else [source._stage]
+        )
+        stages = []
+        handles = []
+        for stage in source_stages:
+            if not isinstance(stage, PipelineStage):
+                raise NotImplementedError(
+                    "Independent validation batches require manual stages"
+                )
+            evaluation_stage = PipelineStage(
+                stage.submod,
+                stage.stage_index,
+                stage.num_stages,
+                stage.device,
+                group=stage.group,
+                get_mesh=_build_get_mesh_callback(self.parallelism_context),
+            )
+            for context in stage._forward_contexts.values():
+                handles.append(evaluation_stage.register_forward_context(context))
+            stages.append(evaluation_stage)
+        self.pp_schedule = _build_pipeline_schedule(
+            parallelism=self.parallelism,
+            num_microbatches=num_microbatches,
+            stages=stages,
+            loss_fn=self.loss_fn,
+        )
+        for cleanup in source._post_metadata_inference_cleanups.values():
+            handles.append(
+                self.pp_schedule.register_post_metadata_inference_cleanup(cleanup)
+            )
+        self._pipeline_handles = tuple(handles)
 
     def should_validate(self, step: int) -> bool:
         """Return whether validation is scheduled or eval capture is pending.
@@ -268,12 +351,16 @@ class Validator(BaseValidator):
                     for stage in self.pp_schedule._stages:
                         stage.clear_runtime_states()
             else:
-                assert len(prepared) == len(model_parts) == 1
-                inputs, labels, kwargs = prepared[0]
-                predictions = model_parts[0](inputs, **kwargs)
-                loss_sum, metrics = self.loss_fn(predictions, labels)
-                loss_metrics = [metrics]
-                del predictions
+                assert len(model_parts) == 1
+                loss_terms = []
+                loss_metrics = []
+                for inputs, labels, kwargs in prepared:
+                    predictions = model_parts[0](inputs, **kwargs)
+                    loss, metrics = self.loss_fn(predictions, labels)
+                    loss_terms.append(loss)
+                    loss_metrics.append(metrics)
+                    del predictions
+                loss_sum = torch.stack(loss_terms).sum()
             post_validate_fsdp_for_accelerator_graph(model_parts)
         return loss_sum.detach(), loss_metrics
 
@@ -303,24 +390,23 @@ class Validator(BaseValidator):
                 (), dtype=torch.int64, device=device_type
             )
             num_steps = 0
-            num_pp_microbatches = (
+            num_pp_microbatches = self._validation_num_microbatches or (
                 self.parallelism.num_pp_microbatches
                 if parallelism_context.pp_enabled
                 else 1
             )
 
-            validation_dataloader = self.dl_config.build(
-                dp_world_size=self.dp_world_size,
-                dp_rank=self.dp_rank,
-                tokenizer=self.tokenizer,
-                max_context_length=self.seq_len,
-                num_tokens_per_microbatch=self.num_tokens_per_microbatch,
-                vision_processor=self.vision_processor,
-            )
-
-            validation_iterator = iter(
-                iterate_and_close_dataloader(validation_dataloader)
-            )
+            if self._validation_dataloader is None:
+                self._validation_dataloader = self.dl_config.build(
+                    dp_world_size=self.dp_world_size,
+                    dp_rank=self.dp_rank,
+                    tokenizer=self.tokenizer,
+                    max_context_length=self.seq_len,
+                    num_tokens_per_microbatch=self.num_tokens_per_microbatch,
+                    vision_processor=self.vision_processor,
+                )
+            self._validation_dataloader.restart()
+            validation_iterator = iter(self._validation_dataloader)
             while True:
                 # pyrefly: ignore [missing-attribute, unsupported-operation]
                 if self.config.steps != -1 and num_steps >= self.config.steps:
@@ -420,9 +506,21 @@ class Validator(BaseValidator):
             self.metrics_processor.log_validation(
                 loss=global_avg_loss, step=step, extra_metrics=extra_metrics
             )
+        except Exception:
+            self.close()
+            raise
         finally:
             for module, training in modes:
                 module.training = training
+
+    def close(self) -> None:
+        """Close the validation source and its prefetch workers."""
+        for handle in reversed(self._pipeline_handles):
+            handle.remove()
+        self._pipeline_handles = ()
+        if self._validation_dataloader is not None:
+            self._validation_dataloader.close()
+            self._validation_dataloader = None
 
 
 def iterate_and_close_dataloader(
