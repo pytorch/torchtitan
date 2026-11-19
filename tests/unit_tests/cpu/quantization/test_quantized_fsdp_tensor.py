@@ -7,8 +7,13 @@
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torch.multiprocessing as mp
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.distributed.tensor import Shard
 
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
@@ -49,7 +54,7 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
     local_2FD = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
     sharded = _TestShardedTensor(local_2FD)
 
-    (comm_F2D,), metadata = sharded.fsdp_pre_all_gather(
+    (comm_2FD,), metadata = sharded.fsdp_pre_all_gather(
         _Mesh(2),
         torch.Size([2, 6, 4]),
         None,
@@ -57,12 +62,16 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
         _MixedPrecisionPolicy(),
     )
 
-    assert comm_F2D.shape == (3, 2, 4)
-    torch.testing.assert_close(comm_F2D, local_2FD.movedim(1, 0).bfloat16())
+    # FSDP reassembles a Shard(1) input along dim 1 itself, so the shard keeps
+    # the parameter's layout.
+    assert comm_2FD.shape == (2, 3, 4)
+    torch.testing.assert_close(comm_2FD, local_2FD.bfloat16())
 
-    gathered_F2D = torch.cat([comm_F2D, comm_F2D + 100], dim=0)
+    # FSDP's output holds the ranks' rows concatenated along dim 1, viewed as
+    # (-1, *input.shape[1:]).
+    gathered_2FD = torch.cat([comm_2FD, comm_2FD + 100], dim=1)
     unsharded, _ = sharded.fsdp_post_all_gather(
-        (gathered_F2D,), metadata, torch.bfloat16
+        (gathered_2FD.view(-1, 3, 4),), metadata, torch.bfloat16
     )
 
     assert isinstance(unsharded, _UnshardedFSDPTensor)
@@ -72,10 +81,72 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
     assert isinstance(flattened, _UnshardedFSDPTensor)
     assert flattened.shape == (12, 4)
     assert flattened.operands is unsharded.operands
-    torch.testing.assert_close(
-        unsharded.operands.value,
-        gathered_F2D.movedim(0, 1),
+    torch.testing.assert_close(unsharded.operands.value, gathered_2FD)
+
+
+def _gather_with_fsdp(rank: int, init_file: str) -> None:
+    dist.init_process_group(
+        "gloo", init_method=f"file://{init_file}", rank=rank, world_size=2
     )
+    try:
+        mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("dp_shard",))
+        # Distinct values, all exact in bf16 (integers below 256, also after the
+        # +64 below), so any reordering of the gathered rows shows. 5 rows split
+        # 3 and 2, so FSDP pads rank 1's Shard(0) shard.
+        stacked_2FD = torch.arange(2 * 6 * 4, dtype=torch.float32).reshape(2, 6, 4)
+        plain_FD = torch.arange(5 * 4, dtype=torch.float32).reshape(5, 4) + 100
+        module = torch.nn.Module()
+        module.stacked = torch.nn.Parameter(_TestShardedTensor(stacked_2FD.clone()))
+        module.plain = torch.nn.Parameter(_TestShardedTensor(plain_FD.clone()))
+        fully_shard(
+            module,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(param_dtype=torch.bfloat16),
+            # As linear_param_shard_placements shards a stacked Linear's weight:
+            # on its matrix rows. Other weights keep FSDP's default Shard(0).
+            shard_placement_fn=lambda param: Shard(1) if param.ndim == 3 else None,
+        )
+        module.unshard()
+        for unsharded, expected in (
+            (module.stacked, stacked_2FD),
+            (module.plain, plain_FD),
+        ):
+            assert isinstance(unsharded, _UnshardedFSDPTensor)
+            torch.testing.assert_close(
+                unsharded.operands.value, expected.bfloat16(), rtol=0, atol=0
+            )
+
+        first_unsharded = (module.stacked, module.plain)
+        first_operands = tuple(param.operands for param in first_unsharded)
+        module.reshard()
+        with torch.no_grad():
+            for param in module.parameters():
+                param.to_local()._tensor.add_(64)
+        module.unshard()
+        for unsharded, original, operands, expected in zip(
+            (module.stacked, module.plain),
+            first_unsharded,
+            first_operands,
+            (stacked_2FD, plain_FD),
+            strict=True,
+        ):
+            # The second gather must refill FSDP's existing operands, including
+            # the new shard values, after reshard freed their storage.
+            assert unsharded is original
+            assert unsharded.operands is operands
+            updated = (expected + 64).bfloat16()
+            torch.testing.assert_close(operands.value, updated, rtol=0, atol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+def test_fsdp_all_gather_restores_the_weight_on_any_shard_dim(tmp_path):
+    """Real FSDP2 reassembles Shard(0) and Shard(1) weights; the hooks must not
+    reorder the rows on either the first gather or a refill after reshard.
+    The stacked [2, F, D] FFN w13 is the Shard(1) case."""
+    # A file rendezvous: a free port picked here could be taken before the
+    # spawned ranks bind it.
+    mp.spawn(_gather_with_fsdp, args=(str(tmp_path / "init"),), nprocs=2, join=True)
 
 
 def test_async_checkpoint_saves_the_sharded_parameter_values(tmp_path):
