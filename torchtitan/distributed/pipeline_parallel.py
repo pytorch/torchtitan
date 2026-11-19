@@ -129,7 +129,8 @@ def pipeline_llm(
             training=training,
             precision=precision,
             model_config=model_config,
-            lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
+            lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper)
+            and not loss_fn.validation_only,
         )
 
     get_mesh_cb = _build_get_mesh_callback(parallelism_context)
