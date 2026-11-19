@@ -37,18 +37,15 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.num_heads = config.num_heads
-        local_num_heads = self.num_heads // spmd_mesh_size("tp")
+        self._local_num_heads = self.num_heads // spmd_mesh_size("tp")
         mesh = current_spmd_mesh()
-        mesh_axis_names = mesh.mesh_dim_names if mesh is not None else ()
-        rank = (
-            mesh.get_local_rank(mesh_axis_names.index("tp"))
-            if mesh is not None
-            and mesh_axis_names is not None
-            and "tp" in mesh_axis_names
-            else 0
+        mesh_axis_names = (mesh.mesh_dim_names or ()) if mesh is not None else ()
+        self._tp_mesh = (
+            mesh
+            if "tp" in mesh_axis_names and self._local_num_heads < self.num_heads
+            else None
         )
-        self._head_start = rank * local_num_heads
-        self._head_end = self._head_start + local_num_heads
+        self._tp_axis = mesh_axis_names.index("tp") if self._tp_mesh is not None else 0
         self.register_buffer(
             "max_attention_logits_H",
             torch.full((self.num_heads,), -torch.inf, dtype=torch.float32),
@@ -72,7 +69,14 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
             assert max_scores_1HT is not None
             # Record gradient-accumulation and PP microbatches once, excluding
             # activation-checkpoint replay.
-            maxima_H = self.max_attention_logits_H[self._head_start : self._head_end]
+            head_start = (
+                self._tp_mesh._sym_get_coordinate(self._tp_axis) * self._local_num_heads
+                if self._tp_mesh is not None
+                else 0
+            )
+            maxima_H = self.max_attention_logits_H[
+                head_start : head_start + self._local_num_heads
+            ]
             torch.maximum(
                 maxima_H,
                 max_scores_1HT.amax(dim=(0, 2)).detach(),

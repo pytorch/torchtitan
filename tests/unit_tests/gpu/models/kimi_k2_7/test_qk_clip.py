@@ -51,7 +51,9 @@ def _qk_clip_mla_attention(num_heads: int = 2) -> MLAAttention:
 
 class QKClipTest(unittest.TestCase):
     def test_tensor_parallel_maxima_update_only_owned_global_heads(self):
-        mesh = SimpleNamespace(mesh_dim_names=("tp",), get_local_rank=lambda axis: 1)
+        mesh = SimpleNamespace(
+            mesh_dim_names=("tp",), _sym_get_coordinate=lambda axis: 1
+        )
         with (
             patch("torchtitan.models.kimi_k2_7.qk_clip.spmd_mesh_size", return_value=2),
             patch(

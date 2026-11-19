@@ -381,6 +381,51 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
+    def test_tensor_parallel_qk_maxima_use_runtime_heads_after_loading(self):
+        import torch.distributed as dist
+        from torch.distributed.device_mesh import DeviceMesh
+
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.experiments.graph_trainer.make_fx_tracer import (
+            minimal_fx_tracer,
+            run_traced,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            flatten_runtime_inputs,
+            PrecompiledFxTraceArtifact,
+        )
+        from torchtitan.models.kimi_k2_7.qk_clip import QKClipFlexInnerAttention
+
+        dist.init_process_group("fake", rank=0, world_size=2, store=dist.HashStore())
+        try:
+            mesh = DeviceMesh("cpu", torch.arange(2), mesh_dim_names=("tp",))
+            with set_current_spmd_mesh(mesh):
+                attention = QKClipFlexInnerAttention.Config(num_heads=4).build()
+            attention.train()
+            scores = torch.tensor([[[100.0, 200.0], [300.0, 400.0]]])
+
+            def forward(value):
+                attention._process_aux(SimpleNamespace(max_scores=value))
+                return attention.max_attention_logits_H
+
+            with torch.compiler.config.patch(compile_on_one_rank=True):
+                traced = minimal_fx_tracer(forward, module=attention)(scores)
+            inputs = flatten_runtime_inputs(attention, (scores,), {})
+            loaded = PrecompiledFxTraceArtifact.from_traced_result(
+                traced
+            ).to_traced_result(inputs)
+            run = run_traced(loaded, module=attention)
+            for rank in (0, 1):
+                with self.subTest(rank=rank):
+                    attention.max_attention_logits_H.fill_(-torch.inf)
+                    with patch("torch.distributed.get_rank", return_value=rank):
+                        actual = run(scores).clone()
+                    expected = torch.full((4,), -torch.inf)
+                    expected[rank * 2 : rank * 2 + 2] = torch.tensor([200.0, 400.0])
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        finally:
+            dist.destroy_process_group()
+
     def test_loaded_artifact_supports_traced_execution(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
