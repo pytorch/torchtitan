@@ -298,7 +298,9 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 return_value=local_storage,
             ),
         ):
-            adapter = _BackendCheckpointStorage(folder_storage_config, protocol="s3")
+            adapter = _BackendCheckpointStorage(
+                "s3://bucket/run", folder_storage_config
+            )
             adapter.isdir("s3://bucket/run/step-1")
             adapter.isdir("/data/hf")
             adapter.isdir("gs://bucket/hf")
@@ -945,8 +947,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # run's pre-save retention deletes abandoned directories outright.
         manager = TorchCheckpointingManager.__new__(TorchCheckpointingManager)
         manager._storage = _BackendCheckpointStorage(
-            LocalFileSystemStorageConfig(use_direct_io=False),
-            protocol=None,
+            "/checkpoint", LocalFileSystemStorageConfig(use_direct_io=False)
         )
 
         for marker, is_resumable in (
