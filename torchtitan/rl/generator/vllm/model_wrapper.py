@@ -39,7 +39,9 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
+from torchtitan.rl.generator.local_compile import inference_regions
 from torchtitan.rl.generator.model import (
     build_dist_moe_runtime,
     build_inference_model,
@@ -73,7 +75,34 @@ def _replace_vllm_layer_configs(model_config):
         new_layer_cfg = layer_cfg
 
         attention_cfg = getattr(layer_cfg, "attention", None)
-        if isinstance(attention_cfg, Attention.Config) and not isinstance(
+        if isinstance(attention_cfg, QSAAttention.Config):
+            from torchtitan.rl.generator.vllm.attention.qsa import (
+                VLLMQSAIndexer,
+                VLLMQSAInnerAttention,
+            )
+
+            indexer = attention_cfg.indexer
+            indexer = VLLMQSAIndexer.Config(
+                **{
+                    field.name: getattr(indexer, field.name)
+                    for field in dataclasses.fields(indexer)
+                },
+                layer_idx=layer_idx,
+            )
+            inner = VLLMQSAInnerAttention.Config(
+                compress_ratio=attention_cfg.inner_attention.compress_ratio,
+                indexer_loss=attention_cfg.inner_attention.indexer_loss,
+                layer_idx=layer_idx,
+                num_kv_heads=attention_cfg.n_kv_heads,
+                head_dim=attention_cfg.head_dim,
+                sharding_config=attention_cfg.inner_attention.sharding_config,
+            )
+            attention_cfg = dataclasses.replace(
+                attention_cfg, indexer=indexer, inner_attention=inner
+            )
+            new_layer_cfg = dataclasses.replace(new_layer_cfg, attention=attention_cfg)
+
+        elif isinstance(attention_cfg, Attention.Config) and not isinstance(
             attention_cfg, LinearAttention.Config
         ):
             (
@@ -178,7 +207,22 @@ def _replace_vllm_layer_configs(model_config):
 
         new_layers.append(new_layer_cfg)
 
-    return dataclasses.replace(model_config, layers=new_layers)
+    model_config = dataclasses.replace(model_config, layers=new_layers)
+    # TODO: Inference regions are always enabled, so users cannot opt out. Model
+    # this as a ModelConfigTransform applied to the generator model config (for
+    # example by default in torchtitan_recipes/rl/model_configs.py) so a recipe
+    # can choose the generator's regions.
+    regions = model_config.local_compile.regions
+    return dataclasses.replace(
+        model_config,
+        local_compile=dataclasses.replace(
+            model_config.local_compile,
+            regions=[
+                *regions,
+                *(name for name in inference_regions() if name not in regions),
+            ],
+        ),
+    )
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor
