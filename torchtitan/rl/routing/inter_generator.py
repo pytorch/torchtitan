@@ -8,10 +8,10 @@
 
 from __future__ import annotations
 
+import abc
 import asyncio
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
@@ -22,10 +22,20 @@ from torchtitan.rl.routing.strategies import (
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
 
+if TYPE_CHECKING:
+    from torchtitan.rl.model_state_dict_transport import (
+        ModelStateDictTransport,
+        TensorShard,
+        TrainerSource,
+    )
+
 
 @dataclass(kw_only=True, slots=True)
 class _GeneratorHandle(RoutingCandidate):
     """Router-side metadata for one generator mesh."""
+
+    index: int
+    """The generator's index."""
 
     actor: Any
     """Actor handle for the full generator mesh. Used for fan-out calls that every
@@ -42,8 +52,9 @@ class _GeneratorHandle(RoutingCandidate):
     """True while the generator drains for a model state dict load (hot_swap=False only)."""
 
 
-class InterGeneratorRouter(Configurable):
-    """Routes generation calls across generator meshes and pulls model's state dict.
+class InterGeneratorRouter(Configurable, abc.ABC):
+    """Spawns the generator meshes, routes generation calls across them and pulls
+    model's state dict.
 
     This is layer 1 of the two-layer routing design: it routes each call across
     generator *meshes* (replicas). Within the chosen mesh, ``IntraGeneratorRouter``
@@ -68,6 +79,11 @@ class InterGeneratorRouter(Configurable):
         the RL job's scale because the router only exchanges small routing
         messages, and the number of concurrent requests should be reasonable for
         a singleton to handle.
+
+    Owner:
+        The router spawns the generators (``spawn_generators``), so their actor
+        framework reports a generator's failure to the router. The actor
+        framework's adapter implements how to spawn one (``_spawn_generator``).
 
     Actor:
        The router singleton is reached from different processes and hosts, so it
@@ -102,22 +118,29 @@ class InterGeneratorRouter(Configurable):
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        generators: Sequence[ServiceHandle],
-    ):
-        self._config = config
-        self._generators = [
-            _GeneratorHandle(actor=generator.all_ranks, rank0_actor=generator.rank0)
-            for generator in generators
-        ]
-        if not self._generators:
+    def __init__(self, config: Config, *, num_generators: int):
+        if num_generators < 1:
             raise ValueError("InterGeneratorRouter requires at least one generator")
-
+        self._config = config
+        self._num_generators = num_generators
         self._strategy = config.strategy.build()
         self._reservations: dict[str, _GeneratorHandle] = {}
+        # One handle per generator index, set by `spawn_generators`.
+        self._generators: list[_GeneratorHandle] = []
+
+    @abc.abstractmethod
+    async def _spawn_generator(self, index: int) -> ServiceHandle:
+        """Spawn generator ``index`` on its own processes."""
+
+    async def spawn_generators(self) -> None:
+        """Spawn the generators; must run before any other call."""
+        handles = await asyncio.gather(
+            *(self._spawn_generator(i) for i in range(self._num_generators))
+        )
+        self._generators = [
+            _GeneratorHandle(index=i, actor=handle.all_ranks, rank0_actor=handle.rank0)
+            for i, handle in enumerate(handles)
+        ]
 
     def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
         """Pick a generator for one generate call, reserve one load unit on it, and
@@ -222,6 +245,42 @@ class InterGeneratorRouter(Configurable):
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
         await asyncio.gather(*[_pull_one(h) for h in self._generators])
+
+    async def model_state_dict_layouts(
+        self,
+    ) -> list[list[tuple[int, dict[str, TensorShard]]]]:
+        """Each generator's ``(rank, shard layout)`` pairs, in any order."""
+        results = await asyncio.gather(
+            *(h.actor.model_state_dict_layout.call() for h in self._generators)
+        )
+        return [list(result.values()) for result in results]
+
+    async def connect_model_state_dict_transport(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        trainer_sources: list[TrainerSource],
+    ) -> None:
+        """Connect every generator to every trainer rank's
+        ``ModelStateDictTransport`` staging buffer."""
+
+        async def connect(h: _GeneratorHandle) -> None:
+            await h.actor.connect_model_state_dict_transport.call(
+                config, trainer_sources=trainer_sources, generator_index=h.index
+            )
+
+        await asyncio.gather(*(connect(h) for h in self._generators))
+
+    async def initialize_torchstore_clients(self) -> None:
+        """Initialize the TorchStore client of every generator rank.
+
+        TODO: delete once ``ModelStateDictTransport`` replaces TorchStore.
+        """
+
+        async def connect(h: _GeneratorHandle) -> None:
+            await h.actor.initialize_torchstore_client.call(requester_index=h.index)
+
+        await asyncio.gather(*(connect(h) for h in self._generators))
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""

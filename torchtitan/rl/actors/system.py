@@ -106,9 +106,9 @@ class ActorSystem(Configurable, abc.ABC):
         generator_config: Generator.Config,
         **generator_kwargs: Any,
     ) -> Any:
-        """Spawn the provisioned generators and the singleton router over them;
-        returns the router's single-actor handle, the only way to reach the
-        generators. ``generator_kwargs`` go to ``Generator``'s constructor."""
+        """Spawn the singleton router, which spawns and owns the provisioned
+        generators; returns the router's single-actor handle, the only way to reach
+        the generators. ``generator_kwargs`` go to ``Generator``'s constructor."""
 
     @abc.abstractmethod
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:

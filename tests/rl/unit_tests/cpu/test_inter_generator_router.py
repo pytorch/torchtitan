@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -54,14 +55,30 @@ class _Actor:
         self.release_sessions = _Endpoint()
 
 
-def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
-    return InterGeneratorRouter(
+class _FakeRouter(InterGeneratorRouter):
+    """A router whose generator ``i`` is ``actors[i]``."""
+
+    def __init__(self, config, actors):
+        super().__init__(config, num_generators=len(actors))
+        self.actors = actors
+
+    async def _spawn_generator(self, index):
+        actor = self.actors[index]
+        return ServiceHandle(all_ranks=actor, rank0=actor)
+
+
+def _router(actors, *, strategy=None, hot_swap=False) -> _FakeRouter:
+    router = _FakeRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
         ),
-        generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
+        actors,
     )
+    # In a thread, since some tests build routers inside a running event loop.
+    with ThreadPoolExecutor(1) as executor:
+        executor.submit(asyncio.run, router.spawn_generators()).result()
+    return router
 
 
 def _route(router, *, session_id: str | None = None) -> str:

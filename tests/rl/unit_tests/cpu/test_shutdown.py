@@ -264,13 +264,14 @@ def _trainer(actor) -> TrainerHandle:
     return TrainerHandle(all_ranks=actor, rank0=actor, by_dp_rank=[actor])
 
 
-def _actor_system(*mesh_names, events, batcher_mesh_name=None) -> MonarchActorSystem:
-    """A Monarch actor system holding stub meshes: the router's, the trainer's, then
-    one per generator; and the batcher's if named."""
+def _actor_system(
+    router_mesh_name, trainer_mesh_name, *, events, batcher_mesh_name=None
+) -> MonarchActorSystem:
+    """A Monarch actor system holding stub meshes: the router's, the trainer's, and
+    the batcher's if named. The router owns the generators' meshes."""
     actor_system = MonarchActorSystem(MonarchActorSystem.Config())
-    meshes = [_StubMesh(name, events) for name in mesh_names]
-    actor_system._router_mesh, actor_system._trainer_mesh = meshes[0], meshes[1]
-    actor_system._generator_meshes = meshes[2:]
+    actor_system._router_mesh = _StubMesh(router_mesh_name, events)
+    actor_system._trainer_mesh = _StubMesh(trainer_mesh_name, events)
     if batcher_mesh_name is not None:
         actor_system._batcher_mesh = _StubMesh(batcher_mesh_name, events)
     return actor_system
@@ -285,13 +286,21 @@ class _StubMesh:
         self._events.append(self._name)
 
 
+class _StubRouter(InterGeneratorRouter):
+    """A router whose generator ``i`` is ``generators[i]``."""
+
+    def __init__(self, generators):
+        super().__init__(InterGeneratorRouter.Config(), num_generators=len(generators))
+        self._stub_generators = generators
+
+    async def _spawn_generator(self, index):
+        return _service(self._stub_generators[index])
+
+
 def _set_generator_router(rl_trainer, generators):
-    rl_trainer.generator_router = _StubRouterHandle(
-        InterGeneratorRouter(
-            InterGeneratorRouter.Config(),
-            generators=[_service(generator) for generator in generators],
-        )
-    )
+    router = _StubRouter(generators)
+    asyncio.run(router.spawn_generators())
+    rl_trainer.generator_router = _StubRouterHandle(router)
 
 
 def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
@@ -307,7 +316,6 @@ def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
     rl_trainer.actor_system = _actor_system(
         "mesh.stop[router]",
         "mesh.stop[trainer]",
-        "mesh.stop[generator]",
         events=events,
         batcher_mesh_name="mesh.stop[batcher]",
     )
@@ -322,11 +330,10 @@ def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
         "mesh.stop[router]",
         "mesh.stop[batcher]",
         "mesh.stop[trainer]",
-        "mesh.stop[generator]",
     ]
     # A second stop has nothing left to stop.
     asyncio.run(rl_trainer.actor_system.stop())
-    assert len(events) == 7
+    assert len(events) == 6
 
 
 def test_shutdown_closes_all_generators(tmp_path):
@@ -431,7 +438,7 @@ def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
     """Roles on one host mesh get disjoint GPUs; another host mesh starts at GPU 0."""
     mesh_a, mesh_b = _FakeHostMesh(), _FakeHostMesh()
 
-    provisioning.spawn_proc_mesh(
+    _, generator_placements = provisioning.spawn_proc_mesh(
         trainer_world_size=2,
         per_generator_world_size=1,
         host_meshes=provisioning.HostMeshes(
@@ -442,8 +449,18 @@ def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
         num_generators=6,
     )
 
-    assert mesh_a.visible_devices == ["0,1", "2", "3"]
-    assert mesh_b.visible_devices == ["0", "1", "2", "3"]
+    # Only the trainer is spawned; the generator router spawns each placement.
+    assert mesh_a.visible_devices == ["0,1"]
+    assert [
+        (p.host_mesh, p.env["CUDA_VISIBLE_DEVICES"]) for p in generator_placements
+    ] == [
+        (mesh_a, "2"),
+        (mesh_a, "3"),
+        (mesh_b, "0"),
+        (mesh_b, "1"),
+        (mesh_b, "2"),
+        (mesh_b, "3"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -475,9 +492,9 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
-    """`provision` spawns the GPU meshes on the launcher's hosts, then the router's and
-    the batcher's procs, then sets up torch elastic on each GPU mesh, before any actor
-    is spawned."""
+    """`provision` spawns the trainer's GPU mesh on the launcher's hosts, then the
+    router's and the batcher's procs, then sets up torch elastic on the trainer's
+    mesh, before any actor is spawned. The router spawns the generators' meshes."""
     events: list[str] = []
 
     def spawn_proc_mesh(trainer_world_size, per_generator_world_size, **kwargs):
@@ -486,7 +503,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
             f"{kwargs['num_generators']}x{per_generator_world_size} "
             f"on {kwargs['host_meshes']}"
         )
-        return "trainer_mesh", ["generator_mesh_0", "generator_mesh_1"]
+        return "trainer_mesh", ["generator_placement_0", "generator_placement_1"]
 
     async def setup_torch_elastic_env(mesh):
         events.append(f"torch elastic {mesh}")
@@ -515,8 +532,6 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
         "cpu procs 1",
         "cpu procs 1",
         "torch elastic trainer_mesh",
-        "torch elastic generator_mesh_0",
-        "torch elastic generator_mesh_1",
     ]
 
 
