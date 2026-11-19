@@ -694,6 +694,6 @@ def validate_flex_shard_training(
         raise ImportError(
             "parallelism.fsdp_backend=FlexShardConfig() needs flex_shard "
             "(github.com/meta-pytorch/flex_shard), which isn't installed. "
-            ".github/workflows/unit_test_gpu.yaml installs the commit torchtitan "
+            ".github/scripts/install_flex_shard.sh installs the commit torchtitan "
             "is tested with."
         )
