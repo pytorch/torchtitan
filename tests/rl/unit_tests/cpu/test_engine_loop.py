@@ -42,6 +42,7 @@ from torchtitan.rl.generator.engine_loop import (
     EngineLoopQueue,
     EngineLoopThread,
     GenerationMessage,
+    GeneratorUnavailableError,
     LoopAction,
     LoopDecision,
     ModelStateDictLoadMessage,
@@ -1482,7 +1483,8 @@ def test_drain_task_handles_peer_results_on_the_engine_thread(
                 await asyncio.wait_for(_generate(engine_loop, "r0"), _TIMEOUT_S)
         elif peer_result == "unknown":
             generation = _generate(engine_loop, "r0")
-            with pytest.raises(KeyError, match="unknown"):
+            # The crash fails the in-flight call as retryable on another generator.
+            with pytest.raises(GeneratorUnavailableError, match="unknown"):
                 await asyncio.wait_for(generation, _TIMEOUT_S)
             with pytest.raises(KeyError, match="unknown"):
                 await asyncio.wait_for(engine_loop.wait(), _TIMEOUT_S)
