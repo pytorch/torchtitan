@@ -481,15 +481,23 @@ class Trainer(Configurable):
                     {"global_valid_tokens": int(global_main_loss_token_count)}
                 )
 
-                # Combine only loss-owner metrics over microbatches and loss peers.
+                microbatch_metrics = [
+                    metrics
+                    for group_metrics in forward_backward_result.loss_metrics
+                    for metrics in group_metrics
+                ]
+                if microbatch_metrics and any(
+                    metrics.keys() != microbatch_metrics[0].keys()
+                    for metrics in microbatch_metrics
+                ):
+                    raise ValueError(
+                        "Loss metric names must remain constant across an optimizer step."
+                    )
+                # Reuse the native reduction for all loss-owner metrics.
                 loss_metrics = {
                     key: float(value.item())
                     for key, value in combine_loss_metrics(
-                        (
-                            microbatch_metrics
-                            for group_metrics in forward_backward_result.loss_metrics
-                            for microbatch_metrics in group_metrics
-                        ),
+                        microbatch_metrics,
                         mesh=loss_mesh,
                     ).items()
                 }
@@ -521,6 +529,9 @@ class Trainer(Configurable):
                     ),
                     parallelism_context.get_mesh("dp"),
                 )
+            for name in ("lm_loss_mean", "mtp_loss_mean", "combined_loss_mean"):
+                if name in loss_metrics:
+                    loss_metrics[name.removesuffix("_mean")] = loss_metrics.pop(name)
 
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
