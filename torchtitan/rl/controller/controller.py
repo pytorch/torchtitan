@@ -98,8 +98,8 @@ import warnings
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-# PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
-# and in train.py; see the note there.
+# Allocator defaults are applied by apply_env_defaults() (torchtitan/rl/_env.py),
+# which the RL entry points call before importing torch.
 import torch  # noqa: F401
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -365,12 +365,14 @@ class Controller(Configurable):
         workers on processes, selected by config type, e.g.
         ``MonarchActorSystem.Config()`` (default)."""
 
-        model_state_dict_transport: ModelStateDictTransport.Config | None = None
+        model_state_dict_transport: ModelStateDictTransport.Config | None = field(
+            default_factory=ModelStateDictTransport.Config
+        )
         """Moves the model state dict from the trainer into the generators with
         one-sided ``torch.distributed._transport`` reads, or None to move it through
-        TorchStore. TODO: drop None (and TorchStore) once this has rolled out and
-        covers ``gpu_fetch``. Requires ``generator.model_state_dict_load_mode="cpu_prefetch"``.
-        See ``torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md``."""
+        TorchStore. Requires ``generator.model_state_dict_load_mode="cpu_prefetch"``;
+        ``gpu_fetch`` needs None. TODO: drop None (and TorchStore) once this covers
+        ``gpu_fetch``. See ``torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md``."""
 
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(
@@ -429,7 +431,9 @@ class Controller(Configurable):
             ):
                 raise ValueError(
                     "model_state_dict_transport requires "
-                    'generator.model_state_dict_load_mode="cpu_prefetch"'
+                    'generator.model_state_dict_load_mode="cpu_prefetch"; set '
+                    "model_state_dict_transport=None to use TorchStore with "
+                    f'"{self.generator.model_state_dict_load_mode}"'
                 )
             if (
                 self.trainer.dist_moe_runtime is not None
@@ -1291,7 +1295,7 @@ class Controller(Configurable):
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite pushed weights mid-pull)
             Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: TorchStore put_state_dict (or ModelStateDictTransport stage) of policy N
+                          |-> Trainer: ModelStateDictTransport stage (or TorchStore put_state_dict) of policy N
                           |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
             Trainer:    forward/backward N+1 (does not mutate persistent model state)

@@ -29,6 +29,7 @@ from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.flex_shard_fsdp import flex_shard_reduce_meshes
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 
@@ -37,6 +38,15 @@ flex_shard = pytest.importorskip("flex_shard")
 pytestmark = pytest.mark.multi_gpu
 
 _SEQ_LEN = 128
+
+
+def _build_tied_llama3_config(flavor: str, **kwargs):
+    """Llama 3 ``<flavor>_tied``: ``flavor`` with lm_head's weight shared with
+    tok_embeddings, set up as the tied Llama 3 flavors (1B, 3B) do."""
+    model_config = build_llama3_config(flavor.removesuffix("_tied"), **kwargs)
+    model_config.enable_weight_tying = True
+    model_config.tok_embeddings.param_init = {"weight": skip_param_init}
+    return model_config
 
 
 def _local(tensor: torch.Tensor) -> torch.Tensor:
@@ -267,6 +277,7 @@ class TestFlexShardDecoder(DTensorTestBase):
             cases=[
                 ((build_llama3_config, "debugmodel"), "default", 2),
                 ((build_qwen3_config, "debugmodel_moe"), "always", 2),
+                ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2),
             ],
         )
 

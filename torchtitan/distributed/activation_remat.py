@@ -9,6 +9,7 @@
 # but distributed module is the best place to put it.
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -23,6 +24,53 @@ logger = logging.getLogger(__name__)
 
 _PackHook = Callable[[torch.Tensor], object]
 _UnpackHook = Callable[[object], torch.Tensor]
+
+
+_BLOCK_FQN = re.compile(r"([A-Za-z_]\w*\.)?layers\.\d+")
+
+
+@dataclass(kw_only=True, slots=True)
+class BlockRematOverride:
+    """Remat policy fields for selected transformer blocks.
+
+    A field left ``None`` inherits the base policy's value; a field that is
+    set replaces it for these blocks.
+    """
+
+    blocks: list[str]
+    """
+    Exact FQNs of the blocks in the original model: ``layers.<id>`` for
+    decoder blocks and ``<encoder>.layers.<id>`` for encoder blocks, e.g.
+    ``vision_encoder.layers.3``. Pipeline splitting keeps original layer ids,
+    so a name follows its block to whichever stage holds it. Names are not
+    checked against the model, since each pipeline stage holds only some
+    blocks.
+    """
+
+    save_regions: list[str] | None = None
+    """
+    Replaces the base ``save_regions`` for these blocks; ``None`` inherits it.
+    ``recompute_regions`` still takes precedence: a region that also matches
+    the blocks' effective ``recompute_regions`` is recomputed. So to retain a
+    region the base policy recomputes, override ``recompute_regions`` too.
+    """
+
+    recompute_regions: list[str] | None = None
+    """Replaces the base ``recompute_regions`` for these blocks; ``None``
+    inherits it."""
+
+    def __post_init__(self) -> None:
+        if not self.blocks:
+            raise ValueError("BlockRematOverride.blocks must not be empty.")
+        if self.save_regions is None and self.recompute_regions is None:
+            raise ValueError(f"BlockRematOverride for {self.blocks} sets no field.")
+        for block_fqn in self.blocks:
+            if _BLOCK_FQN.fullmatch(block_fqn) is None:
+                raise ValueError(
+                    "BlockRematOverride.blocks must name transformer blocks "
+                    "as 'layers.<id>' or '<encoder>.layers.<id>'; got "
+                    f"{block_fqn!r}."
+                )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -42,9 +90,9 @@ class ActivationRematConfig:
     call sites in model code. Everything outside a retained region is
     recomputed.
 
-    NB: Save-region names are relative to a transformer block, so the same
-    policy applies to every transformer block. Per-block remat policies are
-    not currently supported.
+    Save-region names are relative to a transformer block, and the policy
+    applies to every block; ``block_overrides`` changes it for selected
+    blocks.
     """
 
     recompute_regions: list[str] = field(default_factory=list)
@@ -54,6 +102,13 @@ class ActivationRematConfig:
     example, with ``save_regions=["*"]``, this lists the few regions to
     recompute, which suits starting from no remat and recomputing just enough
     to fit a memory budget.
+    """
+
+    block_overrides: list[BlockRematOverride] = field(default_factory=list)
+    """
+    Per-block changes to the fields above, e.g. recomputing an expensive
+    region in only a few blocks, or retaining it in only a few. Each block
+    may be named by at most one override.
     """
 
     preserve_rng_state: bool = False
@@ -84,6 +139,15 @@ class ActivationRematConfig:
                 "torch_remat activation checkpointing does not support the debug "
                 "option."
             )
+        overridden: set[str] = set()
+        for override in self.block_overrides:
+            for block_fqn in override.blocks:
+                if block_fqn in overridden:
+                    raise ValueError(
+                        f"Block {block_fqn!r} is named by more than one "
+                        "BlockRematOverride."
+                    )
+                overridden.add(block_fqn)
 
     def _check_fixed_regions(
         self, save_regions: list[str], recompute_regions: list[str]
@@ -91,25 +155,31 @@ class ActivationRematConfig:
         if (
             self.save_regions != save_regions
             or self.recompute_regions != recompute_regions
+            or self.block_overrides
         ):
             raise ValueError(
                 f"{type(self).__name__} is a fixed policy. Use "
-                "ActivationRematConfig with explicit save_regions and "
-                "recompute_regions to customize it."
+                "ActivationRematConfig with explicit save_regions, "
+                "recompute_regions and block_overrides to customize it."
             )
 
     def apply(
         self,
-        model: Module,
+        module: Module,
         *,
+        module_fqn: str = "",
         saved_tensors_hooks: (
             Callable[[nn.Module, str], tuple[_PackHook, _UnpackHook] | None] | None
         ) = None,
     ) -> None:
-        """Checkpoint every transformer block of ``model`` with ``torch_remat``.
+        """Checkpoint every transformer block of ``module`` with ``torch_remat``.
 
         Args:
-            model: Model whose ``layers`` children are the transformer blocks.
+            module: Module whose ``layers`` children are the transformer
+                blocks: the root model or an encoder within it.
+            module_fqn: FQN of ``module`` within the full model, such as
+                ``"vision_encoder"``; empty for the root model. Prefixes the
+                block FQNs that ``block_overrides`` are matched against.
             saved_tensors_hooks: Optional callable returning the saved-tensor
                 hook pair for one block, given the block and its FQN
                 (``layers.<id>``), or None to leave that block unhooked. The
@@ -123,10 +193,10 @@ class ActivationRematConfig:
                 tells ``pack`` which one it is handling. Called once per
                 block, so each block can own its hook state (e.g. an offload
                 buffer). torch_remat rejects the pair under ``torch.compile``
-                around the block. See torchtitan/distributed/REMAT.md and
+                around the block. See torchtitan/distributed/ACTIVATION_REMAT.md and
                 https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
         """
-        layers = model.get_submodule("layers")
+        layers = module.get_submodule("layers")
         transformer_blocks = list(layers.named_children())
         if not transformer_blocks:
             logger.info(
@@ -135,14 +205,25 @@ class ActivationRematConfig:
             )
             return
 
-        # TODO: Validate unmatched patterns once validation can account for save
-        # regions across all pipeline stages instead of only this model part.
+        # TODO: Validate unmatched patterns and block_overrides names once
+        # validation can account for all pipeline stages instead of only this
+        # model part.
+        overridden = []
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(
-                self.save_regions, self.recompute_regions
-            )
             base_fqn = f"layers.{layer_id}"
+            block_fqn = f"{module_fqn}.{base_fqn}" if module_fqn else base_fqn
+            save_regions, recompute_regions = self.save_regions, self.recompute_regions
+            override = next(
+                (o for o in self.block_overrides if block_fqn in o.blocks), None
+            )
+            if override is not None:
+                overridden.append(block_fqn)
+                if override.save_regions is not None:
+                    save_regions = override.save_regions
+                if override.recompute_regions is not None:
+                    recompute_regions = override.recompute_regions
+            transformer_block.configure_remat_regions(save_regions, recompute_regions)
             transformer_block.forward = remat.checkpoint(
                 region_name=base_fqn,
                 determinism_check=self.determinism_check,
@@ -161,6 +242,8 @@ class ActivationRematConfig:
             self.save_regions or "none",
             self.recompute_regions or "none",
         )
+        if overridden:
+            logger.info("Block overrides apply to: %s", ", ".join(overridden))
 
 
 @dataclass(kw_only=True, slots=True)

@@ -603,6 +603,11 @@ class GDN(LinearAttention):
 
         def __post_init__(self):
             LinearAttention.Config.__post_init__(self)
+            # Before the modulo: 0 raises ZeroDivisionError, and 4 % -2 == 0.
+            if self.n_key_heads < 1:
+                raise ValueError(
+                    f"n_key_heads must be positive, got {self.n_key_heads}"
+                )
             if self.n_heads % self.n_key_heads != 0:
                 raise ValueError(
                     f"n_heads ({self.n_heads}) must be divisible by "
