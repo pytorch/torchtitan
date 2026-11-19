@@ -69,3 +69,30 @@ base -> fine-tuned.
 "Answered" is the largest fraction of questions, taken most-confident first,
 whose error rate stays at or below 5%. These are in-distribution results: test
 questions come from the same source datasets as training.
+
+## GS1 distribution recipe
+
+`DecisionModel` in `base.py` defines the reusable recipe interface, data
+processor, and loss for candidate-distribution fine-tuning. `GS1DecisionModel`
+in `gs1.py` supplies the GS1-format data and Qwen3.5 backbone configuration.
+The preparation script selects 3,000 eligible questions by default.
+
+Training estimates candidate probabilities with
+`NLL + brier_weight * expected Brier`. Each pass samples a candidate from the
+soft target distribution, giving unbiased NLL and Brier gradient estimates.
+Set `brier_weight` through `gs1_decision`.
+
+The recipe follows the fine-tuning pattern in #5569 and trains text records
+with data parallelism.
+
+```bash
+python -m torchtitan_recipes.decision.prepare_gs1_data \
+  --input /path/to/distribution-v4.5/train.jsonl
+python scripts/download_hf_assets.py \
+  --repo_id Qwen/Qwen3.5-0.8B --assets tokenizer safetensors config
+NGPU=8 MODULE=torchtitan_recipes.decision.gs1 \
+  CONFIG=gs1_decision ./run_train.sh --output-dir outputs/gs1-decision
+```
+
+To change the Brier coefficient or model size, use a small Python config
+function that calls `gs1_decision(model_size="2B", brier_weight=0.5)`.
