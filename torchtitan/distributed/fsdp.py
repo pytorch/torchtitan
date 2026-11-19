@@ -148,6 +148,12 @@ class _FSDPGroup(NamedTuple):
     routed_experts: nn.Module | None = None
 
 
+def _decoder_blocks(model: "Decoder") -> list[nn.Module]:
+    """Return a decoder's transformer blocks in forward order: ``layers``, then
+    the MTP layers of a multi-token prediction decoder."""
+    return [*model.layers.values(), *(getattr(model, "mtp_layers", None) or ())]
+
+
 def _decoder_fsdp_groups(
     model: "Decoder",
     dp_mesh: DeviceMesh,
@@ -161,8 +167,8 @@ def _decoder_fsdp_groups(
 
     The embedding group also holds the norm and output projection when weights
     are tied, and there is no head group then. Each transformer block is a
-    group. The root group, ``fully_shard(model)``, takes the parameters left
-    over and doesn't reshard after forward.
+    group, MTP layers included. The root group, ``fully_shard(model)``, takes
+    the parameters left over and doesn't reshard after forward.
 
     Args:
         model: The decoder.
@@ -201,7 +207,7 @@ def _decoder_fsdp_groups(
             )
 
     blocks = []
-    for transformer_block in model.layers.values():
+    for transformer_block in _decoder_blocks(model):
         # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
         # Shard matrix rows so every rank retains both projections.
         placements = linear_param_shard_placements(transformer_block)
@@ -250,7 +256,7 @@ def _decoder_prefetch_order(model: "Decoder") -> list[nn.Module]:
     With explicit prefetching, each group prefetches the next one in forward and
     the previous one in backward.
     """
-    order: list[nn.Module] = list(model.layers.values())
+    order = _decoder_blocks(model)
     if not order:
         return []
     if model.tok_embeddings is not None:
@@ -953,6 +959,13 @@ def apply_fsdp_to_decoder(
             FlexShard instead; ``validate_flex_shard_training`` rejects the
             arguments it doesn't support. FSDP2 otherwise.
     """
+    if unshard_in_current_stream and getattr(model, "mtp_layers", None) is not None:
+        # tok_embeddings runs once per MTP depth, which the explicit
+        # prefetching chain below does not model.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with MTP layers."
+        )
     embedding, head, blocks = _decoder_fsdp_groups(
         model,
         dp_mesh,

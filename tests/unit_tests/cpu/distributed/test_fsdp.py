@@ -86,19 +86,26 @@ def test_fsdp_unshards_preserve_dtype_params_in_their_dtype(preserve: bool) -> N
         dist.destroy_process_group()
 
 
-def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
+def test_apply_fsdp_to_decoder_shards_mtp_layers_and_an_moe_held_as_mlp() -> None:
+    # Each block is its own group, MTP layers too, after the decoder's blocks.
+    # An MoE held as ``mlp`` still gets its routed experts' placements.
+    def moe_block() -> nn.Module:
+        moe = MoE.__new__(MoE)
+        nn.Module.__init__(moe)
+        moe.num_experts = 2
+        moe.routed_experts = nn.Linear(4, 2, bias=False)
+        block = nn.Module()
+        block.mlp = moe
+        return block
+
     model = Module()
     model.enable_weight_tying = False
     model.tok_embeddings = None
     model.norm = None
     model.lm_head = None
-    moe = MoE.__new__(MoE)
-    nn.Module.__init__(moe)
-    moe.num_experts = 2
-    moe.routed_experts = nn.Linear(4, 2, bias=False)
-    block = nn.Module()
-    block.mlp = moe
+    block, mtp_layer = moe_block(), moe_block()
     model.layers = nn.ModuleDict({"0": block})
+    model.mtp_layers = nn.ModuleList([mtp_layer])
     dp_mesh = mock.MagicMock(mesh_dim_names=("dp_shard",))
     dp_mesh["dp_shard"].size.return_value = 2
 
@@ -111,9 +118,12 @@ def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
             pp_enabled=False,
         )
 
-    block_call = next(c for c in fully_shard.call_args_list if c.args[0] == [block])
-    shard_placement_fn = block_call.kwargs["shard_placement_fn"]
-    assert shard_placement_fn(moe.routed_experts.weight) == Shard(0)
+    *block_calls, root_call = fully_shard.call_args_list
+    assert [call.args[0] for call in block_calls] == [[block], [mtp_layer]]
+    assert root_call.args[0] is model
+    for layer, call in zip((block, mtp_layer), block_calls, strict=True):
+        shard_placement_fn = call.kwargs["shard_placement_fn"]
+        assert shard_placement_fn(layer.mlp.routed_experts.weight) == Shard(0)
 
 
 def test_stacked_linear_shard_placements_use_num_linears() -> None:
