@@ -151,6 +151,10 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
         )
+
+        # Raises AttributeError if setup didn't start the metrics.
+        worker.flush_process_metrics(group_id=0)
+
         group = await worker.run_group(
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,

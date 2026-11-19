@@ -52,6 +52,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurnID,
     split_prompt,
 )
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 if TYPE_CHECKING:
     from torchtitan.rl.actors.system import ActorSystem
@@ -244,6 +245,12 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             multiplex=self._config.renderer_multiplex,
             renderer_model_name=hf_assets_path,
         )
+
+        # The end of `BaseRolloutWorker.setup_async`, which this worker skips: Verifiers builds its own renderer.
+        GarbageCollector.freeze(
+            "Full GC before freezing the rollout worker's setup objects"
+        )
+        self.start_process_metrics()
 
     async def run_group(
         self,
