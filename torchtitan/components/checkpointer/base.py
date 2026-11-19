@@ -672,7 +672,15 @@ class BaseCheckpointManager(Configurable, ABC):
         load_only: bool = False
         """Whether to permit loads while disabling all saves."""
 
+        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
+        """Save mode: synchronous, threaded async, or pinned-memory async. A
+        checkpoint manager raises on a mode it does not support."""
+
         def __post_init__(self) -> None:
+            async_lowered = self.async_mode.lower()
+            if async_lowered not in ("disabled", "async", "async_with_pinned_mem"):
+                raise ValueError(f"Invalid async_mode: {async_lowered}")
+            self.async_mode = async_lowered
             if not self.folder.strip():
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:

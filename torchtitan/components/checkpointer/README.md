@@ -80,7 +80,7 @@ checkpointer=CheckpointManager.Config(
 ),
 ```
 
-A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). DCP-specific `async_mode` is on `CheckpointManager.Config` in `torchtitan/components/checkpointer/dcp.py`.
+A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). That includes `async_mode`: the DCP manager supports all three modes, and `TorchCheckpointingManager` supports `disabled` and `async_with_pinned_mem`.
 
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
