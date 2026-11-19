@@ -38,23 +38,28 @@ shards sit in the full tensors (DCP's ``CheckpointableTensor``): the model's,
 through ``declare_state_dict_layouts``, and the optimizer's, through
 ``declare_optimizer_state_layouts``. DCP then saves the same checkpoints as for
 FSDP2's DTensors, and either backend loads the other's.
+``load_hf_into_local_shards`` loads a Hugging Face checkpoint into those local
+shards: it loads full tensors, a group of parameters at a time, and each shard
+keeps its regions.
 """
 
 import math
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from contextlib import contextmanager
 from importlib.util import find_spec
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
     from torchtitan.models.base.model import BaseModel
+    from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
     from torchtitan.training_engine import TrainingEngine
 
 __all__ = [
@@ -65,6 +70,7 @@ __all__ = [
     "flex_shard_partial_backwards",
     "flex_shard_reduce_meshes",
     "holds_flex_shard_params",
+    "load_hf_into_local_shards",
     "validate_flex_shard_training",
 ]
 
@@ -262,6 +268,174 @@ def declare_optimizer_state_layouts(
         register_optimizer_checkpoint_hook(optimizer, model)
 
 
+# The full tensors of one group of parameters in a Hugging Face load take at most
+# this many bytes, unless the group is one parameter that takes more.
+_HF_LOAD_GROUP_BYTES = 1 << 30
+
+
+def load_hf_into_local_shards(
+    sd_adapter: "BaseStateDictAdapter",
+    state_dict: dict[str, Any],
+    storage_reader: dcp.StorageReader,
+) -> None:
+    """Load a Hugging Face checkpoint into ``state_dict`` in place, where
+    ``state_dict`` is a model state dict whose local shards declare their
+    layouts, as FlexShard's does (``declare_state_dict_layouts``).
+
+    The state dict adapters convert full tensors (and FSDP2's DTensors), so
+    they would take each local shard for the whole tensor. Instead, the
+    parameters load as full tensors, a group at a time, through the adapters'
+    conversions of full tensors, and each shard keeps its regions of its full
+    tensor. Each conversion sees every key, as in a full load: the group's full
+    tensors, and meta tensors of the same shapes, which hold no data, for the
+    other keys. One rank reads each group, in turn, and broadcasts its full
+    tensors to the other ranks, so the checkpoint is read once. A shard that
+    ``from_hf`` gives back from another key's Hugging Face tensors, such as
+    ``lm_head.weight``'s with tied weights, loads with that key's group. Entries
+    without a layout load last, as for FSDP2.
+    """
+    # pyrefly: ignore [missing-import]
+    from flex_shard import get_global_layout
+
+    shards, others = {}, {}
+    for key, value in state_dict.items():
+        layout = get_global_layout(value)
+        if layout is None:
+            others[key] = value
+        else:
+            shards[key] = (value, layout)
+    meta = {
+        key: torch.empty(layout.global_shape, dtype=value.dtype, device="meta")
+        for key, (value, layout) in shards.items()
+    } | {key: value.to("meta") for key, value in others.items()}
+    # Every rank holds the same keys, and the groups depend only on the keys and
+    # full shapes, so every rank loads as often.
+    groups: list[list[str]] = []
+    group_bytes = 0
+    for key, (value, layout) in shards.items():
+        nbytes = math.prod(layout.global_shape) * value.element_size()
+        if not groups or group_bytes + nbytes > _HF_LOAD_GROUP_BYTES:
+            groups.append([])
+            group_bytes = 0
+        groups[-1].append(key)
+        group_bytes += nbytes
+    # TODO: Every rank receives each group's full tensors. Sending each rank
+    # only its regions would cut that traffic to the size of its shards.
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    world_size = dist.get_world_size() if dist.is_initialized() else 1
+    device = next(iter(shards.values()))[0].device
+    filled = set()
+    for i, group in enumerate(groups):
+        reader = i % world_size
+        full = _read_and_broadcast(
+            sd_adapter,
+            meta
+            | (
+                {key: shards[key][0].new_empty(meta[key].shape) for key in group}
+                if rank == reader
+                else {}
+            ),
+            shards.keys(),
+            storage_reader,
+            reader,
+            device,
+        )
+        with torch.no_grad():
+            for key, value in full.items():
+                local, layout = shards[key]
+                for global_offset, local_offset, size in zip(
+                    layout.global_offsets,
+                    layout.local_offsets,
+                    layout.local_sizes,
+                    strict=True,
+                ):
+                    local[_box(local_offset, size)].copy_(
+                        value[_box(global_offset, size)]
+                    )
+                filled.add(key)
+        del full
+    if missing := sorted(shards.keys() - filled):
+        raise ValueError(
+            f"{type(sd_adapter).__name__} gives no Hugging Face tensors for "
+            f"{missing}, so FlexShard can't load them."
+        )
+    if others:
+        state_dict.update(
+            _read_and_broadcast(
+                sd_adapter,
+                meta | others,
+                others.keys(),
+                storage_reader,
+                0,
+                next(iter(others.values())).device,
+            )
+        )
+
+
+def _read_and_broadcast(
+    sd_adapter: "BaseStateDictAdapter",
+    state_dict: dict[str, Any],
+    keys: Collection[str],
+    storage_reader: dcp.StorageReader,
+    reader: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    """The tensors of ``keys`` other than meta ones that ``from_hf`` gives back
+    from ``to_hf(state_dict)``, whose tensors other than meta ones ``dcp.load``
+    fills from the checkpoint. Only rank ``reader`` converts and reads, then
+    broadcasts the tensors to the other ranks, which allocate them on
+    ``device``. A tensor that ``from_hf`` gives back for several keys, such as
+    a tied weight, is sent once. If the reader fails, every rank raises."""
+    distributed = dist.is_initialized() and dist.get_world_size() > 1
+    # aliases maps a key to an earlier key whose tensor from_hf gave it.
+    full, aliases, error = {}, {}, None
+    if not distributed or dist.get_rank() == reader:
+        try:
+            hf_state_dict = sd_adapter.to_hf(state_dict)
+            if loaded := {k: v for k, v in hf_state_dict.items() if not v.is_meta}:
+                dcp.load(loaded, storage_reader=storage_reader, no_dist=True)
+            first: dict[int, str] = {}
+            for key, value in sd_adapter.from_hf(hf_state_dict).items():
+                if key not in keys or value.is_meta:
+                    continue
+                if id(value) in first:
+                    aliases[key] = first[id(value)]
+                else:
+                    first[id(value)] = key
+                    full[key] = value.to(device).contiguous()
+        except Exception as e:
+            if not distributed:
+                raise
+            error = e
+    if distributed:
+        specs = [
+            None
+            if error is not None
+            else ({key: (v.shape, v.dtype) for key, v in full.items()}, aliases)
+        ]
+        dist.broadcast_object_list(specs, src=reader)
+        if specs[0] is None:
+            if error is not None:
+                raise error
+            raise RuntimeError(
+                f"Rank {reader} failed to read its part of the Hugging Face "
+                "checkpoint."
+            )
+        shapes, aliases = specs[0]
+        for key, (shape, dtype) in shapes.items():
+            if key not in full:
+                full[key] = torch.empty(shape, dtype=dtype, device=device)
+            dist.broadcast(full[key], src=reader)
+    return full | {key: full[source] for key, source in aliases.items()}
+
+
+def _box(offsets, sizes) -> tuple[slice, ...]:
+    return tuple(
+        slice(offset, offset + size)
+        for offset, size in zip(offsets, sizes, strict=True)
+    )
+
+
 def validate_flex_shard_training(
     config: "TrainingEngine.Config", model_config: "BaseModel.Config"
 ) -> None:
@@ -380,9 +554,10 @@ def validate_flex_shard_training(
             # layouts, which torch.multiprocessing drops on the way to the save
             # process.
             unsupported.append("checkpointer.async_mode='async_with_pinned_mem'")
+        # load_hf_into_local_shards doesn't load quantized checkpoints.
+        if checkpointer.initial_load_in_hf_quantized:
+            unsupported.append("checkpointer.initial_load_in_hf_quantized=True")
         # The state dict adapters need DTensor parameters.
-        if checkpointer.initial_load_in_hf:
-            unsupported.append("checkpointer.initial_load_in_hf=True")
         if checkpointer.last_save_in_hf:
             unsupported.append("checkpointer.last_save_in_hf=True")
     if config.optim.ema is not None:
