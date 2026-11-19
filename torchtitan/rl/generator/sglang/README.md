@@ -205,6 +205,11 @@ Terminal-Bench at the default ratio filled the KV pool with 7% of the state
 slots in use and 29-46 requests queued per engine; DAPO-Math at ratio 0.25
 queued requests 4-8 s each with 12% of the KV pool in use.
 
+With SGLang's unified memory (`extra_server_args={"enable_unified_memory":
+True}`), KV and states share one pool: the state pool size still sets the
+running-request cap, but state slots no request holds are KV memory, so the
+default ratio serves both workloads.
+
 ## Multi-turn sessions
 
 Each request carries its rollout's `routing_session_id` as an SGLang session.

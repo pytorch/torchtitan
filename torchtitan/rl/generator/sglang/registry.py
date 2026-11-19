@@ -148,6 +148,40 @@ def _patch_hybrid_full_attention_v_head_dim() -> None:
     )
 
 
+def _patch_page_major_attention_backend_allow_list() -> None:
+    """Let ``TorchTitanVarlenAttnBackend`` run on SGLang's unified memory
+    (``enable_unified_memory``), whose per-layer K/V caches are views with a page
+    stride of the whole entry.
+
+    SGLang accepts only backends it audited for such views, by name. The TorchTitan
+    backend is SGLang's FlashAttention backend with PyTorch's varlen FlashAttention
+    kernel, which reads that stride, so check it as ``fa3``.
+
+    TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang has no public
+    way to declare a registered backend page-major capable.
+    """
+    from sglang.srt.arg_groups import kv_cache_hook
+
+    from torchtitan.rl.generator.sglang.attention.attention import (
+        TORCHTITAN_VARLEN_ATTENTION_BACKEND,
+    )
+
+    original = kv_cache_hook.handle_page_major_kv_layout
+    backends_of = kv_cache_hook.attention_backends_of
+
+    def handle_page_major_kv_layout(server_args: Any) -> None:
+        kv_cache_hook.attention_backends_of = lambda cfg: tuple(
+            "fa3" if backend == TORCHTITAN_VARLEN_ATTENTION_BACKEND else backend
+            for backend in backends_of(cfg)
+        )
+        try:
+            original(server_args)
+        finally:
+            kv_cache_hook.attention_backends_of = backends_of
+
+    kv_cache_hook.handle_page_major_kv_layout = handle_page_major_kv_layout
+
+
 def register_to_sglang(
     model_config: Decoder.Config,
     *,
@@ -295,6 +329,7 @@ def register_to_sglang(
         )
 
         _patch_hybrid_full_attention_v_head_dim()
+        _patch_page_major_attention_backend_allow_list()
         # TODO(https://github.com/sgl-project/sglang/issues/48463): support SGLang's
         # extra_buffer mamba cache strategy (support_mamba_cache_extra_buffer).
         # Without it, SGLang turns overlap scheduling off for these models, and

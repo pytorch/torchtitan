@@ -112,6 +112,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     sync_weights_from_trainer = False
     # CUDA graphs SGLang captures (SGLangEngine.Config.cuda_graph).
     cuda_graph = "full"
+    # SGLangEngine.Config.extra_server_args.
+    extra_server_args = {}
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -153,7 +155,9 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         torch._C._clear_DTensor_sharding_propagator_cache()
         DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
 
-        cls.engine = SGLangEngine.Config(cuda_graph=cls.cuda_graph).build(
+        cls.engine = SGLangEngine.Config(
+            cuda_graph=cls.cuda_graph, extra_server_args=cls.extra_server_args
+        ).build(
             model=config.generator.model,
             parallelism=config.generator.parallelism,
             model_path=config.hf_assets_path,
@@ -489,6 +493,21 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     # SGLang's normal event loop.
     reset_kv_cache_on_model_state_dict_load = True
     reuses_shared_prompt = False
+
+
+class TestSGLangBitwiseParityGDNUnifiedMemory(TestSGLangBitwiseParityGDN):
+    """``TestSGLangBitwiseParityGDN`` on SGLang's unified memory: KV and GDN states
+    in one pool."""
+
+    extra_server_args = {"enable_unified_memory": True}
+
+    def test_runs_on_unified_memory(self):
+        """SGLang built the unified pool, not separate KV and state pools."""
+        from sglang.srt.mem_cache.kv.alloc.chain import ChainAllocator
+
+        self.assertIsInstance(
+            self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
+        )
 
 
 def _debug_model_config(
