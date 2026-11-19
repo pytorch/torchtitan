@@ -114,6 +114,7 @@ class Optim(Configurable):
         training_steps: int,
         pp_has_last_stage: bool,
         cuda_graph_annotation_config: dict[str, Any] | None = None,
+        accelerator_graph_warmup_steps: int = NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
@@ -156,7 +157,7 @@ class Optim(Configurable):
         if enable_accelerator_graph:
             self._run_update = wrap_with_accelerator_graph(
                 self._update,
-                num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+                num_warmup_iterations=accelerator_graph_warmup_steps,
                 name="optimizer",
                 annotation_config=cuda_graph_annotation_config,
             )
