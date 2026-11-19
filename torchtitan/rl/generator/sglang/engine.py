@@ -102,6 +102,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "random_seed",
         "enable_deterministic_inference",
         "disable_custom_all_reduce",
+        "enable_in_batch_prefix_sharing",
         # SGLang's limit counts only the requests in its waiting queue, so it would
         # not count the requests the engine holds back (see
         # SGLangEngine._awaiting_prefill).
@@ -252,6 +253,12 @@ class SGLangEngine(GenerationEngine):
             isinstance(layer.attention, LinearAttention.Config)
             for layer in model.layers
         )
+        # SGLang shares a prompt's KV among the requests of one prefill batch, except
+        # with linear attention (see _hold_shared_prompts) and with HiCache, which
+        # could copy shared KV to host memory before the forward writes it.
+        share_prompts_in_batch = not has_linear_attention and not (
+            config.extra_server_args.get("enable_hierarchical_cache")
+        )
         if has_linear_attention and config.cuda_graph == "full":
             # TODO(https://github.com/sgl-project/sglang/issues/48593): SGLang's
             # hybrid linear attention backend fails to capture full prefill graphs.
@@ -319,6 +326,7 @@ class SGLangEngine(GenerationEngine):
             param_dtype=precision.param_dtype,
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
+            share_prompts_in_batch=share_prompts_in_batch,
             debug=debug,
         )
         publish(
@@ -364,19 +372,20 @@ class SGLangEngine(GenerationEngine):
         # SGLang does not know about held requests, so its code that scans its
         # request lists skips them: e.g. SGLANG_REQ_WAITING_TIMEOUT (off by default)
         # never times them out.
-        # TODO(https://github.com/sgl-project/sglang/issues/48963): SGLang could share
-        # a prompt's KV among requests in one prefill batch, as vLLM's prefix cache
-        # does; then drop the holding. The same hold inside SGLang's scheduler
-        # (https://github.com/sgl-project/sglang/pull/49147) would also let us drop it.
+        # TODO(https://github.com/sgl-project/sglang/issues/48963): drop the holding
+        # once SGLang shares a prompt's KV within a prefill batch with HiCache too.
         self._awaiting_prefill: dict[
             tuple[int, str | None, tuple[int, ...]], tuple[Req, list[Req]]
         ] = {}
-        # Linear attention models don't hold requests. Without SGLang's extra_buffer
-        # strategy, SGLang saves a linear attention state only at the end of a
-        # cached prefix. A request with the same prompt still computes the prompt's
-        # last token, which needs the state one token earlier, so it can reuse
-        # nothing, and holding it would only delay it.
-        self._hold_shared_prompts = not has_linear_attention
+        # Only with HiCache: otherwise SGLang shares the prompt KV within a prefill
+        # batch itself. Linear attention models don't hold requests. Without SGLang's
+        # extra_buffer strategy, SGLang saves a linear attention state only at the
+        # end of a cached prefix. A request with the same prompt still computes the
+        # prompt's last token, which needs the state one token earlier, so it can
+        # reuse nothing, and holding it would only delay it.
+        self._hold_shared_prompts = (
+            not has_linear_attention and not share_prompts_in_batch
+        )
         # SGLang turns overlap scheduling off only for linear attention models (see
         # step()).
         if not self._scheduler.enable_overlap and not has_linear_attention:
@@ -398,6 +407,7 @@ class SGLangEngine(GenerationEngine):
         param_dtype: str,
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
+        share_prompts_in_batch: bool,
         debug: DebugConfig,
     ) -> ServerArgs:
         """Build SGLang's ``ServerArgs`` (see ``GenerationEngine`` for the arguments)."""
@@ -439,6 +449,9 @@ class SGLangEngine(GenerationEngine):
             # session is released, so its next turn finds it: eviction takes
             # unreferenced KV first, and referenced KV only when nothing else is left.
             enable_session_radix_cache=True,
+            # A rollout group's samples prefilled in one batch compute their shared
+            # prompt once (see add_requests).
+            enable_in_batch_prefix_sharing=share_prompts_in_batch,
             disable_cuda_graph=self.config.cuda_graph == "none",
             # The wrapper loads its weights when SGLang builds it.
             skip_server_warmup=True,
@@ -519,16 +532,17 @@ class SGLangEngine(GenerationEngine):
         instead of raising, so that rejection is the abort, before SGLang schedules it.
         The checks are deterministic, so every TP rank rejects the same requests.
 
-        Requests that share a prompt reuse its KV. If a request's prompt, priority
-        and cache salt match those of an admitted request whose prefill is not done
-        yet (admitted in this call or an earlier one), the engine holds the new
-        request outside SGLang's waiting queue until that prefill is done; the
-        held request then reads the prompt's KV from SGLang's radix cache. Without
-        holding, SGLang would prefill a rollout group's samples in one batch and
-        each would compute the whole prompt, because SGLang caches a request's KV
-        only after its prefill. SGLang's own parallel sampling (n > 1) prefills
-        the prompt once first for the same reason. Linear attention models do not
-        hold requests (see ``_hold_shared_prompts``).
+        Requests that share a prompt reuse its KV. SGLang caches a request's KV only
+        after its prefill, so a rollout group's samples prefilled in one batch
+        would each compute the whole prompt. SGLang's in-batch prefix sharing lets
+        them compute it once: each later sample takes the prompt's KV that the
+        first one computes in the same forward. With HiCache, which does not
+        support that, the engine instead holds a request whose prompt, priority and
+        cache salt match those of an admitted request whose prefill is not done yet
+        (admitted in this call or an earlier one) outside SGLang's waiting queue
+        until that prefill is done; the held request then reads the prompt's KV
+        from SGLang's radix cache. Linear attention models reuse neither way (see
+        ``_hold_shared_prompts``).
         """
         sglang_requests = []
         rejected: list[tuple[str, Exception]] = []

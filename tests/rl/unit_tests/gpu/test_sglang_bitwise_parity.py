@@ -124,8 +124,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
     # Whether a request reuses the prompt KV of an earlier request with the same
-    # prompt admitted in the same call. Linear attention models don't (see
-    # SGLangEngine._hold_shared_prompts).
+    # prompt admitted in the same call (in the same prefill batch). Linear
+    # attention models don't (see SGLangEngine._hold_shared_prompts).
     reuses_shared_prompt = True
 
     @classmethod
