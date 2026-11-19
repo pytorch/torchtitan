@@ -54,7 +54,7 @@ areas:
   - name: remat
     paths:
       - torchtitan/distributed/activation_remat.py
-      - torchtitan/distributed/REMAT.md
+      - torchtitan/distributed/ACTIVATION_REMAT.md
     reviewers: [anijain2305]
 
   - name: pipeline_parallel

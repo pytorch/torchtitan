@@ -3,11 +3,11 @@
 `ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
 model state dict into the generators' prefetched model state dicts with
 one-sided RDMA reads over a `torch.distributed._transport` backend
-(`backend="mooncake"`, the default, or `"nixl"`). It replaces TorchStore when
-`Controller.Config.model_state_dict_transport` is set:
+(`backend="nixl"`, the default, or `"mooncake"`). It is the default
+`Controller.Config.model_state_dict_transport`; select Mooncake with:
 
 ```python
-config.model_state_dict_transport = ModelStateDictTransport.Config(backend="nixl")
+config.model_state_dict_transport = ModelStateDictTransport.Config(backend="mooncake")
 ```
 
 It is a separate path rather than a TorchStore transport: the trainer and
@@ -17,7 +17,7 @@ metadata exchange. The trainer stages a pinned CPU copy already resharded per
 generator rank, so the optimizer can step while generators read and the
 trainer keeps no persistent GPU copy.
 
-`None` keeps TorchStore, which is still needed for
+`None` uses TorchStore instead, which is still needed for
 `model_state_dict_load_mode="gpu_fetch"`. TODO: delete the TorchStore path once
 this one covers `gpu_fetch`.
 
@@ -30,7 +30,9 @@ drop this note once that pin moves past 2026-11-10. Without
 https://github.com/pytorch/pytorch/pull/204113, host memory on other NUMA nodes
 uses node 0's NICs, which can cut read bandwidth several times. On IPv6-only
 hosts set `MC_USE_IPV6=1`; Mooncake's handshake otherwise resolves peer
-hostnames over IPv4.
+hostnames over IPv4. Without RDMA devices Mooncake falls back to its NVLink
+transport, which cannot read pinned CPU memory, and reads fail with
+`Mooncake transfer submission failed`; set `MC_FORCE_TCP=1`.
 
 NIXL needs `nixl==1.5.0` and `nixl-cu13==1.5.0` (installed by
 `scripts/install_rl_env.sh`) and uses its UCX plugin; select NICs and
@@ -62,15 +64,15 @@ on dim 1.
        generator rank 1 (g1): (8, 3), rows 0-1, 2-3, 4-5, 6-7
 ```
 
-Each piece is one contiguous read per index of the dims before the last one it
-does not span. Where a trainer shard cuts a generator shard on a dim after the
-trainer's first sharded dim, the trainer restages the DTensor with its shards of
-later dims moved to that dim, one DTensor redistribute per such tensor per
-push: a row-parallel weight (FSDP `Shard(0)`, TP `Shard(1)`) read by generator
-ranks split on dim 0 is staged as `(Shard(0), Shard(0))`, one read instead of
-one per row. With generator TP on dim 1 matching the trainer's it is staged as
-is, also one read. A stacked `[2, F, D]` weight sharded on dim 1 takes 2
-reads. When several trainer ranks stage the same piece (HSDP replicas),
+Each piece is one read, into the generator rank's prefetch buffer of that key
+at consecutive offsets in piece offset order. If every piece of a key is one
+contiguous run of the generator shard, as above, that is where it belongs.
+Otherwise the key's prefetch buffer holds its pieces packed, and the load
+copies them into place: e.g. a row-parallel weight (FSDP `Shard(0)`, TP
+`Shard(1)`) read by generator ranks split on dim 0 arrives in pieces that span
+only part of each row. This keeps one read per piece, with no per-row reads
+and no trainer collective, at the cost of a strided copy on load. When several
+trainer ranks stage the same piece (HSDP replicas),
 generator ranks are spread across them round-robin. Init raises if the trainer
 does not cover every element of a generator shard, or on `Partial` and uneven
 `_StridedShard` placements.
@@ -83,14 +85,13 @@ does not cover every element of a generator shard, or on `Partial` and uneven
    staging buffer (`register_trainer_source`); every generator rank registers
    its prefetch buffers, connects to every trainer rank and plans its reads
    (`connect_generator`).
-2. Push: the trainer casts and, where needed, restages its shards and copies
-   them into the staging buffer (`stage`). Restaging is a collective, so it
-   runs on the actor thread before the push's first `await`. The controller
-   sends the push before the next forward/backward and Monarch starts them in
-   that order, so every rank issues it before its training collectives.
+2. Push: the trainer casts its shards and copies them into the staging buffer
+   (`stage`), with no collectives.
 3. Pull: each generator rank issues its reads (`read`) and waits for them,
    raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
    restart the job.
+4. Load: the generator copies its weights from the prefetch buffers, unpacking
+   packed keys (`copy_prefetched_`).
 
 The controller finishes pull N before push N+1, so a single staging buffer is
 enough.

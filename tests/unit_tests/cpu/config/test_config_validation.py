@@ -14,17 +14,20 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed.flex_shard_fsdp import validate_flex_shard_training
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
+from torchtitan_recipes.data import c4_document_capacity
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
 from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+from torchtitan_recipes.tests.models.flux import flux_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
@@ -153,8 +156,18 @@ def test_accelerator_graphs_allow_pipeline_validation() -> None:
 
 
 def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
-    config = deepseek_v3_debugmodel()
-    config.parallelism.expert_parallel_degree = 2
+    # Build with the parallelism being validated: the MoE sharding (in
+    # particular the routed-expert EP placements) is derived at build time
+    # and must not be patched afterwards.
+    config = deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    # The builder disables accelerator graphs for EP > 1; this test needs
+    # them on to exercise the dispatcher check.
+    config.training.disable_accelerator_graphs = False
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="without CPU synchronization"
@@ -164,7 +177,6 @@ def test_accelerator_graphs_reject_synchronizing_ep_dispatcher() -> None:
 
 def test_accelerator_graphs_allow_nonblocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
-    config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True):
         config.__post_init__()
@@ -174,11 +186,64 @@ def test_accelerator_graphs_reject_blocking_hybrid_ep() -> None:
     config = deepseek_v3_debugmodel_hybridep()
     for _, dispatcher, _, _ in config.model.traverse(HybridEPTokenDispatcher.Config):
         dispatcher.non_blocking_capacity_factor = None
-    config.parallelism.expert_parallel_degree = 2
 
     with _accelerator_graphs_supported(True), pytest.raises(
         ValueError, match="non_blocking_capacity_factor"
     ):
+        config.__post_init__()
+
+
+def test_ep_off_built_moe_rejects_ep_gt1() -> None:
+    # A MoE config built with expert_parallel_degree == 1 gets dense
+    # routed-expert weight placements; validating it at EP > 1 must raise
+    # instead of silently ignoring the EP degree.
+    config = deepseek_v3_debugmodel()
+    with pytest.raises(ValueError, match="declares no 'ep' sharding"):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(expert_parallel_degree=2),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+
+def test_ep_off_routed_experts_checked_as_dense() -> None:
+    # When EP is off, routed-expert weights live on the dense mesh, so a
+    # layout under <moe>.routed_experts. that omits an active dense axis
+    # must raise (the same silently-replicated gap this check closes
+    # everywhere else).
+    import spmd_types as spmd
+
+    from torchtitan.distributed.parallelism_context import MeshAxisName
+    from torchtitan.models.common.moe import MoE
+
+    config = deepseek_v3_debugmodel()
+    _, moe_cfg, _, _ = next(iter(config.model.traverse(MoE.Config)))
+    sharding = moe_cfg.routed_experts.w13.sharding_config
+    assert sharding is not None
+    # w13.weight is 3-D; the validator only reads the named axes.
+    sharding.state_shardings["weight"] = spmd.SpmdType(
+        {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+        partition_spec=spmd.PartitionSpec(None, None, None),
+    )
+    with pytest.raises(ValueError, match="declares no 'tp' sharding"):
+        validate_model_training_config(
+            config.model,
+            parallelism=ParallelismConfig(tensor_parallel_degree=2),
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+
+def test_flux_pipeline_parallel_degree_gt1_raises() -> None:
+    config = flux_debugmodel()
+    config.parallelism.pipeline_parallel_degree = 2
+
+    with pytest.raises(ValueError, match="does not support pipeline parallelism"):
         config.__post_init__()
 
 
