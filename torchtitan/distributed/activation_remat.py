@@ -161,6 +161,16 @@ class ActivationRematConfig:
     retains on GPU, and a ``BlockRematOverride`` that offloads it raises.
     """
 
+    pp_schedule_driven: bool = False
+    """
+    Under pipeline parallelism, let the schedule free and reload each stage's
+    last group with its WAIT_OFFLOAD/RELOAD actions (see
+    ``ActivationOffloader.defer_to_schedule``), so the last blocks can be
+    offloaded too (``offload_last_block=True``). Requires a policy that
+    offloads and a PyTorch pipeline schedule runtime with
+    ``register_activation_offloader``.
+    """
+
     block_overrides: list[BlockRematOverride] = field(default_factory=list)
     """
     Per-block changes to the fields above, e.g. recomputing an expensive
@@ -195,6 +205,11 @@ class ActivationRematConfig:
             raise ValueError(
                 "torch_remat activation checkpointing does not support the debug "
                 "option."
+            )
+        if self.pp_schedule_driven and not self.offloads_activations:
+            raise ValueError(
+                "pp_schedule_driven is set but the remat policy offloads nothing: "
+                "set offload_block_input or offload_regions."
             )
         overridden: set[str] = set()
         for override in self.block_overrides:

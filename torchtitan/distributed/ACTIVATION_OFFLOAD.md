@@ -249,10 +249,25 @@ it is only reachable through FSDP2's private comm context.
 Basic PP needs no changes: each stage is a model part with its own offloader,
 and groups are per block call, kept alive by each forward's autograd graph,
 so several microbatches can be in flight per stage. The cost is each stage's
-last block (see [The last block](#the-last-block)). Offloading it needs the
-schedule to drive the stage boundary, as it drives FSDP's UNSHARD/RESHARD:
-free each microbatch's last group one action after its forward and reload it
-ahead of its backward (pytorch/torchtitan#6022).
+last block (see [The last block](#the-last-block)).
+
+To offload it too, the schedule drives the stage boundary, as it drives
+FSDP's UNSHARD/RESHARD. It names microbatches by the index its actions
+already carry (`_Action(stage_index, computation_type, microbatch_index)`), so
+the offloader assumes no particular schedule or backward order:
+
+| Call | When | Effect |
+|---|---|---|
+| `defer_to_schedule()` | once, at setup | the schedule, not the model part's hooks, frees and reloads each microbatch's last group |
+| `set_microbatch(i)` | before the stage's forward of microbatch `i` | tags the forward; an untagged forward (e.g. metadata inference) runs as without a schedule |
+| `wait_offload(i)` | after an action following that forward | frees microbatch `i`'s last group, whose copies had that action's compute to finish |
+| `reload_backward(i, num_groups=1)` | ahead of microbatch `i`'s backward | reloads its last `num_groups` groups (all blocks pays off only for stages of one or two blocks) |
+
+Inside the stage, gradient hooks still prefetch one block ahead, and the
+model part's output keeps its reload trigger as a fallback. With
+`ActivationRematConfig.pp_schedule_driven`, `TrainingEngine` calls
+`defer_to_schedule()` on each stage's offloader and registers it with the
+schedule (`register_activation_offloader`), which then makes the other calls.
 
 ## Pinned host memory and CUDA graphs
 

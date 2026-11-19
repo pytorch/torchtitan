@@ -40,6 +40,10 @@ from torchtitan.distributed.accelerator_graph import (
     wrap_fwd_bwd_with_accelerator_graph,
     wrap_with_accelerator_graph,
 )
+from torchtitan.distributed.activation_offload import (
+    ActivationOffloader,
+    get_activation_offloader,
+)
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
@@ -451,6 +455,20 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
 
+        remat_config = config.activation_remat
+        if (
+            remat_config is not None
+            and remat_config.pp_schedule_driven
+            and not create_seed_checkpoint
+        ):
+            # ActivationRematConfig.apply installed one offloader per model
+            # part (each pipeline stage is one).
+            offloaders = [
+                get_activation_offloader(model_part) for model_part in self.model_parts
+            ]
+            assert all(offloader is not None for offloader in offloaders)
+            self._defer_offload_to_pp_schedule(offloaders)
+
         with self.parallelism_context.activate_spmd():
             for model_part in self.model_parts:
                 model_part.to_empty(device=init_device)
@@ -474,6 +492,23 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert lm_head is not None, error_message
             self.loss_fn.set_lm_head(lm_head)
             model_with_lm_head._skip_lm_head = True
+
+    def _defer_offload_to_pp_schedule(
+        self, offloaders: list[ActivationOffloader | None]
+    ) -> None:
+        register = getattr(self.pp_schedule, "register_activation_offloader", None)
+        if not self.parallelism_context.pp_enabled or register is None:
+            raise ValueError(
+                "ActivationRematConfig.pp_schedule_driven requires pipeline "
+                "parallelism with a schedule runtime that supports "
+                "register_activation_offloader (e.g. Interleaved1F1B)."
+            )
+        stages = self.pp_schedule._stages
+        assert len(stages) == len(offloaders)
+        for stage, offloader in zip(stages, offloaders, strict=True):
+            assert offloader is not None
+            offloader.defer_to_schedule()
+            register(stage.stage_index, offloader)
 
     def _parallelize_kwargs(self) -> dict[str, Any]:
         """Return the engine-specific kwargs ``model.parallelize``/``model.pipeline`` expect.
