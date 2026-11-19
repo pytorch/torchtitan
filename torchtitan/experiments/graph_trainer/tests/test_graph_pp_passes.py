@@ -1292,6 +1292,71 @@ def _backward_with_routed_token_live_ins() -> fx.GraphModule:
 
 
 class GraphPPSplitDiDwTest(unittest.TestCase):
+    def test_split_executes_shared_mutations_and_collectives_once(self) -> None:
+        reduce_scatter = torch.ops._c10d_functional.reduce_scatter_tensor.default
+        for mutates_input in (False, True):
+            with self.subTest(mutates_input=mutates_input):
+                graph = fx.Graph()
+                x = graph.placeholder("x")
+                output_grad = graph.placeholder("output_grad")
+                accumulator = graph.placeholder("accumulator")
+                reduced = graph.call_function(
+                    reduce_scatter, args=(x, "sum", 1, _FAKE_PG)
+                )
+                waited = graph.call_function(
+                    torch.ops._c10d_functional.wait_tensor.default, args=(reduced,)
+                )
+                private = graph.call_function(
+                    torch.ops.aten.empty_like.default, args=(x,)
+                )
+                copied = graph.call_function(
+                    torch.ops.aten._foreach_copy_.default, args=([private], [waited])
+                )
+                input_grad = graph.call_function(
+                    torch.ops.aten.mul.Tensor, args=(private, output_grad)
+                )
+                if mutates_input:
+                    graph.call_function(
+                        torch.ops.aten.add_.Tensor, args=(accumulator, private)
+                    )
+                param_grad = graph.call_function(
+                    torch.ops.aten.mul.Tensor, args=(x, accumulator)
+                )
+                graph.output((param_grad, input_grad))
+                with FakeTensorMode():
+                    for node in graph.nodes:
+                        if node.op != "output":
+                            node.meta["val"] = (
+                                None if node is copied else torch.empty(4)
+                            )
+                gm = _make_graph_module(graph)
+                split = split_di_dw_graph(gm, num_param_grads=1)
+                self.assertIsNotNone(split)
+                assert split is not None
+                self.assertIn(reduce_scatter, _call_targets(split.bw_di_module))
+                self.assertNotIn(reduce_scatter, _call_targets(split.bw_dw_module))
+                self.assertIn(
+                    torch.ops.aten._foreach_copy_.default,
+                    _call_targets(split.bw_di_module),
+                )
+                self.assertNotIn(
+                    torch.ops.aten._foreach_copy_.default,
+                    _call_targets(split.bw_dw_module),
+                )
+                inputs = (torch.ones(4), torch.full((4,), 2.0), torch.ones(4))
+                original_inputs = [value.clone() for value in inputs]
+                expected = _FakeCollectiveInterpreter(gm).run(*original_inputs)
+                actual_inputs = [value.clone() for value in inputs]
+                di_outputs = _FakeCollectiveInterpreter(split.bw_di_module).run(
+                    *actual_inputs
+                )
+                dw_outputs = _FakeCollectiveInterpreter(split.bw_dw_module).run(
+                    *di_outputs[1:]
+                )
+                _assert_tensor_sequence_equal(self, dw_outputs, expected[:1])
+                _assert_tensor_sequence_equal(self, di_outputs[:1], expected[1:])
+                torch.testing.assert_close(actual_inputs[2], original_inputs[2])
+
     def test_split_forwards_symbol_bindings_for_dw_live_ins(self) -> None:
         bw_module = _backward_with_routed_token_live_ins()
 

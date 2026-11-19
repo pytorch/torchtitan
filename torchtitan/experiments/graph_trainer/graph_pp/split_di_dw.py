@@ -298,6 +298,13 @@ def split_di_dw_graph(
         "bw_dw",
         ignore_must_be_in_fw_bw=True,
     )
+    di_node_names = {node.name for node in bw_di_graph.nodes}
+    bw_dw_graph.eliminate_dead_code(
+        is_impure_node=lambda node: (
+            node.op != "call_function" or node.name not in di_node_names
+        )
+        and node.is_impure()
+    )
     _add_symint_live_in_uses(bw_dw_graph)
     bw_di_module = _make_graph_module(bw_gm, bw_di_graph)
     bw_dw_module = _make_graph_module(bw_gm, bw_dw_graph)
