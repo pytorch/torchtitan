@@ -19,28 +19,32 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 | Hardware | Integration Tests | Unit Tests |
 | --- | --- | --- |
 | CPU | - | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
-| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
+| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_h100.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
 
 ## Model support
 
 Supported entries completed a two-step end-to-end RL run with a representative
 debug model, including rollout generation, training, and the model state dict transfer to the generators.
 Generator DP and TP were tested together at degree 2; EP was tested at degree 4
-for MoE models. Generator sequence parallelism was disabled.
+for MoE models. Generator sequence parallelism was disabled. DeepSeek V3 and
+Kimi K3 were tested on H100 with two generators at TP=1 and no EP; their MLA decode
+and KDA kernels need SM90+. Image prompts were run end to end with Qwen3.5-0.8B on
+Geometry3K (`rl_grpo_qwen3_5_0_8b_geometry3k`) and Muse Spark 816B-A42B on SLAKE
+(`rl_muse_spark_816b_a42b_slake_lora_gb300`).
 
 | Model | RL support |
 |---|---|
 | Llama 3 | ✅ Supported |
 | Muse Glimmer | ✅ Supported |
-| Muse Spark | ✅ Supported (text only) |
+| Muse Spark | ✅ Supported (text and image) |
 | Qwen 3 | ✅ Supported |
-| Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
+| Qwen 3.5/3.6/3.8 | ✅ Supported (text and image) |
 | GPT-OSS | ✅ Supported |
-| DeepSeek V3 | Not supported |
+| DeepSeek V3 | ✅ Supported (SM90+) |
 | DeepSeek V4 | Support coming soon |
 | FLUX | Not supported |
 | Kimi K2.7 | Not supported |
-| Kimi K3 | Support coming soon |
+| Kimi K3 | ✅ Supported (SM90+) |
 
 ## Architecture
 
@@ -52,7 +56,7 @@ The pipeline has three layers.
 
 **2. Controller and dataflow.** Independent loops load data, produce rollouts, pack batches, and update the policy. `RolloutGroupWorkBuffer` connects them: `target_offpolicy_steps` sets its depth and so the mean policy age, `windowed_fifo_batches` bounds how far one slow group may exceed it (`None`, the default, leaves it unbounded; `1` is FIFO by batch; see [controller/WINDOWED_FIFO.md](controller/WINDOWED_FIFO.md)). Set `target_offpolicy_steps=0` for synchronous execution.
 
-**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and TorchStore (or `ModelStateDictTransport`, see [MODEL_STATE_DICT_TRANSPORT.md](MODEL_STATE_DICT_TRANSPORT.md)) publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
+**3. Distributed execution.** A router picks one of the vLLM generator replicas for each request, and the caller sends the request to it directly. `Trainer` runs on a separately configured TorchTitan mesh, and `ModelStateDictTransport` (see [MODEL_STATE_DICT_TRANSPORT.md](MODEL_STATE_DICT_TRANSPORT.md)) publishes new weights back to the generators. Training and generation can be scaled independently for the workload.
 
 Core and RL each expose a workflow-specific `Trainer`. Both compose the shared
 `torchtitan.training_engine.TrainingEngine`, which owns distributed model execution,
@@ -61,7 +65,7 @@ optimization, checkpointing, profiling, GC, SDC replay, and CUDA graphs.
 The distributed layer builds on two core components:
 
 - **[Monarch](https://github.com/meta-pytorch/monarch) as the controller:** orchestrates trainers and generators on separate GPU meshes with asynchronous communication.
-- **[TorchStore](https://github.com/meta-pytorch/torchstore) for model state dict transfer:** efficiently publishes the model state dict from the trainer to generators, including direct GPU-to-GPU RDMA transfers.
+- **[`ModelStateDictTransport`](MODEL_STATE_DICT_TRANSPORT.md) for model state dict transfer:** generators read the trainer's model state dict with one-sided RDMA reads over `torch.distributed._transport` (NIXL or Mooncake). `model_state_dict_load_mode="gpu_fetch"` requires `model_state_dict_transport=None`, which uses [TorchStore](https://github.com/meta-pytorch/torchstore) instead.
 
 ### Package organization
 

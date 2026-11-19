@@ -19,6 +19,7 @@ from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import Function
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.flex_shard_fsdp import holds_flex_shard_params
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 
@@ -809,10 +810,24 @@ class ChunkedLossWrapper(Loss[LossInput]):
         self.num_chunks = config.num_chunks
         self.loss_fn: Callable[..., LossResult] = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
+        self.lm_head_flex_shard_bucket: Any = None
 
-    def set_lm_head(self, lm_head: nn.Module) -> None:
-        """Set the lm_head module. Must be called before the first __call__."""
+    def set_lm_head(self, lm_head: nn.Module, *, flex_shard_bucket: Any = None) -> None:
+        """Set the lm_head module. Must be called before the first __call__.
+
+        If FlexShard sharded the model, ``flex_shard_bucket`` is ``lm_head``'s
+        bucket (``flex_shard_fsdp.flex_shard_bucket``), which the chunks keep
+        unsharded as FSDP2 keeps ``lm_head``'s group.
+        """
+        # The parameters are sharded until the first forward, so the check sees
+        # FlexShard's.
+        if flex_shard_bucket is None and holds_flex_shard_params(lm_head):
+            raise ValueError(
+                "FlexShard sharded lm_head, so set_lm_head needs its bucket as "
+                "flex_shard_bucket, from flex_shard_fsdp.flex_shard_bucket()."
+            )
         self.lm_head = lm_head
+        self.lm_head_flex_shard_bucket = flex_shard_bucket
 
     def __call__(
         self,
@@ -926,6 +941,7 @@ class ChunkedLossWrapper(Loss[LossInput]):
                 lm_head,
                 run_backward=run_backward,
                 outer_backward_follows=decoder_requires_grad,
+                flex_shard_bucket=self.lm_head_flex_shard_bucket,
             ) as fsdp:
                 for chunk_index in range(num_chunks):
                     if chunk_index == num_chunks - 1:

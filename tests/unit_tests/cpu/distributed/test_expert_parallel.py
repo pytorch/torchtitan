@@ -68,8 +68,12 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self._config(ep=8)
 
     def test_later_moe_layer_not_divisible(self):
+        # Build with EP=8 so routed-expert layouts declare EP/EDP; the
+        # check under test is that a later layer's expert count must
+        # still be divisible by the degree.
         model_config = build_model_config(
-            "debugmodel_moe", parallelism=ParallelismConfig()
+            "debugmodel_moe",
+            parallelism=ParallelismConfig(expert_parallel_degree=8),
         )
         moe = model_config.layers[1].feed_forward
         assert moe is not None

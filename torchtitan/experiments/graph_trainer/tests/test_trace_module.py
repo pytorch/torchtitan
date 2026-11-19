@@ -1927,11 +1927,7 @@ class TestTraceModels(unittest.TestCase):
                     qk_nope_head_dim=qk_nope_head_dim,
                     qk_rope_head_dim=rope_dim,
                     v_head_dim=v_head_dim,
-                    rope=ComplexRoPE.Config(
-                        dim=rope_dim,
-                        max_context_length=seq_len,
-                        scaling="none",
-                    ),
+                    rope=ComplexRoPE.Config(dim=rope_dim, max_context_length=seq_len),
                     q_norm=RMSNorm.Config(normalized_shape=1),
                     kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
                     wq=Linear.Config(
