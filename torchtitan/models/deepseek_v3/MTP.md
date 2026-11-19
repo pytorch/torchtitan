@@ -176,9 +176,7 @@ In other words, SP handling does not call `redistribute` explicitly in the forwa
 
 ### 3.1 FSDP
 
-The current implementation integrates FSDP through `apply_fsdp_to_mtp_decoder()`. It temporarily inserts `mtp_layers` into `model.layers` and reuses the normal decoder `apply_fsdp_to_decoder()` path. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
-
-The benefit is that MTP reuses the existing DeepSeek-V3 FSDP policy instead of duplicating the full wrapper logic. The drawback is that the implementation is indirect. A future cleanup can factor the common FSDP apply logic into a helper shared by normal decoder layers and MTP layers.
+`MTPDecoder` uses `Decoder._apply_fsdp`. The decoder's FSDP groups (`_decoder_fsdp_groups()` in `torchtitan/distributed/fsdp.py`) treat each MTP layer as a transformer block after `layers`. This gives MTP layers the same FSDP wrapping, expert wrapping, reshard policy, and expert-parallel prefetching as normal decoder layers.
 
 ### 3.2 TP/SP
 
@@ -280,3 +278,10 @@ Under PP, the ownership of MTP layers across pipeline stages must be defined, an
 - Wrapping and communication order when PP is combined with FSDP, TP, and EP.
 
 Until PP integration is complete, enabling MTP with PP should remain unsupported.
+
+### 2. FlexShard
+
+`parallelism.fsdp_backend=FlexShardConfig()` rejects MTP layers (`validate_flex_shard_training`), for two reasons:
+
+- The LM head runs once per objective, and FlexShard sums those calls' gradients in bf16, where FSDP2 sums them in fp32. The other gradients differ from FSDP2's too, from the first step.
+- `eh_proj`, `enorm`, `hnorm` and `mtp_norm` have no `param_init`, so they initialize through `reset_parameters()`, which would run on each rank's local shard. `validate_flex_shard_training` rejects such modules for every model, since `eh_proj`'s shards would then not be slices of one device's initialization.
