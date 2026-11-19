@@ -7,6 +7,8 @@
 from dataclasses import dataclass
 
 import torch
+import torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
@@ -74,3 +76,19 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
         unsharded.operands.value,
         gathered_F2D.movedim(0, 1),
     )
+
+
+def test_async_checkpoint_saves_the_sharded_parameter_values(tmp_path):
+    values = torch.randn(256, 128)
+    param = torch.nn.Parameter(_TestShardedTensor(values.clone()))
+
+    stager = DefaultStager(StagingOptions(False, False, False, False))
+    staged = stager.stage({"weight": param})
+    stager.close()
+    assert isinstance(staged["weight"], _TestShardedTensor)
+    torch.testing.assert_close(staged["weight"]._tensor, values, rtol=0, atol=0)
+
+    dcp.async_save({"weight": param}, checkpoint_id=tmp_path, no_dist=True).result()
+    loaded = {"weight": torch.zeros_like(values)}
+    dcp.load(loaded, checkpoint_id=tmp_path, no_dist=True)
+    torch.testing.assert_close(loaded["weight"], values, rtol=0, atol=0)
