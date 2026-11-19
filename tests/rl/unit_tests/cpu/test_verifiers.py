@@ -267,7 +267,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
         async def spawn_rollout_workers(
             self, config, *, num_workers, num_threads, **kwargs
         ):
-            events.append(("spawn", kwargs["env_server_address"]))
+            events.append(("spawn", num_workers, kwargs["env_server_address"]))
             return _WorkerActors()
 
         async def stop_rollout_workers(self) -> None:
@@ -286,8 +286,10 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     )
     rollouter = object.__new__(VerifiersRollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker, worker_pool_size=2, num_threads_per_worker=3
+        worker=worker, num_threads_per_worker=3, rollouts_per_worker=12
     )
+    # 24 training rollouts in flight / 12 per worker -> 2 workers
+    rollouter._max_rollouts_in_flight = 24
     rollouter._verifiers_env_server = SimpleNamespace(
         start=start, close=close_env_server
     )
@@ -307,7 +309,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     asyncio.run(run())
     assert events == [
         ("start_env_server",),
-        ("spawn", "tcp://127.0.0.1:5555"),
+        ("spawn", 2, "tcp://127.0.0.1:5555"),
         ("stop_workers",),
         ("close_env_server",),
     ]

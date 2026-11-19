@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -82,7 +83,7 @@ class Rollouter(Configurable):
                 ),
                 message_env=MyEnv.Config(),
             ),
-        ).build()
+        ).build(max_rollouts_in_flight=256)
 
     Customization:
         Rollouter supports customization at several levels:
@@ -108,27 +109,29 @@ class Rollouter(Configurable):
         """How a rollout group is built, driven, scored and advantaged. Selects the
         `BaseRolloutWorker` subclass by config type; one worker is built per pool process."""
 
-        worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        rollouts_per_worker: int = 128
+        """Training rollouts in flight per rollout worker process, on average. It sets the pool size,
+        rounded up: 300 training rollouts in flight / 128 per worker -> 3 workers. Not a cap: validation
+        rollouts come on top, and groups can land unevenly."""
 
+        # TODO: at 128 rollouts per worker, renders and parses (`TokenEnv`) may queue on these threads.
+        #   Measure that wait, then size the pool from it.
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
         behind every `asyncio.to_thread` call in that process."""
 
         def __post_init__(self) -> None:
-            if self.worker_pool_size < 1:
-                raise ValueError(
-                    "worker_pool_size must be at least 1, got "
-                    f"{self.worker_pool_size}"
-                )
             if self.num_threads_per_worker < 1:
                 raise ValueError(
                     "num_threads_per_worker must be at least 1, got "
                     f"{self.num_threads_per_worker}"
                 )
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, max_rollouts_in_flight: int) -> None:
         self._config = config
+        # The most training rollouts in flight at once. Validation rollouts come on top.
+        # `setup_async` sizes the worker pool from it.
+        self._max_rollouts_in_flight = max_rollouts_in_flight
         training_dataloader = config.training_dataloader.build()
         if not isinstance(training_dataloader, RolloutDataLoader):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
@@ -172,14 +175,25 @@ class Rollouter(Configurable):
         # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn one rollout worker per `rollouts_per_worker` training rollouts in flight, rounded up,
+        and initialize them."""
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
+
+        num_workers = math.ceil(
+            self._max_rollouts_in_flight / self._config.rollouts_per_worker
+        )
+        logger.info(
+            "%d rollout workers (%d training rollouts in flight, rollouts_per_worker=%d)",
+            num_workers,
+            self._max_rollouts_in_flight,
+            self._config.rollouts_per_worker,
+        )
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
             self._config.worker,
-            num_workers=self._config.worker_pool_size,
+            num_workers=num_workers,
             num_threads=self._config.num_threads_per_worker,
             **(worker_kwargs or {}),
         )
