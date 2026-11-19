@@ -40,7 +40,7 @@ RolloutGroupWorkBuffer
                                                   v
 _batcher_loop
 +----------------------------------------------------------------------------------------+
-| batch, trainable = batcher.add_group.call_one(group)                                   |
+| batch, trainable, _ = batcher.add_group.call_one(group)                                |
 | if no trainable samples: group_buffer.release_active_groups(1, "untrainable_group")    |
 | training_batch_queue.put(TrainerStepBatch)                                             |
 +-----------------------+------------------------------+---------------------------------+
@@ -116,6 +116,7 @@ from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
+    compute_hop_metrics,
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
     compute_rollout_metrics,
@@ -1215,8 +1216,8 @@ class Controller(Configurable):
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
                     )
-                group.metrics = compute_rollout_metrics(
-                    prefix="rollout", rollouts=group.rollouts
+                group.metrics.extend(
+                    compute_rollout_metrics(prefix="rollout", rollouts=group.rollouts)
                 )
 
                 # save rollout for inspection
@@ -1255,6 +1256,9 @@ class Controller(Configurable):
             waits for:    a free training_batch_queue slot (maxsize=1)
             unblocked by: _trainer_loop training_batch_queue.get()
         """
+        # Per add_group call since the last batch; the hop's metrics ride with the next batch.
+        add_group_wall_s: list[float] = []
+        add_group_handler_s: list[float] = []
         while True:
             rollout_group = await self._group_buffer.take_finalized()
             if rollout_group is None:  # closed and drained
@@ -1263,15 +1267,27 @@ class Controller(Configurable):
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
             with sl.log_trace_span("batcher_add_group"):
+                start = time.perf_counter()
                 (
                     maybe_training_batch,
                     group_is_trainable,
+                    handler_s,
                 ) = await self.batcher.add_group.call_one(rollout_group=rollout_group)
+                add_group_wall_s.append(time.perf_counter() - start)
+                add_group_handler_s.append(handler_s)
             if not group_is_trainable:
                 await self._group_buffer.release_active_groups(
                     1, reason="untrainable_group"
                 )
             if maybe_training_batch is not None:
+                maybe_training_batch.metrics.extend(
+                    compute_hop_metrics(
+                        "add_group",
+                        wall_s=add_group_wall_s,
+                        handler_s=add_group_handler_s,
+                    )
+                )
+                add_group_wall_s, add_group_handler_s = [], []
                 await training_batch_queue.put(maybe_training_batch)
         await training_batch_queue.put(None)
         # TODO(async-rl): if finite datasets are supported, drain a final partial batch here.
@@ -1356,6 +1372,7 @@ class Controller(Configurable):
                     # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks over TCP).
                     # Sending the RDMAMicrobatches during the previous optim_step would hide it.
                     try:
+                        forward_backward_start = time.perf_counter()
                         # Send each DP rank only its column of the grid.
                         fwd_bwd_results = await asyncio.gather(
                             *(
@@ -1372,13 +1389,24 @@ class Controller(Configurable):
                                 )
                             )
                         )
-                        # Under PP, only trainer ranks holding the last stage
-                        # compute the loss; the others return None.
+                        forward_backward_wall_s = (
+                            time.perf_counter() - forward_backward_start
+                        )
+                        # Each rank replies (metrics, handler seconds). Under PP, only trainer
+                        # ranks holding the last stage compute the loss; the others' metrics are None.
                         fwd_bwd_metrics = next(
                             rank_metrics
-                            for rank_metrics in fwd_bwd_results[0].values()
+                            for rank_metrics, _ in fwd_bwd_results[0].values()
                             if rank_metrics is not None
                         )
+                        # Only ranks with the last stage run the synced metrics reduction; the
+                        # others can leave their handler before their GPU work ends.
+                        forward_backward_handler_s = [
+                            handler_s
+                            for replica_replies in fwd_bwd_results
+                            for rank_metrics, handler_s in replica_replies.values()
+                            if rank_metrics is not None
+                        ]
                     finally:
                         # With RDMA, every rank has read its column (or the step failed).
                         # Not awaited: it would wait behind an in-flight add_group.
@@ -1460,6 +1488,21 @@ class Controller(Configurable):
                         m.Metric(
                             "timing/weight_sync/generator_pull_model_state_dict",
                             m.NoReduce(pull_s),
+                        ),
+                        # Collectives make every last-stage rank leave its handler at about the
+                        # same time, so the rank whose column arrived last spent the least time in
+                        # it. The call's wall time minus that shortest handler time is moving the
+                        # columns until the last one lands, plus the replies.
+                        m.Metric(
+                            "timing/hop/forward_backward/handler",
+                            m.Max(max(forward_backward_handler_s)),
+                        ),
+                        m.Metric(
+                            "timing/hop/forward_backward/transfer",
+                            m.Mean(
+                                forward_backward_wall_s
+                                - min(forward_backward_handler_s)
+                            ),
                         ),
                         *compute_perf_ratio_metrics(
                             num_global_valid_tokens=int(

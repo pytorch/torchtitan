@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import torch
@@ -68,12 +69,16 @@ class _TrainerActorEndpoints:
         ),
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
-    ) -> dict[str, float] | None:
-        return await super().forward_backward(
+    ) -> tuple[dict[str, float] | None, float]:
+        """`Trainer.forward_backward`'s metrics plus the seconds this handler took; the controller
+        subtracts them from its wall time to get the hop's transfer time (see `compute_hop_metrics`)."""
+        start = time.perf_counter()
+        metrics = await super().forward_backward(
             microbatch_groups,
             global_loss_token_counts,
             global_routing_token_counts,
         )
+        return metrics, time.perf_counter() - start
 
     @concurrent_endpoint
     async def optim_step(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -79,8 +80,11 @@ class RolloutWorkerActor(Actor):
         group_id: int,
         group_size: int,
         sampling: Any,
-    ) -> RolloutGroup:
-        return await self._worker.run_group(
+    ) -> tuple[RolloutGroup, float]:
+        """Returns the group and the seconds this handler took; the caller subtracts them from
+        its wall time to get the hop's transfer time (see `compute_hop_metrics`)."""
+        start = time.perf_counter()
+        group = await self._worker.run_group(
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             sample=sample,
@@ -88,6 +92,7 @@ class RolloutWorkerActor(Actor):
             group_size=group_size,
             sampling=sampling,
         )
+        return group, time.perf_counter() - start
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

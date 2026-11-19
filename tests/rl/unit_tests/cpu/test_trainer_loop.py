@@ -22,19 +22,24 @@ from torchtitan.rl.observability import metrics as m
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
+# The fake trainer's two last-stage ranks spend this long in their forward_backward handlers:
+# the rank whose column arrived last waits least. A third rank without the last stage returns
+# no metrics and leaves early (EARLY_STAGE_HANDLER_S); it must not count.
+TRAINER_HANDLER_S = (0.02, 0.035)
+EARLY_STAGE_HANDLER_S = 0.001
 
 
 class _RankValues:
-    """Stands in for a Monarch ValueMesh."""
+    """Stands in for a Monarch ValueMesh; every rank holds `value` unless `per_rank` is given."""
 
-    def __init__(self, value):
-        self._value = value
+    def __init__(self, value=None, *, per_rank=None):
+        self._values = per_rank if per_rank is not None else [value]
 
     def get(self, rank):
-        return self._value
+        return self._values[rank]
 
     def values(self):
-        return [self._value]
+        return self._values
 
 
 class _Endpoint:
@@ -51,13 +56,22 @@ class _Endpoint:
         return await self.call(*args, **kwargs)
 
 
-def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
+def _controller(
+    events: list[str], *, on_push=None, on_pull=None, on_forward_backward=None
+) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
     async def forward_backward(*args):
         events.append(f"fwd_bwd {version + 1}")
-        return _RankValues({"loss/mean": 1.0})
+        if on_forward_backward is not None:
+            await on_forward_backward()
+        return _RankValues(
+            per_rank=[
+                *[({"loss/mean": 1.0}, handler_s) for handler_s in TRAINER_HANDLER_S],
+                (None, EARLY_STAGE_HANDLER_S),
+            ]
+        )
 
     async def optim_step(**kwargs):
         nonlocal version
@@ -222,6 +236,24 @@ def test_push_and_pull_times_are_logged_one_step_late() -> None:
     # Step 2 logs step 1's push and pull, which have run by then.
     assert second[TRAINER_PUSH_KEY].value.value > 0.0
     assert second[GENERATOR_PULL_KEY].value.value > 0.0
+
+
+def test_forward_backward_transfer_is_the_wall_time_minus_the_handler_time() -> None:
+    async def slow_forward_backward():
+        await asyncio.sleep(0.05)
+
+    controller = _controller([], on_forward_backward=slow_forward_backward)
+    _run(controller, num_training_steps=1)
+
+    [metrics] = controller.logged_metrics
+    wall_s = metrics["timing/step/forward_backward"].value.value
+    transfer_s = metrics["timing/hop/forward_backward/transfer"].value.value
+    assert wall_s >= 0.05
+    # The shortest handler: the rank that got its column last bounds the transfer.
+    assert transfer_s == pytest.approx(wall_s - min(TRAINER_HANDLER_S), abs=5e-3)
+    assert metrics["timing/hop/forward_backward/handler"].value.value == max(
+        TRAINER_HANDLER_S
+    )
 
 
 def test_push_failure_fails_the_loop() -> None:

@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import time
+
 from monarch.actor import Actor, endpoint
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -62,10 +64,17 @@ class _BatcherActorEndpoints:
     @endpoint
     async def add_group(
         self, *, rollout_group: RolloutGroup
-    ) -> tuple[TrainerStepBatch | None, bool]:
-        """Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
+    ) -> tuple[TrainerStepBatch | None, bool, float]:
+        """`Batcher.add_group`'s result plus the seconds this handler took; the caller subtracts
+        them from its wall time to get the hop's transfer time (see `compute_hop_metrics`).
+
+        Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
         stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
-        return super().add_group(rollout_group=rollout_group)
+        start = time.perf_counter()
+        training_batch, group_is_trainable = super().add_group(
+            rollout_group=rollout_group
+        )
+        return training_batch, group_is_trainable, time.perf_counter() - start
 
     @endpoint
     async def maybe_release_oldest_batch(self) -> None:
@@ -92,7 +101,7 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
             num_prompts_per_train_step=2,
             **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
         )
-        await batcher.add_group.call_one(rollout_group=group0)  # -> (None, True)
-        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of RDMAMicrobatches, True)
+        await batcher.add_group.call_one(rollout_group=group0)  # -> (None, True, handler_s)
+        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of RDMAMicrobatches, True, handler_s)
         batcher.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
     """

@@ -56,6 +56,33 @@ class MetricsTimer:
         ]
 
 
+def compute_hop_metrics(
+    hop: str, *, wall_s: list[float], handler_s: list[float]
+) -> list[m.Metric]:
+    """Time of each call over one hop between processes, from both ends of the call.
+
+    `wall_s` is the caller's time from sending the call to reading the reply, `handler_s` the
+    callee's time in its handler for the same calls. Their difference is the hop's transfer time:
+    serializing the request and the reply, the transport, the wait in the callee's endpoint queue,
+    and the wait for the caller's event loop to resume after the reply lands (large when that loop
+    is saturated). Both are durations on one clock each, so the processes need no clock sync.
+
+    Example:
+        compute_hop_metrics("add_group", wall_s=[0.030, 0.020], handler_s=[0.010, 0.012])
+        # -> timing/hop/add_group/wall/mean 0.025, timing/hop/add_group/handler/mean 0.011,
+        #    timing/hop/add_group/transfer/mean 0.014, timing/hop/add_group/transfer/max 0.020
+    """
+    transfer_s = [
+        wall - handler for wall, handler in zip(wall_s, handler_s, strict=True)
+    ]
+    return [
+        m.Metric(f"timing/hop/{hop}/wall", m.Mean.from_list(wall_s)),
+        m.Metric(f"timing/hop/{hop}/handler", m.Mean.from_list(handler_s)),
+        m.Metric(f"timing/hop/{hop}/transfer", m.Mean.from_list(transfer_s)),
+        m.Metric(f"timing/hop/{hop}/transfer", m.Max.from_list(transfer_s)),
+    ]
+
+
 def combine_microbatch_metrics(
     microbatch_metrics: list[dict[str, float]],
 ) -> dict[str, float]:

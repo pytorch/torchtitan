@@ -15,7 +15,7 @@ import itertools
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 import numpy as np
@@ -459,6 +459,28 @@ class Batcher(Configurable):
             return None, group_is_trainable  # accumulate until one full batch is ready
         batch = self._pack_one_training_batch()
         if self._rdma_min_tensor_bytes is None:
+            # What each DP rank's `forward_backward` call carries: the tensors of its column,
+            # top-level fields and `model_kwargs` values.
+            bytes_per_rank = [0] * self._dp_degree
+            for group in batch.microbatch_groups:
+                for row in group:
+                    for dp_rank, microbatch in enumerate(row):
+                        values = [
+                            getattr(microbatch, microbatch_field.name)
+                            for microbatch_field in fields(microbatch)
+                        ]
+                        values += list(microbatch.model_kwargs.values())
+                        bytes_per_rank[dp_rank] += sum(
+                            value.nbytes
+                            for value in values
+                            if isinstance(value, torch.Tensor)
+                        )
+            batch.metrics.append(
+                m.Metric(
+                    "payload/forward_backward_bytes_per_dp_rank",
+                    m.Mean.from_list(bytes_per_rank),
+                )
+            )
             return batch, group_is_trainable
         assert self._register_rdma_object is not None
 
