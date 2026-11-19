@@ -63,7 +63,11 @@ LEADING_DOCTYPE = re.compile(
 # Linux caps one command-line argument at 128 KiB, and Chrome gets the page as one.
 MAX_PAGE_URL_BYTES = 120 * 1024
 
+# Must match pytorch/test-infra's _claude-code.yml: its log upload step writes to this bucket,
+# under its `execution_log_s3_prefix` input (default review-logs/claude-code).
 BUCKET = "ossci-raw-job-status"
+PREFIX = "review-logs/claude-code"
+
 # The page's file name becomes part of the S3 key.
 IMAGE_STEM = re.compile(r"[a-z0-9_-]{1,40}")
 PAD_CSS_PX = 24
@@ -225,7 +229,7 @@ def _upload(png: Path, stem: str) -> str:
         )
 
     key = (
-        f"review-logs/claude-code/{os.environ['GITHUB_REPOSITORY']}/{issue['number']}/images/"
+        f"{PREFIX}/{os.environ['GITHUB_REPOSITORY']}/{issue['number']}/images/"
         f"{os.environ['GITHUB_RUN_ID']}_{os.environ['GITHUB_RUN_ATTEMPT']}_{stem}.png"
     )
     # An empty HOME, so no ~/.aws/cli/alias can turn `s3 cp` into another command. The

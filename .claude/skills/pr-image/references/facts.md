@@ -20,12 +20,11 @@ context lines of `gh pr diff`. A fact you can't check there leaves the image.
   PR in the stack may be the one that changes it (one image claimed a change that only the next PR in the stack made).
 - Probes: a quick CPU probe (`CUDA_VISIBLE_DEVICES=""`, also for the PR's own tests) helps you understand the code.
   The image still draws only what the body, the diff or the repo code at the base shows: a probe fact misleads
-  a reviewer who can't check it, even when it is true and labelled (op counts, matmul counts). If the body needs
-  one anyway, put it there first. Otherwise the image goes without it. Op lists and autograd graphs carry to GPU.
-  Kernel counts and numerics don't (a CPU probe stored sigma in bf16; the GPU kernel keeps fp32). A toy runs on
-  the real code (the merged class, not a copy).
-- A probe that disagrees with the body: fix the body in the same change (example: the probe said 20, the body
-  19). On a PR you can't edit, leave the number out and log the gap in `SOURCES.md`.
+  a reviewer who can't check it, even when it is true and labelled (op counts, matmul counts). Op lists and
+  autograd graphs carry to GPU. Kernel counts and numerics don't (a CPU probe stored sigma in bf16; the GPU kernel
+  keeps fp32). A toy runs on the real code (the merged class, not a copy).
+- A probe that disagrees with the body (the probe said 20, the body 19): leave the number out, log the gap in
+  `SOURCES.md`, and name it in your message.
 
 ## Numbers in the image
 
