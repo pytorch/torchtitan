@@ -100,9 +100,10 @@ they load the same checkpoint, e.g. a seed checkpoint, which is created without
 sharding.
 
 `tests/unit_tests/gpu/distributed/test_flex_shard_fsdp.py` compares the two
-backends bitwise. The integration tests `llama3_flex_shard+tp+cp` and
-`deepseek_v3_flex_shard+ep` load the seed checkpoint their FSDP2 counterparts
-load and must reproduce those counterparts' Real PG goldens, and
+backends bitwise. The integration tests `llama3_flex_shard+tp+cp`,
+`deepseek_v3_flex_shard+ep` and `deepseek_v3_dist_muon_flex_shard+ep` (with
+DistMuon) load the seed checkpoint their FSDP2 counterparts load and must
+reproduce those counterparts' Real PG goldens, and
 `flex_shard_checkpoint` resumes an FSDP2 checkpoint and loads an FSDP2 Hugging
 Face export. To compare the backends on your own configuration,
 `scripts/loss_compare.py` creates a seed checkpoint from the baseline config and
