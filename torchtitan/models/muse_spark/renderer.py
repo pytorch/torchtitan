@@ -418,8 +418,19 @@ def _render_valid_recipients(tools: list[dict[str, Any]] | None) -> str:
 def _render_atem(tool_call: dict[str, Any]) -> str:
     function = tool_call["function"]
     arguments = function.get("arguments")
+    if isinstance(arguments, str):
+        # OpenAI-format agents (e.g. through a Verifiers interception server)
+        # replay their tool calls with JSON-string arguments.
+        try:
+            arguments = json.loads(arguments) if arguments.strip() else {}
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "tool_call.function.arguments must be a dict or a JSON object string"
+            ) from error
     if not isinstance(arguments, dict):
-        raise ValueError("tool_call.function.arguments must be a dict")
+        raise ValueError(
+            "tool_call.function.arguments must be a dict or a JSON object string"
+        )
     parts = [
         '<atem:function_calls>\n<atem:invoke name="',
         _escape_attribute(function["name"]),
