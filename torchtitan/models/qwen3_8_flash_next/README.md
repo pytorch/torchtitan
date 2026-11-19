@@ -28,15 +28,22 @@ pip install -r .ci/docker/requirements-vlm.txt
 | `debugmodel` | 256 | 8 | 4 / 2 | 64 | 8 / 2 |
 | `debugmodel_mm` | 256 | 8 | 4 / 2 | 64 | 8 / 2 |
 | `125B-A6B` | 2,560 | 48 | 24 / 2 | 256 | 512 / 10 |
+| `125B-A6B-text` | 2,560 | 48 | 24 / 2 | 256 | 512 / 10 |
 
-`debugmodel` builds the text-only `Qwen38FlashNextModel`; `debugmodel_mm` and
-`125B-A6B` build `Qwen38FlashNextMultimodalModel`, which adds the vision
-encoder.
+`125B-A6B-text` is the released decoder without the vision encoder; it loads
+from the multimodal checkpoint.
+
+`debugmodel` and `125B-A6B-text` build the text-only `Qwen38FlashNextModel`;
+`debugmodel_mm` and `125B-A6B` build `Qwen38FlashNextMultimodalModel`, which
+adds the vision encoder.
 
 The released vision encoder has 27 layers, width 1,152 and 16-pixel patches.
 Its merger produces 2,560-wide decoder embeddings. The text vocabulary has
-248,320 entries. Released-model training capacity and throughput are unqualified;
-the training recipes use reduced models.
+248,320 entries. The
+[`qwen38_flash_next_125b_dist_moe`](../../../torchtitan_recipes/models/qwen3_8_flash_next.py)
+recipe fine-tunes the released decoder on 16 GB300s at 16K tokens per GPU
+with Dist-MoE and accelerator graphs;
+longer contexts and the multimodal model at this scale are unqualified.
 
 ## PLE: Lexical Features and Sharding
 
@@ -128,7 +135,7 @@ The multimodal recipe keeps vision on AdamW.
 | Feature | Notes |
 | --- | --- |
 | FSDP | Per-layer backbone sharding; persistent row ownership for PLE |
-| EP | Existing routed-expert placements and all-to-all dispatcher |
+| EP | Existing routed-expert placements; all-to-all dispatcher by default, Dist-MoE with accelerator graphs in the 125B recipe and the B200 graph test |
 
 EP shards experts independently of PLE: at FSDP8/EP4 each rank owns one eighth
 of the PLE rows and one fourth of the experts, with FSDP2 within each expert
@@ -168,5 +175,5 @@ dynamic shapes from the process's history
 - Replace the model-local indexer teacher with
   [the shared teacher](https://github.com/pytorch/torchtitan/pull/5863) once it
   lands.
-- Qualify released-model capacity and throughput, including table offload and
-  longer-context attention.
+- Qualify the released model beyond the 16K-token, 16-GB300 fine-tuning
+  recipe: table offload, longer-context attention, and the multimodal model.
