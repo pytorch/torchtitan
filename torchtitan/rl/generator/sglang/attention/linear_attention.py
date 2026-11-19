@@ -127,6 +127,11 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
     which the kernels skip. Speculative decoding is not supported.
     """
 
+    # The extend reads only the state slots and query offsets of forward_metadata and
+    # the batch's extend_prefix_lens, and the Attention Gym kernels launch on grids
+    # the token count fixes: SGLang's full prefill CUDA graphs capture it.
+    supports_full_cuda_graph_prefill = True
+
     def convolve_extend(
         self,
         forward_batch,
