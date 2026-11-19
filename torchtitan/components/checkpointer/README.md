@@ -84,8 +84,8 @@ A more exhaustive and up-to-date list of checkpoint config options can be found 
 
 ## Remote storage with `TorchCheckpointingManager`
 
-`TorchCheckpointingManager` can keep checkpoints on any store fsspec has a driver for.
-Point `folder` at a URI and install the driver (`gcsfs` for `gs://`, `s3fs` for `s3://`):
+`TorchCheckpointingManager` can keep checkpoints on a remote store through fsspec.
+Point `folder` at a URI and install its driver, e.g. `gcsfs` for `gs://`:
 
 ```python
 checkpointer=TorchCheckpointingManager.Config(
@@ -96,9 +96,9 @@ checkpointer=TorchCheckpointingManager.Config(
 
 Interval saves, the final save, resume, `keep_latest_k` retention, Hugging Face export
 (`last_save_in_hf`), and Hugging Face load (`initial_load_in_hf`) all go through the
-remote store. `initial_load_path` and the `hf_assets_path` an HF initial load reads may be
-on other storage than `folder`, e.g. HF weights on local disk with checkpoints on `gs://`;
-each is read from the storage its own scheme names.
+remote store. `initial_load_path` may be on other storage than `folder`, and a local
+`hf_assets_path` works with a remote `folder`, e.g. HF weights on local disk with
+checkpoints on `gs://`.
 
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.

@@ -477,8 +477,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
     def test_remote_folder_hf_round_trip(self) -> None:
         """Export to HF and load it back on a remote folder with the real backend.
 
-        The folder is relative to a remote dump folder, as with
-        ``--output-dir gs://...``.
+        The folder is relative to a remote base_folder.
         """
         memory_fs = fsspec.filesystem("memory")
         bucket = f"/hf-round-trip-{uuid.uuid4().hex}"
@@ -519,9 +518,10 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         restored = nn.Linear(2, 2, bias=False)
         loader = build(
             restored,
-            _StateDictAdapter(hf_assets_path=f"memory://{export}"),
+            _StateDictAdapter(),
             initial_load_model_only=True,
             initial_load_in_hf=True,
+            initial_load_path=f"memory://{export}",
         )
         try:
             self.assertTrue(loader.load())
