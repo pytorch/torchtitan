@@ -1084,11 +1084,30 @@ def flex_shard_fsdp_scheduling(
                 waits = [node for node in region if _is_wait_for(node, launch)]
                 assert len(waits) == 1, "Expected one wait per FlexShard collective"
                 wait = waits[0]
+                finish = set(region[region.index(wait) :])
+                if action == "reduce_grad":
+                    for node in reversed(region[: region.index(wait)]):
+                        schema = getattr(node.target, "_schema", None)
+                        if (
+                            schema is not None
+                            and schema.name.startswith("aten::empty")
+                            and not schema.is_mutable
+                            and all(
+                                result.alias_info is None for result in schema.returns
+                            )
+                            and node.users
+                            and all(user in finish for user in node.users)
+                        ):
+                            finish.add(node)
                 launch_wait_pairs.append(
                     (
-                        region[: region.index(launch) + 1],
+                        [
+                            node
+                            for node in region[: region.index(launch) + 1]
+                            if node not in finish
+                        ],
                         wait,
-                        region[region.index(wait) :],
+                        [node for node in region if node in finish],
                     )
                 )
 

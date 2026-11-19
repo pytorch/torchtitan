@@ -1882,6 +1882,66 @@ class TestFlexShardScheduling(TestCase):
                     self.assertLess(positions[compute], positions[first[3]])
                     self.assertLess(positions[first[3]], positions[first[4]])
 
+    def test_reduction_finish_defers_only_private_output_allocations(self):
+        with tempfile.TemporaryDirectory() as rendezvous:
+            dist.init_process_group(
+                "gloo",
+                init_method=f"file://{rendezvous}/rendezvous",
+                rank=0,
+                world_size=1,
+            )
+            try:
+                for early_user in (False, True):
+                    with self.subTest(early_user=early_user):
+                        graph = torch.fx.Graph()
+                        param = graph.placeholder("param")
+                        first = self._bucket(
+                            graph, param, "reduce_grad", fqn="first.weight"
+                        )
+                        with graph.inserting_before(first[2]):
+                            destination = graph.call_function(
+                                torch.ops.aten.empty_like.default, (param,)
+                            )
+                            destination.meta = dict(first[0].meta)
+                            if early_user:
+                                initialized = graph.call_function(
+                                    torch.ops.aten.zero_.default, (destination,)
+                                )
+                                initialized.meta = dict(first[1].meta)
+                        first[-1].target = torch.ops.aten.copy_.default
+                        first[-1].args = (destination, first[3])
+                        compute = graph.call_function(
+                            torch.ops.aten.sin.default, (param,)
+                        )
+                        second = self._bucket(
+                            graph, param, "reduce_grad", fqn="second.weight"
+                        )
+                        for bucket in (first, second):
+                            bucket[2].args = (
+                                bucket[0],
+                                "sum",
+                                1,
+                                dist.group.WORLD.group_name,
+                            )
+                        graph.output((first[-1], second[-1], compute))
+                        gm = torch.fx.GraphModule({}, graph)
+                        inputs = (torch.ones(4),)
+                        expected = gm(*inputs)
+                        self.schedule(gm)
+                        self.assertEqual(gm(*inputs), expected, atol=0, rtol=0)
+                        positions = {
+                            node: index for index, node in enumerate(graph.nodes)
+                        }
+                        if early_user:
+                            self.assertLess(positions[destination], positions[first[2]])
+                        else:
+                            self.assertLess(
+                                positions[second[2]], positions[destination]
+                            )
+                        self.assertLess(positions[destination], positions[first[-1]])
+            finally:
+                dist.destroy_process_group()
+
     def test_repeated_bucket_uses_stay_within_forward_or_backward(self):
         graph = torch.fx.Graph()
         param = graph.placeholder("param")
