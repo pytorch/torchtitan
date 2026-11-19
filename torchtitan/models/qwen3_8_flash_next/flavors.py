@@ -14,6 +14,7 @@ from typing import Any
 import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.config import derive
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -72,6 +73,7 @@ from .attention import (
     SplitLinear,
 )
 from .embedding import NGramEmbedding, NGramTable, PLELayer
+from .gdn import SplitInProjGDN
 from .model import (
     GatedResidual,
     Qwen38FlashNextBlock,
@@ -440,22 +442,26 @@ def _config(*, debug, multimodal, seq_len, parallelism, indexer_loss):
                 layer_id=layer_id,
                 enable_sp=enable_sp,
             )
-            attention.in_proj = _split_linear(
-                attention.in_proj,
-                num_groups=attention.n_key_heads,
-                projection_features=(
-                    2 * attention.n_key_heads * attention.key_head_dim
-                    + attention.n_heads * attention.value_head_dim
+            attention = derive(
+                attention,
+                SplitInProjGDN.Config,
+                in_proj=_split_linear(
+                    attention.in_proj,
+                    num_groups=attention.n_key_heads,
+                    projection_features=(
+                        2 * attention.n_key_heads * attention.key_head_dim
+                        + attention.n_heads * attention.value_head_dim
+                    ),
                 ),
-            )
-            # Flash-Next uses BF16 A_log and dt_bias in the released reference.
-            attention.preserve_dtype_params = ()
-            attention.norm = InputDtypeGatedRMSNorm.Config(
-                dim=128,
-                eps=1e-6,
-                activation_fn=Sigmoid.Config(),
-                param_init={"weight": nn.init.ones_},
-                sharding_config=gated_rms_norm_sharding_config(),
+                # Flash-Next uses BF16 A_log and dt_bias in the released reference.
+                preserve_dtype_params=(),
+                norm=InputDtypeGatedRMSNorm.Config(
+                    dim=128,
+                    eps=1e-6,
+                    activation_fn=Sigmoid.Config(),
+                    param_init={"weight": nn.init.ones_},
+                    sharding_config=gated_rms_norm_sharding_config(),
+                ),
             )
         layers.append(
             Qwen38FlashNextBlock.Config(
@@ -543,6 +549,8 @@ MODEL_FLAVORS = {
     "debugmodel": (partial(_config, debug=True, multimodal=False), 4096),
     "debugmodel_mm": (partial(_config, debug=True, multimodal=True), 4096),
     "125B-A6B": (partial(_config, debug=False, multimodal=True), 262144),
+    # The released decoder without the vision encoder, for text-only training.
+    "125B-A6B-text": (partial(_config, debug=False, multimodal=False), 262144),
 }
 
 

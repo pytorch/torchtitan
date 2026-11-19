@@ -86,6 +86,7 @@ jobs:
             tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
             tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference \
             tests/unit_tests/gpu/models/qwen3_8_flash_next/test_qsa_graph.py \
+            tests/unit_tests/gpu/recipes/test_flash_next_qsa_teacher_override.py \
             -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
