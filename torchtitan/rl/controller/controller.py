@@ -760,6 +760,10 @@ class Controller(Configurable):
         max_num_seqs = config.max_num_seqs_per_generator_dp_rank
         logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
 
+        # E.g. the Mooncake Store master, on this (the controller's) host. Before
+        # provisioning, so a config error raises before any host starts.
+        generator_engine = config.generator.engine.start_job_services()
+
         with sl.log_trace_span("mesh_spawn"):
             actor_system = await self._build_actor_system()
             self.actor_system = actor_system
@@ -779,7 +783,7 @@ class Controller(Configurable):
             # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
             self.generator_router = await actor_system.spawn_generator_router(
                 config.generator_router,
-                generator_config=config.generator,
+                generator_config=replace(config.generator, engine=generator_engine),
                 precision=config.precision,
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,

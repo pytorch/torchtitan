@@ -52,6 +52,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.model import validate_ep_token_dispatchers
+from torchtitan.rl.generator.mooncake_master import start_master
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import (
     TORCHTITAN_VARLEN_ATTENTION_BACKEND,
@@ -193,6 +194,35 @@ class SGLangEngine(GenerationEngine):
                         "to a run) in hicache_storage_backend_extra_config (a JSON "
                         "string)"
                     )
+
+        def start_job_services(self) -> SGLangEngine.Config:
+            """Mooncake Store: start the job's master and pass its address to the
+            generators in ``hicache_storage_backend_extra_config``."""
+            if self.extra_server_args.get("hicache_storage_backend") != "mooncake":
+                return self
+            extra_config = json.loads(
+                self.extra_server_args["hicache_storage_backend_extra_config"]
+            )
+            # Checked here, not in __post_init__: build() re-runs __post_init__ on
+            # the config this returns, which has the address.
+            if "master_server_address" in extra_config:
+                raise ValueError(
+                    "Remove master_server_address from "
+                    "hicache_storage_backend_extra_config: the controller starts the "
+                    "job's Mooncake master on its host and sets this address for "
+                    f"every generator (got {extra_config['master_server_address']!r})"
+                )
+            extra_config["master_server_address"] = start_master()
+            logger.info(
+                f"Mooncake Store master listens on {extra_config['master_server_address']}"
+            )
+            return dataclasses.replace(
+                self,
+                extra_server_args={
+                    **self.extra_server_args,
+                    "hicache_storage_backend_extra_config": json.dumps(extra_config),
+                },
+            )
 
     def __init__(
         self,

@@ -63,7 +63,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        def start_job_services(self) -> GenerationEngine.Config:
+            """Start the services all generators of a job share, on the controller
+            host; they run until the controller process exits. Returns the config
+            to build the generators with. Default: none."""
+            return self
 
     @property
     @abc.abstractmethod
