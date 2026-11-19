@@ -1013,11 +1013,14 @@ class TestUlysses(unittest.TestCase):
                     if isinstance(layer.attention, LinearAttention.Config):
                         self.assertIs(layer.attention.inner_attention._owner, backend)
 
-                for load_balancer in (
-                    HeadTailCPLoadBalancer.Config(),
-                    PTRRFlexAttentionCPLoadBalancer.Config(),
-                ):
-                    parallelism.context_parallel_load_balancer = load_balancer
+                parallelism.context_parallel_load_balancer = (
+                    HeadTailCPLoadBalancer.Config()
+                )
+                validate_context_parallel(model, parallelism)
+                parallelism.context_parallel_load_balancer = (
+                    PTRRFlexAttentionCPLoadBalancer.Config()
+                )
+                with self.assertRaisesRegex(ValueError, "does not support PTRR"):
                     validate_context_parallel(model, parallelism)
 
     def test_rejects_gdn_key_heads_indivisible_by_tp_times_cp(self):

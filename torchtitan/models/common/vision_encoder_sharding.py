@@ -120,19 +120,26 @@ def vision_rowwise_sharding_config() -> ShardingConfig:
 
 def vision_attention_sharding_config(
     *,
-    rope_cache_dp: spmd.PerMeshAxisSpmdType,
+    positions_dp: spmd.PerMeshAxisSpmdType,
 ) -> ShardingConfig:
-    """Vision attention boundary: TP-invariant ``x``, TP-replicated ``rope_cache``.
+    """Vision attention boundary: TP-invariant ``x`` and ``positions``.
 
-    ``VisionAttention`` replicates ``x`` across TP itself. The rope cache is
+    ``VisionAttention`` replicates ``x`` across TP itself. The RoPE cache is
     already TP-``Replicate`` (like the decoder's), so it combines with the
     head-sharded q/k.
     """
     return ShardingConfig(
         input_shardings={
             "x": _vision_activation_placement(),
-            "rope_cache": _vision_activation_placement(dp=rope_cache_dp, tp=spmd.R),
+            "positions": _vision_activation_placement(dp=positions_dp),
         },
+    )
+
+
+def vision_rope_sharding_config() -> ShardingConfig:
+    """Vision RoPE cache; TP-replicated like the decoder RoPE cache."""
+    return ShardingConfig(
+        state_shardings={"cache": _vision_state_placement(tp=spmd.R, cp=spmd.I)},
     )
 
 

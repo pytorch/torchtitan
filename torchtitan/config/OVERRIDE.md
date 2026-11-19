@@ -91,28 +91,35 @@ example); no `triton_rope.py` is shipped. It is a valid override: each attention
 module owns a `rope` submodule (a `RoPE.Config`), so swapping in a custom RoPE is
 an ordinary component override.
 
+The example targets `ComplexRoPE.Config`, the format its kernel implements. RoPE
+formats read `positions` differently (1D ids for text, `(T, 2)` coordinates for
+the vision RoPEs), so target the format you replace; `target=RoPE.Config` would
+match all of them. Vision attention works the same way:
+`VisionAttention.Config.rope` holds a `ComplexVisionRoPE.Config` or a
+`CosSinVisionRoPE.Config`.
+
 ```python
 from dataclasses import dataclass
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import ComplexRoPE
 
 
-class TritonRoPE(RoPE):
+class TritonRoPE(ComplexRoPE):
     """RoPE applied with a Triton kernel (illustrative)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
+    class Config(ComplexRoPE.Config):
         block_size: int = 128
 
     def __init__(self, config: Config): ...
     def forward(self, query, key, positions=None): ...
 
 
-@override(target=RoPE.Config,
+@override(target=ComplexRoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
-def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
-    # `derive` copies every field shared with RoPE.Config; the factory states
+def triton_rope(cfg: ComplexRoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
+    # `derive` copies every field shared with ComplexRoPE.Config; the factory states
     # only its deltas. See "Deriving the replacement config" below. `block_size`
     # defaults to 128 but can be tuned per config tree via a per-entry kwarg
     # (see "Optional per-entry kwargs" below).
@@ -137,14 +144,14 @@ This matters for version-robustness. Hand-copying couples a factory to the
 target's field set at the time it was written:
 
 ```python
-# Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
+# Fragile: ComplexRoPE.Config has many fields (theta, scaling, sharding_config,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
 return TritonRoPE.Config(
     dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
-# Robust: every RoPE.Config field (including ones added later, inherited by the
+# Robust: every ComplexRoPE.Config field (including ones added later, inherited by the
 # subclass TritonRoPE.Config) is copied automatically; only block_size is a delta.
 return derive(cfg, TritonRoPE.Config, block_size=128)
 ```
@@ -225,13 +232,13 @@ In `Trainer.__init__`, before any component is built:
    re-traversed). An override that changes a module's sharding contract must set
    the replacement's `sharding_config`; `derive()` preserves it when the contract
    is unchanged.
-7. Log every replacement.
+7. Log one line per distinct (override, source class -> replacement class,
+   kwargs) group, with the match count and every replaced FQN.
+   `apply_overrides()` returns one line per replaced node.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
-...
-INFO: Applied 32 override(s)
+INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=2 fqns=['model.layers.0.feed_forward', 'model.layers.1.feed_forward']
+INFO: Applied 2 override(s)
 ```
 
 The model config is a `Configurable.Config` nested directly at `model` in the

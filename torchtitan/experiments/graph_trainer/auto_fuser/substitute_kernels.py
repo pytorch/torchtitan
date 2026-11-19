@@ -61,8 +61,10 @@ Submodules must not read attributes: tensor constants have to be passed as
 the cache stores no tensors. Higher-order ops with subgraphs (``get_attr`` of
 a GraphModule) are not supported yet.
 
-Custom ops must be defined with ``torch.library.custom_op`` or ``triton_op``
-in an importable module. ``<l2>.py`` imports those modules so it runs in a
+Custom ops must be defined in an importable module: with
+``torch.library.custom_op`` or ``triton_op``, or with ``torch.library.Library``
+and a Python fake kernel (e.g. torchao's ops), whose module is the one that
+registers the fake kernel. ``<l2>.py`` imports those modules so it runs in a
 fresh process, and their source is part of the level-1 key. Submodules
 calling any other non-torch op are not cacheable.
 """
@@ -87,7 +89,7 @@ import torch
 import torch._guards
 
 # TODO: the imports below are private PyTorch APIs (AOTAutograd cache key,
-# PyCodeCache, torch_key, OPDEFS, FX import formatting) without public
+# PyCodeCache, torch_key, OPDEFS, simple_registry, FX import formatting) without public
 # equivalents; they can change in any nightly. Replace them once upstream
 # exposes public ones.
 from torch._functorch._aot_autograd.autograd_cache import (
@@ -96,6 +98,7 @@ from torch._functorch._aot_autograd.autograd_cache import (
 )
 from torch._functorch._aot_autograd.schemas import AOTConfig
 from torch._inductor.codecache import CacheBase, PyCodeCache, torch_key, write_atomic
+from torch._library import simple_registry
 from torch._library.custom_ops import OPDEFS
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -210,10 +213,21 @@ def normalize_names(gm: torch.fx.GraphModule) -> torch.fx.GraphModule:
 def _op_modules(op: torch._ops.OpOverload) -> set[str]:
     """Non-torch modules defining ``op``'s implementation and fake kernel."""
     opdef = OPDEFS.get(op._schema.name)
-    if opdef is None:
-        raise ValueError(f"{op} is not a torch.library.custom_op / triton_op")
-    fns = [opdef._init_fn, opdef._abstract_fn, *opdef._backend_fns.values()]
-    modules = {inspect.unwrap(fn).__module__ for fn in fns if fn is not None}
+    if opdef is not None:
+        fns = [opdef._init_fn, opdef._abstract_fn, *opdef._backend_fns.values()]
+        modules = {inspect.unwrap(fn).__module__ for fn in fns if fn is not None}
+    else:
+        # An op defined with torch.library.Library, e.g. torchao's C++ kernels with
+        # Python fake kernels: the module that registers its fake kernel defines it.
+        kernel = simple_registry.singleton.find(op._schema.name).fake_impl.kernel
+        if kernel is None:
+            raise ValueError(f"{op} has no Python fake kernel")
+        path = kernel.source.rsplit(":", 1)[0]
+        modules = {
+            name
+            for name, module in list(sys.modules.items())
+            if getattr(module, "__file__", None) == path
+        }
     # triton_op wraps the user function in a torch-internal backend function.
     modules = {m for m in modules if m != "torch" and not m.startswith("torch.")}
     if not modules or "__main__" in modules:
