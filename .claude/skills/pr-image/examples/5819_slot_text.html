@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; width: 900px; background: #fbf8f3; color: #222;
+         font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 15px; }
+  .page { padding: 20px 24px 8px 24px; }
+  h1 { font-size: 23px; margin: 0 0 4px 0; }
+  .sub { font-size: 15px; color: #4a4741; margin-bottom: 10px; line-height: 1.45; }
+  code, .mono { font-family: "Liberation Mono", "DejaVu Sans Mono", monospace; font-size: 14px; }
+  .key { display: flex; gap: 20px; align-items: center; font-size: 14px; color: #444; margin: 0 0 12px 2px; }
+  .key span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { display: inline-block; width: 22px; height: 13px; border-radius: 2px; box-sizing: border-box; }
+  .panel { border: 2px solid; border-radius: 8px; padding: 8px 12px 8px 12px; margin-bottom: 12px; }
+  .main { border-color: #c98a82; background: #fdf4f2; }
+  .pr { border-color: #86b893; background: #f1f8f2; }
+  .ph { font-size: 16px; font-weight: bold; margin: 0 0 6px 2px; }
+  .main .ph { color: #9c3427; margin-bottom: 0; }
+  .pr .ph { color: #23663a; }
+  .close { font-size: 15px; color: #222; margin: 6px 2px 0 2px; }
+  svg { font-family: "Liberation Sans", "DejaVu Sans", sans-serif; font-size: 14px; fill: #222; }
+  svg .dim { fill: #5d5a55; }
+  svg .green { fill: #1f5e35; }
+  .res { font-size: 15px; color: #333; line-height: 1.5; margin: 2px 2px 0 2px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>SGLangEngine runs KDA, keeping replay state in SGLang's slot</h1>
+  <div class="sub">In batch-invariant mode, one KDA layer of the Kimi K3 debug model keeps this state for one request after a 150-token prompt.</div>
+  <div class="key">
+    <span><i class="sw" style="background:#e8e4dc;border:1.3px solid #8a857d"></i>SGLang's usual KDA state</span>
+    <span><i class="sw" style="background:#d3ebd9;border:2px solid #2f7d4a"></i>the replay state, added to the slot by this PR</span>
+    <span><i class="sw" style="background:#fff;border:1.5px dashed #8a857d"></i>tokens not seen yet</span>
+  </div>
+
+  <div class="panel main">
+    <div class="ph">Before (#5818): <span class="mono" style="font-size:15px">SGLangEngine</span> raises an error for KDA layers.</div>
+  </div>
+
+  <div class="panel pr">
+    <div class="ph">This PR: SGLang's slot also stores the replay state.</div>
+    <svg id="s" width="828" height="352" viewBox="0 0 828 352"></svg>
+    <div class="close">SGLang's radix cache copies every entry, so the next turn resumes the unfinished chunk too.</div>
+  </div>
+
+  <div class="res">SGLang's logprobs match the trainer's bit for bit, Kimi K3 debug model on 1 GB300.<br>
+    Without the replay state, logprobs differ by up to 3.7e-2.<br>
+    The replay state costs 1.25x the memory of the recurrent state.</div>
+</div>
+<script>
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.getElementById("s");
+  function el(tag, attrs, text) {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (text !== undefined) e.textContent = text;
+    svg.appendChild(e);
+    return e;
+  }
+  const GREY = {fill: "#e8e4dc", stroke: "#8a857d", "stroke-width": 1.3};
+  const GREEN = {fill: "#d3ebd9", stroke: "#2f7d4a", "stroke-width": 2};
+
+  // 1. the tokens, in 64-token chunks: 1-128 are in the recurrent state, 129-150 in the replay state
+  const TX0 = 70, TP = 3.3;
+  const TX = t => TX0 + t * TP;
+  el("text", {x: 0, y: 24, "font-weight": "bold"}, "tokens");
+  for (const [a, b] of [[1, 64], [65, 128]]) {
+    el("rect", {x: TX(a - 1), y: 6, width: (b - a + 1) * TP - 2, height: 26, rx: 2, ...GREY});
+    el("text", {x: (TX(a - 1) + TX(b)) / 2, y: 24, "text-anchor": "middle"}, `${a}-${b}`);
+  }
+  el("rect", {x: TX(128), y: 6, width: 22 * TP, height: 26, rx: 2, ...GREEN});
+  el("text", {x: TX(128) + 11 * TP, y: 24, "text-anchor": "middle", class: "green", "font-weight": "bold"}, "129-150");
+  el("rect", {x: TX(150) + 1, y: 6, width: 42 * TP - 3, height: 26, rx: 2, fill: "#fff", stroke: "#8a857d", "stroke-width": 1.5, "stroke-dasharray": "4,3"});
+  el("text", {x: TX(150) + 21 * TP, y: 24, "text-anchor": "middle", class: "dim"}, "151-192");
+  el("path", {d: `M${TX(0)},38 L${TX(0)},44 L${TX(128) - 2},44 L${TX(128) - 2},38`, fill: "none", stroke: "#6f6a62", "stroke-width": 1.3});
+  el("text", {x: TX(0), y: 62}, "The recurrent state covers the full 64-token chunks.");
+  el("path", {d: `M${TX(128)},38 L${TX(128)},44 L${TX(192) - 2},44 L${TX(192) - 2},38`, fill: "none", stroke: "#2f7d4a", "stroke-width": 1.3});
+  el("text", {x: TX(128), y: 62, class: "green"}, "The replay state holds the unfinished chunk.");
+
+  // 2. the request's slot in SGLang's state pool (one KDA layer)
+  const SY = 82;
+  el("rect", {x: 0, y: SY, width: 828, height: 266, rx: 6, fill: "#fff", stroke: "#b9b3aa", "stroke-width": 1.3});
+  el("text", {x: 12, y: SY + 24, "font-weight": "bold"}, "SGLang's slot has only a list of entries and the recurrent state.");
+  const KB = 1.6, SX = 70;            // px per KiB, nominal bytes of the Kimi K3 debug model
+  const entries = [
+    // [name, KiB, style, label inside the box]
+    ["conv", 9, GREY, ""],
+    ["q", 64, GREEN, "q"],
+    ["k", 64, GREEN, "k"],
+    ["v", 64, GREEN, "v"],
+    ["gate", 128, GREEN, "gate"],
+    ["beta", 1, GREEN, ""],
+    ["count", 16 / 1024, GREEN, ""],
+  ];
+  const RY = SY + 64;
+  el("text", {x: 12, y: RY + 22, class: "dim"}, "list");
+  let x = SX;
+  const pos = {};
+  for (const [name, kib, st, inside] of entries) {
+    const w = Math.max(kib * KB, 5);
+    el("rect", {x: x, y: RY, width: w, height: 34, rx: 1, ...st});
+    if (inside) el("text", {x: x + w / 2, y: RY + 22, "text-anchor": "middle", class: "green", "font-weight": "bold"}, inside);
+    pos[name] = [x, w];
+    x += w + 3;
+  }
+  // names of the narrow entries
+  el("line", {x1: pos.conv[0] + 7, y1: RY - 1, x2: pos.conv[0] + 7, y2: RY - 10, stroke: "#6f6a62"});
+  el("text", {x: pos.conv[0], y: RY - 14, class: "dim"}, "conv history");
+  const bx = pos.beta[0] + pos.beta[1] / 2, cx = pos.count[0] + pos.count[1] / 2;
+  el("line", {x1: bx, y1: RY - 1, x2: bx + 14, y2: RY - 12, stroke: "#2f7d4a"});
+  el("text", {x: bx + 16, y: RY - 12, class: "green", "font-weight": "bold"}, "beta");
+  el("line", {x1: cx, y1: RY + 35, x2: cx + 12, y2: RY + 46, stroke: "#2f7d4a"});
+  el("text", {x: cx + 14, y: RY + 52, class: "green", "font-weight": "bold"}, "count");
+  // brace under the replay entries
+  const rx0 = pos.q[0], rx1 = pos.count[0] + pos.count[1];
+  el("path", {d: `M${rx0},${RY + 60} L${rx0},${RY + 66} L${rx1},${RY + 66} L${rx1},${RY + 60}`, fill: "none", stroke: "#2f7d4a", "stroke-width": 1.4});
+  el("text", {x: rx0, y: RY + 86, class: "green"}, "This PR adds the replay state to that list, as 6 more entries.");
+  el("text", {x: rx0, y: RY + 108}, "q, k, v and gate each hold 64 tokens × 4 heads × 128 values.");
+  el("text", {x: rx0, y: RY + 130}, "The count entry is padded from 4 to 16 bytes, because SGLang's HiCache copies 16-byte words.");
+  // per-slot sizes of the entries drawn wide enough to label
+  for (const [name, txt] of [["q", "64 KiB"], ["k", "64 KiB"], ["v", "64 KiB"], ["gate", "128 KiB"]])
+    el("text", {x: pos[name][0] + pos[name][1] / 2, y: RY + 52, "text-anchor": "middle", class: "dim"}, txt);
+
+  // the recurrent state
+  const TY = RY + 150;
+  el("rect", {x: SX, y: TY, width: 256 * KB, height: 34, rx: 1, ...GREY});
+  el("text", {x: SX + 128 * KB, y: TY + 22, "text-anchor": "middle"}, "recurrent state");
+  el("text", {x: SX + 256 * KB + 12, y: TY + 22, class: "dim"}, "256 KiB");
+</script>
+</body>
+</html>

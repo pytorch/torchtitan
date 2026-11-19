@@ -43,14 +43,16 @@ Detected by `<formatted_context>`, `<pr_or_issue_body>`, and `<comments>` tags i
 the prompt. PR metadata, the description, and all comments are already in the
 prompt. The checkout is shallow, so get the diff with `gh pr diff <N>` rather than
 `git diff`. Allowed read-only commands: `gh pr view`, `gh pr diff`, `gh pr list`,
-`gh issue view`. Post the result with `gh pr review` (see "Posting").
+`gh issue view`. Also allowed: pr-image's renderer (Step 7), which writes PNGs in
+`pr_image/` and uploads one. Post the result with `gh pr review` (see "Posting").
 
 ### What was asked
 Read the triggering comment first; it overrides defaults below.
 - **"review" / "review this PR"**: full review.
 - **"review again" / "check again"**: re-review. Report only what changed since
   the last automated review: which earlier must-fix items are resolved (one line
-  each), which remain, and new problems in the new commits.
+  each), which remain, and new problems in the new commits. If Step 7 draws a
+  new image, add **What this PR does.** at the top and put it there.
 - **"review my review" / "comment on my comments"**: evaluate the maintainer's
   comments one by one (see "Reviewing a maintainer's review").
 - **A specific question** ("is this the proper fix?", "give a concrete example",
@@ -208,8 +210,40 @@ code. Group findings by area; use 1-3 agents for large PRs, or do it yourself
 for small ones. Each finding comes back valid, invalid, or needs rewording. Drop
 the invalid ones. Mark anything you still can't verify as *unverified*.
 
-### Step 6: Write and post
-Use the output format below, then post (Actions mode) or print (local mode).
+### Step 6: Write
+Write the whole review in the output format below. In Actions mode, write it to
+`review_body.md` in the working directory (never commit it). Don't post it yet.
+
+### Step 7: Image (GitHub Actions mode)
+Only after `review_body.md` is written, so drawing never shapes the review. Don't
+open pr-image's files before this step. A picture of the change goes under "What
+this PR does" on the first review, and again only after a major change. Only for
+a full review or a re-review (see "What was asked"). Skip this step locally, for
+"review my review", for a question, and on ghstack PRs (Write is disabled there):
+no image and no line about it.
+1. Find the last review by `claude` (`author.login`) whose body has
+   `<!-- pr-image drawn at <sha> -->`: `gh pr view <N> --json reviews`.
+2. None: draw. Found: check that image against the current diff (its alt text, and
+   the image sources under that review's Details).
+   - Its main claim still holds, even if a name or line number changed: no image and
+     no line.
+   - Its main claim is false, or the PR's main change moved: draw a new one.
+3. No image and no line when the PR is trivial and "Example" is omitted.
+4. Only now load the `pr-image` skill, and draw with its "GitHub Actions" section.
+   When its §2 says nothing runs differently: no image and no line.
+5. Upload the picked image (pr-image's `--upload` command, which prints its URL).
+   In `review_body.md`, put `![<alt>](<url>)` and `<!-- pr-image drawn at <PR head
+   sha> -->` under "What this PR does", and the image sources (label -> `path:line`
+   or diff hunk) under Details.
+6. A failed render or upload, or a run over the render budget: no image, and one
+   line under "Not verified": "No image: <the reason>".
+
+TODO(ghstack): ghstack PRs (32 of 300 recent ones) get no image, because Write is
+disabled there. A render flag that takes the page as an argument could cover them
+(stdin would need a pipe or a redirect, which are denied). Untested.
+
+### Step 8: Post
+Post `review_body.md` (Actions mode, see "Posting") or print the review (local mode).
 
 ## Reviewing a maintainer's review
 
@@ -232,6 +266,8 @@ under "Not verified" if it matters). Put long detail in a collapsible section.
 **Verdict: Approve | Request changes | Needs discussion** -- <one sentence: the decisive reason>
 
 **What this PR does.** <2-4 plain sentences.>
+
+<the image and its marker, when Step 7 drew one>
 
 **Example.** <5-15 lines: a minimal concrete scenario, before vs. after. For a
 refactor, show one representative call site before/after.>
