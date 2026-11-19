@@ -27,6 +27,34 @@ from torchtitan.config import Configurable
 GrainDataset: TypeAlias = grain.MapDataset | grain.IterDataset
 
 
+def _shard_and_repeat(
+    dataset: grain.MapDataset, policy: DatasetIterationPolicy
+) -> grain.MapDataset:
+    """Assign globally ordered indices to DP ranks and apply epoch repetition.
+
+    Strided ownership repeats before slicing so local index ``i`` on rank
+    ``r`` always reads global index ``i * dp_world_size + r``, including when
+    a corpus length is not divisible by the data-parallel degree.
+    """
+    if len(dataset) < policy.dp_world_size:
+        raise ValueError(
+            f"dataset has {len(dataset)} rows, fewer than "
+            f"dp_world_size={policy.dp_world_size}"
+        )
+    if policy.map_dataset_dp_sharding == "strided":
+        if policy.repeat:
+            dataset = dataset.repeat()
+        return dataset[policy.dp_rank :: policy.dp_world_size]
+
+    shard_size, remainder = divmod(len(dataset), policy.dp_world_size)
+    shard_start = policy.dp_rank * shard_size + min(policy.dp_rank, remainder)
+    shard_stop = shard_start + shard_size + int(policy.dp_rank < remainder)
+    dataset = dataset[shard_start:shard_stop]
+    # Grain preserves the epoch through sliced map indices, so the upstream
+    # shuffle uses seed + epoch on each repeat of this contiguous shard.
+    return dataset.repeat() if policy.repeat else dataset
+
+
 class DatasetConfig(Protocol):
     """Builds one node of a Grain dataset graph."""
 
@@ -107,6 +135,10 @@ class SingleDatasetConfig:
         if isinstance(source, RandomAccessDataSource):
             dataset: GrainDataset = grain.MapDataset.source(source)
         elif isinstance(source, StreamingDataSource):
+            if dataset_iteration_policy.map_dataset_dp_sharding == "strided":
+                raise ValueError(
+                    "strided data-parallel sharding requires an indexed source"
+                )
             dataset = source.build_iter_dataset(
                 dataset_iteration_policy=dataset_iteration_policy
             )
@@ -153,26 +185,7 @@ class SingleDatasetConfig:
         # Shuffle globally, then give each DP rank a disjoint slice.
         if dataset_iteration_policy.shuffle:
             dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
-        if len(dataset) < dataset_iteration_policy.dp_world_size:
-            raise ValueError(
-                f"dataset has {len(dataset)} rows, fewer than "
-                f"dp_world_size={dataset_iteration_policy.dp_world_size}"
-            )
-        shard_size, remainder = divmod(
-            len(dataset), dataset_iteration_policy.dp_world_size
-        )
-        shard_start = dataset_iteration_policy.dp_rank * shard_size + min(
-            dataset_iteration_policy.dp_rank, remainder
-        )
-        shard_stop = shard_start + shard_size
-        if dataset_iteration_policy.dp_rank < remainder:
-            shard_stop += 1
-        dataset = dataset[shard_start:shard_stop]
-        if dataset_iteration_policy.repeat:
-            # Grain preserves the epoch through sliced map indices, so the
-            # upstream shuffle uses seed + epoch on each repeat.
-            dataset = dataset.repeat()
-        return dataset
+        return _shard_and_repeat(dataset, dataset_iteration_policy)
 
     def _build_iter_dataset(
         self,
@@ -310,23 +323,4 @@ class DatasetConcatConfig:
         if dataset_iteration_policy.shuffle:
             dataset = dataset.shuffle(seed=dataset_iteration_policy.seed)
 
-        if len(dataset) < dataset_iteration_policy.dp_world_size:
-            raise ValueError(
-                f"dataset has {len(dataset)} rows, fewer than "
-                f"dp_world_size={dataset_iteration_policy.dp_world_size}"
-            )
-
-        shard_size, remainder = divmod(
-            len(dataset), dataset_iteration_policy.dp_world_size
-        )
-        shard_start = dataset_iteration_policy.dp_rank * shard_size + min(
-            dataset_iteration_policy.dp_rank, remainder
-        )
-        shard_stop = shard_start + shard_size
-        if dataset_iteration_policy.dp_rank < remainder:
-            shard_stop += 1
-        dataset = dataset[shard_start:shard_stop]
-
-        if dataset_iteration_policy.repeat:
-            dataset = dataset.repeat()
-        return dataset
+        return _shard_and_repeat(dataset, dataset_iteration_policy)
