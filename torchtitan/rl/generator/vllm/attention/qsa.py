@@ -21,11 +21,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import reshape_and_cache_flash
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import CircularBufferSpec, FullAttentionSpec
 
 from torchtitan.models.common.attn_gym import paged_sparse_decode, PagedKV
 
-# T = packed tokens, P = pages, N = tokens per page,
+# T = packed tokens, S = requests, P = pages, N = tokens per page,
 # Q = query heads, H = KV heads, K = head dimension, B = selected blocks.
 
 
@@ -36,6 +36,22 @@ class QSAPagedMetadata(AttentionMetadata):
     query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
     max_query_len: int
+
+    def token_coordinates(self, num_tokens: int):
+        """Return request indices, absolute positions and validity for packed rows."""
+        rows_T = torch.arange(num_tokens, device=self.query_start_loc.device)
+        request_T = torch.searchsorted(
+            self.query_start_loc[1:], rows_T, right=True
+        ).clamp_max(self.seq_lens.numel() - 1)
+        query_lens_S = self.query_start_loc.diff()
+        positions_T = (
+            self.seq_lens[request_T]
+            - query_lens_S[request_T]
+            + rows_T
+            - self.query_start_loc[request_T]
+        )
+        valid_T = rows_T < self.query_start_loc[-1]
+        return request_T, positions_T.masked_fill(~valid_T, 0), valid_T
 
 
 class QSAPagedMetadataBuilder(AttentionMetadataBuilder[QSAPagedMetadata]):
@@ -175,3 +191,21 @@ class PagedCache(torch.nn.Module, AttentionLayerBase):
             < metadata.query_start_loc[-1]
         )
         return output_TQK.masked_fill(~valid_T[:, None, None], 0)
+
+
+class PagedRingCache(PagedCache):
+    """One state ring per request, with at least 16 slots, managed by vLLM."""
+
+    def get_kv_cache_spec(self, vllm_config):
+        return CircularBufferSpec(
+            block_size=16,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            dtype=self.dtype,
+        )
+
+    def gather(self, cache_PNHK, request_T, positions_T, metadata):
+        return cache_PNHK[
+            metadata.block_table[request_T, 0].long(),
+            positions_T % cache_PNHK.shape[1],
+        ]

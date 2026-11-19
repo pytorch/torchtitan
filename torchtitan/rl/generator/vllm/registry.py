@@ -44,6 +44,8 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.qwen3_5.rope import get_mrope_config
+from torchtitan.models.qwen3_8_flash_next.attention import QSAInnerAttention
+from torchtitan.models.qwen3_8_flash_next.model import Qwen38FlashNextModel
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -96,6 +98,8 @@ def vllm_attention_backend(cfg: Decoder.Config) -> AttentionBackendEnum | None:
     if attention is None:
         raise ValueError("No full attention layer found in the model spec.")
     kernel_config = attention.inner_attention
+    if isinstance(kernel_config, QSAInnerAttention.Config):
+        return None
     if uses_compressed_mla_cache(kernel_config):
         return None
     if isinstance(kernel_config, MLAAttention.Config):
@@ -164,7 +168,11 @@ def model_config_to_hf_config_dict(
         ),  # positive int; only PP/KV-transfer read magnitude
         # Unused
         "rope_theta": rope_theta,  # only used for non-default rope_type; wrapper builds RoPE
-        "rms_norm_eps": cfg.norm.eps,  # only minimax-qk-norm fusion reads it; wrapper builds RMSNorm
+        "rms_norm_eps": (
+            cfg.hyper_connection_mixer.hc_norm.eps
+            if isinstance(cfg, Qwen38FlashNextModel.Config)
+            else cfg.norm.eps
+        ),  # only minimax-qk-norm fusion reads it; wrapper builds the norms
         "tie_word_embeddings": getattr(
             cfg, "enable_weight_tying", False
         ),  # multimodal/GGUF only; wrapper ties weights
