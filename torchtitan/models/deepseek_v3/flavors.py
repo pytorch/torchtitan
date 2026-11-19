@@ -8,6 +8,7 @@
 
 import copy
 import dataclasses
+import math
 from collections.abc import Callable
 from functools import partial
 
@@ -88,6 +89,8 @@ _LINEAR_INIT = {
 }
 _NORM_INIT = {"weight": nn.init.ones_}
 _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
+# nn.Linear's default initialization, as Linear.reset_parameters applies it.
+_DEFAULT_LINEAR_INIT = {"weight": partial(nn.init.kaiming_uniform_, a=math.sqrt(5))}
 
 
 def _output_linear_init(dim: int) -> dict[str, Callable]:
@@ -435,20 +438,28 @@ def _build_mtp_layers(
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
                 ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
                 enorm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, sharding_config=norm_sharding
+                    normalized_shape=dim,
+                    eps=1e-6,
+                    param_init=_NORM_INIT,
+                    sharding_config=norm_sharding,
                 ),
                 hnorm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, sharding_config=norm_sharding
+                    normalized_shape=dim,
+                    eps=1e-6,
+                    param_init=_NORM_INIT,
+                    sharding_config=norm_sharding,
                 ),
                 eh_proj=Linear.Config(
                     in_features=dim * 2,
                     out_features=dim,
                     bias=False,
+                    param_init=_DEFAULT_LINEAR_INIT,
                     sharding_config=mtp_projection_sharding_config(enable_sp=enable_sp),
                 ),
                 mtp_norm=RMSNorm.Config(
                     normalized_shape=dim,
                     eps=1e-6,
+                    param_init=_NORM_INIT,
                     sharding_config=norm_sharding_config(enable_sp=enable_sp),
                 ),
                 sharding_config=mtp_block_sharding_config(enable_sp=enable_sp),
