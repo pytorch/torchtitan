@@ -299,7 +299,6 @@ class DecisionModel(ABC):
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-5, weight_decay=0.0)]
                 ),
                 lr_scheduler=LRSchedulersContainer.Config(
-                    warmup_steps=0,
                     decay_ratio=0.9,
                     decay_type="cosine",
                     min_lr_factor=0.1,

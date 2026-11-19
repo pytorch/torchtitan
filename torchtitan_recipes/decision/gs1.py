@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GS1-format decision fine-tuning on TorchTitan-supported backbones."""
+"""GS1 native decision-model fine-tuning on TorchTitan."""
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
@@ -14,11 +14,11 @@ from torchtitan_recipes.decision.base import DecisionModel
 
 
 class GS1DecisionModel(DecisionModel):
-    """Use GS1 decision data with a TorchTitan Qwen3.5 backbone."""
+    """Build the GS1 decision recipe and its model-family boundary."""
 
     @property
     def hf_assets_path(self) -> str:
-        return f"./assets/hf/Qwen3.5-{self.model_size}"
+        return f"./assets/hf/GS1-{self.model_size}"
 
     def build_backbone_config(self, *, seq_len: int) -> tuple[Qwen35Model.Config, int]:
         model_config = build_model_config(
@@ -33,7 +33,7 @@ def gs1_decision(
     parallelism: ParallelismConfig | None = None,
     brier_weight: float = 1.0,
 ) -> Trainer.Config:
-    """Build a GS1 data recipe using TorchTitan's selected backbone family."""
+    """Build a GS1 data recipe with distribution NLL plus expected Brier."""
     return GS1DecisionModel(
         model_size, parallelism=parallelism, brier_weight=brier_weight
     ).build_trainer_config(data_path="./assets/hf/gs1-distribution/train.jsonl")

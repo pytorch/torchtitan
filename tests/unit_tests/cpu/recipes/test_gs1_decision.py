@@ -130,5 +130,5 @@ def test_gs1_decision_model_uses_shared_decision_recipe_base() -> None:
 
     model = GS1DecisionModel("0.8B")
     assert isinstance(model, DecisionModel)
-    assert model.hf_assets_path.endswith("Qwen3.5-0.8B")
+    assert model.hf_assets_path.endswith("GS1-0.8B")
     assert gs1_decision.__module__ == "torchtitan_recipes.decision.gs1"
