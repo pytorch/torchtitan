@@ -76,6 +76,7 @@ def test_sparse_attention_and_indexer_loss_match_oracle() -> None:
                 kv_lora_rank=14, num_heads=2, qk_nope_head_dim=4, v_head_dim=5
             ),
             index_topk=3,
+            impl="reference",
             aux_loss=SparseIndexerLoss.Config(
                 coeff=0.01,
                 reduce_mesh="loss",
