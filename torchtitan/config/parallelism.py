@@ -119,7 +119,8 @@ class ParallelismConfig:
     FSDP2 group, so training from the same parameters is bitwise identical to
     FSDP2. ``validate_flex_shard_training`` in
     ``torchtitan/distributed/flex_shard_fsdp.py`` rejects what FlexShard doesn't
-    support yet.
+    support yet. See ``torchtitan/distributed/FLEX_SHARD_FSDP.md`` for everything
+    it supports and rejects.
     """
 
     tensor_parallel_degree: int = 1
