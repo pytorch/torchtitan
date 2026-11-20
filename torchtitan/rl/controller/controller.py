@@ -25,25 +25,25 @@ _data_input_loop                                      _rollout_loop[N] (group wo
                         v                                                     | v
 RolloutGroupWorkBuffer
 +---------------------------------------------------------------------------------------------------------------------+
-| active slots = (target_offpolicy_steps + 1) * num_prompts_per_train_step                                                |
+| active slots (keyed by group id): (target_offpolicy_steps + 1) * num_prompts_per_train_step                         |
 |                                                                                                                     |
 | caller            group_buffer call                                            state / active slot                  |
 | _data_input_loop  add_work(RolloutGroupWork)                                   WAITING; slot acquired               |
 | _rollout_loop[N]  claim_next()                                                 WAITING -> CLAIMED                   |
 | _rollout_loop[N]  finalize_work(RolloutGroup)                                  CLAIMED -> FINALIZED                 |
 | _batcher_loop     RolloutGroup = take_finalized()                              FINALIZED -> taken (slot still held) |
-| _batcher_loop     release_active_groups(1, "untrainable_group")                slot released                        |
-| _trainer_loop     release_active_groups(num_prompts_per_train_step, "trained")  slots released after state dict pull |
+| _batcher_loop     release_slots([group_id], "untrainable_group")                slot released                        |
+| _trainer_loop     release_slots(batch.trainable_group_ids, "trained")           slots released after state dict pull |
 +---------------------------------------------------------------------------------------------------------------------+
                                                   |
                                                   | group = group_buffer.take_finalized()
                                                   v
 _batcher_loop
-+----------------------------------------------------------------------------------------+
-| batch, trainable, _ = batcher.add_group.call_one(group)                                |
-| if no trainable samples: group_buffer.release_active_groups(1, "untrainable_group")    |
-| training_batch_queue.put(TrainerStepBatch)                                             |
-+-----------------------+------------------------------+---------------------------------+
++-------------------------------------------------------------------------------------------+
+| batch, trainable, _ = batcher.add_group.call_one(group)                                   |
+| if no trainable samples: group_buffer.release_slots([group.group_id], "untrainable_group") |
+| training_batch_queue.put(TrainerStepBatch)                                                |
++-----------------------+------------------------------+------------------------------------+
                         |  ^                           |
           add group     |  | maybe_training_batch      | put batch
                         v  |                           v
@@ -56,15 +56,15 @@ Batcher (own process)                                training_batch_queue
                                                                          v
 _trainer_loop
 +----------------------------------------------------------------------------------------------------------+
-| train batch -> optim -> push/pull weights -> buffer.release_active_groups(num_prompts_per_train_step)     |
+| train batch -> optim -> push/pull weights -> buffer.release_slots(batch.trainable_group_ids)              |
 +----------------------------------------------------------------------------------------------------------+
 
 Backpressure (each loop: what it consumes/produces, and what gates each side):
 _data_input_loop
   produces: RolloutGroupWork into group_buffer
     waits for:    a free active slot (group_buffer.wait_for_slot)
-    unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained") after the pull
-                  (and _batcher_loop release_active_groups(1,"untrainable_group"))
+    unblocked by: _trainer_loop release_slots(batch.trainable_group_ids, "trained") after the pull
+                  (and _batcher_loop release_slots([group_id], "untrainable_group"))
 _rollout_loop[N]
   consumes: a WAITING RolloutGroupWork (group_buffer.claim_next)
     waits for:    a claimable WAITING entry
@@ -1158,8 +1158,8 @@ class Controller(Configurable):
     async def _data_input_loop(self, group_buffer: RolloutGroupWorkBuffer) -> None:
         """produces a RolloutGroupWork into group_buffer.
         waits for:    a free active slot (group_buffer.wait_for_slot)
-        unblocked by: _trainer_loop release_active_groups(num_prompts_per_train_step, "trained")
-            after the pull (and _batcher_loop release_active_groups(1,"untrainable_group"))
+        unblocked by: _trainer_loop release_slots(batch.trainable_group_ids, "trained")
+            after the pull (and _batcher_loop release_slots([group_id], "untrainable_group"))
 
         Separate from `_rollout_loop`, so slow data prep (e.g. on-the-fly question generation) overlaps
         generation instead of serializing in front of it.
@@ -1276,8 +1276,8 @@ class Controller(Configurable):
                 add_group_wall_s.append(time.perf_counter() - start)
                 add_group_handler_s.append(handler_s)
             if not group_is_trainable:
-                await self._group_buffer.release_active_groups(
-                    1, reason="untrainable_group"
+                await self._group_buffer.release_slots(
+                    [rollout_group.group_id], reason="untrainable_group"
                 )
             if maybe_training_batch is not None:
                 maybe_training_batch.metrics.extend(
@@ -1456,7 +1456,9 @@ class Controller(Configurable):
                 push_task = self._start_push_model_state_dict()
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
-                        optimizer_result.policy_version, after=push_task
+                        optimizer_result.policy_version,
+                        trainable_group_ids=packed.trainable_group_ids,
+                        after=push_task,
                     )
                 )
 
@@ -1539,10 +1541,15 @@ class Controller(Configurable):
         return asyncio.create_task(wait())
 
     async def _pull_model_state_dict_and_release_groups(
-        self, version: int, *, after: asyncio.Task[float]
+        self,
+        version: int,
+        *,
+        trainable_group_ids: list[int],
+        after: asyncio.Task[float],
     ) -> float:
-        """Once the push ``after`` lands, load policy ``version`` into every generator, then admit
-        the next rollout groups; returns the pull's wall time in seconds."""
+        """Once the push ``after`` lands, load policy ``version`` into every generator, then release
+        the step's ``trainable_group_ids`` to admit the next rollout groups; returns the pull's wall
+        time in seconds."""
         await after
         with sl.log_trace_span("generator_pull_model_state_dict"):
             start = time.perf_counter()
@@ -1555,7 +1562,5 @@ class Controller(Configurable):
 
         # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
         # rollout starts at the current version (keeps policy_age within the derived freshness bound).
-        await self._group_buffer.release_active_groups(
-            self.config.async_loop.num_prompts_per_train_step, reason="trained"
-        )
+        await self._group_buffer.release_slots(trainable_group_ids, reason="trained")
         return pull_s
