@@ -50,6 +50,11 @@ checkpoint. Append `_mm` (e.g. `9B_mm`, `35B-A3B_mm`) for
 | 9B | 4096 | 32 | 16 | 4 | 256 | 1152 | 27 |
 | 27B | 5120 | 64 | 24 | 4 | 256 | 1152 | 27 |
 
+`9B_1M` and `9B_4M` are text-only 9B flavors for long-context testing. They
+extend RoPE from 262144 positions with YaRN (factor 4 and 16) to 2**20 and 2**22
+positions. As in HF, the YaRN attention factor scales cos and sin, so it applies
+only to the rotary channels of each head.
+
 ### MoE
 
 | Variant | LLM dim | Layers | Experts | Top-k | Shared Expert |

@@ -54,7 +54,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
-from torchtitan.models.common.rope import CosSinVisionRoPE
+from torchtitan.models.common.rope import CosSinVisionRoPE, YaRNScalingConfig
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -1070,6 +1070,7 @@ def _9b(
     seq_len: int,
     parallelism: ParallelismConfig,
     has_vision_encoder: bool = True,
+    rope_scaling: YaRNScalingConfig | None = None,
 ) -> Qwen35Model.Config:
     """Qwen3.5-9B dense config, with a vision encoder if ``has_vision_encoder``."""
     dim = 4096
@@ -1107,6 +1108,7 @@ def _9b(
                 max_context_length=seq_len,
                 theta=10_000_000.0,
                 mrope_section=[11, 11, 10],
+                scaling=rope_scaling,
             ),
             attn_backend=attn_backend,
             n_layers=n_layers,
@@ -1469,6 +1471,23 @@ MODEL_FLAVORS = {
     "4B_mm": (_4b, 262144),
     "9B": (partial(_9b, has_vision_encoder=False), 262144),
     "9B_mm": (_9b, 262144),
+    # Long-context text flavors: YaRN extends the 262144-token RoPE range.
+    "9B_1M": (
+        partial(
+            _9b,
+            has_vision_encoder=False,
+            rope_scaling=YaRNScalingConfig(factor=4.0, original_seq_len=262144),
+        ),
+        2**20,
+    ),
+    "9B_4M": (
+        partial(
+            _9b,
+            has_vision_encoder=False,
+            rope_scaling=YaRNScalingConfig(factor=16.0, original_seq_len=262144),
+        ),
+        2**22,
+    ),
     "27B": (partial(_27b, has_vision_encoder=False), 262144),
     "27B_mm": (_27b, 262144),
     "35B-A3B": (partial(_35b_a3b, has_vision_encoder=False), 262144),
