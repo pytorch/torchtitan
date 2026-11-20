@@ -96,7 +96,10 @@ def _swe_rebench_rollouter_config(
     def taskset(
         partition: Literal["train", "validation"]
     ) -> SWERebenchV21TasksetConfig:
-        return SWERebenchV21TasksetConfig(id=taskset_id, partition=partition)
+        # Python only: the language of the gold-checked tasks (README).
+        return SWERebenchV21TasksetConfig(
+            id=taskset_id, partition=partition, languages=["python"]
+        )
 
     return VerifiersRollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
@@ -154,7 +157,8 @@ def _swe_rebench_rollouter_config(
 
 
 def rl_grpo_qwen35_9b_swe_rebench() -> Controller.Config:
-    """Qwen3.5-9B on SWE-rebench V2.1 with the bash harness, on one 8-GPU host.
+    """Qwen3.5-9B on SWE-rebench V2.1's Python tasks with the bash harness, on one
+    8-GPU host.
 
     8 GPUs: 4 trainer (FSDP=4) and 4 one-GPU generators. Batches of 8 tasks x
     8 rollouts, up to 100 agent turns at 64K context.

@@ -23,13 +23,14 @@ this torch-free module rather than in the recipe.
 """
 
 import asyncio
-import functools
 import hashlib
 import json
 import re
 import shlex
+import sys
+import tempfile
 import tomllib
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -79,16 +80,6 @@ _TEST_OUTPUT_START = "SWEREBENCH_V2_TEST_OUTPUT_START"
 _TEST_OUTPUT_END = "SWEREBENCH_V2_TEST_OUTPUT_END"
 
 
-class SWERebenchV21TaskConfig(vf.TaskConfig):
-    reward_mode: Literal["f2p_regression", "resolved"] = "f2p_regression"
-    """`resolved`: 1.0 when every FAIL_TO_PASS and PASS_TO_PASS test passes, else
-    0.0 (V2.1's criterion). `f2p_regression` gives partial credit:
-    f2p * (0.5 + 0.5 * p2p), where f2p and p2p are the pass fractions of the
-    FAIL_TO_PASS and PASS_TO_PASS tests. Each broken PASS_TO_PASS test lowers the
-    reward; breaking all of them halves it. The env server builds every task,
-    validation included, with the training taskset's value."""
-
-
 class SWERebenchV21Data(SWERebenchV2Data):
     grader_source: str
     """The task's tests/grade.py."""
@@ -104,26 +95,6 @@ def strip_script_markers(test_output: str) -> str:
     return region.rsplit(_TEST_OUTPUT_END + "\n", 1)[0]
 
 
-@functools.cache
-def load_grader(grader_source: str) -> Callable[[dict, str], dict]:
-    """Compile a task's tests/grade.py and return its `grade` function. Tasks with
-    the same log parser ship the same grader, so each distinct grader loads once.
-
-    What is specific to SWE-rebench V2.1: each task ships tests/grade.py, a
-    standalone script that SWE-rebench-V2's lib/harbor_tasks generates for the
-    task's log parser (there are 32 parsers). It defines
-    ``grade(config, test_log)``, where `config` holds the FAIL_TO_PASS and
-    PASS_TO_PASS lists, and returns the report `run_grader` describes. V2.1's
-    tests/test.sh calls it through the script's command line
-    (``grade.py CONFIG LOG REPORT``), which only reads and writes those files around
-    `grade`; this calls `grade` directly. The script imports only the standard
-    library and runs its command line only as ``__main__``.
-    """
-    namespace = {"__name__": "swe_rebench_v21_grader"}
-    exec(compile(grader_source, "tests/grade.py", "exec"), namespace)
-    return namespace["grade"]
-
-
 async def run_grader(
     grader_source: str,
     *,
@@ -131,42 +102,76 @@ async def run_grader(
     pass_to_pass: list[str],
     test_log: str,
 ) -> dict:
-    """Grade a test log with a task's grader, as V2.1's tests/test.sh does, and
-    return its report: `resolved`, `parsed_counts`, and `fail_to_pass` and
-    `pass_to_pass` mapping each expected test name to whether it passed."""
-    config = {"FAIL_TO_PASS": fail_to_pass, "PASS_TO_PASS": pass_to_pass}
+    """Run a task's grader on a test log, as V2.1's tests/test.sh does, and return
+    its report: `resolved`, `parsed_counts`, and `fail_to_pass` and `pass_to_pass`
+    mapping each expected test name to whether it passed.
 
-    def grade() -> dict:
-        return load_grader(grader_source)(config, test_log)
-
-    try:
-        # In a worker thread, so parsing a large log does not stall the event loop
-        # that serves the env server's other rollouts.
-        return await asyncio.to_thread(grade)
-    except Exception as error:
-        # The grader is the dataset's code: fail scoring rather than score 0.
-        raise RuntimeError(f"the task's grader failed: {error!r}") from error
+    What is specific to SWE-rebench V2.1: each task ships tests/grade.py, a
+    standalone script that SWE-rebench-V2's lib/harbor_tasks generates for the
+    task's log parser (there are 32 parsers). Its command line is
+    ``grade.py CONFIG LOG REPORT``: CONFIG is a JSON file with the FAIL_TO_PASS and
+    PASS_TO_PASS lists, LOG the test command's output, and REPORT where it writes
+    the report above. It exits 0 when the task is resolved, else 1. It imports only
+    the standard library, so V2.1 runs it with ``-I -S`` (no environment variables,
+    user or site packages), and so does this function. The script takes file
+    paths, so the inputs go to a temporary directory, one per call.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "grade.py").write_text(grader_source)
+        (root / "config.json").write_text(
+            json.dumps({"FAIL_TO_PASS": fail_to_pass, "PASS_TO_PASS": pass_to_pass})
+        )
+        (root / "test_output.log").write_bytes(test_log.encode(errors="replace"))
+        report_path = root / "report.json"
+        # Its own process: the grader is code from the dataset, and the scoring
+        # timeout must be able to stop a parser stuck on a large log.
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-I",
+            "-S",
+            str(root / "grade.py"),
+            str(root / "config.json"),
+            str(root / "test_output.log"),
+            str(report_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await process.communicate()
+        finally:
+            # Scoring timed out or was cancelled: stop the grader with it.
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        # The grader exits 1 both for an unresolved task and on a crash; only a
+        # finished grade writes the report.
+        if not report_path.exists():
+            raise RuntimeError(
+                f"the task's grader failed (exit {process.returncode}): "
+                f"{stderr.decode(errors='replace')[-500:]}"
+            )
+        return json.loads(report_path.read_text())
 
 
 def pass_fraction(passed: dict[str, bool]) -> float:
-    """Fraction of a grader report's tests that passed; 1.0 when there are none."""
+    """Fraction of a grader report's tests that passed; 1.0 when there are none,
+    which only happens for PASS_TO_PASS: `read_task_directory` rejects a task
+    without FAIL_TO_PASS tests."""
     return sum(passed.values()) / len(passed) if passed else 1.0
 
 
-class SWERebenchV21Task(
-    SWERebenchV2Task,
-    vf.Task[SWERebenchV21Data, vf.State, SWERebenchV21TaskConfig],
-):
+class SWERebenchV21Task(SWERebenchV2Task, vf.Task[SWERebenchV21Data]):
     """prime-envs' SWE-rebench V2 task, adapted to V2.1 task directories.
 
     V2.1 tasks carry no base commit, which prime-envs needs to restore the test
     patch's files before applying it and to diff the agent's changes. The image's
     HEAD is that commit, so setup records it before the agent can move HEAD.
     Setup also deletes the answer key some images ship. Scoring grades with the
-    task's own V2.1 grader instead of prime-envs' parsers, adds the
-    `f2p_regression` reward mode and records the FAIL_TO_PASS and PASS_TO_PASS
-    pass fractions as metrics. The second base binds the data and config types;
-    prime-envs' base binds only its own data type.
+    task's own V2.1 grader instead of prime-envs' parsers, gives partial credit
+    instead of prime-envs' binary reward, and records the FAIL_TO_PASS and
+    PASS_TO_PASS pass fractions as metrics. The second base binds the data type;
+    prime-envs' base binds its own.
     """
 
     @property
@@ -211,10 +216,13 @@ class SWERebenchV21Task(
     # second one.
     @vf.reward(weight=1.0)
     async def solved(self, runtime: vf.Runtime, trace: vf.Trace) -> float:
+        """f2p * (0.5 + 0.5 * p2p), where f2p and p2p are the pass fractions of the
+        FAIL_TO_PASS and PASS_TO_PASS tests: a partial fix earns partial credit, and
+        each broken PASS_TO_PASS test lowers the reward; breaking all of them halves
+        it. Validation scores the same way, so its reward is not V2.1's resolve rate
+        (every test passes); `resolved` on the trace records that."""
         metrics = await self._grade(runtime, base_commit=trace.info[BASE_COMMIT_KEY])
         trace.record_metrics(metrics)
-        if self.config.reward_mode == "resolved":
-            return metrics["resolved"]
         return metrics["fail_to_pass_fraction"] * (
             0.5 + 0.5 * metrics["pass_to_pass_fraction"]
         )
@@ -283,6 +291,12 @@ def read_task_directory(
         )
     test_env_exports, test_command = match.group(1).splitlines(), match.group(2)
     tests = json.loads((task_dir / "tests" / "config.json").read_text())
+    # Every rollout would pass an empty FAIL_TO_PASS list, so the reward would not
+    # check the fix. No task of V2.1's revisions 3 and 4 has one.
+    if not tests["FAIL_TO_PASS"]:
+        raise ValueError(
+            f"{task_dir.name}: tests/config.json has no FAIL_TO_PASS tests"
+        )
     return TaskDirectory(
         repo=metadata["repo"],
         language=metadata["language"],
@@ -333,8 +347,6 @@ def validation_projects(projects: set[str], *, fraction: float) -> set[str]:
 
 
 class SWERebenchV21TasksetConfig(vf.TasksetConfig):
-    task: SWERebenchV21TaskConfig = SWERebenchV21TaskConfig()
-
     dataset: str = DATASET
     """Harbor Hub id of the task directories; Verifiers downloads it into
     ``~/.cache/harbor`` on first use."""

@@ -8,9 +8,8 @@
 
 import asyncio
 import json
-import pickle
+import os
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,23 +21,17 @@ pytest.importorskip("swerebench_v2")
 import verifiers.v1 as vf
 from swerebench_v2.taskset import build_eval_script
 
-from torchtitan.config import ConfigLoader
-from torchtitan.rl.controller.controller import Controller
-from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.swe_rebench.taskset import (
-    ANSWER_KEY_DIR,
     BASE_COMMIT_KEY,
     project_name,
     read_task_directory,
     run_grader,
     strip_script_markers,
     SWERebenchV21Task,
-    SWERebenchV21TaskConfig,
     SWERebenchV21Taskset,
     SWERebenchV21TasksetConfig,
 )
 from verifiers.v1.runtimes import ProgramResult
-from verifiers.v1.serve import env_config_data
 from verifiers.v1.state import state_cls
 from verifiers.v1.trace import Trace, TraceTask
 
@@ -49,21 +42,25 @@ RESOURCES = vf.TaskResources(cpu=1, memory=1, disk=1)
 TEST_PATCH = "diff --git a/tests/test_app.py b/tests/test_app.py\n-old\r\n+new\r\n"
 GOLD_PATCH = "diff --git a/app.py b/app.py\n-old\r\n+new\r\n"
 
-# A stand-in for V2.1's tests/grade.py with the same `grade` function and report:
-# a test passes when the log has a "PASSED <name>" line.
+# A stand-in for V2.1's tests/grade.py with the same command line and report: a
+# test passes when the log has a "PASSED <name>" line.
 GRADER = """
-def grade(config, test_log):
-    lines = test_log.splitlines()
-    # V2.1 grades the test command's output alone.
-    assert not any(line.startswith("SWEREBENCH_V2_TEST_OUTPUT") for line in lines)
-    passed = {line.split()[1] for line in lines if line.startswith("PASSED ")}
-    failed = {line.split()[1] for line in lines if line.startswith("FAILED ")}
-    return {
-        "resolved": passed >= set(config["FAIL_TO_PASS"] + config["PASS_TO_PASS"]),
-        "parsed_counts": {"PASSED": len(passed), "FAILED": len(failed)},
-        "fail_to_pass": {name: name in passed for name in config["FAIL_TO_PASS"]},
-        "pass_to_pass": {name: name in passed for name in config["PASS_TO_PASS"]},
-    }
+import json, sys
+config_path, log_path, report_path = sys.argv[1:4]
+config = json.load(open(config_path))
+lines = open(log_path).read().splitlines()
+# V2.1 grades the test command's output alone.
+assert not any(line.startswith("SWEREBENCH_V2_TEST_OUTPUT") for line in lines)
+passed = {line.split()[1] for line in lines if line.startswith("PASSED ")}
+failed = {line.split()[1] for line in lines if line.startswith("FAILED ")}
+report = {
+    "resolved": passed >= set(config["FAIL_TO_PASS"] + config["PASS_TO_PASS"]),
+    "parsed_counts": {"PASSED": len(passed), "FAILED": len(failed)},
+    "fail_to_pass": {name: name in passed for name in config["FAIL_TO_PASS"]},
+    "pass_to_pass": {name: name in passed for name in config["PASS_TO_PASS"]},
+}
+json.dump(report, open(report_path, "w"))
+sys.exit(0 if report["resolved"] else 1)
 """
 
 
@@ -141,6 +138,14 @@ def test_a_task_directory_becomes_a_prime_envs_task(tmp_path) -> None:
     assert data.base_commit == ""
 
 
+def test_a_task_without_fail_to_pass_tests_is_rejected(tmp_path) -> None:
+    """Every rollout would pass an empty FAIL_TO_PASS list."""
+    with pytest.raises(ValueError, match="no FAIL_TO_PASS tests"):
+        read_task_directory(
+            _write_task(tmp_path, "t-1", fail_to_pass=[]), resources=RESOURCES
+        )
+
+
 def test_the_test_command_runs_as_in_v21s_test_script(tmp_path) -> None:
     """The task's test environment reaches the command, which runs in a login shell;
     a multi-line command with shell variables survives prime-envs' `set -u` script."""
@@ -156,7 +161,7 @@ def test_the_test_command_runs_as_in_v21s_test_script(tmp_path) -> None:
         container_env='env = { _JAVA_OPTIONS = "-Xmx1g" }',
     )
     data = read_task_directory(task_dir, resources=RESOURCES).data
-    task = SWERebenchV21Task(data, SWERebenchV21TaskConfig())
+    task = SWERebenchV21Task(data, vf.TaskConfig())
 
     script = build_eval_script(data.install_config["test_cmd"])
     result = subprocess.run(
@@ -220,54 +225,26 @@ def test_a_language_filter_keeps_the_split(tmp_path) -> None:
 
 
 class _ScriptedRuntime:
-    """Answers each command the task runs, and records them in order. HEAD is
-    `HEAD_NOW`."""
+    """Returns `test_log` as prime-envs' test output and records each command the
+    task runs."""
 
-    def __init__(self, test_log: str = "") -> None:
+    def __init__(self, test_log: str) -> None:
         self.test_log = test_log
         self.commands: list[tuple[list[str], dict[str, str]]] = []
 
     async def run(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
         self.commands.append((argv, env))
-        if argv == ["git", "rev-parse", "HEAD"]:
-            return ProgramResult(exit_code=0, stdout=f"{HEAD_NOW}\n", stderr="")
         if argv == ["cat", "/test_output.txt"]:
             return ProgramResult(exit_code=0, stdout=self.test_log, stderr="")
-        if ANSWER_KEY_DIR in " ".join(argv):
-            return ProgramResult(exit_code=0, stdout="removed\n", stderr="")
         return ProgramResult(exit_code=0, stdout="", stderr="")
 
     async def write(self, path: str, data: bytes) -> None:
         pass
 
-    async def read(self, path: str) -> bytes:
-        return b"diff --git a/app.py b/app.py\n"
 
-
-HEAD_NOW = "head-now"
-# A different commit: the agent can move HEAD after setup recorded the base.
+# The commit setup recorded; HEAD may differ by scoring time, since the agent can
+# commit.
 BASE_AT_SETUP = "base-at-setup"
-
-
-def _trace() -> SimpleNamespace:
-    trace = SimpleNamespace(info={}, metrics={})
-    trace.record_metrics = trace.metrics.update
-    return trace
-
-
-def _task(tmp_path: Path, reward_mode: str = "f2p_regression") -> SWERebenchV21Task:
-    data = read_task_directory(_write_task(tmp_path, "t-1"), resources=RESOURCES).data
-    return SWERebenchV21Task(data, SWERebenchV21TaskConfig(reward_mode=reward_mode))
-
-
-def test_setup_removes_the_answer_key_and_records_the_base_commit(tmp_path) -> None:
-    runtime, trace = _ScriptedRuntime(), _trace()
-
-    asyncio.run(_task(tmp_path).setup(trace=trace, runtime=runtime))
-
-    assert trace.info[BASE_COMMIT_KEY] == HEAD_NOW
-    assert trace.metrics["answer_key_present"] == 1.0
-    assert "rm -rf /swebench_matterhorn" in " ".join(runtime.commands[0][0])
 
 
 # What prime-envs' test script writes: its markers around the test command's output.
@@ -279,21 +256,18 @@ SWEREBENCH_V2_TEST_OUTPUT_END
 """
 
 
-@pytest.mark.parametrize(
-    ("reward_mode", "reward"), [("f2p_regression", 0.75), ("resolved", 0.0)]
-)
-def test_scoring_restores_tests_from_the_recorded_commit(
-    tmp_path, reward_mode: str, reward: float
-) -> None:
+def test_scoring_restores_tests_from_the_recorded_commit(tmp_path) -> None:
     """The fix passes, but it breaks one of the two tests that passed before."""
-    runtime, trace = _ScriptedRuntime(TEST_LOG), _trace()
-    trace.info[BASE_COMMIT_KEY] = BASE_AT_SETUP
+    data = read_task_directory(_write_task(tmp_path, "t-1"), resources=RESOURCES).data
+    runtime = _ScriptedRuntime(TEST_LOG)
+    trace = SimpleNamespace(info={BASE_COMMIT_KEY: BASE_AT_SETUP}, metrics={})
+    trace.record_metrics = trace.metrics.update
 
     score = asyncio.run(
-        _task(tmp_path, reward_mode).solved(runtime=runtime, trace=trace)
+        SWERebenchV21Task(data, vf.TaskConfig()).solved(runtime=runtime, trace=trace)
     )
 
-    assert score == reward
+    assert score == 0.75
     restore_env = next(env for argv, env in runtime.commands if "base" in env)
     assert restore_env["base"] == BASE_AT_SETUP
     assert trace.metrics == {
@@ -305,17 +279,16 @@ def test_scoring_restores_tests_from_the_recorded_commit(
 
 
 @pytest.mark.parametrize(
-    ("pass_to_pass", "reward_mode", "reward"),
+    "pass_to_pass",
     [
         # One of two FAIL_TO_PASS tests passes; the one PASS_TO_PASS test still passes.
-        (["tests/test_app.py::test_old_a"], "f2p_regression", 0.5),
-        (["tests/test_app.py::test_old_a"], "resolved", 0.0),
+        ["tests/test_app.py::test_old_a"],
         # No PASS_TO_PASS tests: only FAIL_TO_PASS counts.
-        ([], "f2p_regression", 0.5),
+        [],
     ],
 )
 def test_verifiers_scores_the_task_with_its_one_reward(
-    tmp_path, pass_to_pass: list[str], reward_mode: str, reward: float
+    tmp_path, pass_to_pass: list[str]
 ) -> None:
     """Score through Verifiers, which finds rewards by their decorator and name."""
     fail_to_pass = ["tests/test_app.py::test_fix", "tests/test_app.py::test_fix_2"]
@@ -323,7 +296,7 @@ def test_verifiers_scores_the_task_with_its_one_reward(
         tmp_path, "t-1", fail_to_pass=fail_to_pass, pass_to_pass=pass_to_pass
     )
     data = read_task_directory(task_dir, resources=RESOURCES).data
-    task = SWERebenchV21Task(data, SWERebenchV21TaskConfig(reward_mode=reward_mode))
+    task = SWERebenchV21Task(data, vf.TaskConfig())
     trace = Trace(
         task=TraceTask(
             type="SWERebenchV21Task", data=data, key=task.key, hash=task.hash
@@ -343,34 +316,16 @@ def test_verifiers_scores_the_task_with_its_one_reward(
     asyncio.run(task.score(trace, _ScriptedRuntime(test_log)))
 
     # The bridge trains on trace.reward.
-    assert {name: r.score for name, r in trace.rewards.items()} == {"solved": reward}
-    assert trace.reward == reward
-
-
-@pytest.mark.parametrize(
-    ("test_log", "valid"),
-    [(TEST_LOG.replace("FAILED", "PASSED"), True), (TEST_LOG, False)],
-    ids=["all_tests_pass", "a_passing_test_breaks"],
-)
-def test_the_gold_check_reads_the_base_commit_itself(
-    tmp_path, test_log: str, valid: bool
-) -> None:
-    """Verifiers' gold check passes only the runtime, so there is no trace to read."""
-    runtime = _ScriptedRuntime(test_log)
-
-    assert asyncio.run(_task(tmp_path).validate(runtime)) is valid
-
-    argvs = [argv for argv, _ in runtime.commands]
-    assert argvs.index(["git", "rev-parse", "HEAD"]) == 0
-    restore_env = next(env for argv, env in runtime.commands if "base" in env)
-    assert restore_env["base"] == HEAD_NOW
+    assert {name: r.score for name, r in trace.rewards.items()} == {"solved": 0.5}
+    assert trace.reward == 0.5
 
 
 def test_a_crashed_grader_fails_scoring_instead_of_scoring_zero() -> None:
+    """A grader exits 1 both for an unresolved task and on a crash."""
     with pytest.raises(RuntimeError, match="grader failed"):
         asyncio.run(
             run_grader(
-                "def grade(config, test_log):\n    raise ValueError(test_log)\n",
+                "raise SystemExit(1)",
                 fail_to_pass=FAIL_TO_PASS,
                 pass_to_pass=PASS_TO_PASS,
                 test_log="",
@@ -378,59 +333,30 @@ def test_a_crashed_grader_fails_scoring_instead_of_scoring_zero() -> None:
         )
 
 
-def test_the_patch_is_diffed_against_the_recorded_commit(tmp_path) -> None:
-    runtime, trace = _ScriptedRuntime(), _trace()
-    trace.info[BASE_COMMIT_KEY] = BASE_AT_SETUP
-
-    asyncio.run(_task(tmp_path).finalize(trace=trace, runtime=runtime))
-
-    diff_env = next(env for argv, env in runtime.commands if "VF_DIFF_BASE" in env)
-    assert diff_env["VF_DIFF_BASE"] == BASE_AT_SETUP
-    assert trace.info["patch"].startswith("diff --git a/app.py")
-
-
-def _recipe(name: str) -> Controller.Config:
-    return ConfigLoader().load(
-        ["--module", "torchtitan_recipes.rl.verifiers_swe_rebench", "--config", name]
+def test_cancelling_scoring_stops_the_grader(tmp_path) -> None:
+    """Verifiers' scoring timeout cancels scoring; the grader must not outlive it."""
+    pid_path = tmp_path / "grader.pid"
+    grader = (
+        "import os, pathlib, time\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(600)\n"
     )
 
+    async def cancel_while_grading() -> None:
+        grading = asyncio.ensure_future(
+            run_grader(
+                grader,
+                fail_to_pass=FAIL_TO_PASS,
+                pass_to_pass=PASS_TO_PASS,
+                test_log="",
+            )
+        )
+        while not (pid_path.exists() and pid_path.read_text()):
+            await asyncio.sleep(0.05)
+        grading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await grading
 
-def test_env_server_workers_load_the_swe_rebench_env(monkeypatch) -> None:
-    """A pool worker runs the pickled `log_setup`, then resolves the env config, whose
-    taskset id is a local alias that only this test's process registered. It must find
-    the taskset and the harness without importing torch, vLLM or Monarch.
-    """
-    captured = {}
-
-    def serve_env(**kwargs) -> None:
-        captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
-        captured["config_data"] = pickle.dumps(kwargs["config_data"])
-
-    monkeypatch.setattr(env_server, "serve_env", serve_env)
-    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
-    monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
-    monkeypatch.setenv("no_proxy", "")
-    monkeypatch.setenv("NO_PROXY", "")
-    config = _recipe("rl_grpo_qwen35_9b_swe_rebench").rollouter.verifiers_env_server
-    env_server._run_env_server_process(
-        environment=env_config_data(config.environment),
-        serve=config.serve,
-        local_taskset_module=config.local_taskset_module,
-        address_queue=None,
-        death_pipe=None,
-    )
-
-    worker = f"""
-import pickle, sys
-from verifiers.v1.utils.loaders import load_harness, load_taskset, resolve_env_config
-pickle.loads({captured["log_setup"]!r})()
-env_config = resolve_env_config(pickle.loads({captured["config_data"]!r}))
-print(type(load_taskset(env_config.taskset)).__name__)
-print(type(load_harness(env_config.agent.harness)).__name__)
-print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.split() == ["SWERebenchV21Taskset", "BashHarness", "[]"]
+    asyncio.run(cancel_while_grading())
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_path.read_text()), 0)

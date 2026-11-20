@@ -9,7 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
+import pickle
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
@@ -20,7 +24,9 @@ pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
+from torchtitan.config import ConfigLoader
 from torchtitan.rl.actors.system import ActorSystem
+from torchtitan.rl.examples.verifiers import env_server
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
@@ -39,6 +45,7 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion, RolloutStatus
+from verifiers.v1.serve import env_config_data
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -311,6 +318,79 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
         ("stop_workers",),
         ("close_env_server",),
     ]
+
+
+@pytest.mark.parametrize(
+    ("module", "config", "taskset", "harness"),
+    [
+        (
+            "torchtitan_recipes.rl.verifiers_terminal_bench",
+            "rl_grpo_qwen35_9b_terminal_bench",
+            "TerminalTaskset",
+            "TerminalBenchTerminusHarness",
+        ),
+        pytest.param(
+            "torchtitan_recipes.rl.verifiers_swe_rebench",
+            "rl_grpo_qwen35_9b_swe_rebench",
+            "SWERebenchV21Taskset",
+            "BashHarness",
+            marks=pytest.mark.skipif(
+                importlib.util.find_spec("swerebench_v2") is None,
+                reason="needs prime-envs' swerebench_v2",
+            ),
+        ),
+    ],
+)
+def test_env_server_workers_skip_the_trainer_imports(
+    monkeypatch, module: str, config: str, taskset: str, harness: str
+) -> None:
+    """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
+    resolves the env config, whose taskset id is the local alias that only this test's
+    process registered. It must find the taskset and the harness without importing
+    torch, vLLM or Monarch.
+    """
+    captured = {}
+
+    def serve_env(**kwargs) -> None:
+        captured["main"] = sys.modules["__main__"]
+        captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
+        captured["config_data"] = pickle.dumps(kwargs["config_data"])
+
+    monkeypatch.setattr(env_server, "serve_env", serve_env)
+    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
+    monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
+    server_config = (
+        ConfigLoader()
+        .load(["--module", module, "--config", config])
+        .rollouter.verifiers_env_server
+    )
+    env_server._run_env_server_process(
+        environment=env_config_data(server_config.environment),
+        serve=server_config.serve,
+        local_taskset_module=server_config.local_taskset_module,
+        address_queue=None,
+        death_pipe=None,
+    )
+
+    # Spawn re-runs __main__ in each worker if it has a module name or a file.
+    assert captured["main"].__spec__ is None
+    assert not hasattr(captured["main"], "__file__")
+    worker = f"""
+import pickle, sys
+from verifiers.v1.utils.loaders import load_harness, load_taskset, resolve_env_config
+pickle.loads({captured["log_setup"]!r})()
+env_config = resolve_env_config(pickle.loads({captured["config_data"]!r}))
+print(type(load_taskset(env_config.taskset)).__name__)
+print(type(load_harness(env_config.agent.harness)).__name__)
+print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stdout.split() == [taskset, harness, "[]"]
 
 
 def test_trainable_token_spans() -> None:

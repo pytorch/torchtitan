@@ -34,14 +34,15 @@ filled from V2.1's Harbor task directories ([`taskset.py`](./taskset.py)).
   variables, in a login shell, for at most 1800 s. The env server grades the log with
   the task's own `tests/grade.py` (V2.1's parser and test-name matching for the task's
   test framework), outside the container. The grader is code from the pinned dataset
-  and runs on the controller host.
-- **Reward.** `f2p_regression` (default) is
-  `fail_to_pass_fraction * (0.5 + 0.5 * pass_to_pass_fraction)`, the pass rates of the
-  FAIL_TO_PASS and PASS_TO_PASS tests. `resolved` is V2.1's binary criterion: every
-  FAIL_TO_PASS and PASS_TO_PASS test passes. The task also records `resolved`, both
-  fractions, `parsed_tests` and `answer_key_present` on each Verifiers trace. TitanRL
-  does not log or record them yet: of the trace's scores, the bridge passes on only the
-  reward.
+  and runs on the controller host, in its own process, which the scoring timeout stops.
+- **Reward.** `fail_to_pass_fraction * (0.5 + 0.5 * pass_to_pass_fraction)`, the pass
+  rates of the FAIL_TO_PASS and PASS_TO_PASS tests: a partial fix earns partial credit,
+  and breaking every PASS_TO_PASS test halves the reward. Validation scores the same
+  way, so `validation_reward` is this score on the held-out projects, not V2.1's resolve
+  rate (every FAIL_TO_PASS and PASS_TO_PASS test passes). The task also records
+  `resolved`, both fractions, `parsed_tests` and `answer_key_present` on each Verifiers
+  trace. TitanRL does not log or record them yet: of the trace's scores, the bridge
+  passes on only the reward.
 
 | What | Where |
 | --- | --- |
@@ -77,8 +78,8 @@ python -m torchtitan.rl.train \
   --config rl_grpo_qwen35_9b_swe_rebench
 ```
 
-The recipe trains Qwen3.5-9B at 64K context on one 8-GPU host: 4 trainer GPUs (FSDP=4)
-and 4 one-GPU generators. It reads the checkpoint from `./assets/hf/Qwen3.5-9B`. It has
+The recipe trains Qwen3.5-9B on V2.1's Python tasks at 64K context on one 8-GPU host:
+4 trainer GPUs (FSDP=4) and 4 one-GPU generators. It reads the checkpoint from `./assets/hf/Qwen3.5-9B`. It has
 not been run end to end yet.
 
 ## Datasets
@@ -89,7 +90,8 @@ first use; set the taskset's `dataset_dir` to read a local copy instead.
 
 - **Languages.** 3,990 tasks are Python, 2,269 Go, 1,798 TypeScript, 1,687 JavaScript,
   1,129 Rust, and 2,464 in 15 other languages. Every language is kept by default;
-  `languages` keeps only some (`task.toml`'s `language`, e.g. `["python"]`).
+  `languages` keeps only some (`task.toml`'s `language`). The recipe keeps only
+  `["python"]`, the language of the gold check below.
 - **Split.** V2.1 has no split. `partition="train"` and `"validation"` split the projects
   by `validation_project_fraction`, so no project is in both, even when V2.1 lists it
   under two owners after a rename.
@@ -116,7 +118,7 @@ grades the same here as under V2.1's `tests/test.sh`. What differs:
 - **Timeout.** Both stop the test command after 1800 s and grade the partial log. Here
   the recipe's scoring timeout (2400 s, V2.1's verifier timeout) also bounds restoring
   the test files, applying the test patch and grading; a timeout errors the rollout,
-  which the recipe scores 0 (`error_reward`).
+  which the recipe scores 0 (`error_reward`), and stops the grader.
 
 A gold check of 100 Python tasks, one per repository, on one host: 94 valid (one of
 them only on a rerun). The other 6 also fail under V2.1's own `tests/test.sh` there;
