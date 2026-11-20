@@ -56,7 +56,8 @@ class _FlashAttentionPageSize:
     per sequence, and an explicit ``block_size`` that is not a multiple of 128 now
     fails.
     Why 16 if batch-invariant: with larger pages, decode and prefill can sum keys in
-    different tiles, so they would not match bitwise.
+    different tiles, so they would not match bitwise. Cost: neither FA4 nor FA3 uses TMA
+    on 16-token pages, so batch-invariant prefill can be slower.
     - FA4 runs its SwapAB decode kernel on any page that is a multiple of 128
       (``SwapABPolicy.page_multiple`` in ``flash_attn/cute/config.py``). SwapAB reads
       256 keys per tile and prefill reads 128.
