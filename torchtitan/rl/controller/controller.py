@@ -126,6 +126,7 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.mooncake_master import start_master
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
@@ -760,9 +761,11 @@ class Controller(Configurable):
         max_num_seqs = config.max_num_seqs_per_generator_dp_rank
         logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
 
-        # E.g. the Mooncake Store master, on this (the controller's) host. Before
-        # provisioning, so a config error raises before any host starts.
-        generator_engine = config.generator.engine.start_job_services()
+        # The generators' Mooncake Store master runs on this (the controller's)
+        # host until this process exits.
+        mooncake_master_address = (
+            start_master() if config.generator.engine.uses_mooncake_store else None
+        )
 
         with sl.log_trace_span("mesh_spawn"):
             actor_system = await self._build_actor_system()
@@ -783,12 +786,13 @@ class Controller(Configurable):
             # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
             self.generator_router = await actor_system.spawn_generator_router(
                 config.generator_router,
-                generator_config=replace(config.generator, engine=generator_engine),
+                generator_config=config.generator,
                 precision=config.precision,
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
                 vision_processor=config.vision_processor,
+                mooncake_master_address=mooncake_master_address,
             )
             self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,

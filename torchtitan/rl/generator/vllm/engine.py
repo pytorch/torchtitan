@@ -160,10 +160,13 @@ class VLLMEngine(GenerationEngine):
         reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
         vision_processor: VisionProcessor.Config | None,
+        mooncake_master_address: str | None,
         rank: int,
         generator_name: str,
         output_dir: str,
     ):
+        # TODO(acisseJZhong): use it once vLLM's Mooncake Store connector lands.
+        del mooncake_master_address
         if (
             config.session_kv_holder is not None
             and reset_kv_cache_on_model_state_dict_load

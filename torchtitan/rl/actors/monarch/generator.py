@@ -33,6 +33,7 @@ class _GeneratorActorEndpoints:
         max_num_seqs: int,
         output_dir: str,
         vision_processor: VisionProcessor.Config | None = None,
+        mooncake_master_address: str | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -44,6 +45,7 @@ class _GeneratorActorEndpoints:
             generator_name=context().actor_instance.actor_id.actor_name,
             open_result_channel=Channel.open,
             vision_processor=vision_processor,
+            mooncake_master_address=mooncake_master_address,
         )
 
     @concurrent_endpoint
