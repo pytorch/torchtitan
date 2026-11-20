@@ -154,15 +154,20 @@ class VLLMEngine(GenerationEngine):
         - Weights: the draft shares the target's embedding and lm_head storage, so it sees
           their updates. Its own layers (`mtp.*`) keep the checkpoint's weights, so
           acceptance can fall as the policy drifts.
-        - CUDA graphs: `cuda_graph.mode="FULL"` runs as FULL_DECODE_ONLY, so steps with a
-          prefill chunk run eagerly.
-        - Not supported with `session_kv_holder`, `debug.batch_invariant` or image prompts."""
+        - Not supported with `cuda_graph.mode="FULL"` (use FULL_DECODE_ONLY),
+          `session_kv_holder`, `debug.batch_invariant` or models with a vision encoder."""
 
         def __post_init__(self) -> None:
             GenerationEngine.Config.__post_init__(self)
             if self.num_speculative_tokens < 0:
                 raise ValueError(
                     f"num_speculative_tokens must be >= 0, got {self.num_speculative_tokens}"
+                )
+            if self.num_speculative_tokens > 0 and self.cuda_graph.mode == "FULL":
+                raise ValueError(
+                    f"num_speculative_tokens={self.num_speculative_tokens} needs "
+                    'cuda_graph.mode="FULL_DECODE_ONLY" or "NONE": with drafts, vLLM\'s GDN '
+                    "metadata builder supports CUDA graphs for decode steps only"
                 )
             if self.num_speculative_tokens > 0 and self.session_kv_holder is not None:
                 # TODO: support it, so sessions keep their KV between turns with MTP on. vLLM
@@ -214,10 +219,10 @@ class VLLMEngine(GenerationEngine):
             )
         if config.num_speculative_tokens > 0 and vision_processor is not None:
             # TODO: vLLM's drafter reads the image token id from the target's config
-            # (SpecDecodeBaseProposer.load_model); support image prompts once tested.
+            # (SpecDecodeBaseProposer.load_model); support vision models once tested.
             raise ValueError(
                 f"num_speculative_tokens={config.num_speculative_tokens} does not "
-                "support image prompts yet"
+                "support models with a vision encoder yet"
             )
         validate_ep_token_dispatchers(
             model,

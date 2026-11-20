@@ -147,9 +147,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             # vLLM's runner hands the accepted-token counts and draft masks only to
             # its own GDN builder, which the speculative path reads.
             # TODO: speculative GDN kernels in Attention Gym, read by
-            # TorchTitanLinearAttentionMetadataBuilder, would give mixed batches FULL graphs
-            # again: vLLM's GDN builder captures uniform decode batches only, so FULL drops
-            # to FULL_DECODE_ONLY. Blocked on those kernels and on vLLM passing the counts.
+            # TorchTitanLinearAttentionMetadataBuilder, would allow cuda_graph.mode="FULL" with
+            # drafts: vLLM's GDN builder graphs uniform decode batches only. Blocked on those
+            # kernels and on vLLM passing the counts.
             return GDNAttentionBackend
         return TorchTitanLinearAttentionBackend
 

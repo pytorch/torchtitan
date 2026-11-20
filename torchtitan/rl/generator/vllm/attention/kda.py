@@ -88,9 +88,6 @@ class VLLMInnerKDA(InnerAttention, MambaBase):
             speculative_config.num_speculative_tokens if speculative_config else 0
         )
         if self.num_spec != 0:
-            # TODO: support drafts as VLLMInnerGDN._forward_speculative does, for MTP on Kimi
-            # checkpoints (vLLM's KimiK3MTPModel). Needs verify-row KDA kernels that keep one
-            # state per draft position; Attention Gym's kernels update one slot per request.
             raise ValueError("Attention Gym KDA does not support speculative decoding.")
         if is_conv_state_dim_first():
             raise ValueError(
