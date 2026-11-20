@@ -286,25 +286,16 @@ class DeepSeekV4Model(Decoder):
         With MTP layers, prepare one token tensor, validity mask and labels
         tensor per depth, as ``MTPDecoder`` does.
         """
-        if len(self.mtp_layers) == 0:
-            inputs, labels, model_kwargs, loss_kwargs = super().preprocess_inputs(
-                input_dict,
-                parallelism_context=parallelism_context,
-                parallelism=parallelism,
-                max_num_documents=max_num_documents,
-                global_routing_token_counts=global_routing_token_counts,
-                **kwargs,
-            )
-        else:
-            inputs, labels, model_kwargs, loss_kwargs = preprocess_mtp_inputs(
-                self,
-                input_dict,
-                num_mtp_layers=len(self.mtp_layers),
-                parallelism_context=parallelism_context,
-                parallelism=parallelism,
-                max_num_documents=max_num_documents,
-                global_routing_token_counts=global_routing_token_counts,
-            )
+        del kwargs
+        inputs, labels, model_kwargs, loss_kwargs = preprocess_mtp_inputs(
+            self,
+            input_dict,
+            num_mtp_layers=len(self.mtp_layers),
+            parallelism_context=parallelism_context,
+            parallelism=parallelism,
+            max_num_documents=max_num_documents,
+            global_routing_token_counts=global_routing_token_counts,
+        )
         # `inputs` holds the token IDs on every rank here. Under PP, later
         # stages' forward receives the previous stage's hidden state instead,
         # but model kwargs reach every stage unchanged.

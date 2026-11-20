@@ -124,13 +124,46 @@ class TestDeepSeekV4MTPInputs(unittest.TestCase):
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
     def test_preprocess_inputs_prepares_each_depth(self):
+        num_mtp_layers = 4
         with torch.device("meta"):
-            model = deepseek_v4_mtp_debugmodel(seq_len=128).model.build()
+            model = build_model_config(
+                "debugmodel",
+                seq_len=128,
+                n_mtp_layers=num_mtp_layers,
+                parallelism=ParallelismConfig(expert_parallel_degree=1),
+            ).build()
         # Two packed documents (70 and 50 tokens) and 8 padding tokens.
-        positions = torch.cat([torch.arange(70), torch.arange(50), torch.arange(8)])
-        padding_mask = torch.arange(128) >= 120
-        tokens = torch.arange(128) + 1000
-        labels = torch.arange(128)
+        document_1 = torch.arange(71, dtype=torch.long) + 100
+        document_2 = torch.arange(51, dtype=torch.long) + 1000
+        positions = torch.cat(
+            [
+                torch.arange(70, dtype=torch.long),
+                torch.arange(50, dtype=torch.long),
+                torch.arange(8, dtype=torch.long),
+            ]
+        )
+        padding_mask = torch.cat(
+            [
+                torch.zeros(70, dtype=torch.bool),
+                torch.zeros(50, dtype=torch.bool),
+                torch.ones(8, dtype=torch.bool),
+            ]
+        )
+        tokens = torch.cat(
+            [
+                document_1[:-1],
+                document_2[:-1],
+                torch.zeros(8, dtype=torch.long),
+            ]
+        )
+        labels = torch.cat(
+            [
+                document_1[1:],
+                document_2[1:],
+                torch.full((8,), IGNORE_INDEX, dtype=torch.long),
+            ]
+        )
+
         inputs, loss_labels, model_kwargs, _ = _preprocess(
             model,
             {
@@ -141,24 +174,49 @@ class TestDeepSeekV4MTPInputs(unittest.TestCase):
             },
         )
 
-        # Depth 1 is shifted by one inside each document: nothing crosses a
-        # document boundary, enters the padding, or runs past the end.
-        valid = torch.zeros(128, dtype=torch.bool)
-        valid[:69] = True
-        valid[70:119] = True
-        self.assertEqual(len(inputs), 2)
+        self.assertEqual(len(inputs), num_mtp_layers + 1)
         self.assertTrue(torch.equal(inputs[0], tokens))
-        self.assertTrue(torch.equal(inputs[1], torch.where(valid, tokens.roll(-1), 0)))
         self.assertTrue(torch.equal(model_kwargs["input_ids_T"], tokens))
-        self.assertEqual(len(model_kwargs["mtp_input_valid_masks"]), 1)
-        self.assertTrue(torch.equal(model_kwargs["mtp_input_valid_masks"][0], valid))
-        self.assertEqual(len(loss_labels), 2)
+        self.assertEqual(len(model_kwargs["mtp_input_valid_masks"]), num_mtp_layers)
+        self.assertEqual(len(loss_labels), num_mtp_layers + 1)
         self.assertTrue(torch.equal(loss_labels[0], labels))
-        self.assertTrue(
-            torch.equal(
-                loss_labels[1], torch.where(valid, labels.roll(-1), IGNORE_INDEX)
+        # Depth d is shifted by d inside each document: nothing crosses a
+        # document boundary, enters the padding, or runs past the end.
+        for depth in range(1, num_mtp_layers + 1):
+            reference_valid = torch.cat(
+                [
+                    torch.ones(70 - depth, dtype=torch.bool),
+                    torch.zeros(depth, dtype=torch.bool),
+                    torch.ones(50 - depth, dtype=torch.bool),
+                    torch.zeros(depth, dtype=torch.bool),
+                    torch.zeros(8, dtype=torch.bool),
+                ]
             )
-        )
+            reference_labels = torch.cat(
+                [
+                    document_1[depth + 1 :],
+                    torch.full((depth,), IGNORE_INDEX, dtype=torch.long),
+                    document_2[depth + 1 :],
+                    torch.full((depth,), IGNORE_INDEX, dtype=torch.long),
+                    torch.full((8,), IGNORE_INDEX, dtype=torch.long),
+                ]
+            )
+            reference_inputs = torch.cat(
+                [
+                    document_1[depth:-1],
+                    torch.zeros(depth, dtype=torch.long),
+                    document_2[depth:-1],
+                    torch.zeros(depth, dtype=torch.long),
+                    torch.zeros(8, dtype=torch.long),
+                ]
+            )
+            self.assertTrue(
+                torch.equal(
+                    model_kwargs["mtp_input_valid_masks"][depth - 1], reference_valid
+                )
+            )
+            self.assertTrue(torch.equal(inputs[depth], reference_inputs))
+            self.assertTrue(torch.equal(loss_labels[depth], reference_labels))
 
 
 class TestDeepSeekV4MTPInputLayout(unittest.TestCase):
