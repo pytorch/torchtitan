@@ -11,12 +11,14 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
+from fnmatch import fnmatch
 from typing import Generic, Literal, TypeVar
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+import torch_remat as remat
 from torch.export import register_dataclass
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -72,6 +74,19 @@ class CPInnerAttention(
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
         pass
+
+    def _kernel_should_recompute(self, region_name: str) -> bool:
+        # The caller wraps this module in a region named after it (e.g.
+        # attention.inner_attention). When that region is saved, the kernel
+        # region nested in it is inert and must not ask for recompute.
+        caller_region = self._remat_module_fqn
+        caller_saved = any(
+            fnmatch(caller_region, pattern) for pattern in self._remat_save_patterns
+        ) and not any(
+            fnmatch(caller_region, pattern)
+            for pattern in self._remat_recompute_patterns
+        )
+        return not caller_saved and self.remat_should_recompute(region_name)
 
     @staticmethod
     @abstractmethod
@@ -386,7 +401,9 @@ class AllGatherKVVarlen(
         cp_rank = dist.get_rank(cp_group)
         varlen_forward = self._forward_varlen
 
-        def run_chunk(q_chunk_THK: torch.Tensor, q_start: int) -> torch.Tensor:
+        def run_chunk(
+            q_chunk_THK: torch.Tensor, q_start: int, region_name: str
+        ) -> torch.Tensor:
             end = q_start + q_chunk_THK.shape[0]
             kv_start = max(0, q_start - max_lookback)
             metadata = self._chunk_metadata(
@@ -395,7 +412,15 @@ class AllGatherKVVarlen(
                 end=end,
                 kv_start=kv_start,
             )
-            return varlen_forward(
+            # The kernel is its own region, so a policy can save only its output
+            # and LSE while recomputing the K/V all-gather. The kernel saves views
+            # of this region's inputs for backward; when they come from recomputed
+            # code, replay rebuilds them instead of retaining them.
+            return remat.region(
+                varlen_forward,
+                self.remat_region_name(region_name),
+                recompute=self._kernel_should_recompute(region_name),
+            )(
                 q_chunk_THK,
                 k_THK[kv_start:end],
                 v_THV[kv_start:end],
@@ -406,7 +431,7 @@ class AllGatherKVVarlen(
         inverse_permutation = attention_metadata.inverse_permutation
         if inverse_permutation is None:
             # No load balancer: Q is one contiguous shard.
-            out_THV = run_chunk(q_THK, cp_rank * q_THK.shape[0])
+            out_THV = run_chunk(q_THK, cp_rank * q_THK.shape[0], "kernel")
         else:
             # Head-tail load balancer.
             gathered_k_THK, gathered_v_THV = k_THK, v_THV
@@ -421,8 +446,9 @@ class AllGatherKVVarlen(
             head_start = cp_rank * chunk_len
             global_len = q_THK.shape[0] * cp_group.size()
             tail_start = global_len - (cp_rank + 1) * chunk_len
-            head_out_THV = run_chunk(q_THK[:chunk_len], head_start)
-            tail_out_THV = run_chunk(q_THK[chunk_len:], tail_start)
+            head_out_THV = run_chunk(q_THK[:chunk_len], head_start, "kernel_head")
+            tail_out_THV = run_chunk(q_THK[chunk_len:], tail_start, "kernel_tail")
+            remat.recompute_needs_tensor(head_out_THV, tail_out_THV)
             out_THV = torch.cat((head_out_THV, tail_out_THV))
         if kwargs.get("out_transform") is None and spmd.is_type_checking():
             spmd.assert_type(
@@ -532,9 +558,16 @@ class UlyssesInnerAttention(Ulysses[_GlobalAttentionMetadataT]):
             )
             for x in (q_THK, k_THK, v_THV)
         )
-        # super() follows the concrete class MRO to its inner attention.
-        out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
+        # super() follows the concrete class MRO to its inner attention. The
+        # kernel is its own region, so a policy can save only its output and
+        # LSE; replay rebuilds its inputs with the all-to-alls above.
+        out_THV = remat.region(
+            super().forward,
+            self.remat_region_name("kernel"),
+            recompute=self._kernel_should_recompute("kernel"),
+        )(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
+        remat.recompute_needs_tensor(out_THV)
         return spmd.redistribute(
             out_THV,
             cp_group,
