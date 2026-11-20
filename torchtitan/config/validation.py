@@ -265,6 +265,7 @@ def validate_context_parallel(
         AllGatherKVVarlen,
         CPInnerAttention,
         Ulysses,
+        UlyssesInnerAttention,
     )
     from torchtitan.models.common.attention.gdn import GDN
     from torchtitan.models.common.decoder import Decoder
@@ -294,18 +295,33 @@ def validate_context_parallel(
             cp_inner_attention, CPInnerAttention
         )
         if issubclass(cp_inner_attention, Ulysses):
-            head_shard_degree = parallelism.tensor_parallel_degree * cp
+            tp = parallelism.tensor_parallel_degree
+            head_shard_degree = tp * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             if isinstance(attention, GDN.Config):
                 n_kv_heads = attention.n_key_heads
-            for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
-                if count % head_shard_degree != 0:
-                    raise ValueError(
-                        f"{fqn}.inner_attention {name} ({count}) must be divisible "
-                        "by tensor_parallel_degree * context_parallel_degree "
-                        f"({head_shard_degree})."
-                    )
+            if n_heads % head_shard_degree != 0:
+                raise ValueError(
+                    f"{fqn}.inner_attention n_heads ({n_heads}) must be divisible "
+                    "by tensor_parallel_degree * context_parallel_degree "
+                    f"({head_shard_degree})."
+                )
+            # UlyssesInnerAttention copies each TP-local KV head when there are
+            # fewer KV heads than CP ranks.
+            if n_kv_heads % head_shard_degree != 0 and not (
+                issubclass(cp_inner_attention, UlyssesInnerAttention)
+                and n_kv_heads % tp == 0
+                and head_shard_degree % n_kv_heads == 0
+            ):
+                raise ValueError(
+                    f"{fqn}.inner_attention n_kv_heads ({n_kv_heads}) must be "
+                    "divisible by tensor_parallel_degree * context_parallel_degree "
+                    f"({head_shard_degree}). UlyssesInnerAttention also accepts "
+                    "n_kv_heads that divides tensor_parallel_degree * "
+                    "context_parallel_degree and is divisible by "
+                    "tensor_parallel_degree."
+                )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
         # Linear attention either routes states or restores token order using
