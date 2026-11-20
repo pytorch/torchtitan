@@ -303,7 +303,7 @@ class VLLMModelWrapper(Module):
             precision=precision,
             device=device,
         )
-        # forward pads a step to a multiple of TP when TP shards the routed tokens.
+        # `_pad_step_to_tp` pads a step to a multiple of TP when TP shards the routed tokens.
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         validate_ep_token_dispatcher_capacity(
             self.config,
@@ -341,7 +341,7 @@ class VLLMModelWrapper(Module):
         Every EP rank must pass the same count: the largest DP replica's token count
         over TP, rounded up. At TP 4:
 
-            DP 1, ``forward`` padded 5 rows to 8          -> 8 / 4 = 2
+            DP 1, ``_pad_step_to_tp`` padded 5 rows to 8  -> 8 / 4 = 2
             DP 2, vLLM's counts [5, 3] (before padding)  -> cdiv(5, 4) = 2
         """
         tp = self.parallelism_context.tp
@@ -369,8 +369,8 @@ class VLLMModelWrapper(Module):
         if self._expert_sequence_parallel_size != tp and any(
             isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
         ):
-            # Dist-MoE splits each step's tokens over TP, but forward pads eager steps
-            # to a multiple of TP only with EP (expert_sequence_parallel_size).
+            # Dist-MoE splits each step's tokens over TP, but `_pad_step_to_tp` pads
+            # eager steps to a multiple of TP only with EP (expert_sequence_parallel_size).
             raise ValueError(
                 "Dist-MoE in the generator needs expert_parallel_degree > 1 when "
                 f"tensor_parallel_degree > 1; got tensor_parallel_degree={tp}, "
@@ -458,6 +458,7 @@ class VLLMModelWrapper(Module):
 
             TP 4 with EP, 5 tokens:  tokens (5,) or (5, dim)  -> 8 rows
                                      positions (5,) or (3, 5)  -> 8 on the last dim
+            EP off:                  unchanged
 
         The MoE splits its tokens evenly over TP, but vLLM runs eager steps of any size.
         Attention reads only the real rows (its metadata's token count).
@@ -482,13 +483,9 @@ class VLLMModelWrapper(Module):
         # replica), or an idle DP rank's dummy batch. vLLM refills this buffer before every
         # step, so a CUDA-graph replay reads the current mask.
         padding_mask = get_forward_context().is_padding
-        if padding_mask is None:
-            raise RuntimeError(
-                "vLLM set no ForwardContext.is_padding for this forward, so "
-                "Dist-MoE can't tell padding rows from real ones."
-            )
+        assert padding_mask is not None, "vLLM set no ForwardContext.is_padding"
 
-        # The rows `forward` added to reach a multiple of TP are padding too.
+        # The rows `_pad_step_to_tp` added to reach a multiple of TP are padding too.
         num_padding_rows = num_tokens - padding_mask.shape[0]
         if num_padding_rows:
             padding_mask = F.pad(padding_mask, (0, num_padding_rows), value=True)
