@@ -40,6 +40,9 @@ def resolve_max_num_batched_tokens(engine_kwargs: dict[str, Any]) -> int:
     """
     if engine_kwargs.get("max_num_batched_tokens") is not None:
         return engine_kwargs["max_num_batched_tokens"]
+    # TODO(https://github.com/pytorch/torchtitan/pull/5956): on vLLM's V2 model runner (vLLM >= 0.34), vLLM drops
+    # prefill CUDA graph sizes above its own budget, so the graphs no longer need the budget up front. Then pass
+    # usage_context=OPENAI_API_SERVER to the engine and keep only the FlashAttention-2 cap below.
     vllm_config = EngineArgs(**engine_kwargs).create_engine_config(
         UsageContext.OPENAI_API_SERVER
     )
