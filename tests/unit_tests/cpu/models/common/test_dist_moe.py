@@ -25,6 +25,7 @@ from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
 from torchtitan.config.configs import PrecisionConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
@@ -1052,12 +1053,15 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
 
 def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
-    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
-    config.parallelism.expert_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-
-    config.__post_init__()
+    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(
+        seq_len=128,
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=2,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+        ),
+    )
+    assert not config.training.disable_accelerator_graphs
 
 
 @pytest.mark.parametrize(
