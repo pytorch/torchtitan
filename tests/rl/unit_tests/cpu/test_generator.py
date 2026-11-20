@@ -850,9 +850,11 @@ def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
     monkeypatch.setattr(
         vllm_config_module, "has_cuda_capability", lambda major, minor: sm90_or_newer
     )
+
     engine_kwargs = _build_engine_kwargs(
         monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG)
     )
+
     assert engine_kwargs["max_num_batched_tokens"] == expected
     # FULL graphs (the default) capture mixed steps up to the same budget.
     assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == expected

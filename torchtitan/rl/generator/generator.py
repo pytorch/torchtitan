@@ -138,11 +138,9 @@ class Generator(Configurable):
         """Fraction of GPU memory to use for the engine (0.0 to 1.0)."""
 
         max_num_batched_tokens: int | None = None
-        """The engine's chunked-prefill chunk size: max tokens one engine step schedules on each
-        DP rank (prefill + decode, summed over the batch). ``None`` (default): the engine's own
-        default for this device. vLLM and SGLang both pick it by device memory, e.g. 16384 on a
-        GB300 and 8192 on an H100 (``resolve_max_num_batched_tokens``,
-        ``SGLangEngine._build_server_args``)."""
+        """Max tokens one engine step schedules on each DP rank (prefill + decode, summed over the
+        batch). ``None`` (default): the engine's own default for this device, picked by device
+        memory: 16384 on a GB300 and 8192 on an H100, in both vLLM and SGLang."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.

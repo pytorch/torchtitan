@@ -492,9 +492,9 @@ class SGLangEngine(GenerationEngine):
             server_kwargs["hicache_storage_backend_extra_config"] = json.dumps(
                 extra_config
             )
+
         if max_num_batched_tokens is None and parallelism.data_parallel_degree > 1:
-            # SGLang gives each attention-DP rank 1/DP of its per-GPU default. Ask SGLang for that
-            # share and undo the split: max_num_batched_tokens is per DP rank, set or not.
+            # Unset: SGLang's per-GPU default, read back from SGLang, which gives each DP rank 1/DP of it.
             probe_server_args = ServerArgs(**server_kwargs)
             probe_server_args.resolve_once()
             max_num_batched_tokens = (
@@ -505,11 +505,13 @@ class SGLangEngine(GenerationEngine):
                 "max_num_batched_tokens is unset: using SGLang's default for this device, %d",
                 max_num_batched_tokens,
             )
+
         if max_num_batched_tokens is not None:
             # SGLang splits chunked_prefill_size over its DP ranks; max_num_batched_tokens is per DP rank.
             server_kwargs["chunked_prefill_size"] = (
                 max_num_batched_tokens * parallelism.data_parallel_degree
             )
+
         return ServerArgs(**server_kwargs)
 
     def _init_event_loop(self) -> None:

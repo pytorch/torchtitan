@@ -361,18 +361,18 @@ class VLLMEngine(GenerationEngine):
             # Image prompts bypass vLLM's processor, so its cache would only hold copies.
             engine_kwargs["mm_processor_cache_gb"] = 0
         add_extra_vllm_engine_args(engine_kwargs, config.extra_engine_args)
+
         # FULL CUDA graphs capture mixed steps up to the step budget, so resolve it first.
         max_num_batched_tokens = resolve_max_num_batched_tokens(engine_kwargs)
         engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
-        engine_kwargs[
-            "compilation_config"
-        ] = config.cuda_graph.get_vllm_compilation_config(
+        vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,
             max_num_batched_tokens=max_num_batched_tokens,
             expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
             enable_sequence_parallel=parallelism.enable_sequence_parallel,
         )
+        engine_kwargs["compilation_config"] = vllm_compilation_config
         return EngineArgs(**engine_kwargs)
 
     def _build_stat_loggers(self, context: StatLoggerContext) -> list | None:
