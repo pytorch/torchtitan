@@ -87,18 +87,18 @@ provide the first TorchTitan integration. Their shared optimizer configuration:
 The same construction can be used by Kimi-family, Kimi-VL, and Moonlight
 recipes.
 
-## Local optimizer compilation
+## Triton local optimizer updates
 
-Enable compilation of local momentum preparation, Newton-Schulz and direction
+Enable Triton local momentum preparation, Newton-Schulz normalization and
 writeback, and parameter updates in the TorchTitan optimizer config:
 
 ```python
-DistMuon.Config(..., compile=True)
+DistMuon.Config(..., use_triton=True)
 ```
 
-The standalone FlexShard `DistMuon` constructor also accepts `compile=True`.
-The default is eager updates. Compilation requires accelerator-resident parameters,
-is lazy, and is independent of model compilation. Redistribution stays eager.
+The standalone FlexShard `DistMuon` constructor also accepts `use_triton=True`.
+The default is PyTorch updates. The Triton path requires CUDA FP32 or BF16 storage.
+NS matrix multiplications and redistribution retain their PyTorch implementations.
 
 ## Package boundary
 

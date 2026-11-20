@@ -221,8 +221,8 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
-        compile: bool = False
-        """Compile local optimizer updates independently of model compilation."""
+        use_triton: bool = False
+        """Use Triton local updates while keeping redistribution unchanged."""
         max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
@@ -308,7 +308,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
-            compile=config.compile,
+            use_triton=config.use_triton,
         )
 
 
