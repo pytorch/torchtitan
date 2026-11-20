@@ -105,8 +105,8 @@ class ActorSystem(Configurable, abc.ABC):
         generator_parallelism: InferenceParallelismConfig,
         num_generators: int,
     ) -> None:
-        """Reserve the processes for the trainer, ``num_generators`` generators, the
-        generator router and the batcher, before any of them is spawned."""
+        """Reserve the processes for the trainer, ``num_generators`` generators and the
+        generator router, before any of them is spawned."""
 
     @abc.abstractmethod
     async def spawn_trainer(
@@ -129,7 +129,7 @@ class ActorSystem(Configurable, abc.ABC):
 
     @abc.abstractmethod
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
-        """Spawn the batcher in its own process; returns a single-actor handle.
+        """Spawn the batcher in a new process of its own; returns a single-actor handle.
         ``kwargs`` go to ``Batcher``'s constructor."""
 
     @abc.abstractmethod
@@ -167,7 +167,8 @@ class ActorSystem(Configurable, abc.ABC):
 
     @abc.abstractmethod
     async def stop(self) -> None:
-        """Stop every process ``provision`` reserved, best-effort."""
+        """Stop every process that ``provision`` reserved or ``spawn_batcher`` started,
+        best-effort."""
 
     @abc.abstractmethod
     def shutdown(self) -> None:
