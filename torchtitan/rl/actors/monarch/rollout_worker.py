@@ -127,21 +127,13 @@ class RolloutWorkerActor(Actor):
 
     def _flush_metrics(self) -> list[m.Metric]:
         """Return this worker's metrics since its previous training group, then reset them."""
-        # RAM this worker uses now (VmRSS) and the most it has used (VmHWM), shared libraries counted
-        # in full. Each line reads e.g. "VmRSS:  1745628 kB".
-        with open("/proc/self/status") as status:
-            kib = {
-                line.split(":")[0]: int(line.split()[1])
-                for line in status
-                if line.startswith(("VmRSS:", "VmHWM:"))
-            }
         return [
             # The event loop's longest delay, and how many ms late it ran per second
             *self._event_loop_lag.flush(),
             # How late the thread pool starts a call: the longest delay, and ms late per second
             *self._thread_pool_lag.flush(),
-            m.Metric("rollout_worker/ram_gib", m.Max(kib["VmRSS"] / 2**20)),
-            m.Metric("rollout_worker/peak_ram_gib", m.Max(kib["VmHWM"] / 2**20)),
+            # RAM this worker uses now, and the most it has used
+            *m.ram_metrics("rollout_worker"),
         ]
 
     @concurrent_endpoint
