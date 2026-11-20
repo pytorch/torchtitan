@@ -17,6 +17,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     gate_transform,
+    KernelOptions,
     l2norm,
     paged_chunk_gdn,
     recurrent_gdn,
@@ -126,7 +127,14 @@ def paged_gdn(
             cu_seqlens=cu_seqlens,
             has_initial_state=has_initial_state,
             scale=head_k_dim**-0.5,
-            kernel_options=chunk_kernel_options(query),
+            # TODO(acisseJZhong, https://github.com/meta-pytorch/attention-gym/issues/980):
+            # warpdrive kernels can't write state checkpoints yet, so prefills that take
+            # a snapshot use the fused kernels.
+            kernel_options=(
+                chunk_kernel_options(query)
+                if checkpoints is None
+                else KernelOptions(backend="fused")
+            ),
             state_checkpoints=checkpoints,
         )
     return recurrent_output[0]

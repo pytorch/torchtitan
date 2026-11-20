@@ -17,6 +17,7 @@ from torchtitan.models.common.attention.linear_attention import chunk_kernel_opt
 from torchtitan.models.common.attn_gym import (
     bound_gate,
     copy_replay_tails,
+    KernelOptions,
     l2norm,
     paged_chunk_kda,
     ReplayState,
@@ -131,8 +132,15 @@ def paged_kda(
         cu_seqlens=cu_seqlens,
         has_initial_state=has_initial_state,
         replay_state=replay_state,
+        # TODO(acisseJZhong, https://github.com/meta-pytorch/attention-gym/issues/980):
+        # warpdrive kernels can't write state checkpoints yet, so prefills that take
+        # a snapshot use the fused kernels.
         kernel_options=(
-            None if cu_seqlens is None else chunk_kernel_options(query_BTHK)
+            None
+            if cu_seqlens is None
+            else chunk_kernel_options(query_BTHK)
+            if checkpoints is None
+            else KernelOptions(backend="fused")
         ),
         state_checkpoints=checkpoints,
     )
