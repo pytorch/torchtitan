@@ -356,6 +356,10 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not support async_mode='async'"):
             TorchCheckpointingManager.Config(async_mode="ASYNC")
 
+    def test_rejects_file_read_workers_below_one(self) -> None:
+        with self.assertRaisesRegex(ValueError, "file_read_workers must be at least 1"):
+            TorchCheckpointingManager.Config(file_read_workers=0)
+
     def test_sync_save_returns_after_writing_and_skips_prewarm(self) -> None:
         config = TorchCheckpointingManager.Config(
             interval=3,

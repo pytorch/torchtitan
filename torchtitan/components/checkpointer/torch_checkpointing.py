@@ -27,9 +27,11 @@ from torch_checkpointing.checkpoint_manager import (
 from torch_checkpointing.checkpoint_writer import CallbackArgs, CheckpointWriterConfig
 from torch_checkpointing.config import (
     AsyncCheckpointSaverConfig,
+    CheckpointLoaderConfig,
     CheckpointSaverConfig,
     SyncCheckpointSaverConfig,
 )
+from torch_checkpointing.default_load_plan_executor import DefaultLoadPlanExecutor
 from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
 from torch_checkpointing.hf.metadata import (
@@ -189,6 +191,7 @@ def _default_backend_config(
     save_config: CheckpointSaverConfig,
     *,
     storage_config: StorageConfig | None = None,
+    load_config: CheckpointLoaderConfig | None = None,
     items: dict[str, ItemSpec] | None = None,
     default: ItemSpec | None = _DEFAULT_ITEM_SPEC,
     subprocess_init_fn: Callable[..., None] | None = None,
@@ -208,6 +211,7 @@ def _default_backend_config(
         items=_item_specs() if items is None else items,
         default=default,
         save=save_config,
+        load=CheckpointLoaderConfig() if load_config is None else load_config,
         storage_config=storage_config,
         subprocess_init_fn=subprocess_init_fn,
         subprocess_init_args=subprocess_init_args,
@@ -228,8 +232,19 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
+        file_read_workers: int | None = None
+        """Checkpoint files each rank reads concurrently when loading. None
+        uses the backend's default, which splits a per-host number of reads
+        across the ranks on the host. That default assumes every rank on the
+        host loads at once; raise it when only some of them do."""
+
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)
+            if self.file_read_workers is not None and self.file_read_workers < 1:
+                raise ValueError(
+                    "file_read_workers must be at least 1, got "
+                    f"{self.file_read_workers}"
+                )
             # Async saves stage into pinned memory and write from a background
             # process; there is no threaded mode.
             if self.async_mode == "async":
@@ -305,6 +320,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         manager_config = _default_backend_config(
             save_config,
             storage_config=storage_config,
+            load_config=CheckpointLoaderConfig(
+                load_plan_executor=DefaultLoadPlanExecutor(
+                    file_read_workers=config.file_read_workers
+                )
+            ),
         )
         self._manager_config = manager_config
         storage_config = (
@@ -393,6 +413,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             hf_config = _default_backend_config(
                 _sync_save_config(use_barrier=False),
                 storage_config=self._manager_config.storage_config,
+                load_config=self._manager_config.load,
                 items={item_key: hf_model_spec},
                 default=None,
             )
