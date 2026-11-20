@@ -519,15 +519,6 @@ class Controller(Configurable):
                         f"model's image tokens take {'M-RoPE' if uses_mrope else '1D'} "
                         f"positions; set it to {uses_mrope}."
                     )
-            if self.trainer.parallelism.enable_sequence_parallel:
-                sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                max_context_length = self.trainer.model.max_context_length
-                if sp_degree > 1 and max_context_length % sp_degree != 0:
-                    raise ValueError(
-                        "trainer.model.max_context_length "
-                        f"({max_context_length}) must be divisible "
-                        f"by sequence parallel degree ({sp_degree})."
-                    )
 
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
