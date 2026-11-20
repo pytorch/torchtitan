@@ -1,0 +1,178 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""GLM-5 configurations used by tests and local development."""
+
+from typing import Literal
+
+from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
+from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from torchtitan.components.optim import (
+    AdamW,
+    LRSchedulersContainer,
+    Optim,
+    OptimizersContainer,
+)
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, TokenDispatcherTransform
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
+from torchtitan.models.common.config_utils import (
+    decoder_vocab_size,
+    DEFAULT_DEBUG_MODEL_SEQ_LEN,
+)
+from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.glm5 import MTPLoss
+from torchtitan.models.glm5.loss import Glm5WarmupLoss
+from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.trainer import Trainer
+from torchtitan_recipes.tests import _set_spmd_typechecking
+from torchtitan_recipes.tests.models.glm5_configs import resolve_model_config
+
+
+def glm5_debugmodel(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    flavor: str = "glm5_2_debugmodel",
+    mtp_scale: float | None = None,
+    indexer_stage: Literal["frozen", "warmup", "sparse"] = "frozen",
+    indexer_loss_coeff: float = 1.0,
+) -> Trainer.Config:
+    """Return a deterministic small GLM-5 training recipe."""
+    if parallelism is None:
+        parallelism = ParallelismConfig()
+    model_config = resolve_model_config(
+        flavor,
+        parallelism=parallelism,
+        seq_len=seq_len,
+        indexer_stage=indexer_stage,
+        indexer_loss_coeff=indexer_loss_coeff,
+    )
+    num_mtp_layers = len(model_config.mtp_layers or ())
+    if mtp_scale is not None and num_mtp_layers == 0:
+        raise ValueError("mtp_scale may only be set for a GLM MTP flavor")
+    if mtp_scale is not None and mtp_scale < 0:
+        raise ValueError("mtp_scale must be non-negative")
+    num_tokens = 8 * seq_len
+    loss_config = (
+        MTPLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_config),
+            mtp_scale=0.3 if mtp_scale is None else mtp_scale,
+        )
+        if model_config.mtp_layers
+        else CrossEntropyLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_config),
+        )
+    )
+    return Trainer.Config(
+        loss=(
+            Glm5WarmupLoss.Config(evaluation_loss=loss_config)
+            if indexer_stage == "warmup"
+            else ChunkedLossWrapper.Config(loss_fn=loss_config)
+        ),
+        hf_assets_path="./tests/assets/tokenizer",
+        metrics=MetricsProcessor.Config(log_freq=1),
+        model=model_config,
+        dataloader=GrainDataLoader.Config(
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            num_mtp_layers=num_mtp_layers,
+        ),
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
+        ),
+        training=TrainingConfig(
+            disable_accelerator_graphs=True,
+            num_tokens_per_microbatch_per_dp_rank=num_tokens,
+            steps=10,
+        ),
+        parallelism=parallelism,
+        checkpointer=None,
+        activation_remat=DefaultActivationRematConfig(),
+    )
+
+
+def glm5_debugmodel_warmup() -> Trainer.Config:
+    """CLI recipe for training the indexer with a frozen dense-attention teacher."""
+    config = glm5_debugmodel(seq_len=128, indexer_stage="warmup")
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
+def glm5_debugmodel_sparse() -> Trainer.Config:
+    """CLI recipe for joint backbone and indexer training with sparse attention."""
+    config = glm5_debugmodel(seq_len=128, indexer_stage="sparse")
+    _set_spmd_typechecking(config, typechecking=True)
+    return config
+
+
+def glm5_2_scaled_debugmodel(
+    seq_len: int = 4096,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    return glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_2_scaled_debugmodel",
+    )
+
+
+def glm5_2_debugmodel_mtp(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    mtp_scale: float = 0.3,
+    indexer_stage: Literal["frozen", "warmup", "sparse"] = "frozen",
+    indexer_loss_coeff: float = 1.0,
+) -> Trainer.Config:
+    return glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_2_debugmodel_mtp",
+        mtp_scale=mtp_scale,
+        indexer_stage=indexer_stage,
+        indexer_loss_coeff=indexer_loss_coeff,
+    )
+
+
+def glm5_2_debugmodel_deepep(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Return the GLM-5.2 debug recipe with the official DeepEP dispatcher."""
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=4)
+    if parallelism.expert_parallel_degree <= 1:
+        raise ValueError("GLM DeepEP acceptance requires expert_parallel_degree > 1")
+    config = glm5_debugmodel(
+        seq_len,
+        parallelism=parallelism,
+        flavor="glm5_2_debugmodel",
+    )
+    num_max_tokens_per_rank = config.training.num_tokens_per_microbatch_per_dp_rank // (
+        config.parallelism.context_parallel_degree
+        * config.parallelism.tensor_parallel_degree
+    )
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                num_max_tokens_per_rank=num_max_tokens_per_rank,
+            )
+        ],
+    )
