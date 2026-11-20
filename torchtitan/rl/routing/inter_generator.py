@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+import abc
 import asyncio
-from collections.abc import Sequence
+import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal, TYPE_CHECKING
 
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
@@ -22,10 +24,58 @@ from torchtitan.rl.routing.strategies import (
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
 
+if TYPE_CHECKING:
+    from torchtitan.rl.model_state_dict_transport import (
+        ModelStateDictTransport,
+        TensorShard,
+        TrainerSource,
+    )
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(kw_only=True, slots=True)
+class GeneratorFaultToleranceConfig:
+    """Restart failed generators in place instead of failing the run.
+
+    A generator fails as a whole when any of its ranks fails: its process dies, its
+    actor or engine loop crashes, a call to it finds it gone, or its model state dict
+    pull fails. The router takes it out of routing at once, stops its processes,
+    and spawns a new incarnation on the same hosts and GPUs. The new incarnation
+    joins the next model state dict pull and serves once that pull lands. ``generate``
+    calls the failed generator did not finish are retried on other generators.
+    """
+
+    min_healthy_generators: int = 1
+    """The run fails when a failure leaves fewer healthy generators than this. A
+    restarted generator counts once it has pulled. At least 1: the survivors' rollouts
+    let the trainer step and reach the next pull, where restarted generators rejoin."""
+
+    max_restarts_per_generator: int = 3
+    """The run fails when a generator fails after this many restarts, so a generator
+    that fails on every start (e.g. a broken GPU) does not restart forever. 3 rides
+    out a few unrelated failures of one generator in a run, while a generator that
+    can't start ends the run within a few restarts' time (seconds to minutes)."""
+
+    def __post_init__(self) -> None:
+        if self.min_healthy_generators < 1:
+            raise ValueError(
+                "fault_tolerance.min_healthy_generators must be at least 1, got "
+                f"{self.min_healthy_generators}"
+            )
+        if self.max_restarts_per_generator < 0:
+            raise ValueError(
+                "fault_tolerance.max_restarts_per_generator must be non-negative, got "
+                f"{self.max_restarts_per_generator}"
+            )
+
 
 @dataclass(kw_only=True, slots=True)
 class _GeneratorHandle(RoutingCandidate):
-    """Router-side metadata for one generator mesh."""
+    """Router-side metadata for one incarnation of one generator mesh."""
+
+    index: int
+    """The generator's index; a restarted generator keeps it."""
 
     actor: Any
     """Actor handle for the full generator mesh. Used for fan-out calls that every
@@ -35,6 +85,11 @@ class _GeneratorHandle(RoutingCandidate):
     """Rank-0 handle of the same generator. Used for calls that only rank 0 needs
     to run."""
 
+    state: Literal["healthy", "joining", "dead"] = "healthy"
+    """``healthy`` generators are routed to. A restarted generator is ``joining``
+    until its first model state dict pull lands. A ``dead`` one is never called
+    again; with fault tolerance, its replacement takes its index."""
+
     reserved_load: int = 0
     """Number of in-flight generate calls reserved on this generator."""
 
@@ -42,8 +97,9 @@ class _GeneratorHandle(RoutingCandidate):
     """True while the generator drains for a model state dict load (hot_swap=False only)."""
 
 
-class InterGeneratorRouter(Configurable):
-    """Routes generation calls across generator meshes and pulls model's state dict.
+class InterGeneratorRouter(Configurable, abc.ABC):
+    """Spawns the generator meshes, routes generation calls across them and pulls
+    model's state dict.
 
     This is layer 1 of the two-layer routing design: it routes each call across
     generator *meshes* (replicas). Within the chosen mesh, ``IntraGeneratorRouter``
@@ -53,7 +109,8 @@ class InterGeneratorRouter(Configurable):
         The router never sees a generate call's payload. ``reserve`` picks a
         generator, adds one unit of load to it and returns its rank-0 handle; the
         caller sends the generate call there directly, then calls
-        ``release_reservation``.
+        ``release_reservation``, with the call's error if it failed, so that the
+        router can tell whether another generator may serve it.
 
     Singleton:
         Routing decisions read and write mutable states such as
@@ -68,6 +125,14 @@ class InterGeneratorRouter(Configurable):
         the RL job's scale because the router only exchanges small routing
         messages, and the number of concurrent requests should be reasonable for
         a singleton to handle.
+
+    Owner:
+        The router spawns the generators (``spawn_generators``), so their actor
+        framework reports a generator's failure to the router, which restarts it
+        when ``Config.fault_tolerance`` is set. This class decides when to restart;
+        the actor framework's adapter implements how to spawn and stop a generator
+        (``_spawn_generator``, ``_stop_generator``) and which errors mean a
+        generator is gone (``_is_generator_unavailable``).
 
     Actor:
        The router singleton is reached from different processes and hosts, so it
@@ -102,42 +167,90 @@ class InterGeneratorRouter(Configurable):
         under different policy versions. A turn whose session is pinned to a
         draining generator waits for it instead of moving to another one."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        generators: Sequence[ServiceHandle],
-    ):
-        self._config = config
-        self._generators = [
-            _GeneratorHandle(actor=generator.all_ranks, rank0_actor=generator.rank0)
-            for generator in generators
-        ]
-        if not self._generators:
-            raise ValueError("InterGeneratorRouter requires at least one generator")
+        fault_tolerance: GeneratorFaultToleranceConfig | None = None
+        """Restart failed generators in place; None fails the run on any generator
+        failure."""
 
+    def __init__(self, config: Config, *, num_generators: int):
+        if num_generators < 1:
+            raise ValueError("InterGeneratorRouter requires at least one generator")
+        self._config = config
+        self._num_generators = num_generators
         self._strategy = config.strategy.build()
         self._reservations: dict[str, _GeneratorHandle] = {}
+        # One handle per generator index, set by `spawn_generators`; a restart
+        # replaces the failed handle at its index.
+        self._generators: list[_GeneratorHandle] = []
+        self._num_restarts = [0] * num_generators
+        # Restarts, and stops of generators that failed the run.
+        self._background_tasks: set[asyncio.Task[None]] = set()
+        # Connects a generator to the trainer's model state dict source; replayed
+        # on every restarted generator.
+        self._connect_model_state_dict_source: (
+            Callable[[_GeneratorHandle], Awaitable[None]] | None
+        ) = None
+        # Fault tolerance handles failures only while running: before the engine loops
+        # start, restarting a generator would race with the controller's setup of it.
+        self._phase: Literal["setup", "running", "closing"] = "setup"
+        # The error that ends the run, which `wait_engine_loop` raises.
+        self._fatal_error: Exception | None = None
+        self._fatal = asyncio.Event()
+        self._generators_changed = asyncio.Condition()
+
+    @abc.abstractmethod
+    async def _spawn_generator(self, index: int) -> ServiceHandle:
+        """Spawn generator ``index`` on its own processes."""
+
+    @abc.abstractmethod
+    async def _stop_generator(self, index: int) -> None:
+        """Stop generator ``index``'s processes, if any, which fails every call still
+        in flight to it."""
+
+    @abc.abstractmethod
+    def _is_generator_unavailable(self, error: BaseException) -> bool:
+        """Whether a call failed with ``error`` because its generator is gone, so
+        another generator may serve it."""
+
+    async def spawn_generators(self) -> None:
+        """Spawn the generators; must run before any other call."""
+        handles = await asyncio.gather(
+            *(self._spawn_generator(i) for i in range(self._num_generators))
+        )
+        self._generators = [
+            _GeneratorHandle(index=i, actor=handle.all_ranks, rank0_actor=handle.rank0)
+            for i, handle in enumerate(handles)
+        ]
 
     def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
-        """Pick a generator for one generate call, reserve one load unit on it, and
-        return its rank-0 handle."""
+        """Pick a healthy generator for one generate call, reserve one load unit on
+        it, and return its rank-0 handle.
+
+        Raises:
+            RuntimeError: once a failure fails the run.
+        """
         assert (
             request_id not in self._reservations
         ), f"request_id {request_id!r} already has a reservation"
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                "generator fault tolerance gave up"
+            ) from self._fatal_error
 
         routing_ctx = RoutingContext(session_id=routing_session_id)
         pinned = self._strategy.pinned_candidate(routing_ctx)
-        if pinned is not None and pinned.draining:
+        # A session pinned to a failed generator is re-pinned below.
+        if pinned is not None and pinned.draining and pinned.state == "healthy":
             # Stay on the draining generator, which queues the turn until its load is
             # applied; the strategy would re-pin the session just because it drains.
             h = pinned
         else:
+            healthy = [g for g in self._generators if g.state == "healthy"]
+            assert healthy, "the last healthy generator's failure fails the run"
             # Prefer generators that aren't draining: a draining one holds new work
             # back, which its reserved load doesn't reflect. All of them drain
             # together at the start of a load, so then use any.
-            candidates = [g for g in self._generators if not g.draining]
-            h = self._strategy.choose(routing_ctx, candidates or self._generators)
+            candidates = [g for g in healthy if not g.draining]
+            h = self._strategy.choose(routing_ctx, candidates or healthy)
         # TODO: one load unit per call ignores the request's size, the KV that sessions
         #   hold between turns (vLLM reports only running requests' KV), and tokens
         #   generated so far. Reserve by a token or KV estimate, ideally refreshed from
@@ -148,37 +261,61 @@ class InterGeneratorRouter(Configurable):
         #   return the generator index and have callers keep the handle list.
         return h.rank0_actor
 
-    def release_reservation(self, request_id: str) -> None:
+    def release_reservation(
+        self, request_id: str, *, error: BaseException | None = None
+    ) -> bool:
         """Free the load unit ``reserve`` placed for ``request_id``. Routing
-        bookkeeping only; unlike ``release_session``, it doesn't call a generator."""
-        self._reservations.pop(request_id).reserved_load -= 1
-
-    async def _fanout(
-        self,
-        method: str,
-        *args,
-        return_exceptions: bool = False,
-        **kwargs,
-    ) -> list[Any | BaseException]:
-        """Call ``method`` on every generator concurrently and gather results.
+        bookkeeping only; unlike ``release_session``, it doesn't call a generator.
 
         Args:
-            method: Actor endpoint name to call on every generator.
-            *args: Positional arguments forwarded to each call.
-            return_exceptions: If False (default), the first exception
-                propagates immediately; if True, each call's exception is
-                returned in the list instead of raised. Either way, a failure
-                never cancels the other calls.
-            **kwargs: Keyword arguments forwarded to each call.
+            request_id: The call's request id.
+            error: What the call raised, if it failed.
 
         Returns:
-            One entry per generator, in order: its result, or its exception when
-            ``return_exceptions`` is True.
+            True if the call failed because its generator is gone and fault
+            tolerance is on: the generator is reported failed, and the caller may
+            retry the call, which ``reserve`` routes to another generator.
         """
-        return await asyncio.gather(
-            *[getattr(h.actor, method).call(*args, **kwargs) for h in self._generators],
-            return_exceptions=return_exceptions,
-        )
+        h = self._reservations.pop(request_id)
+        h.reserved_load -= 1
+        return error is not None and self._absorb_failed_call(h, error, "generate")
+
+    def _absorb_failed_call(
+        self, h: _GeneratorHandle, error: BaseException, method: str
+    ) -> bool:
+        """With fault tolerance, report ``h`` failed if its ``method`` call failed with
+        ``error`` because it is gone, and return True; otherwise return False, and the
+        caller raises ``error``."""
+        if (
+            self._config.fault_tolerance is None
+            or self._phase != "running"
+            or not self._is_generator_unavailable(error)
+        ):
+            return False
+        self._report_failure(h, f"{method} failed: {error!r}")
+        return True
+
+    async def _fanout(self, method: str, *args, **kwargs) -> None:
+        """Call ``method`` on every rank of every live generator, concurrently.
+
+        A failure never cancels the other calls. Without fault tolerance, the first
+        error propagates at once. With it, a generator whose call finds it gone is
+        reported failed, and any other error propagates once every call is done.
+        """
+        targets = [h for h in self._generators if h.state != "dead"]
+        calls = [getattr(h.actor, method).call(*args, **kwargs) for h in targets]
+        if self._config.fault_tolerance is None:
+            await asyncio.gather(*calls)
+            return
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        errors = [
+            result
+            for h, result in zip(targets, results)
+            if isinstance(result, BaseException)
+            and not self._absorb_failed_call(h, result, method)
+        ]
+        if errors:
+            raise errors[0]
 
     async def wait_engine_loop(self) -> None:
         """Wait for every generator rank's engine loop; raise on the first one that crashes.
@@ -187,16 +324,51 @@ class InterGeneratorRouter(Configurable):
         engine loop crashes, its TP peers stay blocked in collectives and may not reply until
         those time out. ``stream()`` yields each rank's reply as it arrives, so the first
         crash raises at once.
+
+        With fault tolerance, a crashed generator is restarted instead, and this waits for
+        its new incarnation; it raises once the run must fail (see
+        ``GeneratorFaultToleranceConfig``).
         """
+        if self._config.fault_tolerance is None:
+            await asyncio.gather(*(_wait_engine_loop(h) for h in self._generators))
+            return
+        watchers = asyncio.gather(
+            *(self._watch_engine_loop(i) for i in range(len(self._generators)))
+        )
+        fatal = asyncio.ensure_future(self._fatal.wait())
+        try:
+            await asyncio.wait([watchers, fatal], return_when=asyncio.FIRST_COMPLETED)
+            if self._fatal_error is not None:
+                raise self._fatal_error
+            await watchers
+        finally:
+            watchers.cancel()
+            fatal.cancel()
+            await asyncio.gather(watchers, fatal, return_exceptions=True)
 
-        async def wait(generator: _GeneratorHandle) -> None:
-            for reply in generator.actor.wait_engine_loop.stream():
-                await reply
-
-        await asyncio.gather(*(wait(generator) for generator in self._generators))
+    async def _watch_engine_loop(self, index: int) -> None:
+        """Wait for generator ``index``'s engine loop, across restarts, until it exits."""
+        while True:
+            h = self._generators[index]
+            try:
+                await _wait_engine_loop(h)
+                if self._generators[index] is h:
+                    return
+            except Exception as e:
+                self._report_failure(h, f"its engine loop failed: {e!r}")
+            async with self._generators_changed:
+                await self._generators_changed.wait_for(
+                    lambda: self._phase == "closing" or self._generators[index] is not h
+                )
+            if self._phase == "closing":
+                return
 
     async def pull_model_state_dict(self, policy_version: int) -> None:
-        """Pull the given policy version's state dict into every generator.
+        """Pull the given policy version's state dict into every live generator.
+
+        With fault tolerance, a generator whose pull fails is reported failed and the
+        others keep the new version; a joining generator becomes healthy once its pull
+        lands.
 
         Args:
             policy_version: Trainer policy version whose state dict to pull.
@@ -221,11 +393,70 @@ class InterGeneratorRouter(Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        targets = [h for h in self._generators if h.state != "dead"]
+        fault_tolerant = self._config.fault_tolerance is not None
+        results = await asyncio.gather(
+            *[_pull_one(h) for h in targets], return_exceptions=fault_tolerant
+        )
+        if not fault_tolerant:
+            return
+        for h, result in zip(targets, results):
+            # Any error fails the generator, since its weights are then unknown.
+            if isinstance(result, BaseException):
+                self._report_failure(h, f"its model state dict pull failed: {result!r}")
+            elif h.state == "joining":
+                h.state = "healthy"
+                logger.info(
+                    f"Generator {h.index} rejoined at policy version {policy_version}"
+                )
+
+    async def model_state_dict_layouts(
+        self,
+    ) -> list[list[tuple[int, dict[str, TensorShard]]]]:
+        """Each generator's ``(rank, shard layout)`` pairs, in any order."""
+        results = await asyncio.gather(
+            *(h.actor.model_state_dict_layout.call() for h in self._generators)
+        )
+        return [list(result.values()) for result in results]
+
+    async def connect_model_state_dict_transport(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        trainer_sources: list[TrainerSource],
+    ) -> None:
+        """Connect every generator, and every one restarted later, to every trainer
+        rank's ``ModelStateDictTransport`` staging buffer."""
+
+        async def connect(h: _GeneratorHandle) -> None:
+            await h.actor.connect_model_state_dict_transport.call(
+                config, trainer_sources=trainer_sources, generator_index=h.index
+            )
+
+        await self._set_model_state_dict_source(connect)
+
+    async def initialize_torchstore_clients(self) -> None:
+        """Initialize the TorchStore client of every generator rank, and of every
+        generator restarted later.
+
+        TODO: delete once ``ModelStateDictTransport`` replaces TorchStore.
+        """
+
+        async def connect(h: _GeneratorHandle) -> None:
+            await h.actor.initialize_torchstore_client.call(requester_index=h.index)
+
+        await self._set_model_state_dict_source(connect)
+
+    async def _set_model_state_dict_source(
+        self, connect: Callable[[_GeneratorHandle], Awaitable[None]]
+    ) -> None:
+        self._connect_model_state_dict_source = connect
+        await asyncio.gather(*(connect(h) for h in self._generators))
 
     async def start_engine_loop(self) -> None:
         """Start the engine loop on every rank of every generator."""
         await self._fanout("start_engine_loop")
+        self._phase = "running"
 
     async def sync_log_step(self, step: int) -> None:
         """Set the step counter in this process and in every generator rank."""
@@ -240,13 +471,120 @@ class InterGeneratorRouter(Configurable):
         )
         self._strategy.release_session(routing_session_id)
         # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
-        if pinned is not None:
+        if pinned is None or pinned.state == "dead":
+            return
+        try:
             await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
+        except Exception as e:
+            if not self._absorb_failed_call(pinned, e, "release_sessions"):
+                raise
 
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""
         await self._fanout("release_groups", group_ids)
 
     async def close_generators(self) -> list[Any | BaseException]:
-        """Close every generator, returning each one's result or exception."""
-        return await self._fanout("close", return_exceptions=True)
+        """Stop restarting generators, then close every live generator, returning
+        each one's result or exception (None for a dead one)."""
+        self._phase = "closing"
+        async with self._generators_changed:
+            self._generators_changed.notify_all()
+        restarts = list(self._background_tasks)
+        for task in restarts:
+            task.cancel()
+        await asyncio.gather(*restarts, return_exceptions=True)
+
+        async def close(h: _GeneratorHandle) -> Any:
+            if h.state == "dead":
+                # Stop the incarnation a cancelled restart may have spawned.
+                return await self._stop_generator(h.index)
+            return await h.actor.close.call()
+
+        return await asyncio.gather(
+            *(close(h) for h in self._generators), return_exceptions=True
+        )
+
+    def _report_failure(self, h: _GeneratorHandle, reason: str) -> None:
+        """Take a failed generator out of service and restart it. Idempotent: later
+        reports of the same incarnation are no-ops. Fault tolerance only."""
+        ft = self._config.fault_tolerance
+        assert ft is not None
+        if self._phase == "closing" or h.state == "dead":
+            return
+        h.state = "dead"
+        logger.warning(f"Generator {h.index} failed: {reason}")
+        num_healthy = sum(g.state == "healthy" for g in self._generators)
+        if num_healthy < ft.min_healthy_generators:
+            self._fail(
+                h.index,
+                RuntimeError(
+                    f"generator {h.index} failed, leaving {num_healthy} healthy "
+                    f"generator(s), fewer than min_healthy_generators="
+                    f"{ft.min_healthy_generators}: {reason}"
+                ),
+            )
+            return
+        task = asyncio.create_task(self._restart(h.index, reason))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _restart(self, index: int, reason: str) -> None:
+        """Replace generator ``index``, which failed for ``reason``, with a new
+        incarnation on the same hosts and GPUs; it joins the next model state dict
+        pull. A failed attempt counts as another failure, retried while restarts are
+        left."""
+        ft = self._config.fault_tolerance
+        assert ft is not None
+        while True:
+            if self._num_restarts[index] == ft.max_restarts_per_generator:
+                self._fail(
+                    index,
+                    RuntimeError(
+                        f"generator {index} failed after {self._num_restarts[index]} "
+                        f"restart(s) (max_restarts_per_generator="
+                        f"{ft.max_restarts_per_generator}): {reason}"
+                    ),
+                )
+                return
+            self._num_restarts[index] += 1
+            try:
+                await self._stop_generator(index)
+                handle = await self._spawn_generator(index)
+                joining = _GeneratorHandle(
+                    index=index,
+                    actor=handle.all_ranks,
+                    rank0_actor=handle.rank0,
+                    state="joining",
+                )
+                if self._connect_model_state_dict_source is not None:
+                    await self._connect_model_state_dict_source(joining)
+                await joining.actor.start_engine_loop.call()
+                break
+            except Exception as e:
+                reason = f"restarting it failed: {e!r}"
+                logger.warning(f"Generator {index}: {reason}")
+        async with self._generators_changed:
+            self._generators[index] = joining
+            self._generators_changed.notify_all()
+        logger.info(
+            f"Generator {index} restarted ({self._num_restarts[index]} of "
+            f"max_restarts_per_generator={ft.max_restarts_per_generator}); it serves "
+            "after the next model state dict pull"
+        )
+
+    def _fail(self, index: int, error: Exception) -> None:
+        """Fail the run with ``error``, which ``wait_engine_loop`` raises, and stop the
+        failed generator ``index``, so that calls still in flight to it fail too."""
+        logger.error(f"Generator fault tolerance gives up: {error}")
+        if self._fatal_error is None:
+            self._fatal_error = error
+            self._fatal.set()
+        task = asyncio.create_task(self._stop_generator(index))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+
+async def _wait_engine_loop(generator: _GeneratorHandle) -> None:
+    """Wait for every rank of ``generator``'s engine loop; raise as soon as one fails."""
+    for reply in generator.actor.wait_engine_loop.stream():
+        await reply

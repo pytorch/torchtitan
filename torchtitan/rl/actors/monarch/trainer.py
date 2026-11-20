@@ -11,8 +11,9 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from monarch.actor import Actor, concurrent_endpoint
+from monarch.actor import concurrent_endpoint
 
+from torchtitan.rl.actors.monarch.actor import TitanActor
 from torchtitan.rl.model_state_dict_transport import (
     ModelStateDictTransport,
     TensorShard,
@@ -86,5 +87,5 @@ class _TrainerActorEndpoints:
         await super().push_model_state_dict()
 
 
-class TrainerActor(Actor, _TrainerActorEndpoints, Trainer):
+class TrainerActor(TitanActor, _TrainerActorEndpoints, Trainer):
     """Expose a standalone :class:`Trainer` through Monarch endpoints."""

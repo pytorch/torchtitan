@@ -128,25 +128,43 @@ def compute_generator_world_size(p: InferenceParallelismConfig) -> int:
     return p.data_parallel_degree * p.tensor_parallel_degree
 
 
-def _spawn_proc_mesh(
+@dataclass(frozen=True)
+class RolePlacement:
+    """Where one role's processes run. A generator keeps its placement, so a
+    restarted generator takes its predecessor's hosts and GPUs."""
+
+    host_mesh: HostMesh
+    gpus_per_host: int
+    env: dict[str, str]
+    """Launch env of every process, e.g. its ``CUDA_VISIBLE_DEVICES``."""
+    bootstrap: Callable[[], None]
+
+    def spawn_procs(self) -> ProcMesh:
+        return self.host_mesh.spawn_procs(
+            per_host={"gpus": self.gpus_per_host},
+            bootstrap=self.bootstrap,
+            bootstrap_command=default_bootstrap_cmd().with_env(self.env),
+        )
+
+
+def _place_role(
     host_mesh: HostMesh,
     role_world_size: int,
     provisioner: PerHostProvisioner,
     *,
     bootstrap: Callable[[], None],
-) -> ProcMesh:
-    """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
-    evenly across the mesh's hosts.
+) -> RolePlacement:
+    """Split ``role_world_size`` evenly across ``host_mesh``'s hosts and allocate
+    those GPUs.
 
     Assumes ``_check_gpus_per_host`` passed: the split is even and the GPUs fit.
     """
-    nodes = len(host_mesh)
-    role_gpus_per_node = role_world_size // nodes
-    env = provisioner.allocate(role_gpus_per_node)
-    return host_mesh.spawn_procs(
-        per_host={"gpus": role_gpus_per_node},
+    gpus_per_host = role_world_size // len(host_mesh)
+    return RolePlacement(
+        host_mesh=host_mesh,
+        gpus_per_host=gpus_per_host,
+        env=provisioner.allocate(gpus_per_host),
         bootstrap=bootstrap,
-        bootstrap_command=default_bootstrap_cmd().with_env(env),
     )
 
 
@@ -205,21 +223,24 @@ def spawn_proc_mesh(
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
-) -> tuple[ProcMesh, list[ProcMesh]]:
-    """Spawn the trainer and generator proc meshes.
+) -> tuple[ProcMesh, list[RolePlacement]]:
+    """Spawn the trainer proc mesh and place the generators.
+
+    The generators are only placed: the generator router spawns them
+    (``RolePlacement.spawn_procs``), so it owns them and can restart them.
 
     Args:
         trainer_world_size: Number of GPU procs to spawn for the trainer.
-        per_generator_world_size: Number of GPU procs to spawn for each generator.
+        per_generator_world_size: Number of GPU procs of each generator.
         host_meshes: Caller-provided trainer/generator host meshes. When
-            provided, each role is spawned on its provided host mesh; roles given
+            provided, each role is placed on its provided host mesh; roles given
             the same host mesh object get non-overlapping GPU ranges on it. None means
-            both roles are spawned on ``this_host()`` by using non-overlapping
+            both roles are placed on ``this_host()`` by using non-overlapping
             GPU ranges.
-        num_generators: Number of generator proc meshes to spawn.
+        num_generators: Number of generators to place.
 
     Returns:
-        The ``(trainer_mesh, generator_meshes)`` proc meshes.
+        The trainer proc mesh and each generator's placement.
     """
     total_generator_gpus = num_generators * per_generator_world_size
     total_gpus = trainer_world_size + total_generator_gpus
@@ -247,45 +268,31 @@ def spawn_proc_mesh(
             provisioners.setdefault(
                 id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
             )
-        trainer_mesh = _spawn_proc_mesh(
-            trainer_host_mesh,
-            trainer_world_size,
-            provisioners[id(trainer_host_mesh)],
-            bootstrap=_preimport_torch,
-        )
-        generator_meshes = [
-            _spawn_proc_mesh(
-                gen_host_mesh,
-                per_generator_world_size,
-                provisioners[id(gen_host_mesh)],
-                bootstrap=_bootstrap_generator,
-            )
-            for gen_host_mesh in generator_host_meshes
-        ]
     else:
         # Single-node mode: partition GPUs on this_host() via
         # CUDA_VISIBLE_DEVICES
-        host_mesh = this_host()
-        provisioner = PerHostProvisioner(total_gpus=total_gpus)
-        trainer_mesh = host_mesh.spawn_procs(
-            per_host={"gpus": trainer_world_size},
-            bootstrap=_preimport_torch,
-            bootstrap_command=default_bootstrap_cmd().with_env(
-                provisioner.allocate(trainer_world_size)
-            ),
-        )
-        generator_meshes = [
-            host_mesh.spawn_procs(
-                per_host={"gpus": per_generator_world_size},
-                bootstrap=_bootstrap_generator,
-                bootstrap_command=default_bootstrap_cmd().with_env(
-                    provisioner.allocate(per_generator_world_size)
-                ),
-            )
-            for _ in range(num_generators)
-        ]
+        trainer_host_mesh = this_host()
+        generator_host_meshes = [trainer_host_mesh] * num_generators
+        provisioners = {
+            id(trainer_host_mesh): PerHostProvisioner(total_gpus=total_gpus)
+        }
 
-    return trainer_mesh, generator_meshes
+    trainer_mesh = _place_role(
+        trainer_host_mesh,
+        trainer_world_size,
+        provisioners[id(trainer_host_mesh)],
+        bootstrap=_preimport_torch,
+    ).spawn_procs()
+    generator_placements = [
+        _place_role(
+            host_mesh,
+            per_generator_world_size,
+            provisioners[id(host_mesh)],
+            bootstrap=_bootstrap_generator,
+        )
+        for host_mesh in generator_host_meshes
+    ]
+    return trainer_mesh, generator_placements
 
 
 def spawn_cpu_procs(num_procs: int) -> ProcMesh:

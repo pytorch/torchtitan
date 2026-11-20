@@ -10,23 +10,73 @@ allocates its own hosts subclasses `Controller` and overrides
 hosts from a cluster scheduler, use a launch recipe (see
 [Launchers](#launchers)).
 
-Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
+Each adapter is a thin `TitanActor` (a Monarch `Actor`) subclass of a service with no Monarch
 dependency of its own: it declares the service's methods as
 `@concurrent_endpoint`s and supplies Monarch-specific constructor arguments
 (rank, actor name, `Channel.open`). Domain behavior stays in the service.
 
 | Module | Purpose |
 | --- | --- |
-| `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client (or the `ModelStateDictTransport`), and stops the meshes. |
+| `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, places the generators, spawns each service's actors, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client (or the `ModelStateDictTransport`), and stops the meshes. |
+| `actor.py` | `TitanActor`, the base of every actor here: drops a message it sends to a stopped or failed actor instead of failing (Monarch's default). |
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
-| `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
+| `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton, spawns and stops the generators' proc meshes, and reports their failures from `__supervise__` (see [Generator fault tolerance](#generator-fault-tolerance)). |
 | `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process; supplies `MonarchRDMAMicrobatch.register`. |
 | `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/trainer/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
-| `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
+| `provisioning.py` | Proc meshes: the trainer's GPU mesh and each generator's `RolePlacement` (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
 | `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), and the submit command (`submit.py`). |
+
+## Generator fault tolerance
+
+Monarch reports a mesh's failures only to the actor that spawned it. The
+generator router spawns every generator's proc mesh on that generator's
+`RolePlacement` (hosts and GPUs), so it hears of their failures. With
+`InterGeneratorRouter.Config.fault_tolerance` unset, it passes them on to the
+controller, which exits. With it set (and `num_generators` >= 2), the router
+restarts a failed generator in place while training goes on with the others:
+
+```python
+from torchtitan.rl.routing.inter_generator import GeneratorFaultToleranceConfig
+
+config.generator_router.fault_tolerance = GeneratorFaultToleranceConfig()
+```
+
+```
+           failure reported                stop its procs, spawn a new incarnation on
+ healthy -------------------> dead ------> the same GPUs, connect it to the model state
+    ^                                      dict source, start its engine loop
+    |                                                     |
+    +------ its first model state dict pull lands ---- joining
+```
+
+A generator fails as a whole when any of its ranks does. The router learns of it
+from whichever signal comes first:
+
+| Failure | Signal |
+| --- | --- |
+| A rank's process dies (OOM kill, crash) | `wait_engine_loop` on that rank fails at once; Monarch's `__supervise__` after `HYPERACTOR_MESH_DATA_SUPERVISION_TIMEOUT` (30s by default) |
+| A rank's actor fails, its process alive | `__supervise__` |
+| The engine loop crashes | `wait_engine_loop` |
+| A model state dict pull fails | `pull_model_state_dict` |
+| A call finds the generator gone (`SupervisionError`, `GeneratorUnavailableError`) | the router's own calls to it; a `generate` caller, through `release_reservation(error=...)` |
+
+A `generate` call that fails because its generator is gone is retried on other
+generators, in up to `num_generators` attempts. A restarted generator serves only
+after the next model state dict pull lands, so it never serves stale weights.
+The trainer never waits for a restart; a pull waits for a generator that fails
+during it only until that generator is stopped. The run fails when a failure
+leaves fewer than `min_healthy_generators` healthy generators, or when a
+generator fails, or fails to restart, after `max_restarts_per_generator`
+restarts.
+
+Not covered: a lost host (Slurm ends the whole job), a generator failure before
+the engine loops start (the run fails), a generator that hangs without failing,
+and failures of the trainer, the router or the controller. A
+request that crashes every engine it reaches is retried on each generator, so
+it can fail several generators at once.
 
 ## Launchers
 

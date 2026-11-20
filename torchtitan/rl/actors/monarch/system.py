@@ -19,12 +19,11 @@ from monarch.actor import ProcMesh
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
     compute_generator_world_size,
     compute_trainer_world_size,
-    generator_role_names,
     HostMeshes,
+    RolePlacement,
     shutdown,
     spawn_cpu_procs,
     spawn_proc_mesh,
@@ -33,7 +32,7 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.router import InterGeneratorRouterActor
 from torchtitan.rl.actors.monarch.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.actors.monarch.trainer import TrainerActor
-from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
+from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.model_state_dict_transport import (
@@ -55,7 +54,8 @@ class MonarchActorSystem(ActorSystem):
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
     ``launcher/base.py``, with the hosts of a submitted job). The router, the
-    batcher and the rollout worker pool get CPU procs on this host.
+    batcher and the rollout worker pool get CPU procs on this host. The router
+    spawns the generators' proc meshes, so that it owns them.
 
     Example: a ``Controller`` subclass that allocated its hosts as
     ``self.host_meshes``::
@@ -77,12 +77,12 @@ class MonarchActorSystem(ActorSystem):
         self.config = config
         self._host_meshes = host_meshes
         self._trainer_mesh: ProcMesh | None = None
-        self._generator_meshes: list[ProcMesh] = []
+        self._generator_placements: list[RolePlacement] = []
         self._router_mesh: ProcMesh | None = None
         self._batcher_mesh: ProcMesh | None = None
         self._rollout_worker_mesh: ProcMesh | None = None
         self._trainer: Any | None = None
-        self._generators: list[ServiceHandle] = []
+        self._router: Any | None = None
 
     async def provision(
         self,
@@ -91,7 +91,7 @@ class MonarchActorSystem(ActorSystem):
         generator_parallelism: InferenceParallelismConfig,
         num_generators: int,
     ) -> None:
-        self._trainer_mesh, self._generator_meshes = spawn_proc_mesh(
+        self._trainer_mesh, self._generator_placements = spawn_proc_mesh(
             compute_trainer_world_size(trainer_parallelism),
             compute_generator_world_size(generator_parallelism),
             host_meshes=self._host_meshes,
@@ -107,8 +107,6 @@ class MonarchActorSystem(ActorSystem):
         self._batcher_mesh = spawn_cpu_procs(1)
 
         await setup_torch_elastic_env(self._trainer_mesh)
-        for generator_mesh in self._generator_meshes:
-            await setup_torch_elastic_env(generator_mesh)
 
     async def spawn_trainer(
         self, config: Trainer.Config, *, dp_degree: int, **kwargs: Any
@@ -152,23 +150,16 @@ class MonarchActorSystem(ActorSystem):
         **generator_kwargs: Any,
     ) -> Any:
         assert self._router_mesh is not None, "provision before spawning"
-        actor_names = generator_role_names(len(self._generator_meshes))
-        for actor_name, generator_mesh in zip(actor_names, self._generator_meshes):
-            generator = generator_mesh.spawn(
-                actor_name, GeneratorActor, generator_config, **generator_kwargs
-            )
-            self._generators.append(
-                ServiceHandle(
-                    all_ranks=generator,
-                    rank0=generator.flatten("rank").slice(rank=0),
-                )
-            )
-        return self._router_mesh.spawn(
+        self._router = self._router_mesh.spawn(
             "generator_router",
             InterGeneratorRouterActor,
             config,
-            generators=self._generators,
+            placements=self._generator_placements,
+            generator_config=generator_config,
+            generator_kwargs=generator_kwargs,
         )
+        await self._router.spawn_generators.call_one()
+        return self._router
 
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
         assert self._batcher_mesh is not None, "provision before spawning"
@@ -210,28 +201,19 @@ class MonarchActorSystem(ActorSystem):
         # TorchStore clients are cached per process. Initialize every actor
         # rank before the role-less state-dict APIs use that cache.
         assert self._trainer is not None, "spawn the trainer first"
+        assert self._router is not None, "spawn the generator router first"
         await asyncio.gather(
             self._trainer.initialize_torchstore_client.call(),
-            *(
-                generator.all_ranks.initialize_torchstore_client.call(
-                    requester_index=requester_index
-                )
-                for requester_index, generator in enumerate(self._generators)
-            ),
+            self._router.initialize_torchstore_clients.call_one(),
         )
 
     async def initialize_model_state_dict_transport(
         self, config: ModelStateDictTransport.Config
     ) -> None:
         assert self._trainer is not None, "spawn the trainer first"
-        results = await asyncio.gather(
-            *(
-                generator.all_ranks.model_state_dict_layout.call()
-                for generator in self._generators
-            )
-        )
+        assert self._router is not None, "spawn the generator router first"
         generator_rank_layouts = shared_rank_layouts(
-            [list(r.values()) for r in results]
+            await self._router.model_state_dict_layouts.call_one()
         )
         trainer_sources = list(
             (
@@ -240,31 +222,20 @@ class MonarchActorSystem(ActorSystem):
                 )
             ).values()
         )
-        await asyncio.gather(
-            *(
-                generator.all_ranks.connect_model_state_dict_transport.call(
-                    config,
-                    trainer_sources=trainer_sources,
-                    generator_index=generator_index,
-                )
-                for generator_index, generator in enumerate(self._generators)
-            )
+        await self._router.connect_model_state_dict_transport.call_one(
+            config, trainer_sources=trainer_sources
         )
 
     async def stop(self) -> None:
+        # Stopping the router's mesh also stops the generator meshes it owns.
         meshes = [
             mesh
-            for mesh in (
-                self._router_mesh,
-                self._batcher_mesh,
-                self._trainer_mesh,
-                *self._generator_meshes,
-            )
+            for mesh in (self._router_mesh, self._batcher_mesh, self._trainer_mesh)
             if mesh is not None
         ]
-        self._router_mesh, self._batcher_mesh = None, None
-        self._trainer_mesh, self._generator_meshes = None, []
-        self._trainer, self._generators = None, []
+        self._router_mesh, self._batcher_mesh, self._trainer_mesh = None, None, None
+        self._generator_placements = []
+        self._trainer, self._router = None, None
         for i, mesh in enumerate(meshes):
             try:
                 await mesh.stop()

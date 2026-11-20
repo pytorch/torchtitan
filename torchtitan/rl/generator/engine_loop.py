@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+class GeneratorUnavailableError(RuntimeError):
+    """A call reached a generator whose engine loop is closed or has crashed, so the call
+    did not complete; another generator can serve it."""
+
+
 class EngineLoopThread:
     """A daemon thread running its own event loop, where the engine and the engine loop live.
 
@@ -266,7 +271,9 @@ class EngineLoop:
         """Guard for the rank-0-only calls"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
         if self._queue.closed:
-            raise RuntimeError(f"generator is closed; cannot call {endpoint_name}")
+            raise GeneratorUnavailableError(
+                f"generator is closed; cannot call {endpoint_name}"
+            )
         if self._future is None:
             raise RuntimeError(
                 "engine loop not started; call start_engine_loop on all ranks "
@@ -390,9 +397,12 @@ class EngineLoop:
         except Exception as exc:
             logger.exception("engine loop crashed; failing all outstanding replies")
             if self._rank == 0:
-                self._request_dispatcher.fail_outstanding_generations(exc)
-                _fail_loads(pending_load_messages, exc)
-                await self._rank0_close_and_fail_queue(exc)
+                # The calls didn't complete, so another generator may serve them.
+                unavailable = GeneratorUnavailableError(f"engine loop crashed: {exc!r}")
+                unavailable.__cause__ = exc
+                self._request_dispatcher.fail_outstanding_generations(unavailable)
+                _fail_loads(pending_load_messages, unavailable)
+                await self._rank0_close_and_fail_queue(unavailable)
             raise
         finally:
             await self._release_resources()
@@ -563,7 +573,7 @@ class EngineLoop:
         # The loop has stopped; fail any replies it left unresolved so awaiting callers get an
         # exception instead of hanging.
         self._request_dispatcher.fail_outstanding_generations(
-            RuntimeError("generator closed before the request finished")
+            GeneratorUnavailableError("generator closed before the request finished")
         )
 
         if self._engine is not None:
@@ -659,12 +669,13 @@ class EngineLoopQueue:
         """Enqueue `message`; it lands on the next iteration of `event_loop`. Raises once closed."""
         with self._lock:
             if self._closed_reason is not None:
-                raise RuntimeError(self._closed_reason)
+                raise GeneratorUnavailableError(self._closed_reason)
             # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
             self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
 
     def close(self, last_message: EngineLoopMessage, reason: str) -> None:
-        """Queue `last_message` behind every message already put; later puts raise `RuntimeError(reason)`.
+        """Queue `last_message` behind every message already put; later puts raise
+        `GeneratorUnavailableError(reason)`.
         No-op once closed."""
         with self._lock:
             if self._closed_reason is not None:
