@@ -22,6 +22,7 @@ from vllm.inputs import EngineInput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.cache import LRUCache
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -56,7 +57,7 @@ from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import device_type, has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,23 @@ def add_extra_vllm_engine_args(
             f"extra_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
         )
     engine_kwargs.update(extra_engine_args)
+
+
+def _validate_platform(config: VLLMEngine.Config, model: Decoder.Config) -> None:
+    """Reject what TorchTitan's vLLM path supports only on CUDA (and ROCm)."""
+    if device_type == "cuda":
+        return
+    if config.cuda_graph.mode != "NONE":
+        raise ValueError(
+            f"vLLM CUDA graphs need CUDA; set cuda_graph.mode='NONE' on {device_type}."
+        )
+    # TorchTitan's CUSTOM backend runs varlen_attn, which calls
+    # aten::_flash_attention_forward: CUDA-only (e.g. not implemented on XPU).
+    if vllm_attention_backend(model) is AttentionBackendEnum.CUSTOM:
+        raise ValueError(
+            f"varlen attention is not supported on {device_type}; use flex attention "
+            "(FlexInnerAttention) for the generator model."
+        )
 
 
 class VLLMEngine(GenerationEngine):
@@ -181,6 +199,7 @@ class VLLMEngine(GenerationEngine):
             cuda_graph=config.cuda_graph.mode != "NONE",
             deterministic=debug.deterministic,
         )
+        _validate_platform(config, model)
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load

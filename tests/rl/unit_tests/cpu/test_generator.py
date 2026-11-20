@@ -29,7 +29,7 @@ from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
-from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.rl.generator.dispatcher import (
     _prepare_generation_request_metrics,
     _RejectedRequests,
@@ -39,11 +39,13 @@ from torchtitan.rl.generator.dispatcher import (
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.vllm import worker as vllm_worker
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
     _extract_request_metrics_inputs,
     _finished_request,
+    _validate_platform,
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
@@ -710,6 +712,58 @@ def test_generator_dp_can_supply_expert_parallelism():
             expert_parallel_degree=4,
         ),
     )
+
+
+def test_varlen_attention_rejected_off_cuda(monkeypatch):
+    monkeypatch.setattr("torchtitan.rl.generator.vllm.engine.device_type", "xpu")
+    config = VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE"))
+    with pytest.raises(ValueError, match="varlen attention is not supported on xpu"):
+        _validate_platform(config, _MODEL_CONFIG)
+
+
+def test_flex_attention_accepted_off_cuda(monkeypatch):
+    monkeypatch.setattr("torchtitan.rl.generator.vllm.engine.device_type", "xpu")
+    model = SimpleNamespace(
+        first_full_attention=SimpleNamespace(
+            inner_attention=FlexInnerAttention.Config()
+        ),
+        max_context_length=1024,
+    )
+    _validate_platform(
+        VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")), model
+    )
+
+
+@pytest.mark.parametrize("mode", ["FULL", "FULL_DECODE_ONLY"])
+def test_vllm_cuda_graphs_rejected_off_cuda(monkeypatch, mode):
+    monkeypatch.setattr("torchtitan.rl.generator.vllm.engine.device_type", "xpu")
+    config = VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode=mode))
+    with pytest.raises(ValueError, match="cuda_graph.mode='NONE'"):
+        _validate_platform(config, _MODEL_CONFIG)
+
+
+@pytest.mark.skipif(
+    not hasattr(vllm_worker, "TorchTitanXPUWorker"),
+    reason="the XPU worker is defined on XPU only",
+)
+def test_xpu_worker_builds_torchtitan_runner(monkeypatch):
+    import vllm.v1.worker.xpu_worker as vllm_xpu_worker
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+
+    runner_cls = vllm_worker.TorchTitanXPUModelRunner
+    mro = runner_cls.__mro__
+    assert mro.index(TorchTitanGPUModelRunner) < mro.index(XPUModelRunner)
+    built = []
+    monkeypatch.setattr(
+        vllm_xpu_worker.XPUWorker,
+        "init_device",
+        lambda self: built.append(vllm_xpu_worker.XPUModelRunner),
+    )
+    worker = object.__new__(vllm_worker.TorchTitanXPUWorker)
+    worker.use_v2_model_runner = False
+    worker.init_device()
+    assert built == [runner_cls]
+    assert vllm_xpu_worker.XPUModelRunner is XPUModelRunner
 
 
 def test_batch_invariant_requires_kv_cache_reset():
