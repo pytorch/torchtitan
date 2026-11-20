@@ -463,17 +463,27 @@ class HFTransformerModel(BaseModel):
             hf_model_id: str,
             max_context_length: int,
             deterministic: bool,
+            trust_remote_code: bool = False,
+            revision: str | None = None,
         ) -> None:
-            """Populate this config from the selected Hugging Face model."""
-            config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
-            trust_remote_code = (
-                config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
-            )
+            """Populate this config from the selected Hugging Face model.
+
+            ``trust_remote_code`` runs config code shipped in the model repo, so
+            enable it only for trusted repos, ideally with a pinned ``revision``.
+            """
+            if trust_remote_code:
+                config_dict, _ = PretrainedConfig.get_config_dict(
+                    hf_model_id, revision=revision
+                )
+                trust_remote_code = (
+                    config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
+                )
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
                 trust_remote_code=trust_remote_code,
+                revision=revision,
             )
 
             # For composite (VL) models, use the nested text config so we
