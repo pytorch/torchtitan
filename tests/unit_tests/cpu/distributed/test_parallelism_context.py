@@ -13,6 +13,7 @@ import unittest
 from dataclasses import dataclass
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
@@ -371,6 +372,7 @@ class TestSpmdLayout(DTensorTestBase):
                 torch.testing.assert_close(local_weight, expected)
 
 
+@pytest.mark.xdist_group("tcp_port_12356")
 class TestParallelismContextMeshOperations(unittest.TestCase):
     """Test ParallelismContext mesh operations with single-rank distributed environment."""
 
