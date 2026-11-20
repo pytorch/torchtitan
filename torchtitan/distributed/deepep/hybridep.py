@@ -117,7 +117,7 @@ def _dispatch_impl(
       then reads tokens_per_expert from pinned CPU memory to compute the
       exact num_permuted_tokens on the host.
     """
-    global _buffer, _handle_counter
+    global _handle_counter
     # pyrefly: ignore [bad-argument-type]
     group = dist.distributed_c10d._resolve_process_group(group_name)
     assert _buffer is not None, "HybridEP buffer must be initialized before dispatch"
@@ -220,7 +220,6 @@ def _combine_impl(
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """CUDA combine: reverse dispatch permutation via opaque handle."""
-    global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
@@ -253,7 +252,6 @@ def _dispatch_bwd_impl(
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """Backward of combine: scatter gradients via dispatch_with_permute."""
-    global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
@@ -288,7 +286,6 @@ def _combine_bwd_impl(
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward of dispatch: gather gradients via combine_with_unpermute."""
-    global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 

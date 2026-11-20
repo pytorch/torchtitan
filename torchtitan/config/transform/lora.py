@@ -5,8 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass, fields
-from typing import Any, cast
+from dataclasses import dataclass, field, fields
+from typing import Any, cast, Literal
 
 from torchtitan.models.base.module import Module
 
@@ -17,6 +17,7 @@ from torchtitan.models.common.lora import (
     get_lora_grouped_linear,
     get_lora_linear,
 )
+from torchtitan.models.common.moe import RoutedExperts
 
 from .base import ModelConfigTransform
 
@@ -31,6 +32,57 @@ def _matches_fqn(fqn: str, target: str) -> bool:
     return fqn == target or fqn.endswith(f".{target}")
 
 
+def _is_target(fqn: str, target_module_names: set[str] | None) -> bool:
+    return target_module_names is None or any(
+        _matches_fqn(fqn, target) for target in target_module_names
+    )
+
+
+def _in_subtree(fqn: str, root: str) -> bool:
+    return fqn == root or fqn.startswith(f"{root}.")
+
+
+def _validate_trainable_modules(
+    configs: list[tuple[str, Module.Config, object | None, str | int | None]],
+    trainable_modules: list[str],
+    target_module_names: set[str] | None,
+) -> None:
+    matched: set[str] = set()
+    occurrences: dict[int, tuple[list[str], list[str]]] = {}
+    for fqn, cfg, _parent, _attr in configs:
+        roots = [root for root in trainable_modules if _in_subtree(fqn, root)]
+        # A root matches when any config is at or under it. A list container
+        # such as "layers" has no config of its own.
+        matched.update(roots)
+        if (
+            roots
+            and isinstance(cfg, (Linear.Config, GroupedLinear.Config))
+            and _is_target(fqn, target_module_names)
+        ):
+            hint = (
+                " target_modules=None targets every supported projection."
+                if target_module_names is None
+                else ""
+            )
+            raise ValueError(
+                f"LoRA target {fqn!r} is inside trainable module {roots[0]!r}.{hint}"
+            )
+        trainable_fqns, frozen_fqns = occurrences.setdefault(id(cfg), ([], []))
+        (trainable_fqns if roots else frozen_fqns).append(fqn)
+
+    unmatched = set(trainable_modules) - matched
+    if unmatched:
+        raise ValueError(
+            f"LoRA trainable_modules {sorted(unmatched)} match no module config."
+        )
+    for trainable_fqns, frozen_fqns in occurrences.values():
+        if trainable_fqns and frozen_fqns:
+            raise ValueError(
+                f"A shared config is trainable at {sorted(trainable_fqns)} and "
+                f"frozen at {sorted(frozen_fqns)}. Create separate config objects."
+            )
+
+
 def _validate_shared_projection_target_consistency(
     configs: list[tuple[str, Module.Config, object | None, str | int | None]],
     target_module_names: set[str] | None,
@@ -39,9 +91,7 @@ def _validate_shared_projection_target_consistency(
     for fqn, cfg, _parent, _attr in configs:
         if not isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
             continue
-        is_target = target_module_names is None or any(
-            _matches_fqn(fqn, target) for target in target_module_names
-        )
+        is_target = _is_target(fqn, target_module_names)
         _, lora_fqns, frozen_fqns = projection_occurrences.setdefault(
             id(cfg), (cfg, [], [])
         )
@@ -60,22 +110,28 @@ def _validate_shared_projection_target_consistency(
 def _validate_weight_tied_lm_head_target(
     configs: list[tuple[str, Module.Config, object | None, str | int | None]],
     target_module_names: set[str] | None,
+    trainable_modules: list[str],
 ) -> None:
     for fqn, cfg, parent, attr in configs:
         if not isinstance(cfg, Linear.Config) or attr != "lm_head":
             continue
         if not getattr(parent, "enable_weight_tying", False):
             continue
-
-        is_target = target_module_names is None or any(
-            _matches_fqn(fqn, target) for target in target_module_names
-        )
-        if is_target:
+        if _is_target(fqn, target_module_names):
             raise ValueError(
                 f"LoRA cannot target {fqn!r} while weight tying is "
                 "enabled because tok_embeddings and lm_head share their base "
                 "weight, but only lm_head would receive the adapter. Disable "
                 "weight tying or exclude lm_head from target_modules."
+            )
+        # Decoder ties the built parameters, so the frozen side would win.
+        embeddings_fqn = fqn.removesuffix("lm_head") + "tok_embeddings"
+        if any(_in_subtree(fqn, root) for root in trainable_modules) != any(
+            _in_subtree(embeddings_fqn, root) for root in trainable_modules
+        ):
+            raise ValueError(
+                f"{fqn!r} and {embeddings_fqn!r} share a weight under weight "
+                "tying. List both or neither in trainable_modules."
             )
 
 
@@ -121,11 +177,36 @@ def _make_linear_lora_config(
     )
 
 
+# The factor on the model-dimension side of each routed-expert projection:
+# A reads the hidden stream in W13, B writes it in W2.
+_SHARED_OUTER_FACTOR = {"w13": "lora_a", "w2": "lora_b"}
+
+
+def _shared_factor(
+    fqn: str,
+    parent: Any,
+    attr: str | int | None,
+    expert_adapter_layout: Literal["per_expert", "shared_outer"],
+) -> Literal["lora_a", "lora_b"] | None:
+    if expert_adapter_layout == "per_expert":
+        return None
+    shared = _SHARED_OUTER_FACTOR.get(cast(str, attr))
+    if shared is None or not isinstance(
+        parent, (RoutedExperts.Config, DistMoeRoutedExperts.Config)
+    ):
+        raise ValueError(
+            "expert_adapter_layout='shared_outer' applies to the w13 and w2 of "
+            f"routed experts only, got grouped projection {fqn!r}."
+        )
+    return cast(Literal["lora_a", "lora_b"], shared)
+
+
 def _make_grouped_linear_lora_config(
     cfg: GroupedLinear.Config,
     *,
     rank: int,
     alpha: float,
+    shared_factor: Literal["lora_a", "lora_b"] | None,
 ) -> Module.Config:
     if rank % 8:
         raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
@@ -136,6 +217,7 @@ def _make_grouped_linear_lora_config(
         **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
         rank=rank,
         alpha=alpha,
+        shared_factor=shared_factor,
     )
 
 
@@ -178,7 +260,8 @@ class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
     Built-in dispatch selects the correct LoRA implementation for each target.
-    Non-target configs are frozen so only adapter parameters are trainable.
+    Non-target configs are frozen so only adapter parameters are trainable,
+    except configs under ``trainable_modules`` paths, which are left unchanged.
 
     A shared projection config must receive the same LoRA decision at every FQN.
     For example, if ``layers.0.attention.wo`` and ``layers.1.attention.wo``
@@ -193,6 +276,14 @@ class LoRATransform(ModelConfigTransform):
     Dist-MoE parent is wrapped only to materialize effective weights because its
     fused execution bypasses the child forwards.
 
+    ``expert_adapter_layout`` picks the adapter shape of routed experts. Per
+    expert, every expert has its own A and B. Shared-outer shares the factor on
+    the model-dimension side across the experts of a projection (A of W13, B of
+    W2) and keeps the other per expert: a token's low-rank path then reads and
+    writes the hidden stream through one matrix, the layout SGLang's MoE LoRA
+    plans target and Megatron-Bridge trains, and the adapter volume no longer
+    scales with the model dimension per expert.
+
     This transform conflicts with itself because every application freezes all
     non-target configs. Applying multiple LoRA transforms would make freezing
     and adapter configuration depend on their order.
@@ -203,6 +294,9 @@ class LoRATransform(ModelConfigTransform):
 
     alpha: float = 16.0
     """Scaling factor. Output is scaled by alpha/rank."""
+
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert"
+    """Adapter layout of routed-expert projections (``w13`` and ``w2``)."""
 
     target_modules: list[str] | None = None
     """Module FQNs or dot-delimited FQN suffixes to adapt.
@@ -216,6 +310,15 @@ class LoRATransform(ModelConfigTransform):
 
     ``None`` means all supported projection layers. An empty list means no
     layers.
+    """
+
+    trainable_modules: list[str] = field(default_factory=list)
+    """Config paths to keep fully trainable, e.g. ``"vision_encoder"``.
+
+    A config path starts at the model root and can differ from the module FQN: the
+    Muse Spark vision layers are ``vision_encoder.block``, not
+    ``vision_encoder.layers.0``. Configs at or under each path are left unchanged.
+    Suffixes are not matched. A LoRA target inside these paths is rejected.
     """
 
     def __post_init__(self) -> None:
@@ -250,17 +353,25 @@ class LoRATransform(ModelConfigTransform):
             configs,
             target_module_names,
         )
-        _validate_weight_tied_lm_head_target(configs, target_module_names)
+        _validate_weight_tied_lm_head_target(
+            configs, target_module_names, self.trainable_modules
+        )
+        _validate_trainable_modules(
+            configs, self.trainable_modules, target_module_names
+        )
 
         # Walk the traversal backward so Dist-MoE parents observe converted
         # projection children when selecting their wrapper.
         for fqn, cfg, parent, attr in reversed(configs):
-            is_target = target_module_names is None
-            if isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
-                for target in target_module_names or ():
-                    if _matches_fqn(fqn, target):
-                        matched_targets.add(target)
-                        is_target = True
+            if any(_in_subtree(fqn, root) for root in self.trainable_modules):
+                continue
+            is_target = _is_target(fqn, target_module_names)
+            if is_target and isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
+                matched_targets.update(
+                    target
+                    for target in target_module_names or ()
+                    if _matches_fqn(fqn, target)
+                )
 
             if isinstance(cfg, DistMoeRoutedExperts.Config):
                 # The fused path bypasses child forwards. Wrap the parent only
@@ -280,6 +391,9 @@ class LoRATransform(ModelConfigTransform):
                     cfg,
                     rank=self.rank,
                     alpha=self.alpha,
+                    shared_factor=_shared_factor(
+                        fqn, parent, attr, self.expert_adapter_layout
+                    ),
                 )
             elif isinstance(cfg, Linear.Config) and is_target:
                 new_cfg = _make_linear_lora_config(

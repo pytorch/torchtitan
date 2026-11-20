@@ -499,8 +499,11 @@ def compute_logprobs(
     vocab_parallel_group: dist.ProcessGroup | None,
     return_entropy: bool = False,
     global_vocab_size: int | None = None,
+    temperature: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Per-token logprobs from ``logits[T, V]`` and ``labels[T]``.
+
+    With ``temperature[T]``, logprobs and entropy use ``softmax(logits / temperature)``.
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
@@ -516,6 +519,15 @@ def compute_logprobs(
     Returns ``logprobs`` when ``return_entropy`` is False, else
     ``(logprobs, entropy)``.
     """
+    if temperature is not None:
+        # Divide, never multiply by the reciprocal: batch-invariant runs need logprobs bitwise
+        # equal to vLLM's, which divides.
+        # expand_as skips Inductor's div-softmax rewrite, whose isfinite guard writes two fp32
+        # [T, V] buffers for a [T, 1] divisor: 1529 us with a [T, 1] divisor vs 806 us expanded,
+        # per [1280, 151936] chunk, fwd+bwd, GB300.
+        # TODO: drop expand_as once Inductor's div-softmax rewrite stops writing its isfinite
+        # buffers for a broadcast tensor divisor (guard added in pytorch/pytorch#184046).
+        logits = logits / temperature.unsqueeze(-1).expand_as(logits)
     if vocab_parallel_group is not None:
         if global_vocab_size is None:
             raise ValueError(

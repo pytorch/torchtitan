@@ -46,6 +46,7 @@ __all__ = [
     "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
+    "split_module",
 ]
 
 
@@ -642,7 +643,7 @@ def _generate_llm_fqn_per_model_part(
     return module_names_per_stage
 
 
-def _split_module(
+def split_module(
     whole_model: BaseModel,
     module_names: list[str],
 ) -> BaseModel:
@@ -903,7 +904,7 @@ def _pipeline_module_split(
     )
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
-        model_chunk = _split_module(whole_model, module_names)
+        model_chunk = split_module(whole_model, module_names)
         stage = PipelineStage(
             model_chunk,
             stage_idx,

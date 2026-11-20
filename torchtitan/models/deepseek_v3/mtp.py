@@ -33,7 +33,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -168,7 +168,7 @@ class MTPTransformerBlock(TransformerBlock):
             )
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
-        return self.mtp_norm(h)
+        return maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h))
 
     def _maybe_shard_mtp_valid_mask_across_tp(
         self, mtp_input_valid_mask_T: torch.Tensor
@@ -200,7 +200,7 @@ class MTPDecoder(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        mtp_layers: list = field(default_factory=list)
+        mtp_layers: list[MTPTransformerBlock.Config] = field(default_factory=list)
 
         def build_flops_estimator(
             self,
@@ -265,6 +265,7 @@ class MTPDecoder(Decoder):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
         )
 
     def preprocess_inputs(
@@ -424,7 +425,7 @@ class MTPDecoder(Decoder):
             )
 
         prev_depth_hidden = h
-        h = self.norm(h) if self.norm is not None else h
+        h = self._pre_lm_head_norm_and_gather(h)
 
         mtp_outputs = []
         for depth, (layer, depth_tokens, mtp_input_valid_mask) in enumerate(
@@ -483,7 +484,16 @@ def apply_fsdp_to_mtp_decoder(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    *,
+    unshard_in_current_stream: bool = False,
 ) -> None:
+    if unshard_in_current_stream and model.mtp_layers is not None:
+        # tok_embeddings runs once per MTP depth, which the explicit
+        # prefetching chain in apply_fsdp_to_decoder does not model.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with MTP layers."
+        )
     mtp_layer_keys = []
     try:
         if model.mtp_layers is not None:
@@ -506,6 +516,7 @@ def apply_fsdp_to_mtp_decoder(
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=symm_mem_scope,
+            unshard_in_current_stream=unshard_in_current_stream,
         )
     finally:
         for key in mtp_layer_keys:

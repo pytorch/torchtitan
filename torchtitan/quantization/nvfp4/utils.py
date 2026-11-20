@@ -7,6 +7,7 @@
 """NVFP4 recipe utilities."""
 
 import math
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from torchtitan.models.common.feed_forward import DenseFeedForward
@@ -40,7 +41,7 @@ def nvfp4_bf16_tail_fqns(num_layers: int, bf16_tail_fraction: float) -> list[str
 
 
 def nvfp4_ffn_submodules(
-    layers: list["TransformerBlock.Config"],
+    layers: Sequence["TransformerBlock.Config"],
 ) -> tuple[str, ...]:
     """Select the FFN submodules NVFP4 can convert for this model.
 
