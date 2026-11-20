@@ -178,6 +178,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             ),
             model_state_dict_load_mode="gpu_fetch",
             vision_processor=None,
+            mooncake_master_address=None,
             rank=dist.get_rank(),
             generator_name="generator",
             output_dir=tempfile.gettempdir(),

@@ -126,6 +126,7 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWorkBuffer,
 )
 from torchtitan.rl.generator.generator import Generator
+from torchtitan.rl.generator.mooncake_master import start_master
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
@@ -760,6 +761,12 @@ class Controller(Configurable):
         max_num_seqs = config.max_num_seqs_per_generator_dp_rank
         logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
 
+        # The generators' Mooncake Store master runs on this (the controller's)
+        # host until this process exits.
+        mooncake_master_address = (
+            start_master() if config.generator.engine.uses_mooncake_store else None
+        )
+
         with sl.log_trace_span("mesh_spawn"):
             actor_system = await self._build_actor_system()
             self.actor_system = actor_system
@@ -785,6 +792,7 @@ class Controller(Configurable):
                 max_num_seqs=max_num_seqs,
                 output_dir=config.dump_folder,
                 vision_processor=config.vision_processor,
+                mooncake_master_address=mooncake_master_address,
             )
             self.batcher = await actor_system.spawn_batcher(
                 async_loop.batcher,
