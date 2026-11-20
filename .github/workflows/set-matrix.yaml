@@ -30,8 +30,12 @@ on:
         value: ${{ jobs.set.outputs.docker-hash }}
 
 jobs:
+  check-draft:
+    uses: ./.github/workflows/check-draft.yaml
+
   set:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: check-draft
+    if: needs.check-draft.outputs.is-draft != 'true'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}

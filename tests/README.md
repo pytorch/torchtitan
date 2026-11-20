@@ -47,6 +47,9 @@ into `main`. Scheduled runs also execute the complete suite with Real PG.
 
 #### Cadence
 
+- Draft PRs run no tests, not even for a `ciflow/*` label added by hand
+  (`.github/workflows/check-draft.yaml`). After marking the PR ready, push or
+  re-add that label to run it.
 - 1 GPU Fake PG cadence: ready, non-draft pull requests, whether they target
   `main` directly or belong to a ghstack stack.
   - The `.github/labeler.yml` file automatically applies the

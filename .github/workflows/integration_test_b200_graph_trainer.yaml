@@ -20,8 +20,12 @@ permissions:
   contents: read
 
 jobs:
+  check-draft:
+    uses: ./.github/workflows/check-draft.yaml
+
   build-test:
-    if: github.repository_owner == 'pytorch'
+    needs: check-draft
+    if: needs.check-draft.outputs.is-draft != 'true' && github.repository_owner == 'pytorch'
     runs-on: linux.dgx.b200.8
     timeout-minutes: 60
     container:
