@@ -353,7 +353,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     async def run() -> None:
         for rollout_id in range(20):
             renderer = _RewritingRenderer(rng)
-            env = TokenEnv.Config().build(
+            env = TokenEnv.Config(max_rollout_tokens=32768).build(
                 message_env=_CountingMessageEnv(num_turns=rng.randint(1, 6)),
                 renderer=renderer,
             )
