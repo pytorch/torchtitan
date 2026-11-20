@@ -250,7 +250,7 @@ torchrun --nproc-per-node=2 -m pytest tests/rl/unit_tests/gpu/test_bitwise_parit
 
 The RL CPU and GPU unit workflows (`unit_test_cpu_rl.yaml`, `unit_test_gpu_rl.yaml`) run
 on `main` pushes, every 12 hours, and on PRs with the `ciflow/rl` label, which is added
-automatically to PRs that touch RL code (see `.github/labeler.yml`). When a PR
+automatically to non-draft PRs that touch RL code (see `.github/labeler.yml`). When a PR
 changes `.ci/docker/`, use the existing `ciflow/docker` label to build its image;
 rerun the RL unit job after that image is available.
 
