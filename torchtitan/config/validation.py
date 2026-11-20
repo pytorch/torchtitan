@@ -13,12 +13,14 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import Attention, LinearAttention
 
 if TYPE_CHECKING:
+    from torchtitan.components.loss import Loss
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_remat import ActivationRematConfig
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.base.module import Module
+    from torchtitan.models.common.decoder import Decoder
 
 __all__ = [
     "validate_context_parallel",
@@ -161,6 +163,7 @@ def validate_model_training_config(
     debug: DebugConfig,
     activation_remat: ActivationRematConfig | None,
     max_num_documents: int | None,
+    loss: Loss.Config,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.accelerator_graph import accelerator_graphs_supported
@@ -226,6 +229,10 @@ def validate_model_training_config(
         if mtp_layers and parallelism.pipeline_parallel_degree > 1:
             raise NotImplementedError("MTP does not support pipeline parallelism yet.")
 
+        _validate_cp_vocab_parallel(
+            model, loss=loss, parallelism=parallelism, debug=debug
+        )
+
     if not training.disable_accelerator_graphs and accelerator_graphs_supported():
         if max_num_documents is None:
             for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
@@ -263,6 +270,48 @@ def validate_model_training_config(
         )
 
     validate_context_parallel(model, parallelism)
+
+
+def _validate_cp_vocab_parallel(
+    model: Decoder.Config,
+    *,
+    loss: Loss.Config,
+    parallelism: ParallelismConfig,
+    debug: DebugConfig,
+) -> None:
+    """Check the configs that shard the vocab over CP."""
+    from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+    from torchtitan.models.common.decoder_sharding import vocab_sharded_on_cp
+    from torchtitan.models.common.embedding import VocabParallelEmbedding
+
+    lm_head_on_cp = vocab_sharded_on_cp(model.lm_head.sharding_config)
+    embedding_on_cp = any(
+        vocab_sharded_on_cp(embedding.sharding_config)
+        for _, embedding, _, _ in model.tok_embeddings.traverse(
+            VocabParallelEmbedding.Config
+        )
+    )
+    if lm_head_on_cp and not (
+        isinstance(loss, ChunkedLossWrapper.Config)
+        and isinstance(loss.loss_fn, CrossEntropyLoss.Config)
+    ):
+        raise ValueError(
+            "An lm_head with CP-sharded vocab requires ChunkedLossWrapper with "
+            "CrossEntropyLoss."
+        )
+    if not (lm_head_on_cp or embedding_on_cp):
+        return
+    if parallelism.context_parallel_degree == 1:
+        raise ValueError("CP vocab parallelism requires context_parallel_degree > 1.")
+    if parallelism.tensor_parallel_degree > 1:
+        raise ValueError("CP vocab parallelism does not support TP.")
+    if parallelism.pipeline_parallel_degree > 1:
+        raise ValueError("CP vocab parallelism does not support PP.")
+    if model.enable_weight_tying:
+        raise ValueError("CP vocab parallelism does not support weight tying.")
+    if debug.spmd_typechecking:
+        # TODO: Type the CP-gathered loss inputs and the CP-replicated loss.
+        raise ValueError("CP vocab parallelism does not support SPMD typechecking.")
 
 
 def validate_context_parallel(

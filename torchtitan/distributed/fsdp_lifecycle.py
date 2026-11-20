@@ -85,6 +85,19 @@ def fsdp_partial_backwards(
         for owner in states
         for group in owner._fsdp_param_groups
     ]
+    # Inner root callbacks run post_backward on every group, which resets
+    # grad_dtype to the unsharded gradient dtype. Restore what the other groups'
+    # forwards chose, so the outer backward does not write fp32 gradients.
+    # TODO: Remove when the inner root callback skips groups outside the inner
+    # backward. https://github.com/pytorch/pytorch/issues/203176
+    outer_grad_dtypes = [
+        (param, param.grad_dtype)
+        for policy in policies
+        if policy.group not in module_groups
+        for fsdp_param in policy.group.fsdp_params
+        if (param := getattr(fsdp_param, "_unsharded_param", None)) is not None
+        and param.requires_grad
+    ]
     manual_finalization = state_ctx.manual_backward_finalization
     defer_reduction = (
         manual_finalization
@@ -133,6 +146,8 @@ def fsdp_partial_backwards(
             group.reshard_after_backward = policy.reshard_after_backward
             group.reduce_grads = policy.reduce_grads
             group.all_reduce_grads = policy.all_reduce_grads
+        for param, grad_dtype in outer_grad_dtypes:
+            param.grad_dtype = grad_dtype
         for policy in policies:
             if policy.group in module_groups and (
                 not run_backward

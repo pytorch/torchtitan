@@ -20,6 +20,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     token_id_placement,
+    vocab_sharded_on_cp,
 )
 
 _TOKEN_IDS = token_id_placement()
@@ -27,13 +28,15 @@ _PARTIAL_OUTPUT = dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
 
 
 class VocabParallelEmbedding(nn.Embedding, Module):
-    """Token embedding whose weight is vocab-sharded across TP.
+    """Token embedding whose weight is vocab-sharded across TP or CP.
 
     With a TP group, each rank looks up only the token ids in its vocab shard,
     giving a TP-``Partial`` output, then reduces it to the decoder residual
     layout: ``Partial -> Shard(0)`` is a reduce-scatter under sequence
     parallelism, and ``Partial -> Invariant`` is an all-reduce without it.
-    Without TP it is a plain embedding lookup.
+    If the sharding config shards the weight over CP, the CP-sharded token ids
+    are all-gathered, and the CP-``Partial`` lookup is reduce-scattered back to
+    the local tokens. Without a vocab group it is a plain embedding lookup.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -48,6 +51,19 @@ class VocabParallelEmbedding(nn.Embedding, Module):
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is not None and vocab_sharded_on_cp(self._sharding_config):
+            # Config validation rejects SPMD typechecking with CP vocab
+            # parallelism, so this path needs no local region.
+            input = spmd.redistribute(input, cp_group, src=spmd.S(0), dst=spmd.R)
+            output = self._lookup_vocab_shard(input, cp_group)
+            return spmd.redistribute(
+                output,
+                cp_group,
+                src=spmd.P,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": output.dtype},
+            )
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return F.embedding(
@@ -76,16 +92,18 @@ class VocabParallelEmbedding(nn.Embedding, Module):
         out_types=(_PARTIAL_OUTPUT.local_type, _PARTIAL_OUTPUT.partition_spec),
     )
     def _local_lookup_vocab_shard(self, input: torch.Tensor) -> torch.Tensor:
-        return self._lookup_vocab_shard(input)
-
-    def _lookup_vocab_shard(self, input: torch.Tensor) -> torch.Tensor:
-        """Return this rank's TP-partial lookup: the embeddings of the tokens in
-        its vocab shard, and zeros for every other token."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         assert tp_group is not None
-        tp_size = dist.get_world_size(tp_group)
-        chunk_size = (self.num_embeddings + tp_size - 1) // tp_size
-        offset = dist.get_rank(tp_group) * chunk_size
+        return self._lookup_vocab_shard(input, tp_group)
+
+    def _lookup_vocab_shard(
+        self, input: torch.Tensor, vocab_group: dist.ProcessGroup
+    ) -> torch.Tensor:
+        """Return this rank's partial lookup over ``vocab_group``: the embeddings
+        of the tokens in its vocab shard, and zeros for every other token."""
+        num_shards = dist.get_world_size(vocab_group)
+        chunk_size = (self.num_embeddings + num_shards - 1) // num_shards
+        offset = dist.get_rank(vocab_group) * chunk_size
         mask = (input >= offset) & (input < offset + self.weight.shape[0])
         local_input = (input - offset).clamp(0, self.weight.shape[0] - 1)
         # padding_idx is global; only its owning shard should suppress gradients.

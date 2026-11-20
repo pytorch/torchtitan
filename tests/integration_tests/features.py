@@ -53,6 +53,10 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesFlexInnerAttention,
     UlyssesVarlenInnerAttention,
 )
+from torchtitan.models.common.decoder_sharding import (
+    cp_vocab_parallel_lm_head_sharding_config,
+    cp_vocab_parallel_token_embedding_sharding_config,
+)
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.observability.metrics import TensorBoardLogger
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
@@ -566,6 +570,20 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
     )
 
 
+def llama3_debugmodel_fsdp2_cp2_vocab() -> Trainer.Config:
+    """FSDP+CP with the token embedding and lm_head vocab sharded over CP."""
+    config = llama3_debugmodel_fsdp2_cp2()
+    model = config.model
+    model.tok_embeddings = replace(
+        model.tok_embeddings,
+        sharding_config=cp_vocab_parallel_token_embedding_sharding_config(),
+    )
+    model.lm_head = replace(
+        model.lm_head, sharding_config=cp_vocab_parallel_lm_head_sharding_config()
+    )
+    return config
+
+
 def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048, attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=False)
@@ -1033,8 +1051,8 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_debugmodel_fsdp2_cp2],
-            test_descr="FSDP+CP",
+            configs=[llama3_debugmodel_fsdp2_cp2_vocab],
+            test_descr="FSDP+CP with the vocab sharded over CP",
             test_name="fsdp+cp",
             ngpu=4,
         ),
