@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Moves the trainer's model state dict into the generators' prefetch buffers with
-one-sided reads over a ``torch.distributed._transport`` backend.
+"""Moves the trainer's model state dict into the generators' prefetch buffers or
+GPU weights with one-sided reads over a ``torch.distributed._transport`` backend.
 
 See ``MODEL_STATE_DICT_TRANSPORT.md``.
 """
@@ -124,6 +124,11 @@ def _pinned_buffer(nbytes: int) -> torch.Tensor:
     pin_memory_utils.pin_memory(buffer.data_ptr(), buffer.nbytes)
     weakref.finalize(buffer, pin_memory_utils.unpin_memory, buffer.data_ptr())
     return buffer
+
+
+_GPU_STAGING_ALIGNMENT = 256
+"""Byte alignment of each key in a GPU staging buffer, so every dtype view of it is
+aligned."""
 
 
 def _local(tensor: torch.Tensor) -> torch.Tensor:
@@ -318,7 +323,8 @@ class ModelStateDictTransport(Configurable):
 
     Trainer: ``register_trainer_source`` once, then ``stage`` per push.
     Generator: ``connect_generator`` once, then ``read`` per prefetch and
-    ``copy_prefetched_`` per load.
+    ``copy_prefetched_`` per load; or, reading straight into GPU weights,
+    ``connect_generator_gpu`` once, then ``read_into`` per load.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -346,6 +352,21 @@ class ModelStateDictTransport(Configurable):
         self._reads: list[tuple[Any, Any]] | None = None
         self._prefetched: dict[str, torch.Tensor] = {}
         self._packed: dict[str, list[tuple[tuple[slice, ...], torch.Tensor]]] = {}
+        # Generator, GPU fetch: each key's (read, remote buffer) reads, or None until
+        # connected; the pieces of each packed key; each load group's keys, in load
+        # order, and each key's group and offset in a staging buffer; the two
+        # registered staging buffers (tensor, memory, event marking the end of the
+        # last copy out of it); and the group being prefetched as (group, staging
+        # slot, works).
+        self._gpu_reads: dict[str, list[tuple[_Read, Any]]] | None = None
+        self._gpu_packed: dict[str, list[_PackedPiece]] = {}
+        self._gpu_groups: list[frozenset[str]] = []
+        self._gpu_group_of_key: dict[str, int] = {}
+        self._gpu_staging_offsets: dict[str, int] = {}
+        self._gpu_staging_nbytes = 0
+        self._gpu_staging: list[tuple[torch.Tensor, Any, torch.Event | None]] = []
+        self._gpu_prefetch: tuple[int, int, list[Any]] | None = None
+        self._gpu_next_slot = 0
 
     def register_trainer_source(
         self,
@@ -479,6 +500,156 @@ class ModelStateDictTransport(Configurable):
             ]
             for key, pieces in packed.items()
         }
+
+    def connect_generator_gpu(
+        self,
+        layout: dict[str, TensorShard],
+        *,
+        load_groups: list[list[str]],
+        sources: list[TrainerSource],
+        rank: int,
+        generator_index: int,
+    ) -> None:
+        """Connect to every trainer rank and plan reads into two GPU staging buffers,
+        each sized for the largest load group.
+
+        While one group is copied out of a staging buffer and loaded, the next group
+        of the load is read into the other.
+
+        Args:
+            layout: ``shard_layout`` of the tensors loads read into, which the
+                trainer staged for.
+            load_groups: The keys of each ``read_into`` call of a load, in load
+                order.
+            sources: Every trainer rank's ``register_trainer_source`` result.
+            rank: This rank within its generator.
+            generator_index: Index of this rank's generator.
+
+        Raises:
+            ValueError: if ``load_groups`` does not partition ``layout``'s keys.
+        """
+        if sorted(key for group in load_groups for key in group) != sorted(layout):
+            raise ValueError("the load groups must partition the layout's keys")
+        reads, packed = _plan_reads(
+            sources, layout, rank=rank, generator_index=generator_index
+        )
+        for source in sources:
+            self._transport.connect(source.url)
+        self._gpu_packed = packed
+        self._gpu_groups = [frozenset(group) for group in load_groups]
+        self._gpu_group_of_key = {
+            key: index for index, group in enumerate(load_groups) for key in group
+        }
+        self._gpu_reads = {}
+        for read in reads:
+            self._gpu_reads.setdefault(read.key, []).append(
+                (
+                    read,
+                    sources[read.source].remote_buffer.slice(
+                        read.byte_offset, read.nbytes
+                    ),
+                )
+            )
+        for group in load_groups:
+            offset = 0
+            for key in group:
+                self._gpu_staging_offsets[key] = offset
+                shard = layout[key]
+                nbytes = math.prod(shard.shape) * shard.dtype.itemsize
+                offset += -(-nbytes // _GPU_STAGING_ALIGNMENT) * _GPU_STAGING_ALIGNMENT
+            self._gpu_staging_nbytes = max(self._gpu_staging_nbytes, offset)
+
+    def read_into(self, state_dict: dict[str, torch.Tensor]) -> Iterable[str]:
+        """Read one load group's latest trainer values into its GPU tensors. Returns
+        its keys.
+
+        The group's reads land in a staging buffer, already in flight if the
+        previous call prefetched this group. The next group of the load is then
+        read into the other buffer while this group is copied out and loaded.
+        """
+        assert self._gpu_reads is not None, "connect_generator_gpu must be called first"
+        tensors = {key: _local(tensor) for key, tensor in state_dict.items()}
+        if not tensors:
+            return state_dict.keys()
+        if not self._gpu_staging:
+            self._allocate_gpu_staging(next(iter(tensors.values())).device)
+        group = self._gpu_group_of_key[next(iter(tensors))]
+        prefetch = self._gpu_prefetch
+        if prefetch is not None and prefetch[0] == group:
+            self._gpu_prefetch = None
+            _, slot, works = prefetch
+        else:
+            # E.g. left by a load that failed part way.
+            self._finish_gpu_prefetch()
+            slot = self._gpu_next_slot
+            works = self._read_gpu_group(group, slot)
+        for work in works:
+            work.wait()
+        # Prefetch only within this load: the trainer may restage after it.
+        if group + 1 < len(self._gpu_groups):
+            self._gpu_prefetch = (
+                group + 1,
+                1 - slot,
+                self._read_gpu_group(group + 1, 1 - slot),
+            )
+        self._gpu_next_slot = 1 - slot
+
+        buffer, _, event = self._gpu_staging[slot]
+        with torch.no_grad():
+            for key, tensor in tensors.items():
+                start = self._gpu_staging_offsets[key]
+                staged = buffer[start : start + tensor.nbytes].view(tensor.dtype)
+                pieces = self._gpu_packed.get(key)
+                if pieces is None:
+                    tensor.copy_(staged.view(tensor.shape), non_blocking=True)
+                    continue
+                for p in pieces:
+                    tensor[p.index].copy_(
+                        staged[p.offset : p.offset + math.prod(p.shape)].view(p.shape),
+                        non_blocking=True,
+                    )
+        if event is not None:
+            event.record()
+        return state_dict.keys()
+
+    def _allocate_gpu_staging(self, device: torch.device) -> None:
+        """Allocate and register the two staging buffers on ``device``."""
+        for _ in range(2):
+            buffer = torch.empty(
+                max(self._gpu_staging_nbytes, 1), dtype=torch.uint8, device=device
+            )
+            event = torch.Event(device=device) if device.type != "cpu" else None
+            self._gpu_staging.append(
+                (buffer, self._transport.register_memory(buffer), event)
+            )
+
+    def _read_gpu_group(self, group: int, slot: int) -> list[Any]:
+        """Start reading every key of load group ``group`` into staging buffer ``slot``."""
+        assert self._gpu_reads is not None
+        _, memory, event = self._gpu_staging[slot]
+        if event is not None:
+            # Copies of the previous group out of this buffer must finish first.
+            event.synchronize()
+        works = []
+        for key in self._gpu_groups[group]:
+            start = self._gpu_staging_offsets[key]
+            for read, remote in self._gpu_reads.get(key, ()):
+                local = memory.to_mutable_view(
+                    start + read.local_byte_offset, read.nbytes
+                )
+                works.append(
+                    self._transport.read(
+                        local, remote, async_op=True, timeout=self._read_timeout_s
+                    )
+                )
+        return works
+
+    def _finish_gpu_prefetch(self) -> None:
+        """Wait for and drop the prefetched group, if any."""
+        if self._gpu_prefetch is not None:
+            for work in self._gpu_prefetch[2]:
+                work.wait()
+            self._gpu_prefetch = None
 
     async def read(self) -> None:
         """Fill the prefetch buffers from the trainer's staging buffers.
