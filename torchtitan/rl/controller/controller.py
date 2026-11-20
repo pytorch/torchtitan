@@ -166,13 +166,11 @@ class ValidationConfig:
     """Maximum prompts per validation. -1 reads the finite source once; 0 disables."""
 
     temperature: float = 1.0
-    """Sampling temperature. 1.0 samples the model's distribution as is; 0.0 is greedy and needs
-    `num_samples_per_prompt=1`."""
+    """Sampling temperature of validation rollouts."""
 
     num_samples_per_prompt: int = 1
-    """Sibling rollouts sampled per prompt. `validation_reward` averages all of them; set 4 for
-    lower-noise validation. With n > 1, `validation_reward/best_of_{n}` averages each prompt's
-    best reward."""
+    """Rollouts per validation prompt. With n > 1, `validation_reward/best_of_{n}` logs the mean
+    of each prompt's best reward."""
 
     freq: int | None = None
     """A validation comes due at each multiple of `freq` after step 0; none starts at the last step. None:

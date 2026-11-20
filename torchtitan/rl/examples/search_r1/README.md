@@ -80,9 +80,7 @@ Watch `validation_reward/_mean` (NQ test EM) trend up.
 
 Validation exact-match (held-out NQ test split, greedy decoding) climbs steadily as the
 policy learns to call `search` and answer concisely. The recipe keeps evolving, so each
-curve below is a snapshot — the link goes to the exact recipe it was produced with. Runs
-from newer recipes validate at temperature 1.0 (`ValidationConfig.temperature`), so their curves
-are not comparable with these greedy ones.
+curve below is a snapshot — the link goes to the exact recipe it was produced with.
 
 **Qwen3-1.7B** — EM ~0.05 → ~0.41
 ([recipe @ `e28796e0`](https://github.com/pytorch/torchtitan/blob/e28796e0df801a5b5b30c34043cdd8bba14a6ea5/torchtitan/experiments/rl/examples/search_r1/config_registry.py#L41)):
