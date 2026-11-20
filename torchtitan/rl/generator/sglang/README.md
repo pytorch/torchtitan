@@ -208,8 +208,8 @@ queued requests 4-8 s each with 12% of the KV pool in use.
 With SGLang's unified memory (`extra_server_args={"enable_unified_memory":
 True}`), the full attention layers' KV cache and the GDN / KDA layers' conv and
 recurrent states share one pool, and KV can use any state slot no request holds.
-The state pool size then only caps running requests, so the default ratio fits
-both workloads.
+The state pool size then mainly sets the running-request cap, so the default
+ratio works for both workloads without tuning.
 
 ## Multi-turn sessions
 
