@@ -7,7 +7,7 @@ on:
   workflow_call:
     outputs:
       is-draft:
-        description: "'true' when the tag's PR is a draft. 'false', or empty when the job skips, otherwise"
+        description: "'true' when the tag's PR is a draft, 'false' when it isn't, empty when the job skips (not a ciflow tag run)"
         value: ${{ jobs.check.outputs.is-draft }}
 
 jobs:
