@@ -7,8 +7,12 @@
 import copy
 import json
 
+import numpy as np
 import pytest
+from PIL import Image
 from renderers.base import ToolCallParseStatus
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.renderer import hash_image_file
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 
@@ -23,6 +27,8 @@ def tokenizer(tmp_path):
         "<|eot|>": 200008,
         "<|start|>": 200022,
         "<|message|>": 200023,
+        "<|image_start|>": 200080,
+        "<|image_end|>": 200081,
         "<|patch|>": 200092,
     }
     vocab = {chr(index): index for index in range(128)} | special_tokens
@@ -61,6 +67,31 @@ def tokenizer(tmp_path):
 @pytest.fixture
 def renderer(tokenizer):
     return MuseSparkRendererConfig(current_date="2026-01-15").build(tokenizer=tokenizer)
+
+
+@pytest.fixture
+def image_paths(tmp_path):
+    paths = []
+    for name, (width, height) in (("a.png", (100, 60)), ("b.png", (30, 70))):
+        path = tmp_path / "imgs" / name
+        path.parent.mkdir(exist_ok=True)
+        Image.fromarray(np.full((height, width, 3), 80, dtype=np.uint8)).save(path)
+        paths.append(str(path))
+    return paths
+
+
+@pytest.fixture
+def vision_processor():
+    from torchtitan.models.muse_spark import MUSE_SPARK_VISION_PROCESSOR_KWARGS
+
+    return VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS).build()
+
+
+@pytest.fixture
+def image_renderer(tokenizer, vision_processor):
+    return MuseSparkRendererConfig(current_date="2026-01-15").build(
+        tokenizer=tokenizer, vision_processor=vision_processor
+    )
 
 
 def test_generation_prompt_and_loss_mask(renderer, tokenizer):
@@ -416,3 +447,80 @@ def test_bridge_falls_back_to_re_render(renderer):
             renderer.bridge_to_next_turn(previous_prompt, previous_completion, tail)
             is None
         ), case
+
+
+def _image_span(num_tokens):
+    return "<|image_start|>" + "<|patch|>" * num_tokens + "<|image_end|>"
+
+
+def test_image_renders_as_a_patch_run_with_the_file_hash(
+    image_renderer, image_paths, tokenizer
+):
+    content = [
+        {"type": "image", "path": image_paths[0]},
+        {"type": "text", "text": "Is this a CT?"},
+    ]
+
+    rendered = image_renderer.render(
+        [{"role": "user", "content": content}], add_generation_prompt=True
+    )
+
+    # 100x60 with 14-pixel patches and a 2x2 merge: a (1, 4, 6) patch grid, 6 tokens.
+    text = tokenizer.decode(rendered.token_ids, skip_special_tokens=False)
+    assert f"user<|message|>{_image_span(6)}Is this a CT?<|eot|>" in text
+    data = rendered.multi_modal_data
+    (placeholder,) = data.mm_placeholders["image"]
+    with open(image_paths[0], "rb") as f:
+        assert data.mm_hashes["image"] == [hash_image_file(f.read())]
+    assert data.mm_items["image"][0]["image_grid_thw"].tolist() == [[1, 4, 6]]
+    assert data.mm_items["image"][0]["pixel_values"] is None
+    patch_ids = rendered.token_ids[
+        placeholder.offset : placeholder.offset + placeholder.length
+    ]
+    assert tokenizer.decode(patch_ids, skip_special_tokens=False) == "<|patch|>" * 6
+    assert not any(rendered.sampled_mask)
+    assert (
+        image_renderer.render([{"role": "user", "content": "Hi"}]).multi_modal_data
+        is None
+    )
+
+
+def test_bridge_places_new_images_after_previous_ones(image_renderer, image_paths):
+    history = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "path": image_paths[0]},
+                {"type": "text", "text": "What organ?"},
+            ],
+        }
+    ]
+    assistant = {"role": "assistant", "content": "Liver."}
+    follow_up = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "And here?"},
+            {"type": "image", "path": image_paths[1]},
+        ],
+    }
+    prompt, completion = _sampled_turn(image_renderer, history, assistant)
+    first = image_renderer.render(history, add_generation_prompt=True)
+
+    bridged = image_renderer.bridge_to_next_turn(
+        prompt,
+        completion,
+        [follow_up],
+        previous_multi_modal_data=first.multi_modal_data,
+    )
+
+    full = image_renderer.render(
+        [*history, assistant, follow_up], add_generation_prompt=True
+    )
+    assert bridged is not None and bridged.token_ids == full.token_ids
+    for field in ("mm_hashes", "mm_placeholders"):
+        assert getattr(bridged.multi_modal_data, field) == getattr(
+            full.multi_modal_data, field
+        )
+    assert len(full.multi_modal_data.mm_hashes["image"]) == 2
+    # Without the previous images the bridge cannot place them: re-render.
+    assert image_renderer.bridge_to_next_turn(prompt, completion, [follow_up]) is None

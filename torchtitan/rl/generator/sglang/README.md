@@ -66,7 +66,7 @@ scripts/install_rl_env.sh --sglang
 | Feature | Status |
 | --- | --- |
 | Dense softmax attention, varlen backend (Qwen3, Llama 3) | Supported |
-| Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's TP all-reduce (custom all-reduce) instead of NCCL |
+| Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's attention-TP all-reduce (custom all-reduce) instead of NCCL |
 | CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
 | Prompt KV reuse within a rollout group | Supported for softmax attention, not linear attention (GDN, KDA); see below |
@@ -75,15 +75,16 @@ scripts/install_rl_env.sh --sglang
 | `reset_kv_cache_on_model_state_dict_load` | Supported: running requests are retracted and recompute their KV |
 | Multi-turn session KV | Supported, always on; see below |
 | CPU KV offload (SGLang HiCache) | Supported through `extra_server_args`; see below |
+| KV shared across generators (Mooncake Store) | Supported through `extra_server_args`; see below |
 | Batch-invariant mode | Supported; see below |
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
-| Data parallelism within a generator | Not supported: run more generators |
+| Data parallelism within a generator | Supported with expert parallelism, as SGLang's attention DP; see below |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
 | GDN linear attention (Qwen3.5) | Supported; see below |
 | KDA linear attention (Kimi K3) | Supported; see below |
 | MLA (DeepSeek V3) | Supported with per-head K/V in the KV cache, as the vLLM engine runs MLA in batch-invariant mode; SGLang's compressed-latent MLA cache is not used |
 | Flex attention, attention sinks (GPT-OSS) | Not supported |
-| MoE with expert parallelism over the TP group, Dist-MoE | Supported; see below |
+| MoE with expert parallelism over the DP and TP ranks, Dist-MoE | Supported; see below |
 | Sequence parallelism | Not supported |
 
 Unsupported configurations raise at engine build.
@@ -114,8 +115,8 @@ host, which CUDA graphs cannot capture: it needs `cuda_graph="none"`. DeepEP wit
 `cuda_graph_compatible` and HybridEP with `non_blocking_capacity_factor` dispatch
 without a host sync, so they run under CUDA graphs; without those options they
 need `cuda_graph="none"` too. Their `num_max_tokens_per_rank` must cover a step's
-tokens per EP rank, `(chunked_prefill_size + max_running_requests) / TP`; the
-engine checks it at build. HybridEP needs an EP degree divisible by 4: a step can
+tokens per EP rank, `(chunked_prefill_size + max_running_requests) / TP`, with
+the per-DP-rank values; the engine checks it at build. HybridEP needs an EP degree divisible by 4: a step can
 have any token count, which HybridEP's 16-byte alignment otherwise rejects.
 DeepEP's deterministic dispatch (`DebugConfig.deterministic`) cannot run in CUDA
 graphs, and HybridEP's `non_blocking_capacity_factor` must be 1.0 (below it,
@@ -127,6 +128,34 @@ fails its NCCL version check under the PyTorch nightly. Dist-MoE
 (`Generator.Config.dist_moe_runtime`) runs under CUDA graphs: decode graphs, and
 breakable or full prefill graphs. It shards a step's tokens over the TP ranks
 even without expert parallelism, so with TP > 1 it needs expert parallelism too.
+
+## Data parallelism
+
+`data_parallel_degree` > 1 supplies ranks for expert parallelism (Generator.Config
+requires `expert_parallel_degree == data_parallel_degree * tensor_parallel_degree`).
+The engine runs it as SGLang's attention DP: one SGLang instance over the DP x TP
+world (`tp_size = DP * TP`, `attn_dp_size = DP`). Each DP rank runs its own
+requests, with attention heads sharded over its attention-TP group, and the MoE
+layers run EP over every rank. For DP 2 x TP 2:
+
+```
+world = 4 ranks, DP 2 x TP 2
+SGLang TP group (= world):   [0 1 2 3]   <- EP 4 for the MoE layers
+attention-TP groups:         [0 1] [2 3] <- heads sharded over these
+DP rank 0 = ranks 0, 1       DP rank 1 = ranks 2, 3
+```
+
+NOTE: SGLang names its groups after the whole instance. SGLang's "TP" (`tp_size`,
+`tp_group`, `tensor_model_parallel_all_reduce`) spans all DP x TP ranks, while its
+"attention TP" (`attn_tp_size`, `attn_tp_group`, `attn_tp_all_reduce`) is one DP
+rank's TP ranks: torchtitan's `tensor_parallel_degree`. So the engine's TP code
+(attention head sharding, the model's routed TP all-reduce) uses the attention-TP
+names. The two coincide at DP = 1.
+
+The EP collectives span the DP ranks, so every DP rank steps together: SGLang runs
+a DP rank without requests on an empty batch, which the model pads to one row per
+TP rank, and `has_unfinished_requests` is True on every rank while any DP rank has
+requests. `max_num_seqs` and `max_num_batched_tokens` are per DP rank.
 
 ## GDN and KDA
 
@@ -240,6 +269,80 @@ more than copying its KV: for Qwen3-0.6B, recompute is faster.
 KDA models raise with HiCache for now (#6015). TODO: with HiCache's `write_through`
 policy (SGLang's default), one run in 18 of the KDA parity class mismatched the
 trainer (max logprob delta 3.1e-2); not root-caused.
+
+## Shared KV across generators (Mooncake Store)
+
+[Mooncake Store](https://github.com/kvcache-ai/Mooncake) adds a KV tier below
+HiCache's host memory that all generators share, so a session's next turn that
+lands on another generator loads its history's KV instead of recomputing it:
+
+```text
+turn 1 on generator A: prefill, decode; HiCache copies the KV to host memory and the Store
+turn 2 on generator B: GPU and host miss, Store hit -> load the history's KV,
+                       prefill only the new tokens
+```
+
+`scripts/install_rl_env.sh` already installs the Mooncake SDK (for the
+transport API). Start a `mooncake_master` as in SGLang's
+[Mooncake deployment guide](https://github.com/sgl-project/sglang/blob/435ee288edbda6d4522ff2bae2fe33f82a3fd1ea/python/sglang/srt/mem_cache/storage/mooncake_store/README.md#L131)
+and configure the generators; each generator contributes the Store memory:
+
+```python
+SGLangEngine.Config(
+    extra_server_args={
+        "enable_hierarchical_cache": True,
+        "hicache_size": 64,  # GB of host memory per rank
+        "hicache_storage_backend": "mooncake",
+        "hicache_storage_backend_extra_config": json.dumps(
+            {
+                "master_server_address": "<master>:50051",
+                "metadata_server": "P2PHANDSHAKE",
+                "protocol": "rdma",
+                "device_name": "mlx5_0",
+                # Host memory this generator contributes, split across its TP
+                # ranks. It and the KV in it go away when the generator exits.
+                "global_segment_size": "32GB",
+                "extra_backend_tag": f"my-run-{uuid.uuid4().hex}",
+            }
+        ),
+    }
+)
+```
+
+- The Store sits below HiCache's host memory (a load goes Store -> host -> GPU),
+  so it needs `enable_hierarchical_cache`. Keep the default `write_through`
+  policy: with `write_back`, KV reaches the Store only when evicted from GPU.
+- A Store key is `extra_backend_tag`, the model path, the request's cache salt
+  (its pinned policy version), the token prefix and the TP rank. So:
+  - `extra_backend_tag` scopes Store keys to a run (the engine raises without
+    one): the Store outlives a run and a new run's policy versions restart at
+    0. A resume can keep its tag to reuse KV, but it would also read KV the
+    previous launch computed after the checkpoint, with weights the resumed
+    run retrains. Use a new tag unless training is reproducible.
+  - A request reuses another generator's KV only under the same pinned policy
+    version, and generators sharing a tag need the same TP degree.
+- `reset_kv_cache_on_model_state_dict_load=True` raises with a storage backend:
+  it clears KV at each load instead of salting requests, but SGLang's KV reset
+  clears GPU and host memory, not the Store, so unsalted requests would read KV
+  of earlier weights. SGLang never deletes Store keys; Mooncake evicts them when
+  the Store is full.
+- With 1-token pages (see `_build_server_args`), the Store holds one object per
+  token, K and V, and TP rank.
+
+Checked on H100, TP 2:
+
+- **Correctness** (Qwen3-0.6B, batch-invariant mode): a second turn on another
+  generator loaded 649 of its 650 history tokens from the Store and decoded the
+  same tokens and logprobs, bitwise, as recomputing them. Another tag or policy
+  version loaded nothing.
+- **Performance**: second turn of 4 sessions of 16K tokens on another generator,
+  timed until all finish. The Store side uses one RDMA NIC and 16 GB of host
+  memory per rank; the recompute side runs without HiCache.
+
+| Model | Recompute (s) | Load from the Store (s) | Store vs. recompute |
+| --- | ---: | ---: | --- |
+| Qwen3-8B | 1.38 | 1.93 | 1.4x slower |
+| Qwen3-32B | 5.24 | 2.45 | 2.1x faster |
 
 ## Seeds
 

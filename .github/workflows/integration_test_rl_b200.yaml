@@ -112,7 +112,7 @@ jobs:
           bash scripts/install_rl_env.sh --skip-base --flash-attn none --sglang
           MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
-          # Each class runs in its own torchrun launch, one process per TP rank.
+          # Each class runs in its own torchrun launch, one process per DP and TP rank.
           # Only TestSGLangBitwiseParityVarlen loads HF weights; the debug-model
           # classes read the repo's test tokenizer. Every class runs even if one
           # fails, so one failure does not hide the others.
@@ -127,6 +127,11 @@ jobs:
           done
           for test_class in KDA; do
             torchrun --nproc-per-node=1 -m pytest \
+              "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
+              || failed_classes+=("$test_class")
+          done
+          for test_class in MoEDPEP KDADPEP DistMoEDPEP; do
+            torchrun --nproc-per-node=4 -m pytest \
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")
           done

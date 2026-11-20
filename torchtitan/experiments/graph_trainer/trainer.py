@@ -494,6 +494,15 @@ class GraphTrainer(Trainer):
                         "optim.enable_accelerator_graph is not supported with "
                         "precompiled artifacts in GraphTrainer."
                     )
+            if (
+                self.activation_remat is not None
+                and self.activation_remat.offloads_activations
+            ):
+                raise ValueError(
+                    "Activation offloading relies on eager saved-tensor hooks, "
+                    "which GraphTrainer's traced step does not run; use its "
+                    "CPU-offload graph pass instead."
+                )
             # to_graph_trainer_config and the flavor builders turn these off;
             # this catches a transform applied afterwards that builds them with
             # the eager default.

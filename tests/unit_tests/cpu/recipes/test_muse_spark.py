@@ -47,7 +47,7 @@ def test_fake_scale_recipe_tokenizer(recipe):
 
 
 def test_production_recipe_keeps_multimodal_tokenizer():
-    config = recipes._muse_spark_816b_a42b()
+    config = recipes.muse_spark_816b_a42b()
     assert isinstance(config.tokenizer, MuseSparkTokenizer.Config)
     for field, token in MUSE_SPARK_SPECIAL_TOKENS.items():
         assert getattr(config.tokenizer, field) == token
