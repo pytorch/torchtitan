@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+import unittest.mock
 from copy import deepcopy
 
 import torch
@@ -176,14 +177,12 @@ class TestActivationCheckpointing(unittest.TestCase):
     def test_blocks_name_selects_the_block_container(self):
         model = ToyModel()
         model.mtp_layers = ModuleList([TransformerBlock(), TransformerBlock()])
-        hooked = []
-        FullActivationRematConfig().apply(
-            model,
-            blocks_name="mtp_layers",
-            saved_tensors_hooks=lambda block, fqn: hooked.append(fqn),
-        )
+        FullActivationRematConfig().apply(model, blocks_name="mtp_layers")
 
-        self.assertEqual(hooked, ["mtp_layers.0", "mtp_layers.1"])
+        self.assertEqual(
+            [block._remat_block_fqn for block in model.mtp_layers],
+            ["mtp_layers.0", "mtp_layers.1"],
+        )
         self.assertNotIn("forward", vars(model.layers["0"]))
 
     def test_full_and_default_match_uncheckpointed_model(self):
@@ -298,6 +297,25 @@ class TestActivationCheckpointing(unittest.TestCase):
         ).apply(encoder, module_fqn="vision_encoder")
         _run_forward_backward(encoder, torch.randn(8, 32))
         self.assertEqual(_forward_counts(encoder), {"82": (1, 2, 1)})
+
+    def test_apply_marks_checkpointed_blocks(self):
+        # The offloader hooks the blocks apply marked, encoders included.
+        config = ActivationRematConfig(save_regions=["*"], offload_block_input=True)
+        model, encoder = ToyModel(("82",)), ToyModel(("7",))
+        config.apply(encoder, module_fqn="vision_encoder")
+        self.assertEqual(
+            encoder.layers["7"]._remat_block_fqn, "vision_encoder.layers.7"
+        )
+        config.apply(model.cuda())
+        self.assertEqual(model.layers["82"]._remat_block_fqn, "layers.82")
+
+    def test_offloading_requires_cuda(self):
+        with unittest.mock.patch.object(
+            torch.accelerator, "current_accelerator", return_value=None
+        ), self.assertRaisesRegex(ValueError, "requires CUDA"):
+            ActivationRematConfig(save_regions=["*"], offload_block_input=True).apply(
+                ToyModel(("82",))
+            )
 
     def test_block_overrides_are_validated(self):
         for name, override_factory, message in (
