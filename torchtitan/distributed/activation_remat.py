@@ -10,6 +10,7 @@
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar
 
@@ -25,7 +26,9 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
-_BLOCK_FQN = re.compile(r"([A-Za-z_]\w*\.)+\d+")
+# A block container is named "layers" or "<prefix>_layers" (e.g. "mtp_layers"),
+# optionally inside a submodule (e.g. "vision_encoder.layers").
+_BLOCK_FQN = re.compile(r"(?:[A-Za-z_]\w*\.)*(?:[A-Za-z_]\w*_)?layers\.\d+")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -41,10 +44,11 @@ class BlockRematOverride:
     Exact FQNs of the blocks in the original model: ``layers.<id>`` for
     decoder blocks, ``mtp_layers.<id>`` for multi-token prediction blocks and
     ``<encoder>.layers.<id>`` for encoder blocks, e.g.
-    ``vision_encoder.layers.3``. Pipeline splitting keeps original layer ids,
-    so a name follows its block to whichever stage holds it. Names are not
-    checked against the model, since each pipeline stage holds only some
-    blocks.
+    ``vision_encoder.layers.3``; each model lists its block containers in
+    ``BaseModel.remat_block_container_fqns``. Pipeline splitting keeps
+    original layer ids, so a name follows its block to whichever stage holds
+    it. Names are not checked against the model, since each pipeline stage
+    holds only some blocks.
     """
 
     save_regions: list[str] | None = None
@@ -81,8 +85,9 @@ class BlockRematOverride:
             if _BLOCK_FQN.fullmatch(block_fqn) is None:
                 raise ValueError(
                     "BlockRematOverride.blocks must name transformer blocks "
-                    "as '<container>.<id>', e.g. 'layers.3' or "
-                    "'vision_encoder.layers.3'; got "
+                    "as '<container>.<id>' with a container named "
+                    "'layers' or '<prefix>_layers', e.g. 'layers.3', "
+                    "'mtp_layers.0' or 'vision_encoder.layers.3'; got "
                     f"{block_fqn!r}."
                 )
 
@@ -256,35 +261,35 @@ class ActivationRematConfig:
 
     def apply(
         self,
-        module: Module,
+        model_part: Module,
         *,
-        module_fqn: str = "",
-        blocks_name: str = "layers",
+        block_container_fqns: Sequence[str] = ("layers",),
     ) -> None:
-        """Checkpoint every transformer block of ``module`` with ``torch_remat``,
-        and install the CPU offloader on ``module`` if the policy offloads
-        anything. Offloading needs no step after ``fully_shard``: FSDP2
-        prepends its pre-forward hook, so it runs before the offloader's.
+        """Checkpoint every transformer block of ``model_part`` with
+        ``torch_remat``, and install the CPU offloader on ``model_part`` if the
+        policy offloads anything. Offloading needs no step after
+        ``fully_shard``: FSDP2 prepends its pre-forward hook, so it runs before
+        the offloader's.
 
-        Call once per model part (each pipeline stage is one), and for each
-        encoder within it. The model part's offloader hooks every block these
-        calls checkpointed, encoders included, at its first forward.
+        Call once per model part (each pipeline stage is one), naming every
+        block container in it, so that the model part gets one offloader.
 
         Args:
-            module: Module whose ``blocks_name`` children are the transformer
-                blocks: the root model or an encoder within it.
-            module_fqn: FQN of ``module`` within the full model, such as
-                ``"vision_encoder"``; empty for the root model. Prefixes the
-                block FQNs that ``block_overrides`` are matched against.
-            blocks_name: Name of the submodule of ``module`` that holds the
-                blocks, e.g. ``"mtp_layers"`` for multi-token prediction
-                blocks. Blocks are named ``<blocks_name>.<id>``.
+            model_part: Root module of the model part.
+            block_container_fqns: FQNs within ``model_part`` of the submodules
+                whose children are the transformer blocks, in run order, e.g.
+                ``("vision_encoder.layers", "layers", "mtp_layers")``. A
+                block's FQN, which ``block_overrides`` match against, is
+                ``<container fqn>.<child name>``.
 
         The offloader needs no handle: the forward hooks it registers on the
         model part keep it alive, and it logs its first forward's stats.
         """
-        layers = module.get_submodule(blocks_name)
-        transformer_blocks = list(layers.named_children())
+        transformer_blocks = [
+            (f"{container_fqn}.{name}", block)
+            for container_fqn in block_container_fqns
+            for name, block in model_part.get_submodule(container_fqn).named_children()
+        ]
         if not transformer_blocks:
             logger.info(
                 "%s found no transformer blocks in this model part",
@@ -293,10 +298,8 @@ class ActivationRematConfig:
             return
 
         accelerator = torch.accelerator.current_accelerator()
-        if (
-            not module_fqn
-            and self.offloads_activations
-            and (accelerator is None or accelerator.type != "cuda")
+        if self.offloads_activations and (
+            accelerator is None or accelerator.type != "cuda"
         ):
             # TODO: other accelerators need a graph-capture query for the
             # pinned buffer pool's reuse rule; streams and events would port.
@@ -309,10 +312,8 @@ class ActivationRematConfig:
         # validation can account for all pipeline stages instead of only this
         # model part.
         overridden = []
-        for layer_id, transformer_block in transformer_blocks:
+        for block_fqn, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            base_fqn = f"{blocks_name}.{layer_id}"
-            block_fqn = f"{module_fqn}.{base_fqn}" if module_fqn else base_fqn
             policy = self.block_policy(block_fqn)
             if any(block_fqn in override.blocks for override in self.block_overrides):
                 overridden.append(block_fqn)
@@ -321,7 +322,7 @@ class ActivationRematConfig:
             )
             transformer_block._remat_block_fqn = block_fqn
             transformer_block.forward = remat.checkpoint(
-                region_name=base_fqn,
+                region_name=block_fqn,
                 determinism_check=self.determinism_check,
                 preserve_rng_state=False,
             )(transformer_block.forward)
@@ -335,13 +336,10 @@ class ActivationRematConfig:
         )
         if overridden:
             logger.info("Block overrides apply to: %s", ", ".join(overridden))
-        # One offloader per model part, installed on the root module only.
-        # The root contains every block of the model part, so the offloader
-        # still covers all of them, not just the decoder's: at the first
-        # forward it hooks each block that any apply call (decoder, encoders,
-        # MTP) marked with _remat_block_fqn, and chains them in run order.
-        if not module_fqn and self.offloads_activations:
-            ActivationOffloader(module, remat_config=self)
+        if self.offloads_activations:
+            # At its first forward, the offloader hooks each block marked
+            # with _remat_block_fqn above and chains them in run order.
+            ActivationOffloader(model_part, remat_config=self)
 
 
 @dataclass(kw_only=True, slots=True)

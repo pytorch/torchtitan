@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, cast, Self
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -18,9 +18,7 @@ from torch.distributed.fsdp import DataParallelMeshDims
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
-from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -249,30 +247,11 @@ class MTPDecoder(Decoder):
                 )
             self.mtp_layers.append(layer_config.build())
 
-    def parallelize(
-        self,
-        *,
-        parallelism_context: ParallelismContext,
-        precision: PrecisionConfig,
-        parallelism: ParallelismConfig,
-        local_compile: LocalCompileConfig,
-        activation_remat: ActivationRematConfig | None,
-        dump_folder: str,
-    ) -> Self:
-        # Bind local implementations early; torch.compile traces on first use.
-        local_compile.apply()
-        with parallelism_context.activate_spmd():
-            self._parallelize(parallelism_context)
-            if activation_remat is not None:
-                activation_remat.apply(self)
-                if self.mtp_layers is not None and len(self.mtp_layers) > 0:
-                    activation_remat.apply(self, blocks_name="mtp_layers")
-            self._apply_fsdp(
-                parallelism_context=parallelism_context,
-                precision=precision,
-                parallelism=parallelism,
-            )
-        return self
+    def remat_block_container_fqns(self) -> list[str]:
+        return [
+            *super().remat_block_container_fqns(),
+            *([] if self.mtp_layers is None else ["mtp_layers"]),
+        ]
 
     def _apply_fsdp(
         self,

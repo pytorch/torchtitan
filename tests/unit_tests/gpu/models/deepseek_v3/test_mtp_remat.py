@@ -76,8 +76,9 @@ class TestDeepSeekV3MTPRemat(unittest.TestCase):
         for policy in (FullActivationRematConfig(), DefaultActivationRematConfig()):
             with self.subTest(policy=type(policy).__qualname__):
                 model = copy.deepcopy(baseline)
-                policy.apply(model)
-                policy.apply(model, blocks_name="mtp_layers")
+                policy.apply(
+                    model, block_container_fqns=model.remat_block_container_fqns()
+                )
                 self.assertTrue(
                     all("forward" in vars(block) for block in model.mtp_layers)
                 )

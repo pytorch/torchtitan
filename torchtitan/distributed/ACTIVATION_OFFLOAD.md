@@ -77,14 +77,15 @@ config.activation_remat = DefaultActivationRematConfig(
 `torchtitan_recipes.models.llama3.llama3_8b_activation_offload` is a complete
 recipe.
 
-**Encoders.** In a multimodal model, `apply` runs once more for each encoder
-(`module_fqn="vision_encoder"`). Each call records the full FQN of every block
-it checkpoints (e.g. `vision_encoder.layers.0`), and at the model part's first
-forward the offloader hooks every recorded block under it, so the order of the
-`apply` calls does not matter and block overrides name encoder blocks by that
-FQN. Groups chain in the order blocks run, so an encoder's blocks chain into
-the decoder blocks that follow: its last group is freed at the end of decoder
-block 0's forward and reloaded when that block's output gets its gradient.
+**Encoders and MTP.** `apply` runs once per model part and checkpoints the
+blocks of every container the model lists in `remat_block_container_fqns`
+(e.g. `vision_encoder.layers`, `layers`, `mtp_layers`). It records the full
+FQN of every block (e.g. `vision_encoder.layers.0`), and at the model part's
+first forward the one offloader hooks every recorded block under it; block
+overrides name encoder and MTP blocks by that FQN. Groups chain in the order
+blocks run, so an encoder's blocks chain into the decoder blocks that follow:
+its last group is freed at the end of decoder block 0's forward and reloaded
+when that block's output gets its gradient.
 
 Never offloaded, whatever the config:
 
