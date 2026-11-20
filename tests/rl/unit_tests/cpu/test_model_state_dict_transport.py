@@ -58,9 +58,12 @@ class _FakeTransport:
     def __init__(self):
         self.url = str(next(self._urls)).encode()
         self.connected = set()
+        self.registered = []
+        self.reads = []
 
     def register_memory(self, tensor):
         assert tensor.numel() > 0 and tensor.is_contiguous()
+        self.registered.append(tensor)
         return _FakeMemory(tensor, self.url)
 
     def bind(self):
@@ -72,7 +75,14 @@ class _FakeTransport:
     def read(self, local, remote, *, async_op):
         assert remote.url in self.connected
         assert local.shape == remote.data.shape
+        self.reads.append((local, remote))
         local.copy_(remote.data)
+        return _FakeWork() if async_op else 0
+
+
+class _FakeWork:
+    def wait(self, timeout=None):
+        return True
 
 
 async def _wait_all(works, *, timeout):
@@ -103,17 +113,24 @@ def _transfer(
     generator_index=0,
     transfer_dtype=None,
     preserve_dtype_keys=frozenset(),
+    update=None,
 ):
     """Register and stage each trainer rank's ``{key: (local tensor, box)}``, then
     connect, read and load each generator rank's ``{key: (box, dtype)}``; returns
-    the generator ranks' loaded state dicts."""
+    the generator ranks' loaded state dicts. With ``update``, which changes the
+    trainer's local tensors in place, push and load a second time with delta
+    sync."""
     boxes = {}
     monkeypatch.setattr(
         m,
         "_global_offset_and_local_shape",
         lambda tensor: boxes[id(tensor)],
     )
-    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
+    config = ModelStateDictTransport.Config(
+        backend="nixl",
+        sync_mode="full" if update is None else "delta",
+        read_timeout_s=5.0,
+    )
 
     def new_transport(backend):
         assert backend == config.backend
@@ -134,12 +151,12 @@ def _transfer(
         generator_sds.append(sd)
     rank_layouts = [m.shard_layout(sd) for sd in generator_sds]
 
-    sources, trainers = [], []
+    sources, trainer_metadata, trainers = [], [], []
     for shards in trainer_shards:
         sd = {key: local for key, (local, _) in shards.items()}
         for key, (local, box) in shards.items():
             boxes[id(local)] = box
-        trainer = ModelStateDictTransport(config)
+        trainer = config.build()
         sources.append(
             trainer.register_trainer_source(
                 sd,
@@ -149,19 +166,40 @@ def _transfer(
             )
         )
         trainer.stage(sd)
+        trainer_metadata.append(trainer.finish_stage())
         trainers.append(trainer)
 
-    loaded_sds = []
+    generators = []
     for rank, sd in enumerate(generator_sds):
-        generator = ModelStateDictTransport(config)
+        generator = config.build()
         generator.connect_generator(
-            sd, sources=sources, rank=rank, generator_index=generator_index
+            sd,
+            load_groups=[list(sd)],
+            sources=sources,
+            rank=rank,
+            generator_index=generator_index,
         )
-        asyncio.run(generator.read())
-        loaded = {key: torch.full_like(tensor, -1) for key, tensor in sd.items()}
-        generator.copy_prefetched_(loaded)
-        loaded_sds.append(loaded)
-    return loaded_sds
+        generators.append(generator)
+
+    def pull() -> list[dict[str, torch.Tensor]]:
+        loaded_sds = []
+        for generator, sd in zip(generators, generator_sds):
+            asyncio.run(generator.read(tuple(trainer_metadata)))
+            loaded = {key: torch.full_like(tensor, -1) for key, tensor in sd.items()}
+            generator.copy_prefetched_(loaded)
+            loaded_sds.append(loaded)
+        return loaded_sds
+
+    loaded_sds = pull()
+    if update is None:
+        return loaded_sds
+    update()
+    trainer_metadata = []
+    for trainer, shards in zip(trainers, trainer_shards):
+        trainer.stage({key: local for key, (local, _) in shards.items()})
+        trainer_metadata.append(trainer.finish_stage())
+    assert all(metadata.delta_records for metadata in trainer_metadata)
+    return pull()
 
 
 def _transfer_w(monkeypatch, trainer_locals, generator_boxes, *, dtype, **kwargs):
@@ -307,6 +345,266 @@ def test_no_reads(monkeypatch):
     assert out["w"].shape == (0, 3)
 
 
+def test_full_sync_is_default(monkeypatch):
+    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
+    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    monkeypatch.setattr(m, "wait_all", _wait_all)
+
+    initial = {"w": torch.arange(8, dtype=torch.float32)}
+    prefetched = {"w": torch.zeros_like(initial["w"])}
+    layouts = [m.shard_layout(prefetched)]
+    trainer = config.build()
+    assert type(trainer) is ModelStateDictTransport
+    delta_config = ModelStateDictTransport.Config(backend="nixl", sync_mode="delta")
+    assert type(delta_config.build()) is m.ModelStateDictDeltaTransport
+    # Constructing the full-sync class for delta sync would silently read whole.
+    with pytest.raises(ValueError, match="Config.build"):
+        ModelStateDictTransport(delta_config)
+    source = trainer.register_trainer_source(
+        initial,
+        generator_rank_layouts=layouts,
+        transfer_dtype=None,
+        preserve_dtype_keys=frozenset(),
+    )
+    assert len(trainer._transport.registered) == 1
+
+    trainer.stage(initial)
+    metadata = trainer.finish_stage()
+    generator = config.build()
+    generator.connect_generator(
+        prefetched,
+        load_groups=[list(prefetched)],
+        sources=[source],
+        rank=0,
+        generator_index=0,
+    )
+    asyncio.run(generator.read((metadata,)))
+
+    target = {"w": initial["w"] + 10}
+    trainer.stage(target)
+    metadata = trainer.finish_stage()
+    asyncio.run(generator.read((metadata,)))
+    assert len(generator._transport.reads) == 2
+    torch.testing.assert_close(prefetched["w"], target["w"], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+def test_delta_loads_changes(monkeypatch, dim):
+    """A delta load XORs the changes into a key read in place (row pieces) and
+    into a packed key (column pieces), with pieces spanning windows."""
+    monkeypatch.setattr(m, "_DELTA_WINDOW_NBYTES", 32)
+    monkeypatch.setattr(m, "_DELTA_CAPACITY_DIVISOR", 1)
+    full = torch.arange(64, dtype=torch.bfloat16).view(8, 8)
+    boxes = _boxes(full.shape, 2, dim)
+    trainer_locals = [full[_index(*box)].clone() for box in boxes]
+
+    def update():
+        trainer_locals[0].view(-1)[[0, 5, 20]] += 1
+        trainer_locals[1].view(-1)[-1] -= 1
+
+    (loaded,) = _transfer(
+        monkeypatch,
+        [{"w": (local, box)} for local, box in zip(trainer_locals, boxes)],
+        [{"w": (((0, 0), (8, 8)), torch.bfloat16)}],
+        update=update,
+    )
+    expected = torch.empty_like(full)
+    for local, box in zip(trainer_locals, boxes):
+        expected[_index(*box)] = local
+    torch.testing.assert_close(loaded["w"], expected, rtol=0, atol=0)
+
+
+def _load(generator, prefetched):
+    """Load the prefetched model state dict into a new state dict."""
+    loaded = {key: torch.full_like(value, -1) for key, value in prefetched.items()}
+    generator.copy_prefetched_(loaded)
+    return loaded
+
+
+def test_delta_reads_only_changed_pieces(monkeypatch):
+    config = ModelStateDictTransport.Config(
+        backend="nixl", sync_mode="delta", read_timeout_s=5.0
+    )
+    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    monkeypatch.setattr(m, "wait_all", _wait_all)
+    # Each piece below can send every word: the records of pieces this small are
+    # mostly zstd frame overhead.
+    monkeypatch.setattr(m, "_DELTA_CAPACITY_DIVISOR", 1)
+    initial = {
+        "unchanged": torch.arange(128, dtype=torch.bfloat16),
+        "changed": torch.arange(128, dtype=torch.bfloat16) + 200,
+        "many_changes": torch.arange(128, dtype=torch.bfloat16) + 400,
+    }
+    prefetched = {key: torch.zeros_like(value) for key, value in initial.items()}
+    layouts = [m.shard_layout(prefetched)]
+
+    trainer = config.build()
+    source = trainer.register_trainer_source(
+        initial,
+        generator_rank_layouts=layouts,
+        transfer_dtype=None,
+        preserve_dtype_keys=frozenset(),
+    )
+    # One dense staging buffer and one delta buffer.
+    assert len(trainer._transport.registered) == 2
+    trainer.stage(initial)
+    metadata = trainer.finish_stage()
+    assert metadata.delta_records is None
+
+    generator = config.build()
+    generator.connect_generator(
+        prefetched,
+        load_groups=[list(prefetched)],
+        sources=[source],
+        rank=0,
+        generator_index=0,
+    )
+    # The prefetch buffers and the buffer records are received in.
+    assert len(generator._transport.registered) == len(prefetched) + 1
+    reads = generator._transport.reads
+    asyncio.run(generator.read((metadata,)))
+    assert len(reads) == 3
+    for key in initial:
+        torch.testing.assert_close(prefetched[key], initial[key], rtol=0, atol=0)
+
+    target = {key: value.clone() for key, value in initial.items()}
+    target["changed"][3] += 1
+    target["many_changes"][:125].neg_()
+    trainer.stage(target)
+    metadata = trainer.finish_stage()
+    assert metadata.push == 1
+    # The unchanged piece is not sent.
+    assert len(metadata.delta_records) == 2
+
+    asyncio.run(generator.read((metadata,)))
+    # The two changed pieces' records are adjacent in the delta buffer: one read.
+    assert len(reads) == 3 + 1
+    loaded = _load(generator, prefetched)
+    for key in target:
+        torch.testing.assert_close(loaded[key], target[key], rtol=0, atol=0)
+
+    # The trainer's staging buffer and the generator's prefetch buffers both
+    # advance, so the following push is relative to `target`.
+    next_target = {key: value.clone() for key, value in target.items()}
+    next_target["changed"][17] += 2
+    next_target["changed"][100] -= 3
+    trainer.stage(next_target)
+    metadata = trainer.finish_stage()
+    asyncio.run(generator.read((metadata,)))
+    assert len(reads) == 3 + 1 + 1
+    # The read waited for the loaded changes to reach the prefetch buffers.
+    for key in target:
+        torch.testing.assert_close(prefetched[key], target[key], rtol=0, atol=0)
+
+    # The next read first applies the changes of a read that was not loaded.
+    last_target = {key: value.clone() for key, value in next_target.items()}
+    last_target["many_changes"][3] += 64
+    trainer.stage(last_target)
+    metadata = trainer.finish_stage()
+    asyncio.run(generator.read((metadata,)))
+    assert len(reads) == 3 + 1 + 1 + 1
+    for key in next_target:
+        torch.testing.assert_close(prefetched[key], next_target[key], rtol=0, atol=0)
+    loaded = _load(generator, prefetched)
+    for key in last_target:
+        torch.testing.assert_close(loaded[key], last_target[key], rtol=0, atol=0)
+
+    # A generator that missed a push reads the next one whole.
+    trainer.stage(target)
+    trainer.finish_stage()
+    trainer.stage(initial)
+    metadata = trainer.finish_stage()
+    asyncio.run(generator.read((metadata,)))
+    assert len(reads) == 3 + 1 + 1 + 1 + 3
+    for key in initial:
+        torch.testing.assert_close(prefetched[key], initial[key], rtol=0, atol=0)
+
+
+def test_delta_reads_whole_past_capacity(monkeypatch):
+    """A window with more changed words than it sends makes the push read whole."""
+    config = ModelStateDictTransport.Config(
+        backend="nixl", sync_mode="delta", read_timeout_s=5.0
+    )
+    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    monkeypatch.setattr(m, "wait_all", _wait_all)
+    # One window of 128 words, which sends at most 8.
+    initial = {"w": torch.arange(128, dtype=torch.bfloat16)}
+    prefetched = {"w": torch.zeros_like(initial["w"])}
+    trainer = config.build()
+    source = trainer.register_trainer_source(
+        initial,
+        generator_rank_layouts=[m.shard_layout(prefetched)],
+        transfer_dtype=None,
+        preserve_dtype_keys=frozenset(),
+    )
+    trainer.stage(initial)
+    metadata = trainer.finish_stage()
+    generator = config.build()
+    generator.connect_generator(
+        prefetched,
+        load_groups=[list(prefetched)],
+        sources=[source],
+        rank=0,
+        generator_index=0,
+    )
+    asyncio.run(generator.read((metadata,)))
+    target = {"w": initial["w"].clone()}
+    target["w"][:9] += 1
+    trainer.stage(target)
+    metadata = trainer.finish_stage()
+    assert metadata.delta_records is None
+    asyncio.run(generator.read((metadata,)))
+    torch.testing.assert_close(prefetched["w"], target["w"], rtol=0, atol=0)
+    torch.testing.assert_close(_load(generator, prefetched)["w"], target["w"])
+
+
+def test_delta_pieces_span_windows(monkeypatch):
+    """A window holding several pieces, and a piece spanning windows, of mixed
+    dtypes, each sent as one record."""
+    config = ModelStateDictTransport.Config(
+        backend="nixl", sync_mode="delta", read_timeout_s=5.0
+    )
+    monkeypatch.setattr(m, "new_transport", lambda backend: _FakeTransport())
+    monkeypatch.setattr(m, "wait_all", _wait_all)
+    monkeypatch.setattr(m, "_DELTA_WINDOW_NBYTES", 160)
+    monkeypatch.setattr(m, "_DELTA_CAPACITY_DIVISOR", 1)
+    initial = {
+        "a": torch.arange(40, dtype=torch.bfloat16),
+        "b": torch.arange(100, dtype=torch.float32),
+        "c": torch.arange(24, dtype=torch.bfloat16),
+    }
+    prefetched = {key: torch.zeros_like(value) for key, value in initial.items()}
+    trainer = config.build()
+    source = trainer.register_trainer_source(
+        initial,
+        generator_rank_layouts=[m.shard_layout(prefetched)],
+        transfer_dtype=None,
+        preserve_dtype_keys=frozenset(),
+    )
+    trainer.stage(initial)
+    metadata = trainer.finish_stage()
+    generator = config.build()
+    generator.connect_generator(
+        prefetched,
+        load_groups=[list(prefetched)],
+        sources=[source],
+        rank=0,
+        generator_index=0,
+    )
+    asyncio.run(generator.read((metadata,)))
+    target = {key: value.clone() for key, value in initial.items()}
+    target["a"][39] += 1
+    target["b"][[0, 50, 99]] += 0.5
+    target["c"][0] -= 1
+    trainer.stage(target)
+    metadata = trainer.finish_stage()
+    assert metadata.delta_records
+    asyncio.run(generator.read((metadata,)))
+    loaded = _load(generator, prefetched)
+    for key in target:
+        torch.testing.assert_close(loaded[key], target[key], rtol=0, atol=0)
+
+
 def test_shared_rank_layouts():
     a = m.TensorShard((0,), (2,), torch.float32)
     b = m.TensorShard((2,), (2,), torch.float32)
@@ -426,8 +724,11 @@ class TestStageDTensors(DTensorTestBase):
                     preserve_dtype_keys=frozenset(),
                 )
                 trainer.stage(sd)
+                metadata = trainer.finish_stage()
                 sources = [None] * self.world_size
                 dist.all_gather_object(sources, source)
+                metadata_by_source = [None] * self.world_size
+                dist.all_gather_object(metadata_by_source, metadata)
 
                 for rank, layout in enumerate(rank_layouts):
                     generator_sd = {}
@@ -436,9 +737,13 @@ class TestStageDTensors(DTensorTestBase):
                         boxes[id(generator_sd[key])] = (shard.offset, shard.shape)
                     generator = ModelStateDictTransport(config)
                     generator.connect_generator(
-                        generator_sd, sources=sources, rank=rank, generator_index=0
+                        generator_sd,
+                        load_groups=[list(generator_sd)],
+                        sources=sources,
+                        rank=rank,
+                        generator_index=0,
                     )
-                    asyncio.run(generator.read())
+                    asyncio.run(generator.read(tuple(metadata_by_source)))
                     self.assertEqual(set(generator._packed), packed)
                     loaded = {key: torch.zeros(s.shape) for key, s in layout.items()}
                     generator.copy_prefetched_(loaded)

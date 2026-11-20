@@ -16,6 +16,7 @@ from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransferMetadata,
     ModelStateDictTransport,
     TensorShard,
     TrainerSource,
@@ -109,8 +110,11 @@ class _GeneratorActorEndpoints:
         await super().load_model_state_dict(version, drain=drain)
 
     @concurrent_endpoint
-    async def prefetch_model_state_dict(self) -> None:
-        await super().prefetch_model_state_dict()
+    async def prefetch_model_state_dict(
+        self,
+        metadata_by_trainer_rank: tuple[ModelStateDictTransferMetadata, ...],
+    ) -> None:
+        await super().prefetch_model_state_dict(metadata_by_trainer_rank)
 
     @concurrent_endpoint
     async def close(self) -> None:
