@@ -38,6 +38,7 @@ from torchtitan.rl.generator.types import (
     SamplingConfig,
 )
 from torchtitan.rl.generator.vllm.batch_invariance import (
+    configure_batch_invariance,
     force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
@@ -185,7 +186,7 @@ class VLLMEngine(GenerationEngine):
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        self._setup(
+        self.configure_runtime(
             model,
             parallelism=parallelism,
             precision=precision,
@@ -194,6 +195,8 @@ class VLLMEngine(GenerationEngine):
             batch_invariant=debug.batch_invariant,
             model_state_dict_load_mode=model_state_dict_load_mode,
             vision_processor=vision_processor,
+            cuda_graph=config.cuda_graph,
+            max_num_seqs=max_num_seqs,
         )
         self._vision_processor: VisionProcessor | None = (
             vision_processor.build() if vision_processor is not None else None
@@ -242,7 +245,7 @@ class VLLMEngine(GenerationEngine):
             )
 
     @staticmethod
-    def _setup(
+    def configure_runtime(
         model: Decoder.Config,
         *,
         parallelism: InferenceParallelismConfig,
@@ -252,9 +255,17 @@ class VLLMEngine(GenerationEngine):
         batch_invariant: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
         vision_processor: VisionProcessor.Config | None,
+        cuda_graph: VLLMCudaGraphConfig,
+        max_num_seqs: int,
     ) -> None:
-        """Process-wide vLLM setup before the engine build: register the TorchTitan model
-        and config parser with vLLM, and select vLLM's model runner."""
+        """Configure process-wide vLLM state before building an engine."""
+        if batch_invariant:
+            configure_batch_invariance(
+                model,
+                cuda_graph_mode=cuda_graph.mode,
+                max_num_seqs=max_num_seqs,
+            )
+
         register_to_vllm(
             model,
             parallelism=parallelism,
@@ -295,8 +306,8 @@ class VLLMEngine(GenerationEngine):
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
-            # register_to_vllm in _setup). It builds PretrainedConfig from
-            # model config instead of reading config.json from disk.
+            # register_to_vllm in configure_runtime). It builds PretrainedConfig
+            # from model config instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=param_dtype,
             tensor_parallel_size=parallelism.tensor_parallel_degree,
