@@ -372,8 +372,9 @@ class log_trace_span:  # noqa: N801
     enclosing :class:`asyncio.Task`'s name via
     ``asyncio.current_task().get_name()`` (``None`` outside any task)
     and stamps it on both records. Analysis pairs ``_start`` / ``_end``
-    via a LIFO stack on ``(source, task_name)``, so nested spans in one
-    task pair correctly. The ``_end`` record's ``value`` is the elapsed
+    via a LIFO stack on ``(source, task_name, span name)``, or on the
+    native thread outside any task, so nested spans in one task pair
+    correctly. The ``_end`` record's ``value`` is the elapsed
     wall-time in ms.
 
     On exception, emits an extra ``_error`` record (with exception type
