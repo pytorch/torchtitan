@@ -68,7 +68,7 @@ scripts/install_rl_env.sh --sglang
 | Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's attention-TP all-reduce (custom all-reduce) instead of NCCL |
 | CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
-| Prompt KV reuse within a rollout group | Supported for softmax attention, not linear attention (GDN, KDA); see below |
+| Prompt KV reuse within a rollout group | Supported; linear attention (GDN, KDA) reuses the state at the prompt's last 64-token boundary; see below |
 | Model state dict loads (`cpu_prefetch`, `gpu_fetch`) | Supported |
 | Policy-version prefix cache isolation | Supported (`cache_salt`) |
 | `reset_kv_cache_on_model_state_dict_load` | Supported: running requests are retracted and recompute their KV |
@@ -235,10 +235,9 @@ For Qwen3-4B (TP 1) and 8 prompts x 16 samples admitted at once, the cached
 share of prompt tokens goes from 0% to 94% for 1K-token prompts (TTFT p50
 0.46 s -> 0.10 s) and from 59% to 94% for 4K-token prompts (0.73 s -> 0.25 s).
 The held requests keep their priority and wait queue entry times, so groups
-still run oldest first. Linear attention (GDN, KDA) models do not hold requests.
-Without SGLang's `extra_buffer` strategy, SGLang saves their states only at the
-end of a cached prefix, but a request with the same prompt needs the state one
-token earlier to compute the prompt's last token, so it could reuse nothing.
+still run oldest first. Linear attention (GDN, KDA) models hold requests too: a
+held request resumes from the leader's state snapshot at the prompt's last
+64-token boundary and recomputes the rest of the prompt (see [GDN and KDA](#gdn-and-kda)).
 
 ## CPU KV offload
 

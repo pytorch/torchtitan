@@ -129,6 +129,10 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
 
     def __init__(self, model_runner) -> None:
         super().__init__(model_runner)
+        # TODO(https://github.com/sgl-project/sglang/issues/48463): SGLang has no
+        # public hooks for the extra_buffer prefix cache. The backends rely on its
+        # internals: conv_states_shape below, the forward_metadata track fields read
+        # in track_extend_states, and the private _track_mamba_state_decode in decode.
         # SGLang's extend tracking reads the conv window length (W - 1) as the last
         # dim of conv_states_shape; the pool keeps [W - 1, C] per slot, as SGLang's KDA
         # backend does, which exposes the transposed shape too.
