@@ -47,7 +47,6 @@ from torchtitan.rl.generator.vllm.engine import (
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
-from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -148,7 +147,7 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
         reset_kv_cache_on_model_state_dict_load
     )
     engine._get_model = lambda: model
-    engine._session_kv_holder = None
+    engine._session_kv_evictor = Mock()
     engine._vision_processor = None
     engine._pixel_values_lru_cache = LRUCache(
         1 << 20, getsizeof=lambda pixel_values: pixel_values.nbytes
@@ -388,22 +387,25 @@ def test_admission_passes_group_id_as_priority_and_arrival_time():
     assert [kwargs["arrival_time"] for kwargs in added_kwargs] == [1.5] * 3
 
 
-def test_session_kv_holder_tracks_admitted_requests_and_releases_sessions():
+def test_session_kv_evictor_tracks_admitted_requests_and_releases_sessions():
     engine = _vllm_engine()
-    holder = Mock()
-    engine._session_kv_holder = holder
+    evictor = Mock()
+    engine._session_kv_evictor = evictor
     engine._engine.add_request = Mock(return_value="r0-internal")
     engine._engine.step = lambda: []
 
-    assert engine.holds_session_kv
     engine.add_requests([_engine_request("r0", min_policy_version=6)])
     engine.step()
     engine.release_sessions(["group=3/rollout=0"], [3])
 
-    # The holder tracks vLLM's internal request id, which carries a random suffix.
-    holder.track.assert_called_once_with("r0-internal", "group=3/rollout=0", 3)
-    holder.after_step.assert_called_once_with()
-    holder.release.assert_called_once_with(["group=3/rollout=0"], [3])
+    # The evictor tracks vLLM's internal request id, which carries a random suffix.
+    evictor.track.assert_called_once_with(
+        "r0-internal", session_id="group=3/rollout=0", group_id=3
+    )
+    evictor.after_step.assert_called_once_with()
+    evictor.release.assert_called_once_with(
+        session_ids=["group=3/rollout=0"], group_ids=[3]
+    )
 
 
 def test_admission_salts_prompt_with_min_policy_version():
@@ -721,31 +723,6 @@ def test_batch_invariant_requires_kv_cache_reset():
         )
 
 
-def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_path):
-    with pytest.raises(
-        ValueError, match="needs reset_kv_cache_on_model_state_dict_load=False"
-    ):
-        VLLMEngine.Config(session_kv_holder=VLLMSessionKVHolder.Config()).build(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            model_path="unused",
-            max_num_seqs=8,
-            precision=PrecisionConfig(),
-            gpu_memory_limit=0.9,
-            max_num_batched_tokens=None,
-            checkpointer=None,
-            dist_moe_runtime=None,
-            debug=DebugConfig(),
-            reset_kv_cache_on_model_state_dict_load=True,
-            model_state_dict_load_mode="cpu_prefetch",
-            vision_processor=None,
-            mooncake_master_address=None,
-            rank=0,
-            generator_name="generator",
-            output_dir=str(tmp_path),
-        )
-
-
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -769,10 +746,12 @@ def test_qwen36_27b_perf_config():
 
 def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
-    ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
+    ``LLMEngine``, model registration and the session KV evictor mocked; return the
+    ``EngineArgs`` kwargs."""
     engine_args = Mock()
     monkeypatch.setattr(vllm_engine_module, "EngineArgs", engine_args)
     monkeypatch.setattr(vllm_engine_module, "LLMEngine", Mock())
+    monkeypatch.setattr(vllm_engine_module, "VLLMSessionKVEvictor", Mock())
     monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     config.engine.build(

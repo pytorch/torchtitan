@@ -770,10 +770,6 @@ class SGLangEngine(GenerationEngine):
                     ContinueGenerationReqInput(torch_empty_cache=False)
                 )
 
-    @property
-    def holds_session_kv(self) -> bool:
-        return True
-
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         released = set(session_ids)
         for group_id in group_ids:

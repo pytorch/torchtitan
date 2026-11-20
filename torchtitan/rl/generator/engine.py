@@ -115,14 +115,8 @@ class GenerationEngine(Configurable, abc.ABC):
                 with the new weights and returns the keys it filled.
         """
 
-    @property
-    def holds_session_kv(self) -> bool:
-        """Whether the engine holds multi-turn sessions' KV between turns, so callers must
-        release sessions and groups when their rollouts end."""
-        return False
-
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
-        """Release the held KV of ``session_ids`` and of every session of ``group_ids``."""
+        """Release the cached KV of ``session_ids`` and of every session of ``group_ids``."""
 
     def log_stats(self, step: int) -> None:
         """Log the engine's own per-step stats, if any."""

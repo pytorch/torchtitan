@@ -158,9 +158,6 @@ class EngineLoop:
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
         )
-        # Read once: the engine is released on exit, and only the engine loop thread uses it.
-        self._holds_session_kv = engine.holds_session_kv
-
         self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
         # group's first admission and used as its prefix cache salt. Unused with
@@ -217,20 +214,24 @@ class EngineLoop:
         await asyncio.wrap_future(reply)
 
     def release_groups(self, group_ids: list[int]) -> None:
-        """RANK 0: drop the pinned cache salts of finished rollout groups."""
+        """RANK 0: drop the pinned cache salts and release the cached KV of finished rollout groups."""
         # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
         # released group in one batch can get different versions. If every batch must see one
         # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
-        if self._holds_session_kv and self._rank == 0:
-            self._queue.put(SessionReleaseMessage(group_ids=group_ids))
+        # Once the queue closes (shutdown or a crash), nothing is left to release.
+        if self._rank == 0:
+            self._queue.put(
+                SessionReleaseMessage(group_ids=group_ids), drop_if_closed=True
+            )
 
     def release_sessions(self, session_ids: list[str]) -> None:
-        """RANK 0: release the held KV of sessions whose rollout ended (a no-op unless the
-        engine holds session KV)."""
-        if self._holds_session_kv and self._rank == 0:
-            self._queue.put(SessionReleaseMessage(session_ids=session_ids))
+        """RANK 0: release the cached KV of sessions whose rollout ended."""
+        if self._rank == 0:
+            self._queue.put(
+                SessionReleaseMessage(session_ids=session_ids), drop_if_closed=True
+            )
 
     def log_engine_stats(self, step: int) -> None:
         """Log the engine's per-step stats, if it has any (rank 0)."""
@@ -611,7 +612,7 @@ class CloseMessage:
 
 @dataclass(kw_only=True, slots=True)
 class SessionReleaseMessage:
-    """Sessions (and every session of groups) whose held KV the engine loop releases; no reply."""
+    """Sessions (and every session of groups) whose cached KV the engine loop releases; no reply."""
 
     session_ids: list[str] = field(default_factory=list)
     group_ids: list[int] = field(default_factory=list)
@@ -655,10 +656,13 @@ class EngineLoopQueue:
         """Whether `close` has been called."""
         return self._closed_reason is not None
 
-    def put(self, message: EngineLoopMessage) -> None:
-        """Enqueue `message`; it lands on the next iteration of `event_loop`. Raises once closed."""
+    def put(self, message: EngineLoopMessage, *, drop_if_closed: bool = False) -> None:
+        """Enqueue `message`; it lands on the next iteration of `event_loop`. Once closed, raises,
+        or drops `message` if `drop_if_closed`."""
         with self._lock:
             if self._closed_reason is not None:
+                if drop_if_closed:
+                    return
                 raise RuntimeError(self._closed_reason)
             # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
             self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
@@ -715,4 +719,4 @@ class LoopDecision:
 
     released_session_ids: list[str] = field(default_factory=list)
     released_group_ids: list[int] = field(default_factory=list)
-    # sessions (and groups) whose held KV every rank releases before acting (session_kv_holder)
+    # sessions (and groups) whose cached KV every rank releases before acting
