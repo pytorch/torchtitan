@@ -6,11 +6,11 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 import torch
-
 from torchtitan.components.validator import Validator
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graph_manager,
@@ -51,6 +51,20 @@ def test_engine_closes_graphs_after_pending_work(engine_cls):
         engine._pinned_pool_ctx = SimpleNamespace(
             __exit__=lambda *args: events.append("offload")
         )
+        from torchtitan.distributed.nccl_ep_capture import (
+            NCCLEPBufferOwner,
+            NCCLEPRoutingCapturePlan,
+        )
+
+        graph_engine = cast(GraphTrainingEngine, engine)
+        graph_engine._nccl_ep_capture_plan = cast(
+            NCCLEPRoutingCapturePlan,
+            SimpleNamespace(release=lambda: events.append("routing")),
+        )
+        graph_engine._nccl_ep_buffer_owner = cast(
+            NCCLEPBufferOwner,
+            SimpleNamespace(close=lambda: events.append("buffers")),
+        )
     engine.close_profiler = lambda: events.append("profiler")
     engine._dist_moe_runtime = SimpleNamespace(close=lambda: events.append("moe"))
     engine.checkpointer = SimpleNamespace(close=lambda: events.append("checkpoint"))
@@ -62,7 +76,9 @@ def test_engine_closes_graphs_after_pending_work(engine_cls):
     expected = ["profiler", "moe", "checkpoint", "graphs"]
     if engine_cls is GraphTrainingEngine:
         expected.insert(0, "offload")
+        expected.extend(["routing", "buffers"])
         assert engine._pinned_pool_ctx is None
+        assert cast(GraphTrainingEngine, engine)._nccl_ep_capture_plan is None
     assert events == expected
     assert engine._dist_moe_runtime is None
 
@@ -271,3 +287,38 @@ def test_trainer_keeps_scheduled_eval_during_warmup(
     assert events == expected
     engine.checkpointer.maybe_wait_for_staging.assert_not_called()
     assert engine.num_completed_steps == loaded_step + training_steps
+
+
+def test_nccl_ep_graph_config_and_single_rank_rejection(monkeypatch):
+    from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.config.transform import TokenDispatcherTransform
+    from torchtitan.config.validation import validate_model_training_config
+    from torchtitan.models.base import BaseModel
+    from torchtitan.models.common.moe.token_dispatcher import NCCLEPTokenDispatcher
+    from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
+
+    config = deepseek_v3_16b(
+        seq_len=128, parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
+    config.model = cast(
+        BaseModel.Config,
+        TokenDispatcherTransform(
+            dispatcher=NCCLEPTokenDispatcher, num_max_tokens_per_rank=128
+        ).transform(config.model),
+    )
+    config.training.disable_accelerator_graphs = False
+    monkeypatch.setattr(
+        "torchtitan.distributed.accelerator_graph.accelerator_graphs_supported",
+        lambda: True,
+    )
+    kwargs = dict(
+        parallelism=config.parallelism,
+        training=config.training,
+        debug=config.debug,
+        activation_remat=config.activation_remat,
+        max_num_documents=1,
+    )
+    validate_model_training_config(config.model, **kwargs)
+    config.parallelism.expert_parallel_degree = 1
+    with pytest.raises(ValueError, match="expert_parallel_degree greater than 1"):
+        validate_model_training_config(config.model, **kwargs)

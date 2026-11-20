@@ -128,6 +128,8 @@ class _CapturingAuxLoss(nn.Module):
 
 
 class _IdentityDispatcher(nn.Module):
+    scores_on_expert_input = False
+
     def dispatch(
         self,
         x_TD,

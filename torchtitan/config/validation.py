@@ -159,6 +159,7 @@ def validate_model_training_config(
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
+        NCCLEPTokenDispatcher,
     )
 
     _validate_declared_parallel_axes(model, parallelism)
@@ -203,7 +204,11 @@ def validate_model_training_config(
         for fqn, dispatcher, _, _ in model.traverse(LocalTokenDispatcher.Config):
             if ep == 1 and isinstance(
                 dispatcher,
-                (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config),
+                (
+                    DeepEPTokenDispatcher.Config,
+                    HybridEPTokenDispatcher.Config,
+                    NCCLEPTokenDispatcher.Config,
+                ),
             ):
                 raise ValueError(
                     f"{fqn} uses {type(dispatcher).__qualname__}, which requires "
@@ -228,6 +233,9 @@ def validate_model_training_config(
             for _, dispatcher_config, _, _ in model.traverse(
                 LocalTokenDispatcher.Config
             ):
+                if isinstance(dispatcher_config, NCCLEPTokenDispatcher.Config):
+                    continue
+
                 if (
                     isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
                     and dispatcher_config.non_blocking_capacity_factor is not None
@@ -237,7 +245,9 @@ def validate_model_training_config(
                 raise ValueError(
                     "Accelerator graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "Set HybridEP non_blocking_capacity_factor, "
+                    "use NCCLEPTokenDispatcher "
+                    "with fixed token capacity, or set "
                     "training.disable_accelerator_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )

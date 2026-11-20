@@ -19,7 +19,14 @@ from torchtitan.distributed.accelerator_graph import (
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_accelerator_graph,
 )
+from torchtitan.distributed.nccl_ep_capture import (
+    NCCLEPBufferOwner,
+    NCCLEPRoutingCapturePlan,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.cuda_graph import (
+    release_nccl_ep_capture_plans,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
@@ -88,6 +95,16 @@ class GraphTrainingEngine(TrainingEngine):
             output_dir=output_dir,
         )
         self._pinned_pool_ctx = None
+        self._nccl_ep_buffer_owner = NCCLEPBufferOwner()
+        self._nccl_ep_capture_plan = None
+
+    def initialize(self, **kwargs) -> None:
+        try:
+            with self._nccl_ep_buffer_owner.initialize():
+                super().initialize(**kwargs)
+        except BaseException:
+            self.close()
+            raise
 
     def _parallelize_kwargs(self) -> dict[str, Any]:
         """Return the extra kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
@@ -206,15 +223,21 @@ class GraphTrainingEngine(TrainingEngine):
             not self.config.training.disable_accelerator_graphs
             and accelerator_graphs_supported()
         ):
+            plan = NCCLEPRoutingCapturePlan()
+            self._nccl_ep_capture_plan = plan
             self._run_forward_backward = wrap_fwd_bwd_with_accelerator_graph(
-                self._run_forward_backward,
+                partial(plan.run, self._run_forward_backward),
                 parameters=(
                     parameter
                     for model_part in self.model_parts
                     for parameter in model_part.parameters()
                 ),
                 num_warmup_iterations=NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
+                prepare_for_capture=plan.prepare_for_capture,
                 annotation_config=self.config.profiler.maybe_cuda_graph_annotation_config(),
+            )
+            self._run_forward_backward = partial(
+                plan.invoke, self._run_forward_backward
             )
 
         if self.config.compile.memory_policy == "sac_and_offload":
@@ -406,6 +429,12 @@ class GraphTrainingEngine(TrainingEngine):
             self._pinned_pool_ctx = None
 
         super().close()
+        release_nccl_ep_capture_plans()
+        if (plan := getattr(self, "_nccl_ep_capture_plan", None)) is not None:
+            plan.release()
+            self._nccl_ep_capture_plan = None
+        if (owner := getattr(self, "_nccl_ep_buffer_owner", None)) is not None:
+            owner.close()
 
         # Free the stash buffers, now that no CUDA graph points into them, and
         # leave any later trainer in this process a fresh manager.

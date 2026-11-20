@@ -20,7 +20,6 @@ from torch.utils import _pytree as pytree
 
 from torchtitan.tools import utils
 
-
 logger = logging.getLogger(__name__)
 
 NUM_ACCELERATOR_GRAPH_WARMUP_STEPS = 2
@@ -546,19 +545,25 @@ class AcceleratorGraphWrapper:
             return _run_eager_on_accelerator_graph_stream(self._fn, *args)
 
         if self._graph is None:
-            if self._prepare_for_capture is not None:
-                _run_eager_on_accelerator_graph_stream(self._prepare_for_capture, *args)
-            self._args = args
-            self._record_static_input_addresses(args)
-            self._graph, self._output = accelerator_graph_manager.capture(
-                self._fn, args, annotation_config=self._annotation_config
-            )
-            accelerator_graph_manager.log_memory(self.name, "after_capture")
-            logger.info(
-                "Recorded %s graph%s",
-                utils.device_type.upper(),
-                f" {self.name}" if self.name else "",
-            )
+            try:
+                if self._prepare_for_capture is not None:
+                    _run_eager_on_accelerator_graph_stream(
+                        self._prepare_for_capture, *args
+                    )
+                self._args = args
+                self._record_static_input_addresses(args)
+                self._graph, self._output = accelerator_graph_manager.capture(
+                    self._fn, args, annotation_config=self._annotation_config
+                )
+                accelerator_graph_manager.log_memory(self.name, "after_capture")
+                logger.info(
+                    "Recorded %s graph%s",
+                    utils.device_type.upper(),
+                    f" {self.name}" if self.name else "",
+                )
+            except BaseException:
+                self.reset_capture()
+                raise
 
         if self._should_check_address:
             self._check_static_input_addresses(args)
@@ -570,11 +575,15 @@ class AcceleratorGraphWrapper:
         self._graph.replay()
         return self._output
 
-    def teardown(self) -> None:
+    def reset_capture(self) -> None:
+        """Drop captured state while preserving the input contract for recapture."""
         self._graph = None
         self._args = None
         self._output = None
         self._static_input_addresses.clear()
+
+    def teardown(self) -> None:
+        self.reset_capture()
         self._non_tensor_inputs.clear()
 
 
@@ -616,9 +625,9 @@ class _ForwardBackwardAcceleratorGraphWrapper(AcceleratorGraphWrapper):
         self._gradient_state.restore()
         return output
 
-    def teardown(self) -> None:
+    def reset_capture(self) -> None:
         self._gradient_state.teardown()
-        super().teardown()
+        super().reset_capture()
 
 
 def accelerator_graphs_supported() -> bool:
