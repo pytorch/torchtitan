@@ -454,8 +454,9 @@ class Controller(Configurable):
             ):
                 warnings.warn(
                     "async_loop.batcher.rdma_min_tensor_bytes is set without "
-                    "trainer.training.preprocess_microbatch_groups_lazily=True: trainer "
-                    "ranks read all microbatches before forward/backward, with no overlap.",
+                    "trainer.training.preprocess_microbatch_groups_lazily=True, so trainer ranks "
+                    "read every microbatch before forward/backward. Set it to True (it needs "
+                    "disable_accelerator_graphs=True) to read them during training.",
                     stacklevel=2,
                 )
             # TODO: read RDMA microbatches in pipeline-step groups.
@@ -465,7 +466,7 @@ class Controller(Configurable):
             ):
                 raise ValueError(
                     "async_loop.batcher.rdma_min_tensor_bytes does not support "
-                    "trainer pipeline parallelism yet."
+                    "trainer pipeline parallelism yet; set it to None."
                 )
             generator_model = self.generator.model
             if self.vision_processor is None:

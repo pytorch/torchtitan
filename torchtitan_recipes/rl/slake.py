@@ -187,6 +187,7 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
