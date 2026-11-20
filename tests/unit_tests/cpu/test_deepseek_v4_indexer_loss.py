@@ -261,7 +261,7 @@ class TestIndexerSelect(unittest.TestCase):
                 attention_metadata=_metadata(cu, 12),
                 return_scores=True,
             )
-            index_only, _ = indexer(
+            index_only, no_scores = indexer(
                 q,
                 k,
                 w,
@@ -271,6 +271,7 @@ class TestIndexerSelect(unittest.TestCase):
                 return_scores=False,
             )
             torch.testing.assert_close(indices, index_only)
+            self.assertIsNone(no_scores)
             scores[indices >= 0].sum().backward()
             for tensor in (q, k, w):
                 self.assertTrue(torch.isfinite(tensor.grad).all())

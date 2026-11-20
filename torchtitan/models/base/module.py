@@ -561,9 +561,11 @@ class Module(nn.Module, Configurable):
             (layout.local_type, layout.partition_spec) for layout in in_named
         )
         out_types = tree_map(
-            lambda layout: (layout.local_type, layout.partition_spec),
+            lambda layout: (
+                layout if layout is None else (layout.local_type, layout.partition_spec)
+            ),
             output_shardings,
-            is_leaf=lambda x: isinstance(x, SpmdType),
+            is_leaf=lambda x: x is None or isinstance(x, SpmdType),
         )
         return spmd.local_map(
             in_types=in_types,

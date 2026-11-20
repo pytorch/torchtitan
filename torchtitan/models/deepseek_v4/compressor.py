@@ -262,7 +262,7 @@ class Indexer(Module):
             attention_metadata=attention_metadata,
             return_scores=return_scores,
         )
-        return indices, scores if return_scores else None
+        return indices, scores
 
 
 class InnerIndexer(Module):
@@ -285,7 +285,7 @@ class InnerIndexer(Module):
         topk: int,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
         return_scores: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Select top-k compressed positions per folded query token.
 
         Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
@@ -326,9 +326,7 @@ class InnerIndexer(Module):
                 ).squeeze(0)
 
             if not return_scores:
-                # TODO(spmd_types): local_map cannot declare a None output;
-                # remove this placeholder once it can.
-                return topk_indices, idx_w.new_empty((0, 0))
+                return topk_indices, None
             valid_TK = topk_indices >= 0
             gather_indices_TK = compressed_gather_indices(
                 topk_indices, attention_metadata, ratio

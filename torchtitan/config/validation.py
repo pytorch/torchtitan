@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import Attention, LinearAttention
 
 if TYPE_CHECKING:
+    from spmd_types import SpmdType
+
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -56,11 +58,13 @@ def _collect_model_layouts(
             )
         output = sharding.output_shardings
         if output is not None:
+            outputs: tuple[SpmdType | None, ...] = (
+                output if isinstance(output, tuple) else (output,)
+            )
             fields.extend(
                 (f"output_shardings[{i}]", layout)
-                for i, layout in enumerate(
-                    output if isinstance(output, tuple) else (output,)
-                )
+                for i, layout in enumerate(outputs)
+                if layout is not None
             )
         for field, layout in fields:
             layouts.append((fqn, field, set(spmd_axes(layout))))
