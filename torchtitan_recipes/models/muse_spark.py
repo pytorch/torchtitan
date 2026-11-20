@@ -43,6 +43,8 @@ from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     ContextParallelTransform,
     LoRATransform,
+    ModelConfigConverter,
+    MXFP8LinearConverter,
     transform_model_config_,
 )
 from torchtitan.config.transform.base import convert_config_type
@@ -126,6 +128,18 @@ def _muse_spark_kv_all_gather_context_parallel_transform() -> ContextParallelTra
     )
 
 
+_MUSE_SPARK_MXFP8_LINEAR_FQNS = [
+    "attention",
+    "feed_forward.pooler",
+    "feed_forward.unpooler",
+]
+
+
+def _muse_spark_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
+    """Quantize attention and compressed-MoE projections."""
+    return MXFP8LinearConverter.Config(fqns=list(_MUSE_SPARK_MXFP8_LINEAR_FQNS))
+
+
 def _with_dist_moe(
     config: Trainer.Config,
     *,
@@ -138,6 +152,7 @@ def _with_dist_moe(
 ) -> Trainer.Config:
     """Configure and replace Muse routed experts with Dist-MoE."""
     try:
+        import dist_moe
         from torchtitan.config.transform.dist_moe import DistMoeTransform
         from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
     except ModuleNotFoundError as error:
@@ -171,6 +186,11 @@ def _with_dist_moe(
             DistMoeTransform(
                 expert_precision=expert_precision,
                 inplace_wgrad_accum=True,
+                block_scaled_config=(
+                    dist_moe.BlockScaledConfig(fast_math=True)
+                    if expert_precision == "mxfp8"
+                    else None
+                ),
             )
         ],
     )
@@ -251,6 +271,7 @@ def muse_spark_816b_a42b(
     *,
     parallelism: ParallelismConfig | None = None,
     attn_backend: str = "flex",
+    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Trainer.Config:
     """Configure full-parameter text continuation from the Muse Spark Open checkpoint.
 
@@ -276,6 +297,7 @@ def muse_spark_816b_a42b(
         parallelism=parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
+        converters=converters,
     )
     if parallelism.context_parallel_degree > 1:
         transform_model_config_(
@@ -351,7 +373,7 @@ def muse_spark_816b_a42b(
     )
 
 
-def _muse_spark_816b_dist_moe_bf16_spmd(
+def _muse_spark_816b_dist_moe_spmd(
     *,
     seq_len: int,
     global_batch_size: int,
@@ -363,11 +385,12 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     remat_save_regions: Sequence[str] = _MUSE_SPARK_DIST_MOE_SAVE_REGIONS,
     attn_backend: Literal["flex", "varlen"] = "flex",
     max_num_documents: int | None = None,
+    expert_precision: Literal["bf16", "mxfp8"] = "bf16",
 ) -> Trainer.Config:
-    """Build a long-context BF16 Dist-MoE SPMD recipe.
+    """Build a long-context Dist-MoE SPMD recipe.
 
     The caller owns workload geometry and the activation-rematerialization
-    policy. This helper owns the common Muse Spark Open BF16 Dist-MoE, attention,
+    policy. This helper owns the common Muse Spark Open Dist-MoE, attention,
     FSDP, and production-versus-FakePG integration.
 
     Args:
@@ -387,6 +410,9 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
             FA4 varlen attention.
         max_num_documents: Upper bound on documents per local microbatch.
             Varlen attention needs it for CUDA graphs.
+        expert_precision: ``"mxfp8"`` runs the routed experts, attention
+            projections, and compressed-MoE projections in MXFP8. Inner
+            attention and the LM head stay BF16.
     """
     degrees = {
         "data_parallel_shard_degree": data_parallel_shard_degree,
@@ -411,18 +437,21 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     if logical_world_size % expert_parallel_degree != 0:
         raise ValueError("expert_parallel_degree must divide the logical world size")
 
-    # These are BF16-only scale recipes. Muse inner attention and the LM head
-    # remain BF16, and TorchTitan has no asynchronous MXFP8 TP path, so an
-    # MXFP8 long-context recipe would quantize only a minority of the critical
-    # path while exposing TP communication. Keep MXFP8 coverage in the debug
-    # recipe until those two execution paths exist.
-    base = muse_spark_816b_a42b(seq_len=seq_len, attn_backend=attn_backend)
+    base = muse_spark_816b_a42b(
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        converters=(
+            [_muse_spark_mxfp8_linear_converter_config()]
+            if expert_precision == "mxfp8"
+            else None
+        ),
+    )
     # Set before _with_dist_moe enables CUDA graphs, which Trainer.Config
     # validation checks against varlen attention.
     base.dataloader = replace(base.dataloader, max_num_documents=max_num_documents)
     config = _with_dist_moe(
         base,
-        expert_precision="bf16",
+        expert_precision=expert_precision,
         activation_slot_capacity_factor=1.0,
         scratch_capacity_factor=32.0,
         vmm_capacity_factor=None,
@@ -475,7 +504,10 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     else:
         config.checkpointer = replace(
             config.checkpointer,
-            folder=(f"muse_spark_816b_a42b_dist_moe_bf16_spmd_{logical_world_size}"),
+            folder=(
+                f"muse_spark_816b_a42b_dist_moe_{expert_precision}_spmd_"
+                f"{logical_world_size}"
+            ),
         )
     if context_parallel_degree > 1:
         config = apply_transforms(
@@ -504,17 +536,21 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
     return config
 
 
-def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Config:
-    """Configure 32K BF16 Dist-MoE SPMD on 64 GPUs: DP8, CP8, EP64.
+def _muse_spark_816b_dist_moe_spmd_64(
+    *, fake_backend: bool, expert_precision: Literal["bf16", "mxfp8"]
+) -> Trainer.Config:
+    """Configure 32K Dist-MoE SPMD on 64 GPUs: DP8, CP8, EP64.
 
     It uses FA4 varlen attention with K/V all-gather CP, shards the token
     embedding and lm_head vocab over CP, and keeps the Adam moments in pinned
     host memory.
     """
-    config = _muse_spark_816b_dist_moe_bf16_spmd(
+    config = _muse_spark_816b_dist_moe_spmd(
         seq_len=32 * 1024,
         global_batch_size=64,
         data_parallel_shard_degree=8,
+        # TorchTitan has no asynchronous MXFP8 TP path, so MXFP8 with TP would
+        # expose TP communication.
         tensor_parallel_degree=1,
         context_parallel_degree=8,
         expert_parallel_degree=64,
@@ -533,6 +569,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Con
             "feed_forward.unpooler.*",
             "feed_forward.router.*",
         ],
+        expert_precision=expert_precision,
     )
     # Without PP, "default" keeps the last units (norm and lm_head) unsharded
     # after forward, so the loss does not all-gather the lm_head weight again.
@@ -562,17 +599,33 @@ def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Con
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_64() -> Trainer.Config:
     """Configure 32K BF16 Dist-MoE SPMD with varlen attention on 64 GPUs."""
-    return _muse_spark_816b_dist_moe_bf16_spmd_64(fake_backend=False)
+    return _muse_spark_816b_dist_moe_spmd_64(
+        fake_backend=False, expert_precision="bf16"
+    )
 
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_fake() -> Trainer.Config:
     """Validate the logical-64 BF16 SPMD recipe with FakePG."""
-    return _muse_spark_816b_dist_moe_bf16_spmd_64(fake_backend=True)
+    return _muse_spark_816b_dist_moe_spmd_64(fake_backend=True, expert_precision="bf16")
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64() -> Trainer.Config:
+    """Configure 32K MXFP8 Dist-MoE SPMD with varlen attention on 64 GPUs."""
+    return _muse_spark_816b_dist_moe_spmd_64(
+        fake_backend=False, expert_precision="mxfp8"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_fake() -> Trainer.Config:
+    """Validate the logical-64 MXFP8 SPMD recipe with FakePG."""
+    return _muse_spark_816b_dist_moe_spmd_64(
+        fake_backend=True, expert_precision="mxfp8"
+    )
 
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_256() -> Trainer.Config:
     """Configure 96K BF16 Dist-MoE SPMD on 256 GPUs."""
-    return _muse_spark_816b_dist_moe_bf16_spmd(
+    return _muse_spark_816b_dist_moe_spmd(
         seq_len=96 * 1024,
         global_batch_size=128,
         data_parallel_shard_degree=16,
@@ -585,7 +638,7 @@ def muse_spark_816b_a42b_dist_moe_bf16_spmd_256() -> Trainer.Config:
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_256_fake() -> Trainer.Config:
     """Validate the logical-256 BF16 SPMD recipe with FakePG."""
-    return _muse_spark_816b_dist_moe_bf16_spmd(
+    return _muse_spark_816b_dist_moe_spmd(
         seq_len=96 * 1024,
         global_batch_size=128,
         data_parallel_shard_degree=16,
@@ -598,7 +651,7 @@ def muse_spark_816b_a42b_dist_moe_bf16_spmd_256_fake() -> Trainer.Config:
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_512() -> Trainer.Config:
     """Configure 192K BF16 Dist-MoE SPMD on 512 GPUs."""
-    return _muse_spark_816b_dist_moe_bf16_spmd(
+    return _muse_spark_816b_dist_moe_spmd(
         seq_len=192 * 1024,
         global_batch_size=128,
         data_parallel_shard_degree=16,
@@ -611,7 +664,7 @@ def muse_spark_816b_a42b_dist_moe_bf16_spmd_512() -> Trainer.Config:
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_512_fake() -> Trainer.Config:
     """Validate the logical-512 BF16 SPMD recipe with FakePG."""
-    return _muse_spark_816b_dist_moe_bf16_spmd(
+    return _muse_spark_816b_dist_moe_spmd(
         seq_len=192 * 1024,
         global_batch_size=128,
         data_parallel_shard_degree=16,
