@@ -38,7 +38,9 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Completion, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -1065,30 +1067,38 @@ def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) 
     assert rollout.group_id == 1
 
 
-def test_a_failing_rollout_fails_its_group_only_after_every_sibling_finished() -> None:
-    """The caller releases the group once this raises; no sibling may still be generating."""
+def test_a_failing_rollout_is_isolated_after_every_sibling_finished() -> None:
+    """A failed sibling must not discard completed siblings or leave them generating."""
 
     async def run_test() -> list[int]:
         finished = []
 
-        async def run_single_rollout(*, rollout_id: int, **kwargs) -> None:
+        async def run_single_rollout(*, rollout_id: int, **kwargs) -> Rollout:
             if rollout_id == 0:
                 raise RuntimeError("rollout 0 failed")
             await asyncio.sleep(0.01)
             finished.append(rollout_id)
+            return Rollout(
+                group_id=1, rollout_id=rollout_id, status=RolloutStatus.COMPLETED
+            )
 
         worker = object.__new__(VerifiersRolloutWorker)
         worker._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
         worker._run_single_rollout = run_single_rollout
-        with pytest.raises(RuntimeError, match="rollout 0 failed"):
-            await worker.run_group(
-                generate_fn=AsyncMock(),
-                release_session_fn=AsyncMock(),
-                sample=None,
-                group_id=1,
-                group_size=2,
-                sampling=SamplingConfig(),
-            )
+        worker.score_group = AsyncMock(return_value=[RubricOutput(reward=1.0)])
+        worker.advantage_estimator = AdvantageEstimator.Config().build()
+        group = await worker.run_group(
+            generate_fn=AsyncMock(),
+            release_session_fn=AsyncMock(),
+            sample=None,
+            group_id=1,
+            group_size=2,
+            sampling=SamplingConfig(),
+        )
+        assert group.rollouts[0].status is RolloutStatus.ERROR_ENV
+        assert group.rollouts[0].reward is None
+        assert group.rollouts[1].reward == 1.0
+        assert group.rollouts[1].advantage == 0.0
         return finished
 
     assert asyncio.run(run_test()) == [1]

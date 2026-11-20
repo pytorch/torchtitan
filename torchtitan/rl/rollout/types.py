@@ -23,7 +23,17 @@ if TYPE_CHECKING:
 _TRUNCATED = frozenset(
     {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
 )
-_ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+_ERROR = frozenset(
+    {
+        "error_parse",
+        "error_timeout",
+        "error_abort",
+        "error",
+        "error_infra",
+        "error_data",
+        "error_env",
+    }
+)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -217,6 +227,9 @@ class RolloutStatus(StrEnum):
     ERROR_TIMEOUT = "error_timeout"
     ERROR_ABORT = "error_abort"
     ERROR = "error"
+    ERROR_INFRA = "error_infra"
+    ERROR_DATA = "error_data"
+    ERROR_ENV = "error_env"
 
     def is_truncated(self) -> bool:
         return self.value in _TRUNCATED
@@ -226,6 +239,37 @@ class RolloutStatus(StrEnum):
 
     def is_terminal(self) -> bool:
         return self is not RolloutStatus.ONGOING
+
+    def is_trainable(self) -> bool:
+        """Exclude failures outside the policy from scoring and training."""
+        return self not in {
+            RolloutStatus.ERROR_INFRA,
+            RolloutStatus.ERROR_DATA,
+            RolloutStatus.ERROR_ENV,
+        }
+
+
+class RolloutError(Exception):
+    """An explicitly classified failure, preserved across actor RPC boundaries."""
+
+    def __init__(self, status: RolloutStatus, message: str) -> None:
+        super().__init__(status, message)
+        self.status = status
+
+
+def classify_rollout_error(error: Exception) -> RolloutStatus:
+    """Classify explicit transport/input errors; unknown failures are not retried.
+
+    Callers must unwrap actor exceptions first. Environment execution errors are
+    ERROR_ENV even when the environment itself raises a transport-like exception.
+    """
+    if isinstance(error, RolloutError):
+        return error.status
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return RolloutStatus.ERROR_INFRA
+    if isinstance(error, (ValueError, TypeError)):
+        return RolloutStatus.ERROR_DATA
+    return RolloutStatus.ERROR_ENV
 
 
 @dataclass(kw_only=True, slots=True)
