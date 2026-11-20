@@ -15,6 +15,8 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 import asyncio
 import concurrent.futures
 import copy
+import json
+import os
 from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
@@ -790,6 +792,7 @@ def _build_engine_kwargs(
     config: Generator.Config,
     *,
     generator_name="generator",
+    mooncake_master_address=None,
 ) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
@@ -812,7 +815,7 @@ def _build_engine_kwargs(
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
         vision_processor=None,
-        mooncake_master_address=None,
+        mooncake_master_address=mooncake_master_address,
         rank=0,
         generator_name=generator_name,
         output_dir=str(tmp_path),
@@ -849,6 +852,9 @@ def _mooncake_transfer_config():
 
 
 def test_mooncake_engine_args(monkeypatch, tmp_path):
+    store_config = tmp_path / "store.json"
+    store_config.write_text(json.dumps({"protocol": "tcp"}))
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(store_config))
     transfer = _mooncake_transfer_config()
     original = copy.deepcopy(transfer)
     holder_build = Mock()
@@ -859,7 +865,20 @@ def test_mooncake_engine_args(monkeypatch, tmp_path):
             kv_transfer_config=transfer, session_kv_holder=VLLMSessionKVHolder.Config()
         ),
     )
-    first = _build_engine_kwargs(monkeypatch, tmp_path, config, generator_name="first")
+    assert config.engine.uses_mooncake_store
+    first = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        config,
+        generator_name="first",
+        mooncake_master_address="controller:1234",
+    )
+    # vLLM reads the controller's master from a copy of the Store config.
+    with open(os.environ["MOONCAKE_CONFIG_PATH"]) as f:
+        assert json.load(f) == {
+            "protocol": "tcp",
+            "master_server_address": "controller:1234",
+        }
     # Mooncake has no CPU release hints: the session holder gets no connector.
     scheduler = (
         vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler

@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
@@ -116,6 +118,26 @@ _KV_OFFLOAD_CONNECTOR_MODULES = {
 }
 
 
+def _use_mooncake_master(address: str) -> None:
+    """Point this process's Store config (``MOONCAKE_CONFIG_PATH``) at the master the
+    controller started. vLLM reads the master address only from that file, so write
+    a copy with the address."""
+    with open(os.environ["MOONCAKE_CONFIG_PATH"]) as f:
+        store_config = json.load(f)
+    # A copy this function wrote already holds the address.
+    if store_config.get("master_server_address", address) != address:
+        raise ValueError(
+            f"Remove master_server_address from {os.environ['MOONCAKE_CONFIG_PATH']}: "
+            "the controller starts the job's Mooncake master on its host and sets this "
+            f"address for every generator (got {store_config['master_server_address']!r})"
+        )
+    store_config["master_server_address"] = address
+    fd, path = tempfile.mkstemp(prefix="mooncake_store_", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(store_config, f)
+    os.environ["MOONCAKE_CONFIG_PATH"] = path
+
+
 class VLLMEngine(GenerationEngine):
     """The generator's vLLM ``LLMEngine``, behind the calls the engine loop makes.
 
@@ -164,6 +186,13 @@ class VLLMEngine(GenerationEngine):
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
         `VLLMSessionKVHolder`). With SimpleCPU offload configured, also send CPU
         cache release hints when sessions end. None disables both behaviors."""
+
+        @property
+        def uses_mooncake_store(self) -> bool:
+            return (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.kv_connector == "MooncakeStoreConnector"
+            )
 
         def __post_init__(self):
             if self.kv_transfer_config is None:
@@ -233,8 +262,8 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        # TODO(acisseJZhong): use it once vLLM's Mooncake Store connector lands.
-        del mooncake_master_address
+        if mooncake_master_address is not None:
+            _use_mooncake_master(mooncake_master_address)
         self._uses_kv_offload = config.kv_transfer_config is not None
         # Multi-rank offload: TP ranks' schedulers must agree (KVOffloadScheduler,
         # a no-op for TP=1), and all ranks keep stepping while any rank has KV work
