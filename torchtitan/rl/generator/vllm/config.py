@@ -93,8 +93,8 @@ class VLLMCudaGraphConfig:
 
         ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
         internally sequence-sharded MoE path. A value greater than one removes
-        capture sizes that are not multiples of this count, so a graph's tokens
-        split evenly over TP and ``VLLMModelWrapper.forward`` pads no graph.
+        capture sizes that are not multiples of this count, so every graph's tokens
+        already split evenly over TP.
 
         All modes capture with ``mode=CompilationMode.NONE`` to avoid nesting
         vLLM's Inductor compile with TorchTitan local compile.
