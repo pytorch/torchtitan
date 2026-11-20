@@ -71,11 +71,7 @@ def get_linear_attention_metadata(
     attn_metadata = get_forward_context().attn_metadata
     if attn_metadata is None:
         return None
-    if not isinstance(attn_metadata, dict):
-        raise RuntimeError(
-            "Expected one attention-metadata dict per step, got "
-            f"{type(attn_metadata).__name__}."
-        )
+    assert isinstance(attn_metadata, dict), type(attn_metadata)
     if prefix not in attn_metadata:
         if any(
             isinstance(metadata, TorchTitanLinearAttentionMetadata)
@@ -87,11 +83,7 @@ def get_linear_attention_metadata(
             )
         return None
     metadata = attn_metadata[prefix]
-    if not isinstance(metadata, TorchTitanLinearAttentionMetadata):
-        raise RuntimeError(
-            f"Layer {prefix} got {type(metadata).__name__}, expected "
-            "TorchTitanLinearAttentionMetadata."
-        )
+    assert isinstance(metadata, TorchTitanLinearAttentionMetadata), type(metadata)
     return metadata
 
 
