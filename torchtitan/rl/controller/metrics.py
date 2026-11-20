@@ -99,8 +99,9 @@ def compute_perf_ratio_metrics(
     fwd_bwd_s = seconds.get("timing/step/forward_backward")
     optimizer_s = seconds.get("timing/step/optimizer")
 
-    # How long the trainer waited for the background push/pull to finish.
-    # NOTE: **not** how long it took. We overlap push/pull with the next the step.
+    # How long the trainer waited for the push and for the background pull.
+    # The push runs inline, so its wait is the whole push; the pull's wait is only the part
+    # that forward/backward didn't hide.
     blocking_trainer_push_s = seconds.get(
         "timing/step/blocking_trainer_push_model_state_dict"
     )
