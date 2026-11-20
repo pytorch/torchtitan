@@ -80,7 +80,9 @@ python -m torchtitan.rl.train \
 
 The recipe trains Qwen3.5-9B on V2.1's Python tasks at 64K context on one 8-GPU host:
 4 trainer GPUs (FSDP=4) and 4 one-GPU generators. It reads the checkpoint from `./assets/hf/Qwen3.5-9B`. It has
-not been run end to end yet.
+run for 5 steps with a remote-sandbox runtime in place of local Docker, so the load that
+pulling task images and running containers puts on the training host is untested. In
+that run, half of the validation rollouts reached the 64K context limit.
 
 ## Datasets
 

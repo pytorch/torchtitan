@@ -163,7 +163,8 @@ def rl_grpo_qwen35_9b_swe_rebench() -> Controller.Config:
     8 GPUs: 4 trainer (FSDP=4) and 4 one-GPU generators. Batches of 8 tasks x
     8 rollouts, up to 100 agent turns at 64K context.
 
-    Not run end to end yet.
+    Run for 5 steps with a remote-sandbox runtime in place of local Docker, not yet
+    with local Docker (README).
     """
     max_context_length = 65536
     async_loop = AsyncLoopConfig(
