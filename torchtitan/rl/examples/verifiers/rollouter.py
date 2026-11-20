@@ -12,12 +12,18 @@ import asyncio
 import contextlib
 import logging
 import os
+import shutil
+import socket
+import subprocess
 import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import verifiers.v1 as vf
+
+# TODO: import `agent_config_fields` from a public Verifiers module once one exports it. A Verifiers bump may move it.
+from verifiers.v1.configs.agent import agent_config_fields
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
 from verifiers.v1.env import RunSlot
@@ -53,6 +59,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 VERIFIERS_REWARD_KEY = "verifiers_reward"
+
+# How long a rollout worker waits for `docker version` when it starts. A Docker daemon that accepts
+# the connection but never answers would otherwise hang the job's start. Not tuned: it only needs to
+# be far above a healthy daemon's answer time.
+_DOCKER_VERSION_TIMEOUT_S = 60
 
 
 class RewardFromVerifiers(RewardFn):
@@ -111,7 +122,14 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         folder is shared."""
 
         renderer_multiplex: int = 256
-        """Maximum concurrent rollouts sharing one Verifiers renderer instance.
+        """The most model calls in flight that share one Verifiers renderer. A rollout counts toward
+        this limit from rendering its prompt until the model's reply arrives, not while its tools
+        run. When every renderer is at the limit, the worker loads one more (about 170 MB of memory
+        and 0.5-1.5 s to load, for the Qwen3.5 renderer) and keeps it until the worker exits.
+        Example, at 256:
+
+            300 rollouts, at most 100 waiting on the model at once   -> 1 renderer
+            300 rollouts, all waiting on the model at once           -> 2 renderers (256 + 44)
 
         TODO: evaluate sharing this renderer pool with TitanRL's native rollout
         path instead of keeping it specific to the Verifiers client.
@@ -137,7 +155,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             vf.resolve_env_config(config.environment)
         )
         # Holds `env.serving()` open from `setup_async` to `close`. Those are two calls, so a `with`
-        # block can't span them. Step 3 of `setup_async` says what it serves.
+        # block can't span them. The `env.serving()` step of `setup_async` says what it serves.
         self._serving = contextlib.AsyncExitStack()
         # Rollouts still running, so `close` can cancel them.
         self._running_rollouts: set[asyncio.Task[Rollout]] = set()
@@ -151,11 +169,12 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
-        """Start the local servers this worker's episodes use:
+        """Check this host, then start the local servers this worker's episodes use:
 
-        1. `no_proxy` lists 127.0.0.1, so the local calls below skip the host's HTTP proxy.
-        2. Our generation server: Verifiers' model calls -> `generate_fn`.
-        3. `env.serving()`: Verifiers' interception server (the agent's model calls go through it)
+        1. When the env's agents run in Docker: check that this host can run `docker version`.
+        2. `no_proxy` lists 127.0.0.1, so the local calls below skip the host's HTTP proxy.
+        3. Our generation server: Verifiers' model calls -> `generate_fn`.
+        4. `env.serving()`: Verifiers' interception server (the agent's model calls go through it)
            and its shared tools. It must stay open until `close`, so an `AsyncExitStack` holds it
            across the two calls.
 
@@ -174,6 +193,44 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                 "Verifiers' train client builds the renderer from a `renderers` config, the same "
                 "config TitanRL uses: configure the renderer with from_renderers(...)"
             )
+        # Verifiers starts each Docker sandbox with this host's `docker` CLI and daemon. Check them
+        # once here, so a host without Docker fails the job at start, not each rollout.
+        agent_configs = agent_config_fields(self._verifiers_env.config).values()
+        if any(
+            isinstance(agent_config.runtime, vf.DockerConfig)
+            for agent_config in agent_configs
+        ):
+            host = socket.gethostname()
+            how_to_fix = (
+                "The env's agents run in Docker (`runtime=vf.DockerConfig()`). Please give every "
+                "host that runs rollout workers a Docker daemon that the job's OS user can run, or "
+                "give the agents a runtime that needs no local Docker. If only the controller's host "
+                "has Docker, set rollouter.worker_roles.generator=None and "
+                "rollouter.worker_roles.controller=True."
+            )
+            docker_cli = shutil.which("docker")
+            if docker_cli is None:
+                raise RuntimeError(
+                    f"Host {host} has no `docker` CLI on PATH. {how_to_fix}"
+                )
+            try:
+                docker_version_result = await asyncio.to_thread(
+                    subprocess.run,
+                    [docker_cli, "version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=_DOCKER_VERSION_TIMEOUT_S,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    f"`docker version` got no answer in {_DOCKER_VERSION_TIMEOUT_S} s on host "
+                    f"{host}. {how_to_fix}"
+                ) from None
+            if docker_version_result.returncode != 0:
+                raise RuntimeError(
+                    f"`docker version` failed on host {host}. {how_to_fix} "
+                    f"Docker's error: {docker_version_result.stderr.strip()}"
+                )
         # Verifiers' HTTP client sends even a 127.0.0.1 call through `http_proxy`, unless
         # `no_proxy` names 127.0.0.1. Add the loopback names to both spellings, keeping what
         # either already holds, e.g. ".corp.internal" -> ".corp.internal,127.0.0.1,localhost".

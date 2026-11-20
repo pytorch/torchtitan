@@ -24,7 +24,15 @@ class RLDataset(Configurable, ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        @property
+        def paths_on_every_host(self) -> list[str]:
+            """Paths that this dataset's samples point at, e.g. an image dir.
+
+            A dataset whose samples point at files must override this. Most datasets read none.
+            Only the training dataset's paths are checked: each must exist on every rollout worker's
+            host by the time the workers start (`Rollouter.setup_async`).
+            """
+            return []
 
 
 class RolloutDataLoader(Stateful, ABC, Configurable):
