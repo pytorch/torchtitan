@@ -72,11 +72,11 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 # Verifiers id of the example's taskset and harness: the package that exports both
 # (`torchtitan/rl/examples/verifiers/terminal_bench/pyproject.toml`).
-TERMINAL_BENCH_PACKAGE_ID = "torchtitan-verifiers-terminal-bench"
+TERMINAL_BENCH_TASKSET_ID = "torchtitan-verifiers-terminal-bench"
 
 
 def terminal_bench_env_config(
-    dataset: str, *, max_turns: int
+    dataset: str, *, max_turns: int, taskset_id: str = TERMINAL_BENCH_TASKSET_ID
 ) -> vf.SingleAgentEnvConfig:
     """Verifiers' single-agent env on a Harbor dataset: Terminus-2 in a local Docker container.
 
@@ -86,13 +86,15 @@ def terminal_bench_env_config(
     Args:
         dataset: Harbor dataset id, e.g. ``"local/tmax@v1"``.
         max_turns: The agent's turn limit.
+        taskset_id: Name of the installed package that exports the taskset, the harness and,
+            optionally, the env. Pass your own to swap them, e.g. this example's taskset with an
+            env and harness that run each rollout in a remote sandbox instead of local Docker.
+            See "Taskset ids" in the Verifiers README.
     """
     return vf.SingleAgentEnvConfig(
-        taskset=TerminalTasksetConfig(id=TERMINAL_BENCH_PACKAGE_ID, dataset=dataset),
+        taskset=TerminalTasksetConfig(id=taskset_id, dataset=dataset),
         agent=vf.AgentConfig(
-            harness=TerminalBenchTerminusHarnessConfig(
-                id=TERMINAL_BENCH_PACKAGE_ID, version="0.22.0"
-            ),
+            harness=TerminalBenchTerminusHarnessConfig(id=taskset_id, version="0.22.0"),
             runtime=vf.DockerConfig(),
             max_turns=max_turns,
             # The only time limits: the taskset config's `ignore_timeouts=True` (Verifiers'
