@@ -891,7 +891,12 @@ class Controller(Configurable):
 
     @sl.log_trace_span("_collect_validation_rollouts")
     async def _collect_validation_rollouts(
-        self, *, samples: list[object], sampling: SamplingConfig, step: int
+        self,
+        *,
+        samples: list[object],
+        sampling: SamplingConfig,
+        num_samples_per_prompt: int,
+        step: int,
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Run each held-out prompt `num_samples_per_prompt` times concurrently and emit validation metrics.
 
@@ -900,9 +905,6 @@ class Controller(Configurable):
             validation_reward/_mean           0.25   # mean over all 4 rollouts
             validation_reward/best_of_2/mean  0.5    # best rollout per prompt, averaged (n > 1 only)
         """
-        num_samples_per_prompt = (
-            self.config.async_loop.validation.num_samples_per_prompt
-        )
         generate = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
         # Each id is used once, so validations that run at the same time never share one.
@@ -985,7 +987,8 @@ class Controller(Configurable):
             and the step it started at.
         """
         t_validate_start = time.perf_counter()
-        steps = self.config.async_loop.validation.steps
+        validation = self.config.async_loop.validation
+        steps = validation.steps
         if steps == 0:  # skip validation (e.g. loss guard CI)
             return []
         logger.info(f"Validation started at step {step}")
@@ -994,12 +997,13 @@ class Controller(Configurable):
         # in a rollouter's own limit. Do it when validation moves out of the controller.
         # Off the event loop: training runs meanwhile, and building the dataset can take seconds.
         samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
-        sampling = replace(
-            self._sampling, temperature=self.config.async_loop.validation.temperature
-        )
+        sampling = replace(self._sampling, temperature=validation.temperature)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
-            samples=samples, sampling=sampling, step=step
+            samples=samples,
+            sampling=sampling,
+            num_samples_per_prompt=validation.num_samples_per_prompt,
+            step=step,
         )
 
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)

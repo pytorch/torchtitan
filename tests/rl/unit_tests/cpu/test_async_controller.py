@@ -1070,9 +1070,6 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
         return RolloutGroup(group_id=group_id, rollouts=[rollout])
 
     controller = object.__new__(Controller)
-    controller.config = SimpleNamespace(
-        async_loop=SimpleNamespace(validation=ValidationConfig())
-    )
     controller._validation_group_ids = itertools.count(start=-1, step=-1)
     controller._make_generate_fn = lambda: None
     controller._make_release_session_fn = lambda: None
@@ -1085,7 +1082,10 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     async def run_two_validations() -> list[m.Metric]:
         for step in (0, 2):
             _, metrics = await controller._collect_validation_rollouts(
-                samples=["prompt 1", "prompt 2"], sampling=SamplingConfig(), step=step
+                samples=["prompt 1", "prompt 2"],
+                sampling=SamplingConfig(),
+                num_samples_per_prompt=1,
+                step=step,
             )
         return metrics
 
