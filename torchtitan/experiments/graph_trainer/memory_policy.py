@@ -91,7 +91,11 @@ def _get_default_save_ops() -> set:
         torch.ops._c10d_functional.reduce_scatter_tensor.default,
         torch.ops._c10d_functional.all_to_all_single.default,
         (torch.ops, "deepep.dispatch.default"),
+        (torch.ops, "deepep.launch_dispatch.default"),
+        (torch.ops, "deepep.wait_dispatch.default"),
+        (torch.ops, "deepep.dispatch_bwd.default"),
         (torch.ops, "deepep.combine.default"),
+        (torch.ops, "deepep.combine_bwd.default"),
         (torch.ops, "hybridep.dispatch.default"),
         (torch.ops, "hybridep.combine.default"),
     ]
