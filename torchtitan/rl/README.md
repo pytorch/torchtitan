@@ -229,9 +229,9 @@ GPUs such as A100. Flags documented in the script header select another CUDA
 tag (`--cuda`), force Flash Attention versions (`--flash-attn`), or install
 `nvcc` for FlashInfer's JIT when no CUDA toolkit is present (`--nvcc`).
 
-Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
-(SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the
-`attn-gym[linear,cudnn]` dependency installs them.
+Gated DeltaNet (Qwen3.5) runs Attention Gym's fused chunk kernels on every GPU.
+The `cudnn` extra in the `attn-gym[linear,cudnn]` dependency installs its cuDNN
+kernels, which `chunk_kernel_options` does not select for now.
 
 **NOTE:** The pre-built vLLM wheels are built for CUDA 13.2, though they should
 work with most older CUDA versions. A vLLM nightly must match the PyTorch
