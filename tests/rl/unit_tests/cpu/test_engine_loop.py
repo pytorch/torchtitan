@@ -313,17 +313,21 @@ def test_session_releases_ride_the_load_or_step_decision(runner, load) -> None:
     assert (decision.released_session_ids, decision.released_group_ids) == (["s0"], [3])
 
 
-def test_session_releases_are_queued_only_when_the_engine_holds_session_kv(
-    runner,
-) -> None:
-    for holds_session_kv in (False, True):
-        engine = _FakeEngine()
-        engine.holds_session_kv = holds_session_kv
-        engine_loop = _bare_loop(event_loop=runner.get_loop(), engine=engine)
-        engine_loop.release_sessions(["s0"])
-        engine_loop.release_groups([3])
-        runner.run(asyncio.sleep(0))  # `put` lands on the next loop iteration
-        assert engine_loop._queue.empty() is not holds_session_kv
+def test_session_releases_are_queued_and_dropped_once_the_queue_closes(runner) -> None:
+    engine_loop = _bare_loop(event_loop=runner.get_loop())
+    engine_loop.release_sessions(["s0"])
+    engine_loop.release_groups([3])
+    runner.run(asyncio.sleep(0))  # `put` lands on the next loop iteration
+    released = [engine_loop._queue.get_nowait() for _ in range(2)]
+    assert [(message.session_ids, message.group_ids) for message in released] == [
+        (["s0"], []),
+        ([], [3]),
+    ]
+
+    # Shutdown: a rollout that ends after the generator closed must not raise.
+    engine_loop._queue.close(CloseMessage(), reason="generator is closed")
+    engine_loop.release_sessions(["s1"])
+    engine_loop.release_groups([4])
 
 
 def test_load_takes_precedence_over_queued_requests(runner) -> None:
@@ -602,8 +606,6 @@ def _finished(request_id: str) -> FinishedRequest:
 class _FakeEngine:
     """Every step finishes all admitted requests. `step_hook` runs inside each step;
     `threads` records which threads admitted and stepped, and `shutdowns` which shut it down."""
-
-    holds_session_kv = False
 
     def __init__(self, step_hook: Callable[[], None] = lambda: None):
         self.step_hook = step_hook

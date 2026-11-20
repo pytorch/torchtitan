@@ -234,12 +234,16 @@ class InterGeneratorRouter(Configurable):
 
     async def release_session(self, routing_session_id: str) -> None:
         """Forget a routing session after its rollout's last generation call, and tell its
-        generator to release the session's held KV."""
+        generator to release the session's cached KV."""
         pinned = self._strategy.pinned_candidate(
             RoutingContext(session_id=routing_session_id)
         )
         self._strategy.release_session(routing_session_id)
-        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
+        # TODO: without a pin (non-sticky routing), or after a re-pin (repin_load_ratio), the
+        #   session's KV on other generators waits for `release_groups`. Fix: send the release to
+        #   every generator's rank 0 (N calls per rollout end), or record each session's
+        #   generators in `reserve`. Not done: how often sessions re-pin is unmeasured (no re-pin
+        #   count is logged).
         if pinned is not None:
             await pinned.rank0_actor.release_sessions.call_one([routing_session_id])
 
