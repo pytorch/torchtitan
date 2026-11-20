@@ -6,7 +6,6 @@
 
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
-from contextlib import nullcontext
 
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -123,9 +122,10 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             is_profiling=True    graph-memory estimate: keep vLLM's manager (mixed graphs only)
             is_profiling=False   real build: TorchTitanCudaGraphManager (mixed + decode graphs)
 
-        The estimate leaves out decode graphs on purpose. With the extensible KV cache off
-        (vLLM's default is on), vLLM charges every FULL graph like the second widest, but
-        decode graphs take far less (Qwen3-8B TP2: 11 decode graphs added 0.03 GiB to 1.57).
+        The estimate leaves out decode graphs on purpose: vLLM charges every FULL graph like
+        the second widest, but decode graphs take far less (Qwen3-8B TP2: 11 decode graphs
+        added 0.03 GiB to 1.57). The KV cache can't grow past what the estimate leaves, with
+        or without vLLM's extensible KV cache.
         """
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
         # TODO: swap before the estimate too (drop this return) once vLLM's
@@ -152,16 +152,6 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
 
 class TorchTitanGPUWorker(GPUWorker):
     """vLLM worker that builds :class:`TorchTitanGPUModelRunner`."""
-
-    def _maybe_get_memory_pool_context(self, tag: str):
-        # vLLM uses CuMem for model weights and the KV cache.
-        # TorchTitan only transfers model weights over RDMA, so leave all other
-        # allocations on PyTorch's default allocator.
-        # The parent method checks enable_cumem_allocator and returns a no-op
-        # context when it is disabled.
-        if tag == "weights":
-            return super()._maybe_get_memory_pool_context(tag)
-        return nullcontext()
 
     def _make_model_runner(self) -> TorchTitanGPUModelRunner:
         return TorchTitanGPUModelRunner(self.vllm_config, self.device)

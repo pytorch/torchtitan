@@ -14,7 +14,6 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
-from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
@@ -49,10 +48,7 @@ from torchtitan.rl.generator.vllm.engine import (
     VLLMEngine,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
-from torchtitan.rl.generator.vllm.worker import (
-    TorchTitanCudaGraphManager,
-    TorchTitanGPUWorker,
-)
+from torchtitan.rl.generator.vllm.worker import TorchTitanCudaGraphManager
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
@@ -963,23 +959,6 @@ def test_full_mode_decode_dispatch(
         descriptor.uniform_token_count,
     ) == expected
     assert manager.last_dispatched_descriptor is descriptor
-
-
-def test_only_weights_use_cumem_allocator(monkeypatch):
-    base_worker_cls = TorchTitanGPUWorker.__mro__[1]
-    monkeypatch.setattr(
-        base_worker_cls,
-        "_maybe_get_memory_pool_context",
-        lambda self, tag: nullcontext(tag),
-    )
-    worker = object.__new__(TorchTitanGPUWorker)
-
-    with worker._maybe_get_memory_pool_context("kv_cache") as value:
-        assert value is None
-    with worker._maybe_get_memory_pool_context("weights") as value:
-        assert value == "weights"
-    with worker._maybe_get_memory_pool_context("other") as value:
-        assert value is None
 
 
 def test_cuda_graph_default_mode_is_full():
