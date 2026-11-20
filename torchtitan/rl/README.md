@@ -26,7 +26,7 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 Supported entries completed a two-step end-to-end RL run with a representative
 debug model, including rollout generation, training, and the model state dict transfer to the generators.
 Generator DP and TP were tested together at degree 2; EP was tested at degree 4
-for MoE models. Generator sequence parallelism was disabled. DeepSeek V3 and
+for MoE models. DeepSeek V3 and
 Kimi K3 were tested on H100 with two generators at TP=1 and no EP; their MLA decode
 and KDA kernels need SM90+. Image prompts were run end to end with Qwen3.5-0.8B on
 Geometry3K (`rl_grpo_qwen3_5_0_8b_geometry3k`) and Muse Spark 816B-A42B on SLAKE
