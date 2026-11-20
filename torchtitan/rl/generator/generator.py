@@ -139,8 +139,9 @@ class Generator(Configurable):
 
         max_num_batched_tokens: int | None = None
         """Max tokens one engine step schedules on each DP rank (prefill + decode, summed over the
-        batch). ``None`` (default): the engine's own default for this device, picked by device
-        memory: 16384 on a GB300 and 8192 on an H100, in both vLLM and SGLang."""
+        batch). ``None`` (default): the engine's own default for this GPU, picked by GPU memory
+        (16384 on a GB300, 8192 on an H100). vLLM uses it on each DP rank; SGLang splits it over
+        its DP ranks."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.

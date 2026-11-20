@@ -769,12 +769,14 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-# vllm serve's default step budget. Injected: vLLM's config builder needs a real model.
+# What vllm serve picks for max_num_batched_tokens. Injected: vLLM's config builder needs a real model.
 _VLLM_SERVE_MAX_NUM_BATCHED_TOKENS = 4096
 
 
 def _vllm_serve_engine_config(engine_args, usage_context):
     assert usage_context == UsageContext.OPENAI_API_SERVER
+    # vLLM raises when max_num_seqs is above its pick, so the probe must leave it out.
+    assert engine_args.max_num_seqs is None
     return SimpleNamespace(
         scheduler_config=SimpleNamespace(
             max_num_batched_tokens=_VLLM_SERVE_MAX_NUM_BATCHED_TOKENS
@@ -782,7 +784,9 @@ def _vllm_serve_engine_config(engine_args, usage_context):
     )
 
 
-def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
+def _build_engine_kwargs(
+    monkeypatch, tmp_path, config: Generator.Config, max_num_seqs: int = 8
+) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
@@ -797,7 +801,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         model=config.model,
         parallelism=config.parallelism,
         model_path="unused",
-        max_num_seqs=8,
+        max_num_seqs=max_num_seqs,
         precision=PrecisionConfig(),
         gpu_memory_limit=config.gpu_memory_limit,
         max_num_batched_tokens=config.max_num_batched_tokens,
@@ -833,33 +837,40 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "hip_version, sm90_or_newer, expected_max_num_seqs",
+    "sm90_or_newer, max_num_seqs, expected_max_num_batched_tokens, expected_max_num_seqs",
     [
-        # CUDA, compute capability >= 9.0
-        (None, True, 8),
-        # FlashAttention-2 GPUs: at least the budget / 64
-        (None, False, 64),
-        # ROCm
-        ("7.0", False, 8),
+        (True, 8, 4096, 8),
+        # FlashAttention-2 GPUs: at least max_num_batched_tokens / 64
+        (False, 8, 4096, 64),
+        # Clamped to max_num_batched_tokens
+        (True, 8192, 4096, 4096),
+        # At most max_num_seqs x max_model_len (1024)
+        (True, 2, 2048, 2),
     ],
 )
 def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
-    monkeypatch, tmp_path, hip_version, sm90_or_newer, expected_max_num_seqs
+    monkeypatch,
+    tmp_path,
+    sm90_or_newer,
+    max_num_seqs,
+    expected_max_num_batched_tokens,
+    expected_max_num_seqs,
 ):
-    monkeypatch.setattr(torch.version, "hip", hip_version)
     monkeypatch.setattr(
         vllm_config_module, "has_cuda_capability", lambda major, minor: sm90_or_newer
     )
 
     engine_kwargs = _build_engine_kwargs(
-        monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG)
+        monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG), max_num_seqs
     )
 
-    budget = _VLLM_SERVE_MAX_NUM_BATCHED_TOKENS
-    assert engine_kwargs["max_num_batched_tokens"] == budget
+    assert engine_kwargs["max_num_batched_tokens"] == expected_max_num_batched_tokens
     assert engine_kwargs["max_num_seqs"] == expected_max_num_seqs
-    # FULL graphs (the default) capture mixed steps up to the same budget.
-    assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == budget
+    # FULL graphs (the default) capture mixed steps up to max_num_batched_tokens.
+    assert (
+        engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1]
+        == expected_max_num_batched_tokens
+    )
 
 
 @pytest.mark.parametrize(

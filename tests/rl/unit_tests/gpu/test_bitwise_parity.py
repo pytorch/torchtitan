@@ -63,10 +63,7 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller.controller import Controller
-from torchtitan.rl.generator.vllm.config import (
-    fit_max_num_seqs,
-    resolve_max_num_batched_tokens,
-)
+from torchtitan.rl.generator.vllm.config import resolve_scheduler_limits
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -249,11 +246,9 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["block_size"] = 256  # set blocksize to be 256 to align with FA2
 
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
-    max_num_seqs = config.max_num_seqs_per_generator_dp_rank
-    engine_kwargs["max_num_seqs"] = max_num_seqs
+    engine_kwargs["max_num_seqs"] = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
-    max_num_batched_tokens = resolve_max_num_batched_tokens(engine_kwargs)
-    max_num_seqs = fit_max_num_seqs(max_num_seqs, max_num_batched_tokens)
+    max_num_batched_tokens, max_num_seqs = resolve_scheduler_limits(engine_kwargs)
     engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     engine_kwargs["max_num_seqs"] = max_num_seqs
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size

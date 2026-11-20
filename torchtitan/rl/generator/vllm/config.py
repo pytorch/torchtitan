@@ -9,11 +9,9 @@
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import torch
 from vllm import EngineArgs
 from vllm.config import CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -24,48 +22,48 @@ from torchtitan.tools.utils import has_cuda_capability
 logger = logging.getLogger(__name__)
 
 
-def resolve_max_num_batched_tokens(engine_kwargs: dict[str, Any]) -> int:
-    """Return ``engine_kwargs["max_num_batched_tokens"]``, or what ``vllm serve`` picks for these
-    engine args when it is unset. The FULL CUDA graph sizes need it before the engine exists.
+def resolve_scheduler_limits(engine_kwargs: dict[str, Any]) -> tuple[int, int]:
+    """Return ``(max_num_batched_tokens, max_num_seqs)`` for ``engine_kwargs``, in the range vLLM can run.
 
-    vLLM picks by device memory (TPU and CPU have their own rules). As of vLLM 0.32:
+    An unset ``max_num_batched_tokens`` becomes what ``vllm serve`` picks for this GPU. As of vLLM 0.32:
 
         >= 160 GiB (B200, GB300, MI300X)      -> 16384
         >= 70 GiB, not an A100 (H100, H200)   -> 8192
         anything else (A100, A10G)            -> 2048
+
+    Example (``max_num_batched_tokens`` unset, ``max_model_len`` 1024):
+        max_num_seqs 512, GB300    -> (16384, 512)
+        max_num_seqs 4096, A100    -> (2048, 2048)   vLLM needs max_num_seqs <= max_num_batched_tokens
+        max_num_seqs 4, GB300      -> (4096, 4)      a step holds at most 4 x 1024 tokens
+        max_num_seqs 16, A100      -> (2048, 32)     FlashAttention-2, see the TODO
     """
-    if engine_kwargs.get("max_num_batched_tokens") is not None:
-        return engine_kwargs["max_num_batched_tokens"]
+    max_num_batched_tokens = engine_kwargs.get("max_num_batched_tokens")
+    max_num_seqs = engine_kwargs["max_num_seqs"]
 
-    # TODO(https://github.com/pytorch/torchtitan/pull/5956): on vLLM's V2 runner (vLLM >= 0.34), vLLM drops prefill
-    # graph sizes above its own budget. Then pass usage_context=OPENAI_API_SERVER instead; keep the FA2 cap.
-    vllm_config = EngineArgs(**engine_kwargs).create_engine_config(
-        UsageContext.OPENAI_API_SERVER
-    )
-    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-    logger.info(
-        "max_num_batched_tokens is unset: using vllm serve's default for this device, %d",
-        max_num_batched_tokens,
-    )
-    return max_num_batched_tokens
+    if max_num_batched_tokens is None:
+        # LLMEngine.from_engine_args falls back to 2048 on every GPU, so ask what vllm serve picks on this one.
+        # Without max_num_seqs: vLLM raises when it is above that pick, and it is clamped below instead.
+        vllm_config = EngineArgs(
+            **{**engine_kwargs, "max_num_seqs": None}
+        ).create_engine_config(UsageContext.OPENAI_API_SERVER)
 
-
-def fit_max_num_seqs(max_num_seqs: int, max_num_batched_tokens: int) -> int:
-    """Return ``max_num_seqs`` moved into the range vLLM can run with ``max_num_batched_tokens``.
-
-    Example:
-        max_num_seqs 4096, budget 2048                       -> 2048  (vLLM needs max_num_seqs <= budget)
-        max_num_seqs 8, budget 2048, FlashAttention-2 GPU    -> 32    (see the TODO)
-        max_num_seqs 8, budget 2048, other GPUs              -> 8
-    """
-    if torch.version.hip is None and not has_cuda_capability(9, 0):
-        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's CUDA graph memory
-        # profile splits the budget over max_num_seqs requests with 1 key each; FA2 writes out of bounds past 64.
-        max_num_seqs = 2 ** math.ceil(
-            math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
+        # A step holds at most max_num_seqs requests of max_model_len tokens.
+        max_num_batched_tokens = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            max_num_seqs * engine_kwargs["max_model_len"],
+        )
+        logger.info(
+            "max_num_batched_tokens is unset: using vllm serve's pick for this GPU, %d",
+            max_num_batched_tokens,
         )
 
-    return min(max_num_seqs, max_num_batched_tokens)
+    if not has_cuda_capability(9, 0):
+        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory profile splits
+        # max_num_batched_tokens over max_num_seqs requests, the remainder on the last; FA2 writes out of bounds past 64.
+        max_num_seqs = max(max_num_seqs, max_num_batched_tokens // 64)
+
+    # vLLM raises if max_num_seqs > max_num_batched_tokens.
+    return max_num_batched_tokens, min(max_num_seqs, max_num_batched_tokens)
 
 
 @dataclass(kw_only=True, slots=True)

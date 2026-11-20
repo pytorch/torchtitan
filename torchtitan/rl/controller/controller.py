@@ -555,7 +555,8 @@ class Controller(Configurable):
         @property
         def max_num_seqs_per_generator_dp_rank(self) -> int:
             """2x each generator DP rank's even share of the training rollouts in flight,
-            rounded up to a power of two. The vLLM engine may change it (``fit_max_num_seqs``).
+            rounded up to a power of two. The vLLM engine may move it to fit its
+            ``max_num_batched_tokens`` (``resolve_scheduler_limits``).
 
             Example:
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
@@ -571,7 +572,9 @@ class Controller(Configurable):
                 self.num_generators * self.generator.parallelism.data_parallel_degree
             )
             even_share = math.ceil(max_rollouts_in_flight / num_generator_dp_ranks)
-            # 2x is headroom
+
+            # 2x leaves room for uneven routing across DP ranks, validation and a growing buffer. A power
+            # of two splits vLLM's max_num_batched_tokens evenly over max_num_seqs (resolve_scheduler_limits).
             return 2 ** math.ceil(math.log2(2 * even_share))
 
     def __init__(self, config: Config):
