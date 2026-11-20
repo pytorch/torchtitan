@@ -467,9 +467,9 @@ class VLLMModelWrapper(Module):
         if self._dist_moe_runtime is None:
             return {}
 
-        # True for the rows vLLM added: padding to a CUDA-graph size or to the
-        # largest DP replica, or an idle DP rank's dummy batch. vLLM refills this
-        # buffer before every step, so a CUDA-graph replay reads the current mask.
+        # True for the rows vLLM added: padding to a CUDA-graph size (the same on every DP
+        # replica), or an idle DP rank's dummy batch. vLLM refills this buffer before every
+        # step, so a CUDA-graph replay reads the current mask.
         padding_mask = get_forward_context().is_padding
         if padding_mask is None:
             raise RuntimeError(
