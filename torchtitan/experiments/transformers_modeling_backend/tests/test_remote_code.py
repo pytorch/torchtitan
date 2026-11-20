@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Tests that load_hf_config runs repo-shipped config code only on opt-in."""
+"""Tests that load_hf_config never runs config code shipped in a model repo."""
 
 import json
 import os
@@ -50,15 +50,6 @@ def _write_repo(repo_dir: str) -> None:
         f.write(_REMOTE_CONFIG)
 
 
-def _load(repo_dir: str) -> None:
-    config = HFTransformerModel.Config(
-        model_config=TitanModelConfig(dim=64, n_layers=2, n_heads=4, n_kv_heads=4)
-    )
-    config.load_hf_config(
-        hf_model_id=repo_dir, max_context_length=128, deterministic=False
-    )
-
-
 class TestRemoteCode(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -70,7 +61,12 @@ class TestRemoteCode(unittest.TestCase):
         _write_repo(self.repo_dir)
 
     def test_default_does_not_run_remote_code(self) -> None:
-        _load(self.repo_dir)
+        config = HFTransformerModel.Config(
+            model_config=TitanModelConfig(dim=64, n_layers=2, n_heads=4, n_kv_heads=4)
+        )
+        config.load_hf_config(
+            hf_model_id=self.repo_dir, max_context_length=128, deterministic=False
+        )
         self.assertFalse(os.path.exists(self.marker))
 
 
