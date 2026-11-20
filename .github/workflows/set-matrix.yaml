@@ -23,15 +23,26 @@ on:
         default: false
     outputs:
       matrix:
-        description: dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all')
+        description: >-
+          dynamically set matrix, narrowed to the gpu-arch input (both CUDA and ROCm when 'all').
+          Empty on a draft PR's ciflow tag run, so a job that reads it must skip when it is empty.
         value: ${{ jobs.set.outputs.matrix }}
       docker-hash:
-        description: Git tree hash of .ci/docker, used to build the OSDC image tag
+        description: Git tree hash of .ci/docker, used to build the OSDC image tag. Empty when matrix is.
         value: ${{ jobs.set.outputs.docker-hash }}
 
 jobs:
+  check-draft:
+    uses: ./.github/workflows/check-draft.yaml
+
   set:
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: check-draft
+    # Skip draft PRs: a pull_request event has the flag, a ciflow tag run asks check-draft.
+    # !cancelled(): still run when check-draft is skipped (any run that isn't a ciflow tag).
+    if: >-
+      ${{ !cancelled() && (needs.check-draft.result == 'success' || needs.check-draft.result == 'skipped')
+      && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+      && needs.check-draft.outputs.is-draft != 'true' }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
