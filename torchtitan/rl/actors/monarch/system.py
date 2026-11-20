@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torchstore as ts
-from monarch.actor import ProcMesh
+from monarch.actor import ProcMesh, this_host
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
@@ -22,13 +22,13 @@ from torchtitan.rl._env import apply_rollout_worker_env_defaults
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
+    batcher_host,
     compute_generator_world_size,
     compute_trainer_world_size,
     generator_role_names,
     HostMeshes,
     rollout_worker_hosts,
     shutdown,
-    spawn_cpu_procs,
     spawn_proc_mesh,
 )
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
@@ -61,9 +61,10 @@ class MonarchActorSystem(ActorSystem):
     The trainer and each generator get their own GPU proc mesh: on this host,
     partitioned with ``CUDA_VISIBLE_DEVICES``, or on the ``host_meshes`` a
     launcher passes in (e.g. ``MonarchControllerWithLauncher`` in
-    ``launcher/base.py``, with the hosts of a submitted job). The router and the
-    batcher get CPU procs on this host. The rollout workers spread over the hosts
-    that ``rollout_worker_hosts`` picks for the rollouter's ``worker_roles``.
+    ``launcher/base.py``, with the hosts of a submitted job). The router gets a CPU
+    proc on this host. The batcher gets one on this host, or with RDMA microbatches on
+    the host ``batcher_host`` picks. The rollout workers spread over the hosts that
+    ``rollout_worker_hosts`` picks for the rollouter's ``worker_roles``.
 
     Example: a ``Controller`` subclass that allocated its hosts as
     ``self.host_meshes``::
@@ -117,10 +118,7 @@ class MonarchActorSystem(ActorSystem):
         # it with `call_one`. It gets its own mesh rather than sharing the
         # controller's process so routing does not contend with the training
         # loop for the controller's GIL.
-        self._router_mesh = spawn_cpu_procs(1)
-        # Same for the batcher: build + pack would contend for the controller's GIL.
-        # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
-        self._batcher_mesh = spawn_cpu_procs(1)
+        self._router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
 
         await setup_torch_elastic_env(self._trainer_mesh)
         for generator_mesh in self._generator_meshes:
@@ -187,8 +185,20 @@ class MonarchActorSystem(ActorSystem):
         )
 
     async def spawn_batcher(self, config: Batcher.Config, **kwargs: Any) -> Any:
-        assert self._batcher_mesh is not None, "provision before spawning"
-        return self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
+        # Its own process: build + pack would contend for the controller's GIL.
+        # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
+        # Without RDMA, each batch goes back to the controller, so the batcher stays on the controller's host.
+        host = (
+            this_host()
+            if config.rdma_min_tensor_bytes is None
+            else batcher_host(host_meshes=self._host_meshes)
+        )
+        self._batcher_mesh = host.spawn_procs(per_host={"cpus": 1})
+        batcher = self._batcher_mesh.spawn("batcher", BatcherActor, config, **kwargs)
+        logger.info(
+            "The batcher runs on host %s", await batcher.get_hostname.call_one()
+        )
+        return batcher
 
     async def spawn_rollout_workers(
         self,

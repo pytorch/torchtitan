@@ -321,8 +321,13 @@ def spawned(monkeypatch):
         pass
 
     monkeypatch.setattr(monarch_system, "spawn_proc_mesh", spawn_proc_mesh)
+    # The router's proc fails to stop.
     monkeypatch.setattr(
-        monarch_system, "spawn_cpu_procs", lambda n: SimpleNamespace(stop=_stop_fails)
+        monarch_system,
+        "this_host",
+        lambda: SimpleNamespace(
+            spawn_procs=lambda *, per_host: SimpleNamespace(stop=_stop_fails)
+        ),
     )
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
@@ -374,7 +379,7 @@ def test_launch_controller_builds_the_actor_system_on_acquired_hosts(
 
     actor_system = _build_actor_system(config)
     _provision(actor_system)
-    # The CPU meshes fail to stop; stop logs it and goes on.
+    # The router's mesh fails to stop; stop logs it and goes on.
     asyncio.run(actor_system.stop())
 
     assert events == ["acquire_hosts"]

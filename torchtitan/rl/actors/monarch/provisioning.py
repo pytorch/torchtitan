@@ -4,9 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch proc meshes for the RL roles: GPU meshes for the trainer and generators,
-CPU meshes on the controller host, the rollout workers' hosts, and the Monarch client's
-shutdown."""
+"""Monarch proc meshes for the RL roles: GPU meshes for the trainer and generators, the
+batcher's host with RDMA, the rollout workers' hosts, and the Monarch client's shutdown."""
 
 import logging
 from collections.abc import Callable
@@ -301,9 +300,24 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-def spawn_cpu_procs(num_procs: int) -> ProcMesh:
-    """Spawn ``num_procs`` CPU procs on the controller host."""
-    return this_host().spawn_procs(per_host={"cpus": num_procs})
+def batcher_host(*, host_meshes: HostMeshes | None) -> HostMesh:
+    """Return the host for the batcher's process with RDMA microbatches: the last trainer host.
+
+    With RDMA, the batcher holds each packed batch until every trainer rank has read it. The
+    controller runs on t0 (`controller_on_first_trainer_host`) or outside the job, so with 2+
+    trainer hosts those batches stay off the controller's host:
+
+        no launcher (`host_meshes` is None)                     this_host()
+        trainer hosts [t0, t1, t2], the controller on t0        t2
+        trainer hosts [t0], the controller on t0                t0, the controller's host too
+        trainer hosts [t0], the controller outside the job      t0
+    """
+    if host_meshes is None:
+        return this_host()
+    # `flatten("hosts")` gives the mesh one "hosts" axis to slice, as in `rollout_worker_hosts`.
+    return host_meshes.trainer.flatten("hosts").slice(
+        hosts=len(host_meshes.trainer) - 1
+    )
 
 
 def rollout_worker_hosts(
