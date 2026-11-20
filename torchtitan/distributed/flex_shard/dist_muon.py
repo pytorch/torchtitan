@@ -230,8 +230,12 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
+        use_triton: bool = False,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
+        self._prepare_input = _prepare_muon_input
+        self._compute_direction = _compute_muon_direction
+        self._apply_parameter_update = _apply_muon_update
         defaults = {
             "lr": lr,
             "weight_decay": weight_decay,
@@ -252,6 +256,18 @@ class DistMuon(Optimizer):
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
         )
+        if use_triton:
+            from .kernels.cuda.triton.muon import local_updates
+
+            (
+                self._prepare_input,
+                self._compute_direction,
+                self._apply_parameter_update,
+            ) = local_updates(
+                self.param_groups,
+                adjust_learning_rate=_adjust_muon_learning_rate,
+                coefficients_by_step=_ns_coefficients_by_step,
+            )
 
     @staticmethod
     def _resolve_ns_device(ns_device: str | None) -> torch.device | None:
@@ -612,7 +628,7 @@ class DistMuon(Optimizer):
         grad, momentum, momentum_state, group = self._local_gradient_and_momentum(
             compute_layout
         )
-        _prepare_muon_input(
+        self._prepare_input(
             grad,
             momentum,
             momentum=group["momentum"],
@@ -634,7 +650,7 @@ class DistMuon(Optimizer):
             if self._ns_device is None or compute.device == self._ns_device
             else compute.to(self._ns_device, non_blocking=False)
         )
-        _compute_muon_direction(
+        self._compute_direction(
             staged,
             matrix_views=self._matrix_views_by_fqn[compute_layout.fqn],
             lr_reference_shape=(
@@ -660,7 +676,7 @@ class DistMuon(Optimizer):
         row_scale = self._direction_row_scale_by_fqn.get(compute_layout.fqn)
         if row_scale is not None:
             direction.mul_(row_scale)
-        _apply_muon_update(
+        self._apply_parameter_update(
             local_param,
             direction,
             lr=group["lr"],

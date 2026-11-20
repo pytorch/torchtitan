@@ -87,6 +87,19 @@ provide the first TorchTitan integration. Their shared optimizer configuration:
 The same construction can be used by Kimi-family, Kimi-VL, and Moonlight
 recipes.
 
+## Triton local optimizer updates
+
+Enable Triton local momentum preparation, Newton-Schulz normalization and
+writeback, and parameter updates in the TorchTitan optimizer config:
+
+```python
+DistMuon.Config(..., use_triton=True)
+```
+
+The standalone FlexShard `DistMuon` constructor also accepts `use_triton=True`.
+The default is PyTorch updates. The Triton path requires CUDA FP32 or BF16 storage.
+NS matrix multiplications and redistribution retain their PyTorch implementations.
+
 ## Package boundary
 
 FlexShard currently lives in TorchTitan while its API matures. We intend to
