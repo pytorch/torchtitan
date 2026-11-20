@@ -173,7 +173,9 @@ The exported metrics are grouped by OpenTelemetry instrument type:
 - Counters: `vllm.generation_tokens`, `vllm.prompt_tokens`,
   `vllm.cached_prompt_tokens`, `vllm.preempted_requests`,
   `vllm.finished_requests`, `vllm.prefix_cache_queries`, and
-  `vllm.prefix_cache_hits`.
+  `vllm.prefix_cache_hits`. With `VLLMEngine.Config.num_speculative_tokens > 0`,
+  also `vllm.spec_decode_num_drafts`, `vllm.spec_decode_num_draft_tokens`, and
+  `vllm.spec_decode_num_accepted_tokens`.
 - Histograms: `vllm.time_to_first_token`, `vllm.inter_token_latency`,
   `vllm.decode_time`, `vllm.queue_time`, and `vllm.e2e_latency`.
 - Gauges: `vllm.kv_cache_usage`, `vllm.num_running_requests`, and
@@ -205,6 +207,18 @@ prefix_cache_hit_rate_percent =
 Return no value when the query rate is zero. Using rates instead of the raw
 cumulative counter values limits the result to the selected time window and
 handles counter resets.
+
+#### Speculative decoding acceptance
+
+```text
+acceptance_rate =
+    rate(vllm.spec_decode_num_accepted_tokens) / rate(vllm.spec_decode_num_draft_tokens)
+mean_acceptance_length =
+    1 + rate(vllm.spec_decode_num_accepted_tokens) / rate(vllm.spec_decode_num_drafts)
+```
+
+The mean acceptance length is the tokens each verify step emits, from 1 to
+1 + `num_speculative_tokens`.
 
 ### Choose the right exporter option
 
