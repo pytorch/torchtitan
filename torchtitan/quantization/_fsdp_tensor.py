@@ -402,10 +402,10 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         # Return the padded shard in the parameter's own layout, also for a
         # nonzero shard dim (a stacked [N, F, D] weight is Shard(1)): FSDP2
         # reads a Tensor input as the padded sharded parameter and concatenates
-        # the ranks' shards along the shard dim itself. That is
-        # ``_get_all_gather_output_layouts`` in ``_fsdp_param.py`` in the torch
-        # 2.16 nightlies, ``_reassemble_all_gather_outputs`` in
-        # ``_fsdp_collectives.py`` in torch 2.15.
+        # the ranks' shards along the shard dim itself. The output it hands
+        # ``fsdp_post_all_gather`` is viewed as ``(-1, *input.shape[1:])`` but
+        # holds the parameter's layout:
+        # https://github.com/pytorch/pytorch/blob/d59e86aecf1bce34411bfe66c9e01d9257b8212b/torch/distributed/fsdp/_fully_shard/_fsdp_param.py#L1608-L1632
         padded_size = list(self._tensor.shape)
         padded_size[shard_dim] = math.ceil(outer_size[shard_dim] / mesh.size())
         if self._tensor.size(shard_dim) != padded_size[shard_dim]:
