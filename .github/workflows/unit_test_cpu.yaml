@@ -3,13 +3,15 @@ name: CPU Unit Test
 on:
   push:
     branches: [ main ]
+    # Core unit tests import graph_trainer and transformers_modeling_backend, so ignore only
+    # the experiments no core test imports.
     paths-ignore:
-      - 'torchtitan/experiments/**'
+      - 'torchtitan/experiments/torchft/**'
   pull_request:
     # Drafts skip these jobs (set-matrix.yaml), so also run them when a draft is marked ready.
     types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
-      - 'torchtitan/experiments/**'
+      - 'torchtitan/experiments/torchft/**'
 
 concurrency:
   group: unit-test${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
