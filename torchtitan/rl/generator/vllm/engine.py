@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
+from hashlib import sha256
 from typing import Any
 
 import torch
@@ -102,6 +105,39 @@ def add_extra_vllm_engine_args(
     engine_kwargs.update(extra_engine_args)
 
 
+# KV offload connectors: vLLM's built-in module and Titan's lifecycle adapter module.
+_KV_OFFLOAD_CONNECTOR_MODULES = {
+    "SimpleCPUOffloadConnector": (
+        "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector",
+        "torchtitan.rl.generator.vllm.simple_cpu_offload",
+    ),
+    "MooncakeStoreConnector": (
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector",
+        "torchtitan.rl.generator.vllm.mooncake",
+    ),
+}
+
+
+def _use_mooncake_master(address: str) -> None:
+    """Point this process's Store config (``MOONCAKE_CONFIG_PATH``) at the master the
+    controller started. vLLM reads the master address only from that file, so write
+    a copy with the address."""
+    with open(os.environ["MOONCAKE_CONFIG_PATH"]) as f:
+        store_config = json.load(f)
+    # A copy this function wrote already holds the address.
+    if store_config.get("master_server_address", address) != address:
+        raise ValueError(
+            f"Remove master_server_address from {os.environ['MOONCAKE_CONFIG_PATH']}: "
+            "the controller starts the job's Mooncake master on its host and sets this "
+            f"address for every generator (got {store_config['master_server_address']!r})"
+        )
+    store_config["master_server_address"] = address
+    fd, path = tempfile.mkstemp(prefix="mooncake_store_", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(store_config, f)
+    os.environ["MOONCAKE_CONFIG_PATH"] = path
+
+
 class VLLMEngine(GenerationEngine):
     """The generator's vLLM ``LLMEngine``, behind the calls the engine loop makes.
 
@@ -134,7 +170,7 @@ class VLLMEngine(GenerationEngine):
 
         kv_transfer_config: KVTransferConfig | None = None
         """Native vLLM KV offload configuration. None: no connector. See
-        ``SIMPLE_CPU_OFFLOAD.md``."""
+        ``SIMPLE_CPU_OFFLOAD.md`` (local) and ``MOONCAKE_STORE.md`` (distributed)."""
 
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
@@ -148,39 +184,61 @@ class VLLMEngine(GenerationEngine):
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). With KV offload configured, also send CPU cache
-        release hints when sessions end. None disables both session behaviors."""
+        `VLLMSessionKVHolder`). With SimpleCPU offload configured, also send CPU
+        cache release hints when sessions end. None disables both behaviors."""
+
+        @property
+        def uses_mooncake_store(self) -> bool:
+            return (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.kv_connector == "MooncakeStoreConnector"
+            )
 
         def __post_init__(self):
             if self.kv_transfer_config is None:
                 return
             # TODO(acisseJZhong): support prefill/decode disaggregation connectors
             # if needed, and MultiConnector to combine them with KV offload.
-            if self.kv_transfer_config.kv_connector != "SimpleCPUOffloadConnector":
+            connector = self.kv_transfer_config.kv_connector
+            if connector not in _KV_OFFLOAD_CONNECTOR_MODULES:
                 raise ValueError(
-                    "Titan RL supports SimpleCPUOffloadConnector; "
+                    f"Titan RL supports {', '.join(_KV_OFFLOAD_CONNECTOR_MODULES)}; "
                     "MultiConnector and other KV connectors are not supported."
                 )
             if self.kv_transfer_config.kv_role != "kv_both":
                 raise ValueError(
-                    "SimpleCPUOffloadConnector requires kv_role='kv_both': "
+                    f"{connector} requires kv_role='kv_both': "
                     "it both saves and loads KV, so vLLM must enable "
                     "producer finalization and consumer block-lifetime protection."
                 )
             if self.kv_transfer_config.kv_connector_module_path not in (
                 None,
-                "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector",
+                _KV_OFFLOAD_CONNECTOR_MODULES[connector][0],
             ):
                 raise ValueError(
                     "KV offload requires vLLM's built-in connector in "
                     "user config. Titan installs its lifecycle adapter automatically; "
                     "user-provided custom kv_connector_module_path values are not supported."
                 )
-            if self.extra_engine_args.get("enable_prefix_caching") is False:
+            if (
+                connector == "SimpleCPUOffloadConnector"
+                and self.extra_engine_args.get("enable_prefix_caching") is False
+            ):
                 raise ValueError(
                     "SimpleCPUOffloadConnector requires prefix caching: it saves and "
                     "loads KV blocks by their prefix hashes."
                 )
+            if connector == "MooncakeStoreConnector":
+                extra = self.kv_transfer_config.kv_connector_extra_config
+                # The only Store key part that differs across runs (policy-version
+                # salts repeat), and it scopes the derived lookup_rpc_port.
+                if not extra.get("cache_prefix"):
+                    raise ValueError("Mooncake Store requires a non-empty cache_prefix")
+                if "lookup_rpc_port" in extra:
+                    raise ValueError(
+                        "TorchTitan derives lookup_rpc_port for each generator; "
+                        "do not set it in kv_connector_extra_config."
+                    )
 
     def __init__(
         self,
@@ -204,8 +262,8 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        # TODO(acisseJZhong): use it once vLLM's Mooncake Store connector lands.
-        del mooncake_master_address
+        if mooncake_master_address is not None:
+            _use_mooncake_master(mooncake_master_address)
         self._uses_kv_offload = config.kv_transfer_config is not None
         # Multi-rank offload: TP ranks' schedulers must agree (KVOffloadScheduler,
         # a no-op for TP=1), and all ranks keep stepping while any rank has KV work
@@ -266,6 +324,7 @@ class VLLMEngine(GenerationEngine):
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
             serves_images=vision_processor is not None,
+            generator_name=generator_name,
         )
         tp_degree = parallelism.tensor_parallel_degree
         stat_loggers = None
@@ -293,7 +352,9 @@ class VLLMEngine(GenerationEngine):
             self._session_kv_holder = config.session_kv_holder.build(
                 scheduler=scheduler,
                 offload_connector=scheduler.connector
-                if self._uses_kv_offload
+                if config.kv_transfer_config is not None
+                and config.kv_transfer_config.kv_connector
+                == "SimpleCPUOffloadConnector"
                 else None,
             )
 
@@ -338,6 +399,7 @@ class VLLMEngine(GenerationEngine):
         max_num_batched_tokens: int | None,
         seed: int | None,
         serves_images: bool,
+        generator_name: str,
     ) -> EngineArgs:
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments;
         ``serves_images``: the engine has a vision processor)."""
@@ -404,11 +466,22 @@ class VLLMEngine(GenerationEngine):
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
         if self.config.kv_transfer_config is not None:
+            extra = self.config.kv_transfer_config.kv_connector_extra_config
+            if self.config.kv_transfer_config.kv_connector == "MooncakeStoreConnector":
+                extra = dict(extra)
+                # This option names an IPC socket, not a network port. Independent
+                # generators on the same host must not bind/unlink each other's socket;
+                # cache_prefix separates runs that reuse generator names, and hashing
+                # bounds the socket path length.
+                extra["lookup_rpc_port"] = sha256(
+                    f"{extra['cache_prefix']}:{generator_name}".encode()
+                ).hexdigest()[:16]
             engine_kwargs["kv_transfer_config"] = replace(
                 self.config.kv_transfer_config,
-                kv_connector_module_path=(
-                    "torchtitan.rl.generator.vllm.simple_cpu_offload"
-                ),
+                kv_connector_extra_config=extra,
+                kv_connector_module_path=_KV_OFFLOAD_CONNECTOR_MODULES[
+                    self.config.kv_transfer_config.kv_connector
+                ][1],
             )
             if self._coordinate_kv_offload:
                 engine_kwargs[
