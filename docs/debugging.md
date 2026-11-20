@@ -71,8 +71,12 @@ CONFIG=llama3_debugmodel_pp2_fsdp2 \
 ```
 
 Without PP, omit `FAKE_PP_RANK`; the represented rank is logical rank zero.
-`run_train.sh` limits a pure-fake invocation to one training step by default so
-this path remains a diagnostic rather than an accidental benchmark.
+`run_train.sh` does not change `training.steps`, so a pure-fake run uses the
+selected recipe's step count. The launcher's default recipe,
+`llama3_debugmodel`, sets `steps=10`, and that count applies to every launch
+of that recipe, not only fake mode. A recipe that leaves `steps` unset uses
+the `TrainingConfig` default of `10000`. Set `training.steps` on the recipe
+when the fake path should stay a short diagnostic.
 
 ### Real PP / fake SPMD example
 
