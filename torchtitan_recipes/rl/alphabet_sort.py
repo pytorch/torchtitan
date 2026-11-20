@@ -395,7 +395,12 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
-        renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
+        # Keep earlier analysis in later prompts: the bridge extends, and a rollout usually trains
+        # as one sample. Cost vs the default (re-render at each user turn): longer prompts, and the
+        # history keeps the sampled <|return|> where harmony's chat template writes <|end|>.
+        renderer=from_renderers(
+            GptOssRendererConfig(reasoning_effort="low", auto_drop_analysis=False)
+        ),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,

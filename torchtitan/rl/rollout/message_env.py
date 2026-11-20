@@ -75,7 +75,7 @@ class MessageEnv(Configurable, abc.ABC):
                 tool_calls = completion_message.get("tool_calls")
                 if not tool_calls:
                     return MessageEnvStepOutput(done=True)  # assistant gave its final answer
-                result = run_calculator(tool_calls[0])
+                result = run_calculator(tool_calls[0]["function"]["arguments"])
                 return MessageEnvStepOutput(
                     env_messages=[{"role": "tool", "content": result}]
                 )
@@ -95,10 +95,12 @@ class MessageEnv(Configurable, abc.ABC):
 
         `TokenEnv` parses the completion and handles
         finish_reason / length / parse / timeout failures before calling this,
-        so the env only sees a well-formed completion message.
+        so the env only sees a completion that parsed and finished.
 
         Args:
-            completion_message: the completion decoded into a message.
+            completion_message: the completion decoded into a message. Its `tool_calls` are
+                `ToolCall` dicts: read `call["function"]["name"]` and
+                `call["function"]["arguments"]`. A call with no name is left out.
 
         Returns:
             `MessageEnvStepOutput` with the env's reply messages.

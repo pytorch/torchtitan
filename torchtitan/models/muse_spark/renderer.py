@@ -131,38 +131,6 @@ class _Piece(NamedTuple):
     prompt_prefix_chars: int = 0
 
 
-def _normalize_tool_calls(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Accept nested/flat dicts and ParsedToolCall objects without mutating messages."""
-    normalized_messages = []
-    for message in messages:
-        tool_calls = message.get("tool_calls")
-        if not tool_calls:
-            normalized_messages.append(message)
-            continue
-        normalized_calls: list[dict[str, Any]] = []
-        for tool_call in tool_calls:
-            if isinstance(tool_call, dict):
-                if "function" in tool_call:
-                    normalized_calls.append(tool_call)
-                    continue
-                name = tool_call.get("name")
-                arguments = tool_call.get("arguments")
-                call_id = tool_call.get("id")
-            else:
-                name = tool_call.name
-                arguments = tool_call.arguments
-                call_id = tool_call.id
-            normalized_call = {
-                "type": "function",
-                "function": {"name": name, "arguments": arguments},
-            }
-            if call_id is not None:
-                normalized_call["id"] = call_id
-            normalized_calls.append(normalized_call)
-        normalized_messages.append({**message, "tool_calls": normalized_calls})
-    return normalized_messages
-
-
 def _escape(value: Any) -> str:
     return (
         str(value)
@@ -529,7 +497,6 @@ class MuseSparkRenderer:
         tools: list[dict[str, Any]] | None,
         add_generation_prompt: bool,
     ) -> list[_Piece]:
-        messages = _normalize_tool_calls(messages)
         pieces: list[_Piece] = []
         generation_active = False
 
