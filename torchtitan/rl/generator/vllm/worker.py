@@ -146,6 +146,15 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         self, kv_cache_config, is_profiling: bool = False, **kwargs
     ):
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
+        # TODO: Only Flash-Next's VLLMPLELayer defines allocate_request_states: it
+        # keeps PLE history in model-owned buffers sized from the GDN state slots
+        # bound here, to work around vLLM's one-layer-per-group KV-cache limit (see
+        # the TODO in torchtitan/rl/generator/vllm/model/ple.py). Delete this loop
+        # once PLE can use a vLLM KV-cache state again.
+        for module in self.model.modules():
+            allocate_request_states = getattr(module, "allocate_request_states", None)
+            if allocate_request_states is not None:
+                allocate_request_states()
         # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph
         # like the second largest (a mixed graph). Decode graphs take far less (Qwen3-8B TP2:
         # 11 decode graphs added 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
