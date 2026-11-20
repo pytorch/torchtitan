@@ -463,21 +463,25 @@ class VLLMModelWrapper(Module):
 
         Call once per forward.
         """
-        # vLLM's padding mask (graph size, DP equalization, an idle DP rank's
-        # dummy rows), captured by graphs and rewritten every step, plus the rows
-        # forward padded. Only Dist-MoE reads it: padding rows go to expert -1.
+        # Only Dist-MoE reads the padding mask: padding rows go to expert -1.
         if self._dist_moe_runtime is None:
             return {}
+
+        # True for the rows vLLM added: padding to a CUDA-graph size or to the
+        # largest DP replica, or an idle DP rank's dummy batch. vLLM refills this
+        # buffer before every step, so a CUDA-graph replay reads the current mask.
         padding_mask = get_forward_context().is_padding
         if padding_mask is None:
             raise RuntimeError(
                 "vLLM set no ForwardContext.is_padding for this forward, so "
                 "Dist-MoE can't tell padding rows from real ones."
             )
-        # forward padded vLLM's step to num_tokens rows.
+
+        # The rows `forward` added to reach a multiple of TP are padding too.
         num_padding_rows = num_tokens - padding_mask.shape[0]
         if num_padding_rows:
             padding_mask = F.pad(padding_mask, (0, num_padding_rows), value=True)
+
         self._dist_moe_runtime.set_num_local_input_tokens_per_call(
             self._dist_moe_num_local_input_tokens(num_tokens)
         )
