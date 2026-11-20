@@ -40,7 +40,10 @@ from torchtitan.rl.generator.types import (
 from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.config import (
+    resolve_scheduler_limits,
+    VLLMCudaGraphConfig,
+)
 from torchtitan.rl.generator.vllm.multimodal_wrapper import (
     image_prompt_to_engine_input,
     keep_prefix_cached_image_data,
@@ -204,7 +207,8 @@ class VLLMEngine(GenerationEngine):
             _PIXEL_VALUES_LRU_CACHE_BYTES,
             getsizeof=lambda pixel_values: pixel_values.nbytes,
         )
-        engine_args = self._build_engine_args(
+        engine_args = self.build_engine_args(
+            config,
             model,
             parallelism=parallelism,
             model_path=model_path,
@@ -270,8 +274,9 @@ class VLLMEngine(GenerationEngine):
             # overrides; route it through trainer's function to match the trainer exactly.
             force_trainer_logprobs_for_batch_invariance()
 
-    def _build_engine_args(
-        self,
+    @staticmethod
+    def build_engine_args(
+        config: VLLMEngine.Config,
         model: Decoder.Config,
         *,
         parallelism: InferenceParallelismConfig,
@@ -283,8 +288,8 @@ class VLLMEngine(GenerationEngine):
         seed: int | None,
         serves_images: bool,
     ) -> EngineArgs:
-        """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments;
-        ``serves_images``: the engine has a vision processor)."""
+        """Build the vLLM ``EngineArgs`` for ``config`` (see ``GenerationEngine`` for the other
+        arguments; ``serves_images``: the engine has a vision processor)."""
         enable_ep = parallelism.expert_parallel_degree > 1
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
@@ -312,7 +317,7 @@ class VLLMEngine(GenerationEngine):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=gpu_memory_limit,
-            enforce_eager=self.config.cuda_graph.mode == "NONE",
+            enforce_eager=config.cuda_graph.mode == "NONE",
             attention_config=AttentionConfig(backend=vllm_attention_backend(model)),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
@@ -330,7 +335,7 @@ class VLLMEngine(GenerationEngine):
         engine_kwargs["max_num_seqs"] = max_num_seqs
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
-        engine_kwargs["watermark"] = self.config.watermark
+        engine_kwargs["watermark"] = config.watermark
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
         # TODO: validation requests (priority -1) are admitted before training requests, also while a
@@ -350,21 +355,26 @@ class VLLMEngine(GenerationEngine):
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
-        vllm_compilation_config = self.config.cuda_graph.get_vllm_compilation_config(
+        if seed is not None:
+            engine_kwargs["seed"] = seed
+        if serves_images:
+            # Image prompts bypass vLLM's processor, so its cache would only hold copies.
+            engine_kwargs["mm_processor_cache_gb"] = 0
+        add_extra_vllm_engine_args(engine_kwargs, config.extra_engine_args)
+
+        # The CUDA graph sizes below need max_num_batched_tokens before the engine exists.
+        max_num_batched_tokens, max_num_seqs = resolve_scheduler_limits(engine_kwargs)
+        engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        engine_kwargs["max_num_seqs"] = max_num_seqs
+
+        vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,
             max_num_batched_tokens=max_num_batched_tokens,
             expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
             enable_sequence_parallel=parallelism.enable_sequence_parallel,
         )
-        if vllm_compilation_config is not None:
-            engine_kwargs["compilation_config"] = vllm_compilation_config
-        if seed is not None:
-            engine_kwargs["seed"] = seed
-        if serves_images:
-            # Image prompts bypass vLLM's processor, so its cache would only hold copies.
-            engine_kwargs["mm_processor_cache_gb"] = 0
-        add_extra_vllm_engine_args(engine_kwargs, self.config.extra_engine_args)
+        engine_kwargs["compilation_config"] = vllm_compilation_config
         return EngineArgs(**engine_kwargs)
 
     def _build_stat_loggers(self, context: StatLoggerContext) -> list | None:
