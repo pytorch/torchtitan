@@ -202,9 +202,9 @@ class Trainer(Configurable):
             return
 
         # Capture the dependency when weights become final: the push must wait
-        # for the optimizer updates. Its own stream lets the push skip compute-
-        # stream work queued after this point; the TODO in `Controller._trainer_loop`
-        # needs it to overlap the push with forward/backward.
+        # for the optimizer updates. optim_step syncs the host before the push
+        # starts, so the stream saves nothing today; it is kept for the TODO in
+        # `Controller._trainer_loop` that overlaps the push with forward/backward.
         self._push_model_state_dict_stream.wait_stream(
             torch.accelerator.current_stream(self.engine.device)
         )
