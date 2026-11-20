@@ -6,7 +6,6 @@
 
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
-
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -122,10 +121,10 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             is_profiling=True    graph-memory estimate: keep vLLM's manager (mixed graphs only)
             is_profiling=False   real build: TorchTitanCudaGraphManager (mixed + decode graphs)
 
-        The estimate leaves out decode graphs on purpose: vLLM charges every FULL graph like
-        the second widest, but decode graphs take far less (Qwen3-8B TP2: 11 decode graphs
-        added 0.03 GiB to 1.57). The KV cache can't grow past what the estimate leaves, with
-        or without vLLM's extensible KV cache.
+        The estimate runs only with vLLM's extensible KV cache off (vLLM's default is on, and
+        measures the graphs after warmup instead). It leaves out decode graphs on purpose:
+        vLLM charges every FULL graph like the second widest, but decode graphs take far less
+        (Qwen3-8B TP2: 11 decode graphs added 0.03 GiB to 1.57).
         """
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
         # TODO: swap before the estimate too (drop this return) once vLLM's
