@@ -6,6 +6,8 @@ on:
     paths-ignore:
       - 'torchtitan/experiments/**'
   pull_request:
+    # Drafts skip these jobs (set-matrix.yaml), so also run them when a draft is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths-ignore:
       - 'torchtitan/experiments/**'
 
