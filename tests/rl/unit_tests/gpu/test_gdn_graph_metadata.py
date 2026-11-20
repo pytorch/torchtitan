@@ -369,6 +369,7 @@ def test_forward_respects_prepared_extent_and_decode_padding(monkeypatch, decode
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    layer.num_speculative_tokens = 0
     layer.local_num_v_heads = layer.head_v_dim = 1
     extent = 4 if decode else 3
     metadata = TorchTitanLinearAttentionMetadata(
@@ -491,6 +492,7 @@ def test_packed_forward_routes_decode_rows(monkeypatch, capturing):
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix, layer.kv_cache = "gdn", (torch.empty(0), torch.empty(0))
+    layer.num_speculative_tokens = 0
     layer.local_num_k_heads = layer.local_num_v_heads = 1
     layer.head_k_dim = layer.head_v_dim = 1
     monkeypatch.setattr(gdn, "is_in_batch_invariant_mode", lambda: False)
@@ -551,6 +553,7 @@ def test_packed_decode_routing_matches_recurrence(monkeypatch) -> None:
     layer = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
     torch.nn.Module.__init__(layer)
     layer.prefix = "gdn"
+    layer.num_speculative_tokens = 0
     layer.local_num_k_heads = layer.local_num_v_heads = 16
     layer.head_k_dim = layer.head_v_dim = 128
     pools = (

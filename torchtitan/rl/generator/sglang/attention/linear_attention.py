@@ -141,6 +141,9 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
             ``(convolved_1TC, state_indices, cu_seqlens, has_initial_state)``.
         """
         if forward_batch.forward_mode.is_target_verify():
+            # TODO: support SGLang's NEXTN (MTP) drafts, as the vLLM generator does for GDN,
+            # so MTP speeds up this engine too. Needs verify rows that keep one GDN state per
+            # draft position (see VLLMInnerGDN._forward_speculative).
             raise NotImplementedError(
                 "TorchTitan linear attention does not support speculative decoding"
             )
