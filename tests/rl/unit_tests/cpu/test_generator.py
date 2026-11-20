@@ -191,6 +191,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         staging_state_dict = {"weight": torch.zeros(2)}
         generator = Generator.__new__(Generator)
         generator.config = SimpleNamespace(model_state_dict_load_mode="cpu_prefetch")
+        generator._model_state_dict_transport = None
         generator._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
@@ -737,6 +738,7 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
             reset_kv_cache_on_model_state_dict_load=True,
             model_state_dict_load_mode="cpu_prefetch",
             vision_processor=None,
+            mooncake_master_address=None,
             rank=0,
             generator_name="generator",
             output_dir=str(tmp_path),
@@ -786,6 +788,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
         vision_processor=None,
+        mooncake_master_address=None,
         rank=0,
         generator_name="generator",
         output_dir=str(tmp_path),

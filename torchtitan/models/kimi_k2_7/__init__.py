@@ -10,9 +10,9 @@ from .flavors import (
     KIMI_K2_5_VISION_PROCESSOR_KWARGS,
     KimiK25Model,
     KimiK25VisionEncoder,
+    KimiK2Model,
     MODEL_FLAVORS,
     VisionProjector,
-    VisionRotaryEmbedding2D,
 )
 
 __all__ = [
@@ -20,8 +20,8 @@ __all__ = [
     "KIMI_K2_5_VISION_PROCESSOR_KWARGS",
     "KimiK25Model",
     "KimiK25VisionEncoder",
+    "KimiK2Model",
     "MODEL_FLAVORS",
     "VisionProjector",
-    "VisionRotaryEmbedding2D",
     "build_model_config",
 ]
