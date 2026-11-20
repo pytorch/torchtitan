@@ -21,6 +21,11 @@ Kimi K3 is built on Kimi Delta Attention (KDA) and Attention Residuals
 (AttnRes), with 69 KDA layers and 24 Gated MLA layers. Stable LatentMoE selects
 16 of 896 experts per token, and MoonViT-V2 provides native vision input.
 
+The `Kimi-K3` and `debugmodel` flavors are text-only: they build `KimiK3Model`,
+the decoder without the vision encoder, and read the language model from the
+multimodal checkpoint. The `_mm` flavors build `KimiK3MultimodalModel`, which
+adds MoonViT-V2.
+
 ## Released Model Configuration
 
 The values below follow the
@@ -53,7 +58,7 @@ describe the released model.
 ## Numerical Parity
 
 The parity script reduces the released Hugging Face configuration to match
-TorchTitan's local `debugmodel` configuration before initializing both models.
+TorchTitan's local `debugmodel_mm` configuration before initializing both models.
 
 End-to-end KL divergence against the Hugging Face implementation (multimodal
 inputs): **1.0212e-5**, with **100% top-1 and top-5 match**.

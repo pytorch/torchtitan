@@ -22,9 +22,13 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.moe.state_dict_adapter import MoEStateDictAdapter
+from torchtitan.models.common.multimodal import MultimodalModel
 
 if TYPE_CHECKING:
-    from torchtitan.models.muse_spark.model import MuseSparkModel
+    from torchtitan.models.muse_spark.model import (
+        MuseSparkModel,
+        MuseSparkMultimodalModel,
+    )
 
 
 _HF_LOAD_THREAD_COUNT = 8
@@ -321,12 +325,18 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
                 "lm_head.weight": "lm_head.weight",
             }
         )
-        mapping.update(self._build_vision_from_hf_map(config))
-        mapping.update(self._build_audio_from_hf_map(config))
+        # The text-only model reads the decoder from the multimodal checkpoint and
+        # ignores the encoder keys (see ``_classify_checkpoint_keys``).
+        if isinstance(config, MultimodalModel.Config):
+            config = cast("MuseSparkMultimodalModel.Config", config)
+            mapping.update(self._build_vision_from_hf_map(config))
+            mapping.update(self._build_audio_from_hf_map(config))
         return mapping
 
     @staticmethod
-    def _build_vision_from_hf_map(config: MuseSparkModel.Config) -> dict[str, str]:
+    def _build_vision_from_hf_map(
+        config: MuseSparkMultimodalModel.Config,
+    ) -> dict[str, str]:
         vision_encoder = config.vision_encoder
         if vision_encoder is None:
             return {}
@@ -373,7 +383,9 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         return mapping
 
     @staticmethod
-    def _build_audio_from_hf_map(config: MuseSparkModel.Config) -> dict[str, str]:
+    def _build_audio_from_hf_map(
+        config: MuseSparkMultimodalModel.Config,
+    ) -> dict[str, str]:
         audio_encoder = config.audio_encoder
         if audio_encoder is None:
             return {}
@@ -437,8 +449,11 @@ class MuseSparkStateDictAdapter(MoEStateDictAdapter):
         if re.fullmatch(
             r"vision_encoder\.layers\.\d+\.attn\.w[qk]\.(weight|bias)", native_key
         ):
-            assert config.vision_encoder is not None
-            return config.vision_encoder.num_heads
+            vision_encoder = cast(
+                "MuseSparkMultimodalModel.Config", config
+            ).vision_encoder
+            assert vision_encoder is not None
+            return vision_encoder.num_heads
         return None
 
     def _validate_mapping(self) -> None:

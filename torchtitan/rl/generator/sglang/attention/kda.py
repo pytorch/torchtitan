@@ -254,7 +254,9 @@ class SGLangInnerKDA(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        tp_size = get_parallel().tp_size
+        # SGLang's attention TP is torchtitan's TP; under attention DP, SGLang's
+        # tp_size is DP x TP.
+        tp_size = get_parallel().attn_tp_size
         if config.num_heads % tp_size != 0:
             raise ValueError(
                 f"num_heads ({config.num_heads}) must be divisible by "

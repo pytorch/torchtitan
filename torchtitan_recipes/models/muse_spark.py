@@ -73,7 +73,7 @@ from torchtitan.models.common.moe import (
 )
 
 from torchtitan.models.muse_spark import build_model_config, MUSE_SPARK_SPECIAL_TOKENS
-from torchtitan.models.muse_spark.model import MuseSparkModel
+from torchtitan.models.muse_spark.model import MuseSparkModel, MuseSparkMultimodalModel
 from torchtitan.models.muse_spark.renderer import MuseSparkRendererConfig
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.observability.metrics import MetricsProcessor
@@ -210,7 +210,7 @@ def use_flex_flash_attention(model_config: MuseSparkModel.Config) -> None:
 
 # TODO: Add production Muse Spark Open video and audio datasets.
 def muse_spark_mm_dataloader(
-    model_config: MuseSparkModel.Config,
+    model_config: MuseSparkMultimodalModel.Config,
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
     """Multimodal dataloader for ``dataset``. The trainer config also needs
@@ -695,9 +695,9 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
     or override the pattern with ``MUSE_SPARK_ULTRADATA_JSONL_PATTERN``.
 
     Native torch_checkpointing checkpoints retain LoRA adapters and training state;
-    HF exports omit the adapters. The default checkpoint folder is
-    ``muse_spark_ultradata_lora_cp16_128k`` under ``--output-dir`` (default:
-    ``outputs``). ``MUSE_SPARK_CHECKPOINT_FOLDER`` overrides it and accepts
+    HF export (``last_save_in_hf``) raises for LoRA models. The default
+    checkpoint folder is ``muse_spark_ultradata_lora_cp16_128k`` under
+    ``--output-dir`` (default: ``outputs``). ``MUSE_SPARK_CHECKPOINT_FOLDER`` overrides it and accepts
     an absolute path. Existing native checkpoints take precedence over
     initial HF loading, so use a fresh folder to start from released weights.
     Native DCP checkpoints cannot be resumed here; use a separate folder.

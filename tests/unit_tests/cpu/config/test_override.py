@@ -428,17 +428,38 @@ class TestOverride(_IsolatedRegistryTestCase):
         with self.assertRaises(ImportError):
             apply_overrides(override_cfg, parent_cfg)
 
-    def test_logging_format(self):
-        @override(target=ComponentA.Config, description="format test")
-        def fmt_swap(cfg: ComponentA.Config) -> ComponentB.Config:
-            return _to_b(cfg)
+    def test_groups_success_logs_and_keeps_per_node_results(self):
+        @override(target=ComponentA.Config)
+        def swap(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
 
-        parent_cfg = ParentComponent.Config()
-        replacements = apply_overrides(self._imports(), parent_cfg)
-        for line in replacements:
-            self.assertIn("[Override]", line)
-            self.assertIn("fmt_swap", line)
-            self.assertIn("->", line)
+        target = f"{__name__}.swap"
+        parent_cfg = ParentComponent.Config(
+            children=[DerivedComponent.Config(), ComponentA.Config()],
+        )
+        config = OverrideConfig(imports=[(target, {"extra": 256})])
+
+        with self.assertLogs("torchtitan.config.override", "INFO") as logs:
+            replacements = apply_overrides(config, parent_cfg)
+
+        self.assertEqual(
+            [record.getMessage() for record in logs.records],
+            [
+                f"[Override] {target}: ComponentA.Config -> ComponentB.Config with extra=256"
+                " matched=2 fqns=['child', 'children.1']",
+                f"[Override] {target}: DerivedComponent.Config -> ComponentB.Config with extra=256"
+                " matched=1 fqns=['children.0']",
+                "Applied 3 override(s)",
+            ],
+        )
+        self.assertEqual(
+            replacements,
+            [
+                f"[Override] {target}: child ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.0 DerivedComponent.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.1 ComponentA.Config -> ComponentB.Config with extra=256",
+            ],
+        )
 
 
 class TestOverrideKwargs(_IsolatedRegistryTestCase):

@@ -22,6 +22,9 @@ pip install av torchvision
 - **Multimodal forward** — projected vision embeddings are scattered into the
   text embedding sequence at runs of the shared media placeholder token.
 
+`KimiK2Model` is the text-only language model (used by the text-only
+`moonlight-16B-A3B` flavor); `KimiK25Model` adds the vision encoder.
+
 ## Model variants
 
 | Variant | LLM dim | Layers | Heads | Experts (top-k) | ViT dim | ViT layers | ViT heads |
