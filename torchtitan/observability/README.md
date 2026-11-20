@@ -1,8 +1,8 @@
 # Profiling
 
-## Enable Memory Profiling
+## PyTorch allocator memory snapshots
 
-Configure profiling in the selected recipe:
+These snapshots describe memory managed by the PyTorch allocator. For requests from libraries such as NCCL, see [Capture library allocation requests](#capture-library-allocation-requests). Configure snapshots in the selected recipe:
 
 ```python
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
@@ -66,6 +66,40 @@ def llama3_debugmodel_cuspy():
 With CUDA graphs on, the forward-backward, optimizer, and validation graphs are captured with CUPTI-based annotations, so replayed kernels keep their `mark_kernels` metadata. This starts Cuspy's CUPTI subscription at the first capture and holds it for the rest of the run, so other CUPTI tools (Nsight Systems, on-demand Kineto traces via dynolog) can't attach to that process.
 
 Set `record_py_stacks=True` to also record each CUDA graph kernel's Python launch stack. The stacks are written beside each trace as `rank{rank}_cuda_graph_py_stacks.json.gz`, keyed by `(graph id << 32) | graph node id` of the trace's kernel events. Kernels launched outside CUDA graphs get no stack.
+
+### Capture library allocation requests
+
+Cuspy's callback infrastructure can capture allocation requests from libraries such as NCCL that bypass the PyTorch allocator. This capture starts before trainer construction, includes communicator initialization and writes per-rank request reports and native stacks beside profiler traces. It reports allocation requests rather than live memory usage.
+
+This initial implementation requires a CUDA 13.5 PyTorch build with the shared Cuspy callback registry, loaded CUPTI 13.5 and NVIDIA's Python bindings from the 13.5 release family:
+
+```bash
+pip install 'cupti-python~=13.5.0' 'cuda-bindings~=13.5.0'
+```
+
+For allocation capture only, add this to your training recipe:
+
+```python
+from torchtitan.observability.profiler import CudaMemoryProfilerConfig
+
+config.profiler.enable_profiling = False
+config.profiler.cuda_memory = CudaMemoryProfilerConfig(capture_steps=3)
+```
+
+Setting `cuda_memory` starts the required Cuspy callbacks automatically. You can leave `config.profiler.cuspy` unset when scheduled profiling is disabled.
+
+To also collect scheduled CUDA traces, keep `cuda_memory` configured and select Cuspy as the profiler backend:
+
+```python
+from torchtitan.observability.profiler import CuspyProfilerConfig
+
+config.profiler.enable_profiling = True
+config.profiler.cuspy = CuspyProfilerConfig()
+```
+
+Both features share Cuspy's CUPTI subscription. Enabling scheduled profiling while leaving `profiler.cuspy` unset selects Kineto and raises a startup error: set `profiler.cuspy = CuspyProfilerConfig()` or disable scheduled profiling. Missing callback APIs, missing NVIDIA packages and incompatible versions also raise startup errors; allocation capture is not silently disabled. Leaving `profiler.cuda_memory = None` disables this feature.
+
+See [CUDA allocation capture](cuda_memory/README.md) for window behavior, output semantics, standalone use and validation limits.
 
 ### PM sampling configuration
 
