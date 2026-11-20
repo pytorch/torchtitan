@@ -83,7 +83,6 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
         worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardExactMatch.Config(weight=1.0)],
-                truncation_reward=0.0,
             ),
             message_env=SearchR1Env.Config(),
             token_env=TokenEnv.Config(
