@@ -71,7 +71,11 @@ def get_linear_attention_metadata(
     attn_metadata = get_forward_context().attn_metadata
     if attn_metadata is None:
         return None
-    assert isinstance(attn_metadata, dict)
+    if not isinstance(attn_metadata, dict):
+        raise RuntimeError(
+            "Expected one attention-metadata dict per step, got "
+            f"{type(attn_metadata).__name__}."
+        )
     if prefix not in attn_metadata:
         if any(
             isinstance(metadata, TorchTitanLinearAttentionMetadata)
@@ -83,7 +87,11 @@ def get_linear_attention_metadata(
             )
         return None
     metadata = attn_metadata[prefix]
-    assert isinstance(metadata, TorchTitanLinearAttentionMetadata)
+    if not isinstance(metadata, TorchTitanLinearAttentionMetadata):
+        raise RuntimeError(
+            f"Layer {prefix} got {type(metadata).__name__}, expected "
+            "TorchTitanLinearAttentionMetadata."
+        )
     return metadata
 
 
@@ -400,9 +408,9 @@ class TorchTitanHybridModelState(MambaHybridModelState):
     ) -> dict[str, Any]:
         replays_packed_graph = False
         if cudagraph_mode == CUDAGraphMode.FULL:
-            graph = self.cudagraph_manager.last_dispatched_descriptor
+            descriptor = self.cudagraph_manager.last_dispatched_descriptor
             replays_packed_graph = (
-                graph.uniform_token_count is None and graph.num_tokens > 1
+                descriptor.uniform_token_count is None and descriptor.num_tokens > 1
             )
         for groups in attn_groups:
             for group in groups:

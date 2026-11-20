@@ -40,9 +40,7 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
-from torchtitan.rl.generator.vllm.multimodal_wrapper import (
-    image_prompt_to_engine_input,
-)
+from torchtitan.rl.generator.vllm.multimodal_wrapper import image_prompt_to_engine_input
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -250,7 +248,8 @@ class VLLMEngine(GenerationEngine):
         vision_processor: VisionProcessor.Config | None,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
-        and config parser with vLLM."""
+        and config parser with vLLM, and in batch-invariant mode swap vLLM's sampler
+        kernels for the trainer's PyTorch ops."""
         register_to_vllm(
             model,
             parallelism=parallelism,

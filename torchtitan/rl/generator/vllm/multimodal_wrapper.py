@@ -376,7 +376,7 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
         # vLLM orders the embeddings as the placeholder tokens appear in the batch, the
         # order masked_scatter_ fills them in. Unlike assigning through a boolean mask,
         # whose nonzero syncs the host when the mask is on the GPU, masked_scatter_
-        # never syncs (vLLM's V1 runner passes a pinned CPU mask).
+        # never syncs (vLLM's runner passes a pinned CPU mask).
         inputs_embeds.masked_scatter_(
             is_multimodal.to(inputs_embeds.device, non_blocking=True).unsqueeze(-1),
             torch.cat(list(multimodal_embeddings)).to(inputs_embeds.dtype),

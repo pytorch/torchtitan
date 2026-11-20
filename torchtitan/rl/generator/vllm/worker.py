@@ -59,7 +59,7 @@ class TorchTitanCudaGraphManager(ModelCudaGraphManager):
         if self.cudagraph_mode != CUDAGraphMode.FULL:
             return
         # vLLM builds decode graphs only for modes with a separate decode routine.
-        decode_graphs = CudaGraphManager(
+        decode_only_manager = CudaGraphManager(
             self.vllm_config,
             self.device,
             CUDAGraphMode.FULL_DECODE_ONLY,
@@ -68,10 +68,10 @@ class TorchTitanCudaGraphManager(ModelCudaGraphManager):
             varlen_decode=self.varlen_decode,
             ubatch_runner=self.ubatch_runner,
         )
-        self._decode_descs = decode_graphs._decode_descs
+        self._decode_descs = decode_only_manager._decode_descs
         # Widest first, as vLLM captures: narrower graphs reuse the pool's blocks.
         self._capture_descs[CUDAGraphMode.FULL] = sorted(
-            decode_graphs._capture_descs.get(CUDAGraphMode.FULL, [])
+            decode_only_manager._capture_descs.get(CUDAGraphMode.FULL, [])
             + self._capture_descs.get(CUDAGraphMode.FULL, []),
             key=lambda descriptor: descriptor.num_tokens,
             reverse=True,
@@ -87,12 +87,12 @@ class TorchTitanCudaGraphManager(ModelCudaGraphManager):
         num_ubatches: int = 1,
     ) -> BatchExecutionDescriptor:
         descriptor = super().dispatch(
-            num_reqs,
-            num_tokens,
-            uniform_token_count,
-            num_active_loras,
-            max_query_len,
-            num_ubatches,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            uniform_token_count=uniform_token_count,
+            num_active_loras=num_active_loras,
+            max_query_len=max_query_len,
+            num_ubatches=num_ubatches,
         )
         if (
             uniform_token_count is not None
@@ -118,22 +118,23 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
     def initialize_kv_cache(
         self, kv_cache_config: KVCacheConfig, is_profiling: bool = False, **kwargs
     ) -> None:
+        """Let vLLM build its state, then swap in `TorchTitanCudaGraphManager`.
+
+            is_profiling=True    graph-memory estimate: keep vLLM's manager (mixed graphs only)
+            is_profiling=False   real build: TorchTitanCudaGraphManager (mixed + decode graphs)
+
+        The estimate leaves out decode graphs on purpose. With the extensible KV cache off
+        (vLLM's default is on), vLLM charges every FULL graph like the second widest, but
+        decode graphs take far less (Qwen3-8B TP2: 11 decode graphs added 0.03 GiB to 1.57).
+        """
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
-        # With the extensible KV cache off (vLLM's default is on), vLLM sizes the KV
-        # cache after estimating graph memory, charging every FULL graph like the
-        # second widest. Decode graphs take far less (Qwen3-8B TP2: 11 decode graphs
-        # added 0.03 GiB to 1.57), so the estimate runs on vLLM's own manager, which
-        # captures the mixed graphs only.
-        # TODO: install this manager before the estimate (drop the is_profiling return)
-        # once vLLM's _extrapolate_full_graph_memory charges each FULL graph at its own
-        # size instead of the second-largest sample's.
+        # TODO: swap before the estimate too (drop this return) once vLLM's
+        # _extrapolate_full_graph_memory charges each FULL graph at its own size.
         if is_profiling:
             return
-        # vLLM builds its manager here (`ModelCudaGraphManager(...)` in
-        # GPUModelRunner.initialize_kv_cache), with no factory to override. Rebuild it
-        # with the arguments vLLM passed, read off vLLM's manager.
+
         # TODO: drop the rebuild once GPUModelRunner builds its manager through a method
-        # a subclass can override.
+        # a subclass can override. Until then, copy the arguments vLLM passed off its manager.
         vllm_manager = self.cudagraph_manager
         self.cudagraph_manager = TorchTitanCudaGraphManager(
             vllm_manager.vllm_config,
