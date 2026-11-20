@@ -98,6 +98,13 @@ class Rubric(Configurable):
         """Reward for a errored rollout. If set, the reward fns are SKIPPED and this fixed
         reward is used. If None, the reward fns run on the errored rollout."""
 
+        def __post_init__(self) -> None:
+            if self.truncation_penalty < 0:
+                raise ValueError(
+                    "truncation_penalty is subtracted, so it must be >= 0; got "
+                    f"{self.truncation_penalty}"
+                )
+
     def __init__(self, config: Config) -> None:
         self._config = config
         self._reward_fns = [rwd_cfg.build() for rwd_cfg in config.reward_fns]
@@ -112,11 +119,6 @@ class Rubric(Configurable):
         if self._weight_sum <= 0:
             raise ValueError(
                 f"rubric weights must sum to a positive value; got {self._weight_sum}"
-            )
-        if config.truncation_penalty < 0:
-            raise ValueError(
-                "truncation_penalty is subtracted, so it must be >= 0; got "
-                f"{config.truncation_penalty}"
             )
 
     @sl.log_trace_span("score_single_rollout")

@@ -62,6 +62,4 @@ def test_truncation_penalty_leaves_finished_and_errored_rollouts_alone() -> None
 
 def test_truncation_penalty_must_not_be_negative() -> None:
     with pytest.raises(ValueError, match="truncation_penalty"):
-        Rubric.Config(
-            reward_fns=[_PartialCredit.Config()], truncation_penalty=-0.2
-        ).build()
+        Rubric.Config(reward_fns=[_PartialCredit.Config()], truncation_penalty=-0.2)
