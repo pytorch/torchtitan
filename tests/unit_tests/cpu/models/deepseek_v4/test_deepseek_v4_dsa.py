@@ -97,7 +97,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
         }
         # SPMD annotation needs a device mesh; this checks only the plumbing.
         with patch(
-            "torchtitan.models.common.decoder.annotate_input_spmd_types",
+            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
             _, _, kwargs, _ = model.preprocess_inputs(
