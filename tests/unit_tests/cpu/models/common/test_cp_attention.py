@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest import mock
 
+import pytest
 import spmd_types as spmd
 
 import torch
@@ -896,6 +897,7 @@ class TestAllGather(unittest.TestCase):
         self.assertEqual([torch.bfloat16] * 2, self._reduce_dtypes(config))
 
 
+@pytest.mark.xdist_group("tcp_port_12362")
 class TestAllGatherCollective(unittest.TestCase):
     """Exercise the real collective and its backward.
 

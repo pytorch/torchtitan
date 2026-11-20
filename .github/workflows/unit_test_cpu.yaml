@@ -40,8 +40,11 @@ jobs:
         pip install --force-reinstall --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cpu
 
         USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url https://download.pytorch.org/whl/nightly/cpu
+        # TODO: move pytest-xdist into .ci/docker/requirements-dev.txt at the next image change.
+        python -m pip install pytest-xdist==3.8.0
 
-        # Write coverage data/report to /tmp (world-writable): the mounted workspace and
-        # RUNNER_TEMP are owned by the host uid, which the container user (ci-user) can't write.
-        export COVERAGE_FILE=/tmp/.coverage
-        pytest tests/unit_tests/cpu --cov=. --cov-report=xml:/tmp/coverage.xml --durations=20 -vv
+        # 8 workers, one per vCPU of mt-l-x86iavx512-8-64, one torch thread each: torch sizes its
+        # thread pool from the CPUs it sees, which in a CPU-quota pod can be the host's.
+        # loadgroup keeps each xdist_group (tests that bind one fixed port) on one worker.
+        # TODO: drop pytest-cov from requirements-dev.txt, or upload coverage if someone needs it.
+        OMP_NUM_THREADS=1 pytest tests/unit_tests/cpu -n 8 --dist loadgroup --durations=20 -vv
