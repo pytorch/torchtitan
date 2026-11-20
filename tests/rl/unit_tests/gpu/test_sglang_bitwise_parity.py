@@ -496,10 +496,14 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
 
 
 class TestSGLangBitwiseParityGDNUnifiedMemory(TestSGLangBitwiseParityGDN):
-    """``TestSGLangBitwiseParityGDN`` on SGLang's unified memory: KV and GDN states
-    in one pool."""
+    """``TestSGLangBitwiseParityGDN`` on SGLang's unified memory (KV and GDN states
+    in one pool), with HiCache backing them up to host memory."""
 
-    extra_server_args = {"enable_unified_memory": True}
+    extra_server_args = {
+        "enable_unified_memory": True,
+        "enable_hierarchical_cache": True,
+        "hicache_size": 8,
+    }
 
     def test_runs_on_unified_memory(self):
         """SGLang built the unified pool, not separate KV and state pools."""
@@ -508,6 +512,42 @@ class TestSGLangBitwiseParityGDNUnifiedMemory(TestSGLangBitwiseParityGDN):
         self.assertIsInstance(
             self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
         )
+
+    def test_trainer_vs_sglang_decode_after_host_load_back(self):
+        """Test 3 with the previous turns evicted from GPU memory, so the next turns
+        load their KV and GDN states back from host memory into the unified pool."""
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+
+        results = self._generate(self.prompt_ids)
+        scheduler = self.engine._scheduler
+        tree_cache = scheduler.tree_cache
+        with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+            # Wait for the host backups, then drop every GPU copy.
+            tree_cache.writing_check(write_back=True)
+            tree_cache.evict(EvictParams(num_tokens=10**9, mamba_num=10**9))
+        self.assertEqual(tree_cache.total_size(), (0, 0))
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(self.prompt_ids, results, strict=True)
+        ]
+        # SGLang's request objects, for how many cached tokens came from the host.
+        admitted = []
+        admit = self.engine._output_collector.admit
+
+        def record_admit(req, arrival_time):
+            admitted.append(req)
+            admit(req, arrival_time)
+
+        self.engine._output_collector.admit = record_admit
+        try:
+            next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
+        finally:
+            self.engine._output_collector.admit = admit
+        if dist.get_rank() == 0:
+            for prompt, req, result in zip(self.prompt_ids, admitted, next_results):
+                num_cached_tokens = result.metrics_inputs.num_cached_tokens
+                self.assertGreater(num_cached_tokens, len(prompt))
+                self.assertEqual(req.cached_tokens_host, num_cached_tokens)
 
 
 def _debug_model_config(
