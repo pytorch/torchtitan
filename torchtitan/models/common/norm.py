@@ -16,6 +16,8 @@ from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import UnaryActivationFn
 
+# T = tokens, D = model dimension.
+
 
 class GatedRMSNorm(Module):
     """Apply RMSNorm followed by a unary gate activation."""
@@ -48,4 +50,19 @@ class GatedRMSNorm(Module):
         return (normalized * self.activation_fn(gate.float())).to(input_dtype)
 
 
-__all__ = ["GatedRMSNorm"]
+@local_compile("residual_sum_and_norm", batch_invariant=False)
+def residual_sum_and_norm(
+    residual_TD: torch.Tensor,
+    delta_TD: torch.Tensor,
+    norm: nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the residual sum and its module-normalized value.
+
+    Example:
+        x, ffn_input = residual_sum_and_norm(x, attn_out, self.ffn_norm)
+    """
+    h_TD = residual_TD + delta_TD
+    return h_TD, norm(h_TD)
+
+
+__all__ = ["GatedRMSNorm", "residual_sum_and_norm"]

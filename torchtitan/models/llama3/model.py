@@ -18,6 +18,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.common.norm import residual_sum_and_norm
 from .state_dict_adapter import Llama3StateDictAdapter
 
 
@@ -57,8 +58,8 @@ class Llama3TransformerBlock(TransformerBlock):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
-        h = x + attn_out
-        ffn_out = self.feed_forward(self.ffn_norm(h))
+        h, ffn_input = residual_sum_and_norm(x, attn_out, self.ffn_norm)
+        ffn_out = self.feed_forward(ffn_input)
         # Trailing add, always saved: it saves nothing for backward, so replay skips
         # it and its inputs need no persisting, matching checkpoint early stop.
         return remat.region(
@@ -82,7 +83,12 @@ class Llama3Model(Decoder):
         vocab_size: int = 128256
         local_compile: LocalCompileConfig = field(
             default_factory=lambda: LocalCompileConfig(
-                regions=["loss", "fused_binary_activation", "rope"]
+                regions=[
+                    "loss",
+                    "fused_binary_activation",
+                    "rope",
+                    "residual_sum_and_norm",
+                ]
             )
         )
 

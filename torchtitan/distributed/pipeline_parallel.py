@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 import torch
+import torch._functorch.config as functorch_config
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
@@ -165,6 +166,10 @@ def pipeline_llm(
     )
     if _splits_backward(pp_schedule):
         _disable_inplace_wgrad_accum(model_parts)
+        # The input-gradient pass keeps the graph (retain_graph=True) for the
+        # weight-gradient pass, which a compiled backward with donated buffers
+        # rejects. Regions compile on their first call, after this point.
+        functorch_config.donated_buffer = False  # pyrefly: ignore [bad-assignment]
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
