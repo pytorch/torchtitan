@@ -122,13 +122,15 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
 
     results, by_value_results, microbatch_groups_b = asyncio.run(run())
 
-    assert [(batch is None, trainable) for batch, trainable in results] == [
+    assert [(batch is None, trainable) for batch, trainable, _ in results] == [
         (True, True),
         (True, False),
         (False, True),
         (True, True),
         (False, True),
     ]
+    # Each call also returns its handler time, for the controller's hop metrics.
+    assert all(handler_s > 0 for _, _, handler_s in results)
     batch_b = results[4][0]
     assert [results[2][0].group_ids, batch_b.group_ids] == [[0, 1, 2], [3, 4]]
     # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
@@ -147,10 +149,12 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         atol=0,
     )
     # Without the threshold, the batches come back by value and match the in-process ones.
-    assert [batch is None for batch, _ in by_value_results] == [
+    assert [batch is None for batch, _, _ in by_value_results] == [
         batch is None for batch, _ in expected
     ]
-    for (batch, _), (expected_batch, _) in zip(by_value_results, expected, strict=True):
+    for (batch, _, _), (expected_batch, _) in zip(
+        by_value_results, expected, strict=True
+    ):
         if expected_batch is not None:
             torch.testing.assert_close(
                 comparable(batch), comparable(expected_batch), rtol=0, atol=0
