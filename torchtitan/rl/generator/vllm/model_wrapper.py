@@ -483,13 +483,9 @@ class VLLMModelWrapper(Module):
         # replica), or an idle DP rank's dummy batch. vLLM refills this buffer before every
         # step, so a CUDA-graph replay reads the current mask.
         padding_mask = get_forward_context().is_padding
-        if padding_mask is None:
-            raise RuntimeError(
-                "vLLM set no ForwardContext.is_padding for this forward, so "
-                "Dist-MoE can't tell padding rows from real ones."
-            )
+        assert padding_mask is not None, "vLLM set no ForwardContext.is_padding"
 
-        # The rows `forward` added to reach a multiple of TP are padding too.
+        # The rows `_pad_step_to_tp` added to reach a multiple of TP are padding too.
         num_padding_rows = num_tokens - padding_mask.shape[0]
         if num_padding_rows:
             padding_mask = F.pad(padding_mask, (0, num_padding_rows), value=True)
