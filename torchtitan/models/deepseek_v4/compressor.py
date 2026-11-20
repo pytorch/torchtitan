@@ -231,8 +231,8 @@ class Indexer(Module):
         *,
         positions: torch.Tensor,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
-        topk,
-        return_scores=True,
+        topk: int,
+        return_scores: bool,
     ):
         """Project features and return document-local selections and scores."""
         seqlen = x.size(0)
@@ -257,7 +257,6 @@ class Indexer(Module):
             q,
             k,
             weights,
-            max_seqlen=seqlen,
             ratio=self.compressor.compress_ratio,
             topk=topk,
             attention_metadata=attention_metadata,
@@ -282,12 +281,11 @@ class InnerIndexer(Module):
         idx_k,
         idx_w,
         *,
-        max_seqlen,
-        ratio,
-        topk,
+        ratio: int,
+        topk: int,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
-        return_scores=True,
-    ):
+        return_scores: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions per folded query token.
 
         Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
@@ -297,7 +295,7 @@ class InnerIndexer(Module):
 
         Returns:
             ``(indices, scores)``. ``indices`` is int32
-            ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
+            ``[T, min(topk, attention_metadata.max_k // ratio)]`` with ``-1`` in unusable
             slots. ``scores`` holds live indexer logits for those selected
             entries and ``-inf`` in unusable slots, or an empty tensor when
             return_scores is False (evaluation and disabled auxiliary loss).
@@ -311,7 +309,7 @@ class InnerIndexer(Module):
                 and idx_q.dtype in (torch.float16, torch.bfloat16)
                 and has_cuda_capability(9, 0)
             )
-            k = min(topk, max_seqlen // ratio)
+            k = min(topk, attention_metadata.max_k // ratio)
             cu_seqlens = attention_metadata.cu_seq_q
             cu_seqlens_k = attention_metadata.cu_seq_compressed
             with torch.no_grad():
@@ -328,7 +326,8 @@ class InnerIndexer(Module):
                 ).squeeze(0)
 
             if not return_scores:
-                # local_map requires tensors at both declared output leaves.
+                # TODO(spmd_types): local_map cannot declare a None output;
+                # remove this placeholder once it can.
                 return topk_indices, idx_w.new_empty((0, 0))
             valid_TK = topk_indices >= 0
             gather_indices_TK = compressed_gather_indices(

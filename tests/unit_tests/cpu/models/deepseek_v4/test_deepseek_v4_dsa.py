@@ -41,10 +41,10 @@ class TestIndexerSelect(unittest.TestCase):
             idx_q,
             idx_k,
             idx_w,
-            max_seqlen=seqlen,
             ratio=ratio,
             topk=topk,
             attention_metadata=metadata,
+            return_scores=True,
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -67,6 +67,26 @@ class TestIndexerSelect(unittest.TestCase):
         expected_scores = scores.gather(1, selected.long().clamp_min(0))
         expected_scores = expected_scores.masked_fill(selected < 0, -torch.inf)
         torch.testing.assert_close(selected_scores, expected_scores)
+
+    def test_packed_selection_is_bounded_by_the_longest_document(self):
+        ratio, topk = 4, 16
+        lengths = [40, 40, 48]
+        positions = torch.cat([torch.arange(n) for n in lengths])
+        metadata = CompressedSparseAttention.Config(
+            window_size=1, compress_ratio=ratio, softmax_scale=0.1, index_topk=topk
+        ).build_attention_metadata(positions)
+        indexer = InnerIndexer.Config().build()
+        indices, _ = indexer(
+            torch.randn(len(positions), 8, 32),
+            torch.randn(len(positions) // ratio, 32),
+            torch.randn(len(positions), 8),
+            ratio=ratio,
+            topk=topk,
+            attention_metadata=metadata,
+            return_scores=False,
+        )
+        self.assertEqual(indices.shape[1], min(topk, metadata.max_k // ratio))
+        self.assertEqual(indices.shape[1], 12)
 
 
 class TestDSVPackedDocuments(unittest.TestCase):

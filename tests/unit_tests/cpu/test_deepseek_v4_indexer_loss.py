@@ -256,23 +256,21 @@ class TestIndexerSelect(unittest.TestCase):
                 q,
                 k,
                 w,
-                max_seqlen=12,
                 ratio=4,
                 topk=2,
                 attention_metadata=_metadata(cu, 12),
+                return_scores=True,
             )
-            index_only, no_scores = indexer(
+            index_only, _ = indexer(
                 q,
                 k,
                 w,
-                max_seqlen=12,
                 ratio=4,
                 topk=2,
                 attention_metadata=_metadata(cu, 12),
                 return_scores=False,
             )
             torch.testing.assert_close(indices, index_only)
-            self.assertEqual(no_scores.numel(), 0)
             scores[indices >= 0].sum().backward()
             for tensor in (q, k, w):
                 self.assertTrue(torch.isfinite(tensor.grad).all())

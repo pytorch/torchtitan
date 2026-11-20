@@ -223,7 +223,11 @@ def mtp_block_sharding_config() -> ShardingConfig:
 
 
 def inner_indexer_sharding_config() -> ShardingConfig:
-    """Local-SPMD selection boundary over the indexer's q/k/weights."""
+    """Local-SPMD selection boundary over the indexer's q/k/weights.
+
+    The three inputs stay TP-replicated, matching their previous placement as
+    inner-attention kernel inputs.
+    """
     replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     query = SpmdType(
         replicated.local_type,

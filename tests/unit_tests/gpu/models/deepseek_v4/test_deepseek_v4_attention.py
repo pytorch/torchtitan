@@ -115,7 +115,6 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
             indexer = InnerIndexer.Config().build()
             topk_indices, _ = indexer(
                 *idx,
-                max_seqlen=SEQLEN,
                 ratio=ratio,
                 topk=TOPK,
                 attention_metadata=metadata,
@@ -128,7 +127,6 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 idx_q,
                 idx_k,
                 idx_w,
-                max_seqlen=SEQLEN,
                 ratio=ratio,
                 topk=TOPK,
                 attention_metadata=config.build_attention_metadata(
