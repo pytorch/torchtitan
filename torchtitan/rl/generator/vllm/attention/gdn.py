@@ -21,6 +21,7 @@ Decode and prefill update the paged convolution and SSM state pools directly.
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
@@ -43,6 +44,8 @@ from torchtitan.models.common.attn_gym import (
     recurrent_gdn_decode,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.linear import maybe_gather_tp_input
+from torchtitan.models.qwen3_8_flash_next.gdn import SplitInProjGDN
 from torchtitan.rl.generator.attention.gdn import paged_gdn
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
@@ -386,6 +389,124 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             A_log_H.float(),
             dt_bias_H.float(),
         )
+
+
+def _group_rows_by_section_(weight: torch.Tensor, section_sizes: list[int]) -> None:
+    sections = weight.unflatten(0, (-1, sum(section_sizes))).split(section_sizes, dim=1)
+    weight.copy_(torch.cat([section.flatten(0, 1) for section in sections]))
+
+
+@spmd.local_map(
+    in_types=(
+        None,
+        spmd.PartitionSpec(("dp", "cp"), "tp"),
+        spmd.PartitionSpec(("dp", "cp"), "tp"),
+        spmd.PartitionSpec(("dp", "cp"), "tp"),
+        spmd.PartitionSpec("tp", None),
+        spmd.PartitionSpec("tp"),
+        spmd.PartitionSpec("tp"),
+    ),
+    out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None),
+)
+def _run_inner_gdn(
+    inner_gdn: VLLMInnerGDN,
+    mixed_qkv_TC: torch.Tensor,
+    a_TH: torch.Tensor,
+    b_TH: torch.Tensor,
+    conv_weight_CW: torch.Tensor,
+    A_log_H: torch.Tensor,
+    dt_bias_H: torch.Tensor,
+) -> torch.Tensor:
+    return inner_gdn._forward(
+        mixed_qkv_TC, a_TH, b_TH, conv_weight_CW, None, A_log_H, dt_bias_H
+    )
+
+
+class VLLMSplitInProjGDN(SplitInProjGDN):
+    @dataclass(kw_only=True, slots=True)
+    class Config(SplitInProjGDN.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        for name in ("conv_weight_CW", "float_A_log_H", "float_dt_bias_H"):
+            self.register_buffer(name, None, persistent=False)
+
+    def process_loaded_weights_(self, param_names: set[str]) -> None:
+        q_size, k_size, v_size, z_size, a_size, b_size = self.in_proj_split_sizes
+        if "in_proj.projection.weight" in param_names:
+            _group_rows_by_section_(
+                self.in_proj.projection.weight, [q_size, k_size, v_size]
+            )
+        if "in_proj.gates.weight" in param_names:
+            _group_rows_by_section_(self.in_proj.gates.weight, [z_size, a_size, b_size])
+        derived = {
+            "conv_weight_CW": torch.cat(
+                [self.conv_q.weight, self.conv_k.weight, self.conv_v.weight]
+            ).squeeze(1),
+            "float_A_log_H": self.A_log.to(torch.float32, copy=True),
+            "float_dt_bias_H": self.dt_bias.to(torch.float32, copy=True),
+        }
+        for name, value in derived.items():
+            buffer = getattr(self, name)
+            if buffer is None:
+                setattr(self, name, value)
+            else:
+                buffer.copy_(value)
+
+    @staticmethod
+    @spmd.local_map(
+        in_types=(
+            spmd.PartitionSpec(("dp", "cp"), "tp"),
+            spmd.PartitionSpec(("dp", "cp"), "tp"),
+            [None] * 6,
+            None,
+        ),
+        out_types=(
+            spmd.PartitionSpec(("dp", "cp"), "tp"),
+            spmd.PartitionSpec(("dp", "cp"), "tp"),
+            spmd.PartitionSpec(("dp", "cp"), "tp"),
+            spmd.PartitionSpec(("dp", "cp"), "tp", None),
+        ),
+    )
+    def _split_in_proj(
+        projection_TC: torch.Tensor,
+        gates_TC: torch.Tensor,
+        split_sizes: list[int],
+        value_head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        gate_split_sizes = split_sizes[3:]
+        num_groups = gates_TC.shape[-1] // sum(gate_split_sizes)
+        gate_TC, a_TH, b_TH = gates_TC.split(
+            [num_groups * size for size in gate_split_sizes], dim=-1
+        )
+        return (
+            projection_TC,
+            a_TH,
+            b_TH,
+            gate_TC.unflatten(-1, (-1, value_head_dim)),
+        )
+
+    def forward(self, x_TD, attention_metadata=None):
+        x_TD = maybe_gather_tp_input(self, x_TD)
+        num_tokens = x_TD.shape[0]
+        mixed_qkv_TC, a_TH, b_TH, gate_THV = self._split_in_proj(
+            self.in_proj.projection(x_TD),
+            self.in_proj.gates(x_TD),
+            self.in_proj_split_sizes,
+            self.value_head_dim,
+        )
+        output_THV = _run_inner_gdn(
+            self.inner_attention,
+            mixed_qkv_TC,
+            a_TH,
+            b_TH,
+            self.conv_weight_CW,
+            self.float_A_log_H,
+            self.float_dt_bias_H,
+        )
+        output_THV = self.norm(output_THV, gate_THV)
+        return self.out_proj(output_THV.reshape(num_tokens, -1))
 
 
 def maybe_configure_gdn_hybrid_model(

@@ -70,6 +70,15 @@ def _build_loader(
         )
 
 
+class _RecordingLinear(nn.Linear):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.processed: list[set[str]] = []
+
+    def process_loaded_weights_(self, param_names: set[str]) -> None:
+        self.processed.append(param_names)
+
+
 @pytest.mark.parametrize("loads_checkpoint", [False, True])
 def test_load_model_state_dict_leaves_out_only_frozen_params(
     tmp_path, loads_checkpoint: bool
@@ -84,7 +93,7 @@ def test_load_model_state_dict_leaves_out_only_frozen_params(
     )
     try:
         model = nn.Module()
-        model.layers = nn.ModuleList(nn.Linear(4, 4) for _ in range(2))
+        model.layers = nn.ModuleList(_RecordingLinear(4, 4) for _ in range(2))
         model.register_buffer("scale", torch.ones(4))
         mesh = init_device_mesh("cpu", (1,))
         for block in model.layers:
@@ -121,6 +130,8 @@ def test_load_model_state_dict_leaves_out_only_frozen_params(
         resharded = [call.args[0] for call in reshard.call_args_list]
         assert model.layers[0] in resharded
         assert model.layers[1] not in resharded
+        assert model.layers[0].processed == [{"weight", "bias"}, {"weight"}, {"weight"}]
+        assert model.layers[1].processed == [{"weight", "bias"}, set(), set()]
 
         # Published or not, the frozen parameters are never fetched.
         for name, param in model.named_parameters():

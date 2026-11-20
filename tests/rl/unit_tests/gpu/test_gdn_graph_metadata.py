@@ -579,3 +579,118 @@ def test_packed_decode_routing_matches_recurrence(monkeypatch) -> None:
     (routed, routed_state), (reference, reference_state) = run(False), run(True)
     for got, want in ((routed, reference), (routed_state, reference_state)):
         assert ((got - want).norm() / want.norm()).item() < 1e-2
+
+
+def test_section_major_split_in_proj_gdn_matches_trainer_layout_across_loads(
+    tmp_path,
+):
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import fully_shard
+    from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.config.transform.base import convert_config_type
+    from torchtitan.models.qwen3_8_flash_next import build_model_config
+    from torchtitan.models.qwen3_8_flash_next.attention import QSAIndexerLoss
+    from torchtitan.models.qwen3_8_flash_next.gdn import SplitInProjGDN
+    from torchtitan.rl.generator.model import ModelStateDictLoader
+
+    torch.distributed.init_process_group(
+        "nccl", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        torch.manual_seed(0)
+        config = (
+            build_model_config(
+                "debugmodel",
+                seq_len=64,
+                parallelism=ParallelismConfig(),
+                indexer_loss=QSAIndexerLoss.Config(coeff=1.0),
+            )
+            .layers[0]
+            .attention
+        )
+        num_k_heads, num_v_heads = config.n_key_heads, config.n_heads
+        head_dim = config.key_head_dim
+        trainer = config.build().to("cuda", torch.bfloat16)
+        state_dicts = []
+        for _ in range(2):
+            trainer.init_states()
+            with torch.no_grad():
+                trainer.A_log.uniform_(0, 2)
+            state_dicts.append(
+                {k: v.detach().clone() for k, v in trainer.state_dict().items()}
+            )
+
+        mesh = init_device_mesh("cuda", (1,))
+
+        def build(layer_cls):
+            layer = convert_config_type(config, layer_cls).build()
+            inner = gdn.VLLMInnerGDN.__new__(gdn.VLLMInnerGDN)
+            torch.nn.Module.__init__(inner)
+            inner.prefix, inner.conv_kernel_size = "gdn", config.conv_kernel_size
+            inner.local_num_k_heads, inner.local_num_v_heads = num_k_heads, num_v_heads
+            inner.head_k_dim = inner.head_v_dim = head_dim
+            layer.inner_attention = inner
+            model = torch.nn.Module()
+            model.layer = layer.to("cuda", torch.bfloat16)
+            model.requires_grad_(False)
+            for module in (model.layer, model):
+                fully_shard(module, mesh=mesh, reshard_after_forward=False)
+            model.set_keep_unsharded_storage(True)
+            loader = ModelStateDictLoader(
+                model,
+                checkpointer_config=None,
+                model_state_dict_load_mode="gpu_fetch",
+                frozen_param_keys=frozenset(),
+                hf_assets_path="/hf",
+            )
+            return layer, loader
+
+        (stock, stock_loader), (reordered, reordered_loader) = (
+            build(SplitInProjGDN),
+            build(gdn.VLLMSplitInProjGDN),
+        )
+        num_decodes, prefill = 3, 29
+        num_tokens = num_decodes + prefill
+        packed = _packed_metadata(
+            [0, 1, 2, 3, num_tokens],
+            [40, 40, 40, prefill],
+            [1, 2, 3, 4],
+            max_num_seqs=8,
+            device="cuda",
+        )
+        channels = (2 * num_k_heads + num_v_heads) * head_dim
+        pools = (
+            (torch.randn(5, 3, channels, device="cuda") * 0.5).bfloat16(),
+            torch.randn(5, num_v_heads, head_dim, head_dim, device="cuda") * 0.05,
+        )
+        x = torch.randn(num_tokens, config.in_proj.in_features, device="cuda")
+        x = x.bfloat16()
+
+        context = ForwardContext(
+            no_compile_layers={}, attn_metadata={"gdn": packed}, slot_mapping={}
+        )
+
+        def run(layer):
+            layer.inner_attention.kv_cache = tuple(pool.clone() for pool in pools)
+            with torch.inference_mode(), override_forward_context(context):
+                return [layer(x), *layer.inner_attention.kv_cache]
+
+        addresses = []
+        for state_dict in state_dicts:
+
+            def fetch(params, state_dict=state_dict):
+                with torch.no_grad():
+                    for key, param in params.items():
+                        param.to_local().copy_(state_dict[key.removeprefix("layer.")])
+                return list(params)
+
+            stock_loader.load(fetch)
+            reordered_loader.load(fetch)
+            addresses.append(
+                [t.data_ptr() for t in (*reordered.parameters(), *reordered.buffers())]
+            )
+            for got, want in zip(run(reordered), run(stock), strict=True):
+                assert torch.equal(got, want)
+        assert addresses[0] == addresses[1]
+    finally:
+        torch.distributed.destroy_process_group()
