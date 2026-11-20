@@ -50,12 +50,12 @@ def _write_repo(repo_dir: str) -> None:
         f.write(_REMOTE_CONFIG)
 
 
-def _load(repo_dir: str, **kwargs) -> None:
+def _load(repo_dir: str) -> None:
     config = HFTransformerModel.Config(
         model_config=TitanModelConfig(dim=64, n_layers=2, n_heads=4, n_kv_heads=4)
     )
     config.load_hf_config(
-        hf_model_id=repo_dir, max_context_length=128, deterministic=False, **kwargs
+        hf_model_id=repo_dir, max_context_length=128, deterministic=False
     )
 
 
@@ -72,10 +72,6 @@ class TestRemoteCode(unittest.TestCase):
     def test_default_does_not_run_remote_code(self) -> None:
         _load(self.repo_dir)
         self.assertFalse(os.path.exists(self.marker))
-
-    def test_opt_in_runs_remote_code(self) -> None:
-        _load(self.repo_dir, trust_remote_code=True)
-        self.assertTrue(os.path.exists(self.marker))
 
 
 if __name__ == "__main__":

@@ -156,13 +156,6 @@ _TT_SPECIFIC_ATTRIBUTES = [
     "attn_mask_type",
 ]
 
-# NOTE: This backend instantiates model classes from the installed
-# ``transformers`` package. When a model repo ships an older remote config
-# implementation, mixing that remote config with the newer local model code can
-# drop compatibility attrs the local model expects. Prefer the local
-# ``transformers`` config/model pair for denylisted model types.
-_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v2", "deepseek_v3"})
-
 
 def _get_moe_attr_name(layer: nn.Module) -> str | None:
     """Return the attribute name holding the MoE block on a decoder layer.
@@ -463,27 +456,13 @@ class HFTransformerModel(BaseModel):
             hf_model_id: str,
             max_context_length: int,
             deterministic: bool,
-            trust_remote_code: bool = False,
-            revision: str | None = None,
         ) -> None:
-            """Populate this config from the selected Hugging Face model.
-
-            ``trust_remote_code`` runs config code shipped in the model repo, so
-            enable it only for trusted repos, ideally with a pinned ``revision``.
-            """
-            if trust_remote_code:
-                config_dict, _ = PretrainedConfig.get_config_dict(
-                    hf_model_id, revision=revision
-                )
-                trust_remote_code = (
-                    config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
-                )
+            """Populate this config from the selected Hugging Face model."""
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
+                trust_remote_code=False,
             )
 
             # For composite (VL) models, use the nested text config so we

@@ -163,16 +163,12 @@ def build_model_config(
     seq_len: int,
     hf_model: str,
     deterministic: bool = False,
-    trust_remote_code: bool = False,
-    revision: str | None = None,
 ) -> HFTransformerModel.Config:
     config = copy.deepcopy(MODEL_FLAVORS[flavor])
     config.load_hf_config(
         hf_model_id=hf_model,
         max_context_length=seq_len,
         deterministic=deterministic,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
     )
     return config
 
