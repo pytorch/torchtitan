@@ -27,7 +27,7 @@ class SearchR1Sample:
 
 
 class SearchR1Dataset(RLDataset):
-    """Endless, seeded stream of Search-R1 QA samples.
+    """Seeded stream of Search-R1 QA samples: endless, or one pass if not `repeat`.
 
     The NQ/HotpotQA parquet (columns ``question``, ``golden_answers``, ``data_source``)
     is downloaded from the HF Hub dataset ``PeterJinGo/nq_hotpotqa_train``. Row order
@@ -85,6 +85,7 @@ class SearchR1Dataset(RLDataset):
 
         self._rng = random.Random(config.seed)
         self._shuffle = config.shuffle
+        self._repeat = config.repeat
         self._order = list(range(len(self._questions)))
         if self._shuffle:
             self._rng.shuffle(self._order)
@@ -95,6 +96,8 @@ class SearchR1Dataset(RLDataset):
 
     def __next__(self) -> SearchR1Sample:
         if self._pos >= len(self._order):
+            if not self._repeat:
+                raise StopIteration
             if self._shuffle:
                 self._rng.shuffle(self._order)
             self._pos = 0
