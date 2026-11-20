@@ -42,7 +42,12 @@ class TrainerHandle(ServiceHandle):
 
     by_dp_rank: list[Any]
     """``by_dp_rank[i]`` reaches the pp * cp * tp actors at DP rank ``i``, which train
-    the batcher's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
+    the plan's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
+
+    leader_by_dp_rank: list[Any]
+    """``leader_by_dp_rank[i]`` reaches the one actor that packs DP rank ``i``'s column and
+    broadcasts it to the others (pipeline stage 0, CP and TP rank 0), e.g.
+    ``leader_by_dp_rank[i].receive_replica_column.call_one(...)``."""
 
 
 class ActorSystem(Configurable, abc.ABC):

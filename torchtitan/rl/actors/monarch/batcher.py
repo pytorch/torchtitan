@@ -15,12 +15,8 @@ from monarch.actor import Actor, endpoint
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.actors.monarch.rdma_object import (
-    create_cuda_context_to_silence_monarch_log,
-    MonarchRDMAObject,
-)
-from torchtitan.rl.rollout.types import RolloutGroup
-from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
+from torchtitan.rl.rollout.types import RolloutGroupSummary
+from torchtitan.rl.trainer.batcher import Batcher, StepPlan
 
 
 class _BatcherActorEndpoints:
@@ -33,8 +29,6 @@ class _BatcherActorEndpoints:
         num_prompts_per_train_step: int,
         dp_degree: int,
         num_pp_microbatches: int = 1,
-        pad_id: int,
-        temperature: float,
         output_dir: str,
         enable_structured_logging: bool,
         vision_processor: VisionProcessor.Config | None = None,
@@ -46,8 +40,6 @@ class _BatcherActorEndpoints:
             rank=0,
             enable=enable_structured_logging,
         )
-        if config.rdma_min_tensor_bytes is not None:
-            create_cuda_context_to_silence_monarch_log()
         super().__init__(
             config,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
@@ -55,30 +47,21 @@ class _BatcherActorEndpoints:
             num_prompts_per_train_step=num_prompts_per_train_step,
             dp_degree=dp_degree,
             num_pp_microbatches=num_pp_microbatches,
-            pad_id=pad_id,
-            temperature=temperature,
-            register_rdma_object=MonarchRDMAObject.register,
             vision_processor=vision_processor,
         )
 
     @endpoint
     async def add_group(
-        self, *, rollout_group: RolloutGroup
-    ) -> tuple[TrainerStepBatch | None, bool, float]:
+        self, *, summary: RolloutGroupSummary
+    ) -> tuple[StepPlan | None, bool, float]:
         """`Batcher.add_group`'s result plus the seconds this handler took; the caller subtracts
         them from its wall time to get the hop's transfer time (see `compute_hop_metrics`).
 
         Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
         stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
         start = time.perf_counter()
-        training_batch, group_is_trainable = super().add_group(
-            rollout_group=rollout_group
-        )
+        training_batch, group_is_trainable = super().add_group(summary=summary)
         return training_batch, group_is_trainable, time.perf_counter() - start
-
-    @endpoint
-    async def maybe_release_oldest_batch(self) -> None:
-        await super().maybe_release_oldest_batch()
 
     @endpoint
     async def sync_log_step(self, step: int) -> None:
@@ -97,11 +80,10 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
         batcher = this_host().spawn_procs(per_host={"cpus": 1}).spawn(
             "batcher",
             BatcherActor,
-            Batcher.Config(rdma_min_tensor_bytes=1024),
+            Batcher.Config(),
             num_prompts_per_train_step=2,
             **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
         )
-        await batcher.add_group.call_one(rollout_group=group0)  # -> (None, True, handler_s)
-        await batcher.add_group.call_one(rollout_group=group1)  # -> (batch of RDMAMicrobatches, True, handler_s)
-        batcher.maybe_release_oldest_batch.broadcast()  # once every trainer rank has read group1's batch
+        await batcher.add_group.call_one(summary=summary0)  # -> (None, True, handler_s)
+        await batcher.add_group.call_one(summary=summary1)  # -> (StepPlan, True, handler_s)
     """

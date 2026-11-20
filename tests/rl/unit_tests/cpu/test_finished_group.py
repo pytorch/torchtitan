@@ -9,20 +9,28 @@
 from __future__ import annotations
 
 import pickle
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 
 import numpy as np
+import pytest
 from renderers import PlaceholderRange
 
-from torchtitan.rl.controller.metrics import compute_rollout_metrics
+from torchtitan.rl.controller.metrics import (
+    compute_hop_metrics,
+    compute_rollout_metrics,
+)
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.finished_group import (
     finish_rollout_group,
     slim_rollout_group,
 )
+from torchtitan.rl.rollout.packed_group import unpack_rollout_group
 from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
+
+from tests.rl.unit_tests.cpu.test_rollout_utils import rollout_to_training_samples
 
 _IMAGE_BYTES = 1 << 20
 
@@ -34,14 +42,17 @@ class _TurnWithTopkLogprobs(RolloutTurn):
     completion_topk_logprobs: np.ndarray
 
 
-def _group(*, group_size: int = 8, with_image: bool = True) -> RolloutGroup:
-    """A scored group whose rollouts each read the same image file into their own bytes."""
+def _group(
+    *, group_size: int = 8, with_image: bool = True, image_per_rollout: bool = False
+) -> RolloutGroup:
+    """A scored group whose rollouts each read the same image file (or with
+    `image_per_rollout`, their own file) into their own bytes."""
     rollouts = []
     for rollout_id in range(group_size):
         images = (
             (
                 PromptImage(
-                    hash_value="h",
+                    hash_value=f"h{rollout_id}" if image_per_rollout else "h",
                     source_path="a.png",
                     grid_thw=(1, 2, 2),
                     # A copy per rollout, as each env reads the file.
@@ -107,9 +118,6 @@ def test_slim_rollout_group_drops_only_the_logging_fields() -> None:
         assert slim_turn.completion_topk_logprobs is turn.completion_topk_logprobs
         assert slim_turn.completion_logprobs is turn.completion_logprobs
         assert slim_turn.prompt_delta_images == turn.prompt_delta_images
-        assert slim_turn.prompt_delta_images[0].data is (
-            slim.rollouts[0].turns[0].prompt_delta_images[0].data
-        )
         assert slim_turn.rollout_id == turn.rollout_id
         assert (slim_turn.prompt_messages, slim_turn.completion_message) == ([], None)
         assert (slim_turn.env_messages, slim_turn.env_rewards, slim_turn.metrics) == (
@@ -122,21 +130,37 @@ def test_slim_rollout_group_drops_only_the_logging_fields() -> None:
     assert slim.metrics == group.metrics
 
 
-def test_a_slim_group_pickles_each_image_file_once() -> None:
-    group = _group()
-    assert len(pickle.dumps(group)) > 8 * _IMAGE_BYTES
+@pytest.mark.parametrize(
+    "prompt_prefix_len, prompt_delta_token_ids, match",
+    [
+        # The full prompt as the delta: `split_prompt` would store (6, [7]).
+        (0, [0, 1, 2, 3, 5, 6, 7], "could reuse more"),
+        # Past the previous turn's end: its prompt + completion has 6 tokens.
+        (9, [7], "previous turn has only 6"),
+    ],
+)
+def test_finish_rollout_group_checks_every_rollouts_prompt_prefixes(
+    prompt_prefix_len: int, prompt_delta_token_ids: list[int], match: str
+) -> None:
+    """The prompt prefix checks read token values, so the worker runs them before packing, on
+    every rollout: the batcher gets the summary and decides from lengths only."""
+    group = _group(group_size=2, with_image=False)
+    (turn,) = group.rollouts[1].turns
+    # Previous prompt + completion: [0, 1, 2, 3, 5, 6].
+    group.rollouts[1].turns.append(
+        replace(
+            turn,
+            prompt_prefix_len=prompt_prefix_len,
+            prompt_delta_token_ids=np.array(prompt_delta_token_ids, dtype=np.int32),
+        )
+    )
 
-    slim = slim_rollout_group(group)
-
-    images = [
-        image
-        for rollout in slim.rollouts
-        for turn in rollout.turns
-        for image in turn.prompt_delta_images
-    ]
-    assert len(images) == 8
-    assert len({id(image.data) for image in images}) == 1
-    assert len(pickle.dumps(slim)) < 2 * _IMAGE_BYTES
+    with pytest.raises(ValueError, match=match):
+        finish_rollout_group(
+            group,
+            for_training=True,
+            encoder=RolloutSampleEncoder(RolloutSampleRecorder.Config()),
+        )
 
 
 def test_finish_rollout_group_for_training_logs_records_then_slims() -> None:
@@ -156,13 +180,70 @@ def test_finish_rollout_group_for_training_logs_records_then_slims() -> None:
 
     # Metrics and recorder lines come from the full group (messages, reward breakdown).
     assert (
-        m.MetricsProcessor._aggregate_metrics(finished.group.metrics)
+        m.MetricsProcessor._aggregate_metrics(finished.summary.group.metrics)
         == expected_metrics
     )
     assert "rollout_reward/component/correct/mean" in expected_metrics
     assert finished.recorder_lines == expected_lines
     assert '"sort: b a"' in finished.recorder_lines
-    for rollout in finished.group.rollouts:
+    # The group is slim and packed: the summary has no bytes, the regions every array and one
+    # copy of the image file.
+    for rollout in finished.summary.group.rollouts:
         assert rollout.reward_breakdown == {}
         assert rollout.turns[0].prompt_messages == []
+        assert len(rollout.turns[0].completion_token_ids) == 0
+    unpacked_turn = unpack_rollout_group(finished.packed).rollouts[0].turns[0]
+    np.testing.assert_array_equal(unpacked_turn.completion_token_ids, [5, 6])
+    assert unpacked_turn.completion_topk_logprobs.shape == (2, 4)
+    assert unpacked_turn.prompt_messages == []
+    assert _IMAGE_BYTES < finished.packed.num_bytes < 2 * _IMAGE_BYTES
     assert len(pickle.dumps(finished)) < 2 * _IMAGE_BYTES
+
+
+def test_a_leaders_rollouts_carry_no_group_metrics_and_build_the_same_samples() -> None:
+    """What the controller keeps of a training group (`FinishedRolloutGroup.packed`) and sends a
+    trainer DP replica leader (`PackedRolloutGroup.select`) has no group metrics, messages or
+    logs, and the leader builds the same training samples from it as from the full group."""
+    group = _group(group_size=3, with_image=False)
+    builder = TrainingSampleBuilder(TrainingSampleBuilder.Config())
+    expected = [
+        sample
+        for rollout in group.rollouts
+        for sample in rollout_to_training_samples(rollout)
+    ]
+    finished = finish_rollout_group(
+        group,
+        for_training=True,
+        encoder=RolloutSampleEncoder(RolloutSampleRecorder.Config()),
+    )
+    # As the controller adds them after `run_group`.
+    finished.summary.group.metrics.extend(
+        compute_hop_metrics("run_group", wall_s=[1.0], handler_s=[0.9])
+    )
+    specs = builder.decide(
+        rollout_group=finished.summary.group,
+        turn_lengths=finished.summary.turn_lengths,
+        num_mtp_layers=0,
+    ).training_sample_specs
+
+    leader_group = unpack_rollout_group(finished.packed.select({0, 1, 2}))
+
+    assert finished.summary.group.metrics
+    assert leader_group.metrics == []
+    for rollout in leader_group.rollouts:
+        assert (rollout.logs, rollout.reward_breakdown) == ({}, {})
+        for turn in rollout.turns:
+            assert (turn.prompt_messages, turn.completion_message) == ([], None)
+            assert (turn.env_messages, turn.metrics) == ([], [])
+    samples = builder.materialize(
+        training_sample_specs=specs, rollout_group=leader_group
+    )
+    assert len(samples) == len(expected) == 3
+    for sample, expected_sample in zip(samples, expected, strict=True):
+        for sample_field in fields(sample):
+            value = getattr(sample, sample_field.name)
+            expected_value = getattr(expected_sample, sample_field.name)
+            if isinstance(value, np.ndarray):
+                np.testing.assert_array_equal(value, expected_value)
+            else:
+                assert value == expected_value

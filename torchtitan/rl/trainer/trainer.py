@@ -11,17 +11,21 @@ import pickle
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import torch
+import torch.distributed as dist
 import torchstore as ts
 from torch.distributed.checkpoint.stateful import Stateful
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import Configurable, PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
@@ -33,8 +37,12 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rdma_object import RDMAMicrobatch, RDMAMicrobatchPrefetcher
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+from torchtitan.rl.trainer.batcher import MicrobatchPacker
+from torchtitan.rl.trainer.microbatch_group_reader import (
+    MicrobatchGroupReader,
+    ReplicaColumn,
+)
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
@@ -61,6 +69,43 @@ class MirroredState(Stateful):
         self.loaded = pickle.loads(state_dict["state"])
 
 
+def build_dp_replica_group(
+    parallelism_context: ParallelismContext, *, timeout: timedelta
+) -> tuple[dist.ProcessGroup | None, bool]:
+    """This rank's DP replica group, and whether this rank leads it. Every trainer rank calls
+    it (`new_subgroups_by_enumeration` is collective).
+
+    A DP replica is the pp * cp * tp ranks at one DP rank of the dense mesh:
+    they train the same microbatches, which the replica's leader (its first rank: pipeline
+    stage 0, CP and TP rank 0) packs and broadcasts. The group is gloo, so the reader thread's
+    broadcasts stay off the NCCL communicators the main thread's collectives use. A replica of
+    one rank has no group.
+
+    Example:
+        # pp=2, dp=2, tp=2: ranks by DP rank [[0, 1, 4, 5], [2, 3, 6, 7]]
+        build_dp_replica_group(parallelism_context, timeout=timeout)
+        # on rank 4 -> (the group of ranks 0, 1, 4, 5, False); on rank 0 -> (that group, True)
+    """
+    dense_mesh = parallelism_context.get_optional_mesh(
+        ["pp", "dp_replicate", "dp_shard", "cp", "tp"], include_singleton_axes=True
+    )
+    assert dense_mesh is not None
+    # [dp_replicate * dp_shard][pp * cp * tp] global ranks: the DP rank folds dp_replicate
+    # and dp_shard, and each row is in (pp, cp, tp) order.
+    ranks_by_dp_rank = (
+        dense_mesh.mesh.permute(1, 2, 0, 3, 4)
+        .reshape(parallelism_context.dp_replicate * parallelism_context.dp_shard, -1)
+        .tolist()
+    )
+    [replica_ranks] = [ranks for ranks in ranks_by_dp_rank if dist.get_rank() in ranks]
+    if len(replica_ranks) == 1:
+        return None, True
+    replica_group, _ = dist.new_subgroups_by_enumeration(
+        ranks_by_dp_rank, timeout=timeout, backend="gloo"
+    )
+    return replica_group, dist.get_rank() == replica_ranks[0]
+
+
 @dataclass(frozen=True, slots=True)
 class OptimizerStepOutput:
     """Result returned by `Trainer.optim_step` to the controller."""
@@ -75,6 +120,9 @@ class Trainer(Configurable):
     Exposes separate `forward_backward` and `optim_step` endpoints, called
     explicitly by the controller.
 
+    Each DP replica's leader (its first rank) packs the replica's microbatches from the step
+    plan and broadcasts them to the replica's other ranks (`MicrobatchGroupReader`).
+
     Args:
         config: Trainer.Config with all model/optimizer/parallelism settings.
         precision: Parameter, compute, and gradient-reduction dtypes, from
@@ -82,6 +130,14 @@ class Trainer(Configurable):
         max_num_documents: Fixed varlen metadata capacity configured by the batcher.
         hf_assets_path: Path to HF assets folder for checkpoint loading.
             Shared with the generator (both load from the same HF checkpoint).
+        training_sample_builder: The batcher's builder config; leaders materialize the
+            planned samples with it.
+        microbatch_packer: The batcher's packer config; leaders pack each planned
+            microbatch with it.
+        pad_id: Token id of the packed padding (the tokenizer's EOS).
+        temperature: The generators' sampling temperature, which the loss divides logits by.
+        vision_processor: Turns each microbatch's image files into pixel values; None
+            without images.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -99,6 +155,11 @@ class Trainer(Configurable):
         max_num_documents: int | None,
         hf_assets_path: str = "",
         output_dir: str,
+        training_sample_builder: TrainingSampleBuilder.Config,
+        microbatch_packer: MicrobatchPacker.Config,
+        pad_id: int,
+        temperature: float,
+        vision_processor: VisionProcessor.Config | None,
     ):
         init_logger()
         # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -181,8 +242,29 @@ class Trainer(Configurable):
         else:
             self.dp_size = 1
             self.dp_rank = 0
-        # Batches read over RDMA so far; the next batch's `batch_index` must equal it.
-        self._num_rdma_batches_read = 0
+
+        self._replica_group, self._is_replica_leader = build_dp_replica_group(
+            engine.parallelism_context,
+            timeout=timedelta(seconds=config.comm.train_timeout_seconds),
+        )
+        parallelism = config.parallelism
+        self._num_microbatches_per_group = (
+            parallelism.num_pp_microbatches
+            if parallelism.pipeline_parallel_degree > 1
+            else 1
+        )
+        self._training_sample_builder = training_sample_builder.build()
+        self._microbatch_packer = microbatch_packer.build(
+            num_tokens_per_microbatch_per_dp_rank=(
+                config.training.num_tokens_per_microbatch_per_dp_rank
+            ),
+            max_context_length=config.model.max_context_length,
+            pad_id=pad_id,
+            temperature=temperature,
+            vision_processor=vision_processor,
+        )
+        # Set on the leader by `receive_replica_column` before each `forward_backward`.
+        self._replica_column: ReplicaColumn | None = None
 
     @property
     def policy_version(self) -> int:
@@ -254,22 +336,29 @@ class Trainer(Configurable):
         )
         return out
 
+    async def receive_replica_column(self, column: ReplicaColumn) -> None:
+        """On a DP replica's leader: keep the replica's column of the next step's plan and the
+        rollouts it names, for the next `forward_backward` to pack."""
+        assert self._is_replica_leader and self._replica_column is None
+        self._replica_column = column
+
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        microbatch_groups: (
-            list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
-        ),
+        *,
+        num_microbatch_groups: int,
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float] | None:
         """Run one optimizer step's forward/backward microbatches.
 
+        The replica's leader packs its column (from `receive_replica_column`) one microbatch
+        group at a time and broadcasts each group to the replica's other ranks
+        (`MicrobatchGroupReader`, which says how much of that training hides).
+
         Args:
-            microbatch_groups: This rank's column of the batcher's
-                `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
-                as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
-                read a few ahead of training.
+            num_microbatch_groups: Groups in this replica's column. Under PP, each group runs
+                as one pipeline step.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -280,10 +369,10 @@ class Trainer(Configurable):
                 ranks without the last pipeline stage, which compute no loss.
 
         Example:
-            # dp_degree=2, tp=2, one microbatch per group,
-            # grid = [[[mb_00, mb_01]], [[mb_10, mb_11]]]
-            # ranks 0, 1 (DP rank 0) get microbatch_groups = [[mb_00], [mb_10]]
-            # ranks 2, 3 (DP rank 1) get microbatch_groups = [[mb_01], [mb_11]]
+            # dp_degree=2, tp=2, one microbatch per group, plan grid
+            #   [[[specs_00, specs_01]], [[specs_10, specs_11]]]
+            # rank 0 (leader of DP rank 0) packs [[mb_00], [mb_10]] and sends them to rank 1;
+            # rank 2 (leader of DP rank 1) packs [[mb_01], [mb_11]] and sends them to rank 3
         """
         logger.debug(
             f"{os.getpid()=} Trainer forward_backward "
@@ -291,42 +380,26 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
-        microbatches = [
-            microbatch for group in microbatch_groups for microbatch in group
-        ]
-        # The batcher pads every microbatch to the same token count.
+        column, self._replica_column = self._replica_column, None
+        # The controller sends each leader its column before every forward_backward.
+        assert (column is not None) == self._is_replica_leader
+        reader = MicrobatchGroupReader(
+            num_microbatch_groups=num_microbatch_groups,
+            replica_group=self._replica_group,
+            column=column,
+            training_sample_builder=self._training_sample_builder,
+            microbatch_packer=self._microbatch_packer,
+        )
+        # The reader frees each rollout group once its samples exist.
+        del column
+        # The packer pads every microbatch to the same token count.
         self._step_num_tokens_per_dp_rank = (
-            len(microbatches)
+            num_microbatch_groups
+            * self._num_microbatches_per_group
             * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
-        uses_rdma = bool(microbatches) and isinstance(microbatches[0], RDMAMicrobatch)
-        if uses_rdma:
-            # A wrong column, or a batch read twice or out of order, fails here instead of training.
-            # Both counters start at 0 in their own process, and every registered batch trains in order.
-            for microbatch_index, microbatch in enumerate(microbatches):
-                identity = (
-                    microbatch.batch_index,
-                    microbatch.dp_rank,
-                    microbatch.microbatch_index,
-                )
-                expected = (self._num_rdma_batches_read, self.dp_rank, microbatch_index)
-                if identity != expected:
-                    raise ValueError(
-                        "RDMA microbatch (batch_index, dp_rank, microbatch_index) is "
-                        f"{identity}, expected {expected}."
-                    )
-            self._num_rdma_batches_read += 1
-            # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
-            # and broadcast it, to cut the trainer's reads by cp * tp. Needs a per-replica group.
-            # The controller rejects RDMA with PP, so every group holds one microbatch.
-            microbatch_groups = RDMAMicrobatchPrefetcher(microbatches)
-        else:
-            microbatch_groups = [
-                [microbatch.preprocess_images() for microbatch in group]
-                for group in microbatch_groups
-            ]
         result = engine.forward_backward(
-            microbatch_groups=microbatch_groups,
+            microbatch_groups=reader,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
@@ -352,19 +425,22 @@ class Trainer(Configurable):
                 )
 
         metrics = combine_microbatch_metrics(microbatch_metrics)
-        if uses_rdma:
-            # The slowest rank's total read time this step, hidden or not (max over the loss mesh).
-            read_microbatches_s = torch.tensor(
-                microbatch_groups.read_s, device=engine.device
+        # The slowest rank's times this step (max over the loss mesh), totals, hidden or not:
+        # its replica leader's packing (the leader sends it with each group, so the last
+        # pipeline stage reports it too) and its own broadcast time.
+        max_reduced_timing = {
+            "timing/trainer/pack_microbatches/max": torch.tensor(
+                reader.pack_s, device=engine.device
+            ),
+            "timing/trainer/broadcast_microbatches/max": torch.tensor(
+                reader.broadcast_s, device=engine.device
+            ),
+        }
+        metrics.update(
+            self._reduce_forward_backward_metrics(
+                sum_reduced_metrics={}, max_reduced_metrics=max_reduced_timing
             )
-            metrics.update(
-                self._reduce_forward_backward_metrics(
-                    sum_reduced_metrics={},
-                    max_reduced_metrics={
-                        "timing/trainer/read_microbatches/max": read_microbatches_s
-                    },
-                )
-            )
+        )
         return metrics
 
     @sl.log_trace_span("optim_step")

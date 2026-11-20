@@ -354,8 +354,8 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     inner_attention = config.trainer.model.layers[0].attention.inner_attention
     assert isinstance(inner_attention, FlexInnerAttention.Config)
     block_size = inner_attention.block_size
-    config.async_loop.batcher = dataclasses.replace(
-        config.async_loop.batcher, per_sample_pad_multiple=block_size
+    config.async_loop.batcher.microbatch_packer = dataclasses.replace(
+        config.async_loop.batcher.microbatch_packer, per_sample_pad_multiple=block_size
     )
     return config
 
