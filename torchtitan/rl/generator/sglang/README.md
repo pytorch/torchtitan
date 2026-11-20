@@ -178,13 +178,12 @@ recurrent states.
 
 ### The state pool caps running requests
 
-SGLang splits an engine's memory between the KV pool and a fixed state pool,
-by `mamba_full_memory_ratio` (default 0.9: the state pool gets 0.9 / 1.9 of
-it). With the radix cache, a running request needs 3 state slots, so SGLang
-runs at most `state slots // 3` requests and queues the rest, even when the KV
-pool has room. vLLM keeps KV and states in one pool and needs no split
-([sgl-project/sglang#49676](https://github.com/sgl-project/sglang/issues/49676)
-asks SGLang to do the same).
+By default, SGLang splits an engine's memory between the KV pool and a fixed
+state pool, by `mamba_full_memory_ratio` (default 0.9: the state pool gets
+0.9 / 1.9 of it). With the radix cache, a running request needs 3 state slots,
+so SGLang runs at most `state slots // 3` requests and queues the rest, even
+when the KV pool has room. Either size the state pool for the workload, or use
+SGLang's unified memory, which removes the split (see below).
 
 Size the state pool for the requests an engine runs at once: its share of the
 rollouts in flight, `max_active_rollout_groups x num_samples_per_prompt /
@@ -207,9 +206,13 @@ queued requests 4-8 s each with 12% of the KV pool in use.
 
 With SGLang's unified memory (`extra_server_args={"enable_unified_memory":
 True}`), the full attention layers' KV cache and the GDN / KDA layers' conv and
-recurrent states share one pool, and KV can use any state slot no request holds.
-The state pool size then mainly sets the running-request cap, so the default
-ratio works for both workloads without tuning.
+recurrent states share one pool, as in vLLM, and KV can use any state slot no
+request holds. The state pool size then mainly sets the running-request cap, so
+the default ratio works for both kinds of workload without tuning. It is not
+free: at equal running requests it adds about 1 ms to a ~25 ms decode step. On
+Qwen3.5-9B (setup above, `max_num_seqs=512`), it finished within 4-6% of the
+best tuned ratio on both a KV-bound and a state-bound workload, while each tuned
+ratio was 11-14% slower on the other one.
 
 ## Multi-turn sessions
 
