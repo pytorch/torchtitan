@@ -176,43 +176,15 @@ state entries of each slot (`TorchTitanKDAConfig`), so its radix cache snapshots
 them with the state; at head dim 128, they take 1.25x the memory of the
 recurrent states.
 
-### The state pool caps running requests
+### KV and states share one pool
 
-By default, SGLang splits an engine's memory between the KV pool and a fixed
-state pool, by `mamba_full_memory_ratio` (default 0.9: the state pool gets
-0.9 / 1.9 of it). With the radix cache, a running request needs 3 state slots,
-so SGLang runs at most `state slots // 3` requests and queues the rest, even
-when the KV pool has room. Either size the state pool for the workload, or use
-SGLang's unified memory, which removes the split (see below).
-
-Size the state pool for the requests an engine runs at once: its share of the
-rollouts in flight, `max_active_rollout_groups x num_samples_per_prompt /
-number of generators` (`max_num_seqs` is about 2x that, as headroom). Pass
-`max_mamba_cache_size` (3 x those requests) or `mamba_full_memory_ratio` in
-`extra_server_args`; the rest goes to KV. SGLang logs `max_running_requests`
-and `max_total_num_tokens` when it builds.
-
-Qwen3.5-9B at TP 1, `gpu_memory_limit=0.86`, on GB300 (~48 MiB per state slot):
-
-| Setting | State slots | Max running | KV tokens | Fits |
-|---|---|---|---|---|
-| default (ratio 0.9) | ~2,200 | ~730 | 3.77M | -- |
-| ratio 0.25 | 910 | 303 | 5.73M | Terminal-Bench: 131K-token contexts, ~70-110 running, KV-bound |
-| `max_mamba_cache_size=1536` | 1,536 | 512 | 4.75M | DAPO-Math: 8K-token answers, 512 running |
-
-Terminal-Bench at the default ratio filled the KV pool with 7% of the state
-slots in use and 29-46 requests queued per engine; DAPO-Math at ratio 0.25
-queued requests 4-8 s each with 12% of the KV pool in use.
-
-With SGLang's unified memory (`extra_server_args={"enable_unified_memory":
-True}`), the full attention layers' KV cache and the GDN / KDA layers' conv and
-recurrent states share one pool, as in vLLM, and KV can use any state slot no
-request holds. The state pool size then mainly sets the running-request cap, so
-the default ratio works for both kinds of workload without tuning. It is not
-free: at equal running requests it adds about 1 ms to a ~25 ms decode step. On
-Qwen3.5-9B (setup above, `max_num_seqs=512`), it finished within 4-6% of the
-best tuned ratio on both a KV-bound and a state-bound workload, while each tuned
-ratio was 11-14% slower on the other one.
+For GDN and KDA models, the engine turns on SGLang's unified memory: the full
+attention layers' KV cache and the GDN / KDA states share one pool, so memory
+that no state uses can hold KV, and the other way around. A running request
+still takes 3 state slots, so SGLang runs at most `state slots // 3` requests
+(about 714 for Qwen3.5-9B at TP 1, `gpu_memory_limit=0.86`, on GB300); for
+more, raise `max_mamba_cache_size` in `extra_server_args`. Unified memory costs
+about 1 ms of a ~25 ms decode step.
 
 ## Multi-turn sessions
 

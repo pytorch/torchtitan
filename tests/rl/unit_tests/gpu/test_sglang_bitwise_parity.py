@@ -494,24 +494,21 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     reset_kv_cache_on_model_state_dict_load = True
     reuses_shared_prompt = False
 
-
-class TestSGLangBitwiseParityGDNUnifiedMemory(TestSGLangBitwiseParityGDN):
-    """``TestSGLangBitwiseParityGDN`` on SGLang's unified memory (KV and GDN states
-    in one pool), with HiCache backing them up to host memory."""
-
-    extra_server_args = {
-        "enable_unified_memory": True,
-        "enable_hierarchical_cache": True,
-        "hicache_size": 8,
-    }
-
     def test_runs_on_unified_memory(self):
-        """SGLang built the unified pool, not separate KV and state pools."""
+        """The engine runs GDN models on SGLang's unified pool, not on separate KV
+        and state pools."""
         from sglang.srt.mem_cache.kv.alloc.chain import ChainAllocator
 
         self.assertIsInstance(
             self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
         )
+
+
+class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
+    """``TestSGLangBitwiseParityGDN`` with HiCache backing KV and GDN states up to
+    host memory."""
+
+    extra_server_args = {"enable_hierarchical_cache": True, "hicache_size": 8}
 
     def test_trainer_vs_sglang_decode_after_host_load_back(self):
         """Test 3 with the previous turns evicted from GPU memory, so the next turns
