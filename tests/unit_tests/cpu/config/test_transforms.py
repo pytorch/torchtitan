@@ -8,7 +8,7 @@
 
 import copy
 import unittest
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, fields, replace
 
 import spmd_types as spmd
 
@@ -842,6 +842,45 @@ class _RecordedLoRA(LoRATransform):
         return model
 
 
+class _StandInQuantizedLinear(Linear):
+    """Stands in for a quantized Linear such as MXFP8Linear, which needs torchao
+    and an SM100 GPU."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+
+@dataclass(kw_only=True, slots=True)
+class _StandInLinearQuantization(QuantizationTransform):
+    """Converts the stock projection configs whose FQN contains one of ``fqns``,
+    as MXFP8LinearTransform does."""
+
+    fqns: list[str] = field(default_factory=list)
+
+    def transform(self, model):
+        stock_config_types = (
+            Linear.Config,
+            ColumnParallelLinear.Config,
+            RowParallelLinear.Config,
+        )
+        targets = [
+            entry
+            for entry in model.traverse(Linear.Config)
+            if type(entry[1]) in stock_config_types
+            and any(target_fqn in entry[0] for target_fqn in self.fqns)
+        ]
+        for _fqn, config, parent, attr in targets:
+            new_config = _StandInQuantizedLinear.Config(
+                **{f.name: getattr(config, f.name) for f in fields(Linear.Config)}
+            )
+            if isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+        return model
+
+
 class TestQuantizationAndLMHeadRelations(unittest.TestCase):
     @staticmethod
     def _model_config():
@@ -871,12 +910,35 @@ class TestQuantizationAndLMHeadRelations(unittest.TestCase):
 
         self.assertIsInstance(model.lm_head, HiMidLoLinear.Config)
 
-    def test_quantization_conflicts_with_fp32_lm_head(self):
+    def test_quantization_composes_with_fp32_lm_head(self):
+        quantization = _StandInLinearQuantization(fqns=["layers."])
         for transforms in (
-            [LMHeadFP32OutputTransform(), MXFP8LinearTransform()],
-            [MXFP8LinearTransform(), LMHeadFP32OutputTransform()],
+            [LMHeadFP32OutputTransform(), quantization],
+            [quantization, LMHeadFP32OutputTransform()],
         ):
-            with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            model = transform_model_config_(self._model_config(), transforms)
+
+            self.assertIsInstance(model.lm_head, HiMidLoLinear.Config)
+            layer_linears = [
+                linear_config
+                for fqn, linear_config, _, _ in model.traverse(Linear.Config)
+                if fqn.startswith("layers.")
+            ]
+            self.assertTrue(layer_linears)
+            for linear_config in layer_linears:
+                self.assertIsInstance(linear_config, _StandInQuantizedLinear.Config)
+
+    def test_fp32_lm_head_rejects_a_quantized_lm_head(self):
+        # Quantization runs first in either order, so the lm_head transform
+        # finds the quantized lm_head.
+        quantization = _StandInLinearQuantization(fqns=["lm_head"])
+        for transforms in (
+            [LMHeadFP32OutputTransform(), quantization],
+            [quantization, LMHeadFP32OutputTransform()],
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "is a _StandInQuantizedLinear.Config"
+            ):
                 transform_model_config_(self._model_config(), transforms)
 
     def test_dense_quantization_conflicts_with_async_tensor_parallel(self):

@@ -34,6 +34,7 @@ from torchtitan.config import (
 )
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
+    apply_transforms,
     BatchInvariantFlexTransform,
     ModelConfigTransform,
     MXFP8LinearTransform,
@@ -306,11 +307,11 @@ def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchControllerWithLauncher.Config":
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
     """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
     config = rl_grpo_qwen3_0_6b_varlen()
-    # TODO: Allow LMHeadFP32OutputTransform and QuantizationTransform to
-    # co-exist, since they target different layers
-    transform = MXFP8LinearTransform(fqns=["layers."])
-    config.trainer.model = transform.transform(config.trainer.model)
-    config.generator.model = transform.transform(config.generator.model)
+    # Quantize only the decoder layers: the lm_head keeps the fp32-output
+    # HiMidLoLinear that the base recipe set.
+    transforms: list[ModelConfigTransform] = [MXFP8LinearTransform(fqns=["layers."])]
+    config.trainer = apply_transforms(config.trainer, transforms)
+    config.generator = apply_transforms(config.generator, transforms)
     return config
 
 

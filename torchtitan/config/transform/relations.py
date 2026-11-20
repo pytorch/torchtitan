@@ -41,6 +41,9 @@ _BUILTIN_PRECEDES: tuple[PrecedenceRelation, ...] = (
     # lm_head convert only stock projection configs, so they run first.
     (QuantizationTransform, LoRATransform),
     (LMHeadFP32OutputTransform, LoRATransform),
+    # Quantization and the fp32 lm_head must target different Linears. Running
+    # quantization first lets the lm_head transform reject a quantized lm_head.
+    (QuantizationTransform, LMHeadFP32OutputTransform),
 )
 
 # Each pair is unordered.
@@ -54,9 +57,6 @@ _BUILTIN_CONFLICTS: tuple[ConflictRelation, ...] = (
     # quantization touches only routed experts, which async TP never converts.
     (AsyncTensorParallelTransform, MXFP8LinearTransform),
     (AsyncTensorParallelTransform, NVFP4LinearTransform),
-    # TODO: Allow this pair once linear quantization and HiMidLoLinear can
-    # preserve each other's config and compute semantics.
-    (QuantizationTransform, LMHeadFP32OutputTransform),
     # LoRA freezes every non-target config. Applying it more than once would
     # make freezing and adapter configuration depend on transform order.
     (LoRATransform, LoRATransform),

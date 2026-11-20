@@ -69,6 +69,11 @@ an adapter and every other config with a frozen subclass. These transforms
 convert only stock projection configs and raise on a frozen one, so apply them
 in the same call as LoRA or in an earlier one.
 
+Quantization and `LMHeadFP32OutputTransform` compose when they target different
+Linears, e.g. `MXFP8LinearTransform(fqns=["layers."])` leaves `lm_head` to the
+fp32 transform. Quantization runs first in the same call. The lm_head transform
+raises on a quantized `lm_head`, and quantization raises on a `HiMidLoLinear`.
+
 NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
 but the current quantized linear implementations still regenerate quantized
 weight operands on every forward or FSDP unshard. This is avoidable work for

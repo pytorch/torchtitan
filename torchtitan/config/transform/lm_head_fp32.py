@@ -47,7 +47,9 @@ class LMHeadFP32OutputTransform(ModelConfigTransform):
                 raise ValueError(
                     f"LMHeadFP32OutputTransform only converts a plain Linear.Config, but "
                     f"{fqn!r} is a {type(linear_config).__qualname__}, whose extra fields "
-                    "or forward (e.g. a logit soft cap) HiMidLoLinear would drop."
+                    "or forward (e.g. quantization or a logit soft cap) HiMidLoLinear "
+                    "would drop. If a quantization transform converted it, exclude "
+                    f"{self._TARGET!r} with that transform's fqns."
                 )
             kwargs = {
                 f.name: getattr(linear_config, f.name) for f in fields(linear_config)
