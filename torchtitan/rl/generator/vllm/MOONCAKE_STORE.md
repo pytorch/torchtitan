@@ -15,15 +15,14 @@ turn 2 on generator B: look up prefix -> load KV from the Store -> prefill only 
 
 ## Setup
 
-Install the Mooncake SDK (`mooncake-transfer-engine`) on each generator host,
-start a Master (`mooncake_master --rpc_port=50051`), and point
-`MOONCAKE_CONFIG_PATH` in every generator process at a Store config, e.g.:
+Install the Mooncake SDK (`mooncake-transfer-engine`) on the controller and
+generator hosts, and point `MOONCAKE_CONFIG_PATH` in every generator process at
+a Store config without `master_server_address`, e.g.:
 
 ```json
 {
   "mode": "embedded",
   "metadata_server": "P2PHANDSHAKE",
-  "master_server_address": "MASTER_HOST:50051",
   "global_segment_size": "16GB",
   "local_buffer_size": "64MB",
   "protocol": "rdma",
@@ -35,6 +34,13 @@ start a Master (`mooncake_master --rpc_port=50051`), and point
 `global_segment_size` is the CPU DRAM each GPU process contributes. As with
 SimpleCPU offload, set `expandable_segments:False` (see
 [Setup](SIMPLE_CPU_OFFLOAD.md#setup)).
+
+The controller starts the job's `mooncake_master` on its host and each generator
+process fills its address into a copy of the Store config, so generators on all
+hosts share one Store. Generators read each other's Store memory at
+`MOONCAKE_REQUESTER_LOCAL_HOSTNAME` (default: vLLM's `get_ip()`); with generators
+on several hosts, set it to an address the other hosts reach, plus
+`MC_USE_IPV6=1` for an IPv6 address.
 
 ## Generator configuration
 
