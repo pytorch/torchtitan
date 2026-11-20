@@ -524,8 +524,15 @@ def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Con
         # reaches the cap ends early and is padded.
         max_num_documents=64,
         # Saving all attention regions fits on 64 GPUs and is about 2% faster
-        # than the default save regions.
-        remat_save_regions=[*_MUSE_SPARK_DIST_MOE_SAVE_REGIONS, "attention.*"],
+        # than the default save regions. With the vocab sharded over CP, the
+        # compressed-MoE projections and the router gate outputs also fit.
+        remat_save_regions=[
+            *_MUSE_SPARK_DIST_MOE_SAVE_REGIONS,
+            "attention.*",
+            "feed_forward.pooler.*",
+            "feed_forward.unpooler.*",
+            "feed_forward.router.*",
+        ],
     )
     # Without PP, "default" keeps the last units (norm and lm_head) unsharded
     # after forward, so the loss does not all-gather the lm_head weight again.
