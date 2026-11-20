@@ -22,6 +22,8 @@
     - torchtitan/!(*.md)
     - torchtitan/!(rl|experiments)/**/!(*.md)
     - torchtitan_recipes/!(*.md)
+    # TODO: no workflow runs on a graph_trainer or torchft recipe change: the core suites don't read them,
+    # and their own workflows filter on torchtitan/experiments/ only. Add the recipe paths there.
     - torchtitan_recipes/!(rl|graph_trainer|torchft|tests)/**/!(*.md)
     - torchtitan_recipes/tests/!(*.md)
     - torchtitan_recipes/tests/!(rl|graph_trainer|torchft)/**/!(*.md)
