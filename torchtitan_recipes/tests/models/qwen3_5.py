@@ -47,7 +47,7 @@ def qwen35_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -108,7 +108,7 @@ def qwen35_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend="varlen",
         parallelism=config.parallelism,
@@ -131,7 +131,10 @@ def qwen35_debugmodel_moe(
             tensor_parallel_degree=2,
         )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel_moe_mm",
+        seq_len=seq_len,
+        attn_backend="flex",
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -179,6 +182,27 @@ def qwen35_debugmodel_moe_lora(
                 rank=8,
                 alpha=16.0,
                 target_modules=["w13", "w2"],
+            )
+        ],
+    )
+
+
+def qwen35_debugmodel_moe_lora_shared_outer(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Routed-expert adapters in the shared-outer layout: one lora_a for every
+    expert's w13 and one lora_b for every expert's w2."""
+    config = qwen35_debugmodel_moe(seq_len=seq_len, parallelism=parallelism)
+    return apply_transforms(
+        config,
+        [
+            LoRATransform(
+                rank=8,
+                alpha=16.0,
+                target_modules=["w13", "w2"],
+                expert_adapter_layout="shared_outer",
             )
         ],
     )

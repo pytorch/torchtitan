@@ -50,10 +50,14 @@ class GenerationEngine(Configurable, abc.ABC):
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.
         debug: Debug and determinism settings.
         reset_kv_cache_on_model_state_dict_load: Whether each model state dict load resets
-            all KV. When False, a request may reuse only KV computed under its
-            ``min_policy_version``.
+            all KV (and vLLM's encoder cache for image prompts). When False, a request may
+            reuse only KV and image embeddings salted with its ``min_policy_version``.
         model_state_dict_load_mode: ``"cpu_prefetch"`` allocates the pinned CPU buffers of
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
+        vision_processor: Preprocesses image prompts' files (`PromptImage.data`). None:
+            text only; requests with images are rejected.
+        mooncake_master_address: ``host:port`` of the Mooncake Store master the
+            controller started when ``config.uses_mooncake_store``, else None.
         rank: Global rank of this process.
         generator_name: Name of the generator, for engine metrics.
         output_dir: Output directory, for engine metrics.
@@ -61,7 +65,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        @property
+        def uses_mooncake_store(self) -> bool:
+            """Whether the generators share a Mooncake Store. The controller then
+            starts its master and builds the engines with its address."""
+            return False
 
     @property
     @abc.abstractmethod

@@ -16,7 +16,7 @@ Usage:
     python -m scripts.checkpoint_conversion.numerical_tests_qwen3_5 \
         --hf_model_path hf_assets/Qwen/Qwen3.5-2B \
         --tt_checkpoint_path outputs/Qwen/qwen3_5_2b_dcp \
-        --model_flavor 2B
+        --model_flavor 2B_mm
 """
 
 import argparse
@@ -42,6 +42,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.qwen3_5 import (
     build_model_config,
+    Qwen35MultimodalModel,
     QWEN3_5_SPECIAL_TOKENS,
     QWEN3_5_VISION_PROCESSOR_KWARGS,
 )
@@ -96,8 +97,9 @@ def build_inputs(hf_model_path, model_flavor, num_samples, image_size=224):
     processor: Any = AutoProcessor.from_pretrained(hf_model_path)
 
     model_config = build_model_config(model_flavor, parallelism=ParallelismConfig())
+    if not isinstance(model_config, Qwen35MultimodalModel.Config):
+        raise ValueError(f"{model_flavor!r} has no vision encoder; pass an _mm flavor.")
     encoder_config = model_config.vision_encoder
-    assert encoder_config is not None
     patch_size = encoder_config.patch_size
     temporal_patch_size = encoder_config.temporal_patch_size
     merge_size = encoder_config.spatial_merge_size
@@ -322,7 +324,7 @@ def run_tt(model_flavor, checkpoint_path, tt_inputs, special_tokens, device):
             layer.attention.inner_attention = _SDPA(is_causal=True)
 
     for blk in model.vision_encoder.layers.values():
-        blk.attn.flex_attention = _SDPA(is_causal=False)
+        blk.attn.inner_attention = _SDPA(is_causal=False)
 
     model.eval()
 
@@ -398,7 +400,7 @@ def main():
     )
     parser.add_argument("--hf_model_path", type=str, required=True)
     parser.add_argument("--tt_checkpoint_path", type=str, required=True)
-    parser.add_argument("--model_flavor", type=str, default="4B")
+    parser.add_argument("--model_flavor", type=str, default="4B_mm")
     parser.add_argument("--num_samples", type=int, default=10)
     args = parser.parse_args()
 

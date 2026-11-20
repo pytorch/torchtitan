@@ -69,7 +69,9 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
     )
 
 
-def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
+def _lora_dist_moe_config(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts.Config:
     stock = _stock_config()
     base_config = cast(
         DistMoeRoutedExperts.Config,
@@ -77,12 +79,16 @@ def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
     )
     return cast(
         DistMoeRoutedExperts.Config,
-        LoRATransform(rank=8, alpha=16.0).transform(base_config),
+        LoRATransform(
+            rank=8, alpha=16.0, expert_adapter_layout=expert_adapter_layout
+        ).transform(base_config),
     )
 
 
-def _build_lora_dist_moe() -> DistMoeRoutedExperts:
-    module = _lora_dist_moe_config().build()
+def _build_lora_dist_moe(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts:
+    module = _lora_dist_moe_config(expert_adapter_layout).build()
     module.init_states()
     return cast(DistMoeRoutedExperts, module)
 
@@ -449,8 +455,28 @@ def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
     torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
 
 
+def test_shared_outer_lora_dist_moe_weight_operands_broadcast_the_shared_factor() -> None:
+    """W13 shares A and W2 shares B; the materialized operands expand them over the experts."""
+    module = _build_lora_dist_moe("shared_outer")
+    _fill_lora_dist_moe_operands(module)
+    assert module.w13.lora_a.weight.shape == (8, 32)
+    assert module.w13.lora_b.weight.shape == (4, 2, 64, 8)
+    assert module.w2.lora_a.weight.shape == (4, 8, 64)
+    assert module.w2.lora_b.weight.shape == (32, 8)
+
+    actual_w13_EFD, actual_w2_EDF = module._weight_operands()
+    expected_w13_EFD = module.w13.weight.flatten(1, 2) + 2.0 * torch.einsum(
+        "efl,li->efi", module.w13.lora_b.weight.flatten(1, 2), module.w13.lora_a.weight
+    )
+    expected_w2_EDF = module.w2.weight + 2.0 * torch.einsum(
+        "dl,elf->edf", module.w2.lora_b.weight, module.w2.lora_a.weight
+    )
+    torch.testing.assert_close(actual_w13_EFD, expected_w13_EFD)
+    torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
+
+
 def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
-    """Local materialization gives every adapter a finite nonzero gradient."""
+    """Every adapter gets a finite nonzero gradient equal to torch.baddbmm's."""
     module = _build_lora_dist_moe()
     with torch.no_grad():
         module.w13.lora_a.weight.fill_(0.25)
@@ -471,6 +497,28 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
         w2_EDF.numel(),
         dtype=w2_EDF.dtype,
     ).reshape_as(w2_EDF)
+    adapter_names = (
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
+    )
+    adapters = [module.get_parameter(name) for name in adapter_names]
+    w13, w2 = module.w13, module.w2
+    expected_w13_EFD = torch.baddbmm(
+        w13.weight.flatten(1, 2),
+        w13.lora_b.weight.flatten(1, -2),
+        w13.lora_a.weight,
+        alpha=w13._lora_scaling,
+    )
+    expected_w2_EDF = torch.baddbmm(
+        w2.weight, w2.lora_b.weight, w2.lora_a.weight, alpha=w2._lora_scaling
+    )
+    expected_gradients = torch.autograd.grad(
+        (expected_w13_EFD, expected_w2_EDF),
+        adapters,
+        (w13_gradient_EFD, w2_gradient_EDF),
+    )
     torch.autograd.backward(
         (w13_EFD, w2_EDF),
         (w13_gradient_EFD, w2_gradient_EDF),
@@ -478,16 +526,14 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
 
     assert module.w13.weight.grad is None
     assert module.w2.weight.grad is None
-    for name in (
-        "w13.lora_a.weight",
-        "w13.lora_b.weight",
-        "w2.lora_a.weight",
-        "w2.lora_b.weight",
+    for name, adapter, expected in zip(
+        adapter_names, adapters, expected_gradients, strict=True
     ):
-        gradient = module.get_parameter(name).grad
-        assert gradient is not None
+        gradient = adapter.grad
+        assert gradient is not None, name
         assert torch.isfinite(gradient).all()
         assert torch.count_nonzero(gradient) == gradient.numel()
+        torch.testing.assert_close(gradient, expected)
 
 
 def test_dist_moe_lora_rejects_inplace_wgrad() -> None:

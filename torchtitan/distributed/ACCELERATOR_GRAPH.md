@@ -127,9 +127,10 @@ from the normal pool. Waiting until warmup finishes avoids this overlap during
 training warmup. The shared stream also avoids separate eager caches for
 training and eval.
 
-Before its first capture, each wrapper calls `torch.cuda.empty_cache()`. This
-releases unused normal cache. It cannot release storage held by live tensors or
-live graph pools. Replay does not call it.
+Each capture starts with `torch.cuda.graph` (or `torch.accelerator.Graph`),
+which synchronizes the device and calls `empty_cache()`. This releases unused
+normal cache. It cannot release storage held by live tensors or live graph
+pools. Replay does not call it.
 
 ## Memory use with and without `_AcceleratorGraphGradientState`
 

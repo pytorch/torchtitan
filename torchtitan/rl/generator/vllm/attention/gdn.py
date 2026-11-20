@@ -37,17 +37,13 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
 from torchtitan.models.common.attention.gdn import GDN
-from torchtitan.models.common.attention.linear_attention import chunk_kernel_options
 from torchtitan.models.common.attn_gym import (
     causal_conv1d_decode,
-    gate_transform,
-    l2norm,
     paged_causal_conv1d,
-    paged_chunk_gdn,
-    recurrent_gdn,
     recurrent_gdn_decode,
 )
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.rl.generator.attention.gdn import paged_gdn
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
     LinearAttentionExecutionPath,
@@ -111,7 +107,6 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             )
         self.local_num_k_heads = self.num_k_heads // self.tensor_parallel_size
         self.local_num_v_heads = self.num_v_heads // self.tensor_parallel_size
-        self.local_key_dim = self.local_num_k_heads * self.head_k_dim
 
         if is_conv_state_dim_first():
             raise ValueError(
@@ -171,30 +166,6 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             self.conv_kernel_size,
             self.num_speculative_tokens,
         )
-
-    def _split_qkv(
-        self, mixed_qkv: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Split local fused channels and add a singleton batch dim.
-
-        Query and key are strided views; the caller must pass them through l2norm,
-        which reads strided rows and writes compact ones. Value is copied because
-        paged_chunk_gdn would otherwise copy a strided value itself, more slowly.
-        """
-        num_tokens = mixed_qkv.shape[0]
-        local_key_dim = self.local_key_dim
-        query = mixed_qkv[:, :local_key_dim].view(
-            1, num_tokens, self.local_num_k_heads, self.head_k_dim
-        )
-        key = mixed_qkv[:, local_key_dim : 2 * local_key_dim].view(
-            1, num_tokens, self.local_num_k_heads, self.head_k_dim
-        )
-        value = (
-            mixed_qkv[:, 2 * local_key_dim :]
-            .contiguous()
-            .view(1, num_tokens, self.local_num_v_heads, self.head_v_dim)
-        )
-        return query, key, value
 
     def _forward(
         self,
@@ -359,56 +330,23 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         all_slots: torch.Tensor,
         has_initial_state: torch.Tensor,
     ) -> torch.Tensor:
-        """Map each cu_seqlens interval to its paged SSM slot in all_slots.
-
-        Null slots skip state writes and produce zero output for padding.
-        """
-        query, key, value = self._split_qkv(conv_output)
-        # Keep the existing FP32 arithmetic while reusing the GDN gate contract.
-        decay = gate_transform(
-            a.unsqueeze(0),
+        """Map each cu_seqlens interval to its paged SSM slot in all_slots (see
+        ``paged_gdn``)."""
+        return paged_gdn(
+            conv_output,
+            a,
+            b,
             A_log,
             dt_bias,
-            kind="softplus",
-            fastmath=False,
-            impl="fused",
+            self.kv_cache[1],
+            cu_seqlens=cu_seqlens,
+            state_indices=all_slots,
+            has_initial_state=has_initial_state,
+            num_k_heads=self.local_num_k_heads,
+            head_k_dim=self.head_k_dim,
+            num_v_heads=self.local_num_v_heads,
+            head_v_dim=self.head_v_dim,
         )
-        update_gate = torch.sigmoid(b).unsqueeze(0)
-        query = l2norm(query, cu_seqlens=cu_seqlens)
-        key = l2norm(key, cu_seqlens=cu_seqlens)
-
-        if is_in_batch_invariant_mode():
-            recurrent_output, _ = recurrent_gdn(
-                query,
-                key,
-                value,
-                decay,
-                update_gate,
-                self.kv_cache[1],
-                cu_seqlens=cu_seqlens,
-                scale=self.head_k_dim**-0.5,
-                state_indices=all_slots,
-                has_initial_state=has_initial_state,
-                # Triton autotuning breaks batch invariance, and the scan otherwise
-                # picks its arithmetic from the batch shape.
-                autotune=False,
-                kernel_options={"batch_invariant": True},
-            )
-        else:
-            recurrent_output = paged_chunk_gdn(
-                query,
-                key,
-                value,
-                decay,
-                update_gate,
-                self.kv_cache[1],
-                all_slots,
-                cu_seqlens=cu_seqlens,
-                has_initial_state=has_initial_state,
-                scale=self.head_k_dim**-0.5,
-                kernel_options=chunk_kernel_options(query),
-            )
-        return recurrent_output[0]
 
     def forward(
         self,

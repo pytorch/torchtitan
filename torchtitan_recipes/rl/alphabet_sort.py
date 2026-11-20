@@ -61,7 +61,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -83,7 +83,7 @@ def _alphabet_sort_rollouter_config() -> Rollouter.Config:
             dataset=AlphabetSortDataset.Config(seed=42)
         ),
         validation_dataset=AlphabetSortDataset.Config(seed=99),
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardAlphabetSort.Config(weight=1.0)]),
             message_env=AlphabetSortEnv.Config(),
         ),
@@ -184,6 +184,16 @@ def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.C
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
+    return config
+
+
+def rl_grpo_qwen3_0_6b_varlen_sglang(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with the SGLang engine (6 GPUs: 4 gen + 2 train)."""
+    # Imported here so the other recipes do not depend on SGLang.
+    from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.generator.engine = SGLangEngine.Config()
     return config
 
 
@@ -669,6 +679,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config
 
 
@@ -950,4 +963,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config

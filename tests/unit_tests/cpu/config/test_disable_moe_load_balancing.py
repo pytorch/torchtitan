@@ -14,7 +14,7 @@ from torch import nn
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
-    FreezeMoERoutingTransform,
+    DisableMoELoadBalancingTransform,
     transform_model_config_,
 )
 from torchtitan.models.common.decoder import TransformerBlock
@@ -36,7 +36,7 @@ def test_removes_router_aux_loss() -> None:
     routers = [moe.router for _, moe, _, _ in model.traverse(MoE.Config)]
     assert routers and all(router.aux_loss is not None for router in routers)
 
-    model = transform_model_config_(model, [FreezeMoERoutingTransform()])
+    model = transform_model_config_(model, [DisableMoELoadBalancingTransform()])
     routers = [moe.router for _, moe, _, _ in model.traverse(MoE.Config)]
     assert routers and all(router.aux_loss is None for router in routers)
 
@@ -57,21 +57,21 @@ _MOE_DEBUG_MODELS = [
 ]
 
 
-@pytest.mark.parametrize("freeze", [True, False])
+@pytest.mark.parametrize("disable", [True, False])
 @pytest.mark.parametrize("family,flavor,load_balance_coeff", _MOE_DEBUG_MODELS)
-def test_freezes_every_moe_family(
-    family: str, flavor: str, load_balance_coeff: float | None, freeze: bool
+def test_expert_bias_and_params_after_one_step(
+    family: str, flavor: str, load_balance_coeff: float | None, disable: bool
 ) -> None:
     build_model_config = importlib.import_module(
         f"torchtitan.models.{family}"
     ).build_model_config
     model = build_model_config(flavor, parallelism=ParallelismConfig())
-    if freeze:
-        model = transform_model_config_(model, [FreezeMoERoutingTransform()])
+    if disable:
+        model = transform_model_config_(model, [DisableMoELoadBalancingTransform()])
     # The last MoE layer: DeepSeek-V4's first MoE layers route by token id hash.
     moe_config = [moe for _, moe, _, _ in model.traverse(MoE.Config)][-1]
     moe_config.load_balance_coeff = load_balance_coeff
-    # freeze=False keeps the aux loss, which raises without an `aux_loss_denominator`.
+    # disable=False keeps the aux loss, which raises without an `aux_loss_denominator`.
     # test_removes_router_aux_loss covers the aux loss.
     moe_config.router.aux_loss = None
     torch.manual_seed(0)
@@ -102,11 +102,9 @@ def test_freezes_every_moe_family(
     if moe.expert_bias_E is None:
         assert load_balance_coeff is None
     else:
-        assert torch.equal(moe.expert_bias_E, expert_bias_before) == freeze
+        assert torch.equal(moe.expert_bias_E, expert_bias_before) == disable
     for name, param in moe.named_parameters():
-        # router.gate.weight, and router.gate.bias on gpt-oss. Every other parameter
-        # trains, including the Qwen3.5 shared-expert gate.
-        is_frozen = freeze and name.startswith("router.gate.")
-        assert torch.equal(param, params_before[name]) == is_frozen, name
-        has_state = any(param in optimizer.state for optimizer in optimizers)
-        assert has_state != is_frozen, name
+        # Every parameter trains: router.gate.weight, router.gate.bias on gpt-oss,
+        # and the Qwen3.5 shared-expert gate.
+        assert not torch.equal(param, params_before[name]), name
+        assert any(param in optimizer.state for optimizer in optimizers), name

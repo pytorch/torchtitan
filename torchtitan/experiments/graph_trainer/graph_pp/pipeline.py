@@ -31,7 +31,7 @@ from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
-    _split_module,
+    split_module,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -843,7 +843,7 @@ def graph_pipeline_llm(
     model_parts: list[BaseModel] = []
     stages: list[GraphPipelineStage] = []
     for stage_index in pp_rank_to_stage_indices:
-        model_part = _split_module(model, module_names_per_stage[stage_index])
+        model_part = split_module(model, module_names_per_stage[stage_index])
         model_part = model_part.parallelize(
             parallelism_context=parallelism_context,
             precision=precision,

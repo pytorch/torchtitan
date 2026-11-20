@@ -60,7 +60,6 @@ from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
     DeepEPTokenDispatcher,
 )
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
 
 def _llama3_cp_ready():
@@ -548,10 +547,10 @@ class TestTransformModel(unittest.TestCase):
     def test_transforms_nested_kda_backend(self):
         from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
         from torchtitan.models.common.attention.kda import InnerKDA, KDA
-        from torchtitan.models.kimi_k3 import build_model_config
+        from torchtitan.models.kimi_k3 import build_model_config, KimiK3MultimodalModel
 
         model = build_model_config(
-            "debugmodel",
+            "debugmodel_mm",
             attn_backend="flex",
             seq_len=128,
             parallelism=ParallelismConfig(),
@@ -564,7 +563,7 @@ class TestTransformModel(unittest.TestCase):
             }
         ).transform(model)
 
-        assert model.vision_encoder is not None
+        assert isinstance(model, KimiK3MultimodalModel.Config)
         self.assertIsInstance(
             model.vision_encoder.block.attn.inner_attention,
             FlexInnerAttention.Config,
@@ -810,19 +809,6 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         self.assertIs(type(transformed.w13), _ConvertedLinear.Config)
         self.assertIs(type(transformed.w2), AsyncRowParallelLinear.Config)
-
-    def test_async_transform_skips_invariant_row_parallel_linear(self):
-        config = InvariantRowParallelLinear.Config(
-            in_features=4,
-            out_features=4,
-            bias=True,
-        )
-
-        transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
-        ).transform(config)
-
-        self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
 
     def test_async_transform_conflicts_with_lora(self):
         config = self._model_config()

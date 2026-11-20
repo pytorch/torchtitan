@@ -45,10 +45,10 @@ from vllm.model_executor.model_loader import utils as model_loader_utils
 from vllm.sampling_params import RequestOutputKind
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
-    _make_prompt_tokens,
     _run_engine,
     _sync_trainer_weights_to_vllm,
     build_inference_engine,
+    make_prompt_tokens,
 )
 
 
@@ -200,7 +200,7 @@ def _check_inference_operands(engine) -> None:
 
     weights_a = _state_dict_with_random_experts(wrapper, experts, seed=0)
     weights_b = _state_dict_with_random_experts(wrapper, experts, seed=1)
-    prompt_ids = _make_prompt_tokens(2, 32, engine.get_tokenizer())
+    prompt_ids = make_prompt_tokens(2, 32, engine.get_tokenizer())
 
     # The CUDA graphs captured at engine startup read these exact tensors and
     # addresses, so every load must refill them in place.

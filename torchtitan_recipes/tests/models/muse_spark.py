@@ -29,30 +29,36 @@ from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
     MXFP8LinearConverter,
+    TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.muse_spark import build_model_config
+from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.muse_spark import (
+    build_model_config,
+    MUSE_SPARK_DEBUG_SPECIAL_TOKENS,
+    MUSE_SPARK_SPECIAL_TOKENS,
+    MUSE_SPARK_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.models.muse_spark.flavors import _MUSE_SPARK_816B_VOCAB_SIZE
-from torchtitan.models.muse_spark.model import MuseSparkModel
+from torchtitan.models.muse_spark.model import MuseSparkModel, MuseSparkMultimodalModel
 from torchtitan.models.muse_spark.tokenizer import MuseSparkTokenizer
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.data import c4_document_capacity
 from torchtitan_recipes.models.muse_spark import (
     _muse_spark_context_parallel_transform,
     _MUSE_SPARK_FUSED_SWIGLU_OVERRIDE,
     _MUSE_SPARK_HF_ASSETS_PATH,
-    _muse_spark_mm_dataloader,
     _ultradata_lora_sft_optim,
     _ultradata_lora_sft_transform,
     _ultradata_sft_dataloader,
     _with_dist_moe,
-    MUSE_SPARK_SPECIAL_TOKENS,
-    MUSE_SPARK_VISION_PROCESSOR_KWARGS,
+    muse_spark_mm_dataloader,
 )
 
 
@@ -61,20 +67,6 @@ _MUSE_SPARK_MXFP8_LINEAR_FQNS = [
     "feed_forward.pooler",
     "feed_forward.unpooler",
 ]
-
-
-# TODO: Add the Muse Spark Open tokens to tests/assets/tokenizer and remove
-# this debug-only mapping.
-MUSE_SPARK_DEBUG_SPECIAL_TOKENS = {
-    "image_token": "<|image_pad|>",
-    "video_token": "<|video_pad|>",
-    "vision_start_token": "<|vision_start|>",
-    "vision_end_token": "<|vision_end|>",
-    "audio_token": "<|media_pad|>",
-    "audio_start_token": "<|media_begin|>",
-    "audio_end_token": "<|media_end|>",
-    "pad_token": "<|endoftext|>",
-}
 
 
 def _muse_spark_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
@@ -100,7 +92,6 @@ def muse_spark_debugmodel(
         "debugmodel",
         parallelism=parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
     config = Trainer.Config(
@@ -146,6 +137,37 @@ def muse_spark_debugmodel(
     return config
 
 
+def muse_spark_debugmodel_hybridep(
+    seq_len: int | None = None,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    config = muse_spark_debugmodel(seq_len, parallelism=parallelism)
+    # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
+    config.training.disable_accelerator_graphs = False
+    config.dataloader.max_num_documents = c4_document_capacity(
+        config.training.num_tokens_per_microbatch_per_dp_rank
+    )
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
+                # 1.0 reserves the worst case, so no tokens are dropped.
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )
+
+
 def muse_spark_debugmodel_with_cp(
     seq_len: int | None = None,
 ) -> Trainer.Config:
@@ -177,7 +199,6 @@ def muse_spark_debugmodel_dist_moe_mxfp8(
         "debugmodel",
         parallelism=config.parallelism,
         seq_len=seq_len,
-        moe_comm_backend="standard",
         attn_backend="flex",
         converters=[_muse_spark_mxfp8_linear_converter_config()],
     )
@@ -213,18 +234,18 @@ def muse_spark_debugmodel_mm(
         "debugmodel_mm",
         seq_len=seq_len,
         parallelism=config.parallelism,
-        moe_comm_backend="standard",
         attn_backend="flex",
     )
+    assert isinstance(model_config, MuseSparkMultimodalModel.Config)
     config.model = model_config
     config.tokenizer = MuseSparkTokenizer.Config(**MUSE_SPARK_DEBUG_SPECIAL_TOKENS)
     config.vision_processor = VisionProcessor.Config(
         **MUSE_SPARK_VISION_PROCESSOR_KWARGS
     )
-    image_dataset = _muse_spark_mm_dataloader(
+    image_dataset = muse_spark_mm_dataloader(
         model_config, MM_DATASETS["cc12m-test"]
     ).dataset
-    video_loader = _muse_spark_mm_dataloader(
+    video_loader = muse_spark_mm_dataloader(
         model_config, SYNTHETIC_MM_DATASETS["synthetic-video-text"]
     )
     audio_encoder = model_config.audio_encoder

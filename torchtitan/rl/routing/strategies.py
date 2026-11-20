@@ -212,7 +212,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
         self._sessions.move_to_end(routing_ctx.session_id)
-        # Evict the least-recently-used session past max_sessions. `RolloutWorker` releases
+        # Evict the least-recently-used session past max_sessions. A rollout worker releases
         # each rollout's session when it ends, so its finished sessions rarely get here.
         if len(self._sessions) > self._max_sessions:
             self._sessions.popitem(last=False)
