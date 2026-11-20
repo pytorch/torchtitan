@@ -17,7 +17,7 @@ again (`_build_training_sample`); `MicrobatchPacker.pack_planned` checks that th
 """
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 from renderers import PlaceholderRange
@@ -110,7 +110,8 @@ class TrainingSampleSpec:
     min_policy_version: int
     max_policy_version: int
     images: tuple[PromptImage, ...] = ()
-    """`TrainingSample.images`."""
+    """`TrainingSample.images`. `materialize` takes each file's bytes from the rollout, not from
+    here: specs are decided from the rollout group's summary, whose image files are b""."""
     image_placeholders: tuple[PlaceholderRange, ...] = ()
     """`TrainingSample.image_placeholders`."""
 
@@ -551,6 +552,12 @@ class TrainingSampleBuilder(Configurable):
                 (position, spec)
             )
         last_turn_id = max(spec.last_turn_id for spec in training_sample_specs)
+        # Each image file from the rollout, not from the specs (see `TrainingSampleSpec.images`).
+        image_data = {
+            image.hash_value: image.data
+            for turn in rollout.turns
+            for image in turn.prompt_delta_images
+        }
         samples_by_position: dict[int, TrainingSample] = {}
         # (position, spec, its first turn's shared prefix) until the spec's last turn.
         in_progress: list[tuple[int, TrainingSampleSpec, list[np.ndarray]]] = []
@@ -577,7 +584,9 @@ class TrainingSampleBuilder(Configurable):
                 position, spec, prefix = entry
                 if spec.last_turn_id != turn_id:
                     continue
-                sample = self._build_training_sample(spec, rollout, prefix=prefix)
+                sample = self._build_training_sample(
+                    spec, rollout, prefix=prefix, image_data=image_data
+                )
                 samples_by_position[position] = sample
                 # A sample's turns continue one another, so its tokens are this turn's
                 # prompt + completion, in one array.
@@ -632,6 +641,7 @@ class TrainingSampleBuilder(Configurable):
         rollout: Rollout,
         *,
         prefix: list[np.ndarray],
+        image_data: dict[str, bytes],
     ) -> TrainingSample:
         """The sample `spec` describes, from turns `spec.rollout_id.turn_id` to
         `spec.last_turn_id` of `rollout`: `prefix` (the first turn's shared prefix of the
@@ -669,6 +679,9 @@ class TrainingSampleBuilder(Configurable):
             loss_mask=np.concatenate(loss_mask),
             logprobs=np.concatenate(logprobs, dtype=np.float32),
             advantage=np.concatenate(advantage),
-            images=spec.images,
+            images=tuple(
+                replace(image, data=image_data[image.hash_value])
+                for image in spec.images
+            ),
             image_placeholders=spec.image_placeholders,
         )

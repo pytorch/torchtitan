@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import dataclasses
-import weakref
 
 import numpy as np
 import pytest
@@ -20,6 +19,7 @@ from renderers import PlaceholderRange
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.packed_group import pack_rollout_group
 from torchtitan.rl.rollout.types import (
     Prompt,
     PromptImage,
@@ -176,34 +176,6 @@ def _decide(
     )
 
 
-def _without_arrays(group: RolloutGroup) -> RolloutGroup:
-    """`group` with every array field of every turn cut to 0 rows and every image file b""."""
-    return dataclasses.replace(
-        group,
-        rollouts=[
-            dataclasses.replace(
-                rollout,
-                turns=[
-                    dataclasses.replace(
-                        turn,
-                        **{
-                            turn_field.name: getattr(turn, turn_field.name)[:0]
-                            for turn_field in dataclasses.fields(turn)
-                            if isinstance(getattr(turn, turn_field.name), np.ndarray)
-                        },
-                        prompt_delta_images=tuple(
-                            dataclasses.replace(image, data=b"")
-                            for image in turn.prompt_delta_images
-                        ),
-                    )
-                    for turn in rollout.turns
-                ],
-            )
-            for rollout in group.rollouts
-        ],
-    )
-
-
 def _assert_samples_equal(actual: TrainingSample, expected: TrainingSample) -> None:
     for sample_field in dataclasses.fields(expected):
         actual_value = getattr(actual, sample_field.name)
@@ -225,14 +197,13 @@ def test_spec_token_counts_equal_the_packed_counts(
     spec_group = _decide(builder, group, num_mtp_layers=num_mtp_layers)
     specs = spec_group.training_sample_specs
     samples = builder.materialize(training_sample_specs=specs, rollout_group=group)
-    packer = MicrobatchPacker(
+    packer = MicrobatchPacker.Config(
+        per_sample_pad_multiple=per_sample_pad_multiple, num_mtp_layers=num_mtp_layers
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=64,
         max_context_length=64,
         pad_id=0,
         temperature=1.0,
-        per_sample_pad_multiple=per_sample_pad_multiple,
-        num_mtp_layers=num_mtp_layers,
-        build_mrope_positions=False,
         vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
     )
 
@@ -269,47 +240,67 @@ def test_spec_token_counts_equal_the_packed_counts(
 
 @pytest.mark.parametrize("dp_degree", [1, 2])
 def test_plan_global_counts_equal_the_packed_microbatches(dp_degree: int) -> None:
-    batcher = Batcher.Config(num_mtp_layers=3, per_sample_pad_multiple=8).build(
+    group = _trainable_group()
+    packer_config = MicrobatchPacker.Config(per_sample_pad_multiple=8, num_mtp_layers=3)
+    batcher = Batcher.Config(microbatch_packer=packer_config).build(
         num_tokens_per_microbatch_per_dp_rank=32,
         max_context_length=32,
         num_prompts_per_train_step=1,
         dp_degree=dp_degree,
+    )
+    summary, _ = pack_rollout_group(group)
+    plan, _ = batcher.add_group(summary=summary)
+
+    assert plan is not None
+    cells = [
+        microbatch_specs
+        for group_specs in plan.microbatch_groups
+        for row in group_specs
+        for microbatch_specs in row
+    ]
+    samples = iter(
+        _builder().materialize(
+            training_sample_specs=[spec for specs in cells for spec in specs],
+            rollout_group=group,
+        )
+    )
+    packer = packer_config.build(
+        num_tokens_per_microbatch_per_dp_rank=32,
+        max_context_length=32,
         pad_id=0,
         temperature=1.0,
         vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
     )
-    batch, _ = batcher.add_group(rollout_group=_trainable_group())
-
-    assert batch is not None
-    microbatches = [
-        microbatch
-        for group in batch.microbatch_groups
-        for row in group
-        for microbatch in row
-    ]
+    microbatches = [packer.pack([next(samples) for _ in specs]) for specs in cells]
     assert torch.equal(
-        batch.global_loss_token_counts,
+        plan.global_loss_token_counts,
         torch.stack([microbatch.loss_token_counts for microbatch in microbatches]).sum(
             0
         ),
     )
     assert torch.equal(
-        batch.global_routing_token_counts,
+        plan.global_routing_token_counts,
         torch.stack(
             [microbatch.routing_token_counts for microbatch in microbatches]
         ).sum(0),
     )
-    assert batch.global_loss_token_counts.dtype == torch.int64
+    assert plan.global_loss_token_counts.dtype == torch.int64
 
 
 def test_decide_reads_lengths_and_keeps_the_filters_and_metrics() -> None:
     builder = _builder()
     group = _trainable_group()
+    summary, _ = pack_rollout_group(group)
+    # The summary has no bytes: every array is empty and every image file is b"".
+    for rollout in summary.group.rollouts:
+        for turn in rollout.turns:
+            assert len(turn.completion_token_ids) == len(turn.completion_logprobs) == 0
+            assert all(image.data == b"" for image in turn.prompt_delta_images)
 
-    # Without its arrays, with the full group's lengths: the same specs and metrics.
+    # From the summary: the same specs and metrics as from the full group.
     spec_group = builder.decide(
-        rollout_group=_without_arrays(group),
-        turn_lengths=tuple(map(rollout_turn_lengths, group.rollouts)),
+        rollout_group=summary.group,
+        turn_lengths=summary.turn_lengths,
         num_mtp_layers=0,
     )
 
@@ -366,136 +357,3 @@ def test_decide_drops_failed_untrainable_and_zero_std_groups() -> None:
     assert decide(zero_std) == [
         "training_sample_builder/num_groups_dropped_zero_std/sum"
     ]
-
-
-class _MaskedSampleBuilder(TrainingSampleBuilder):
-    """Builds samples that mask their last completion token, which the specs count."""
-
-    def _build_training_sample(self, spec, rollout, **kwargs) -> TrainingSample:
-        sample = super()._build_training_sample(spec, rollout, **kwargs)
-        loss_mask = sample.loss_mask.copy()
-        loss_mask[-1] = False
-        return dataclasses.replace(sample, loss_mask=loss_mask)
-
-
-class _LongerSampleBuilder(TrainingSampleBuilder):
-    """Builds samples one masked token longer than their specs."""
-
-    def _build_training_sample(self, spec, rollout, **kwargs) -> TrainingSample:
-        sample = super()._build_training_sample(spec, rollout, **kwargs)
-        return dataclasses.replace(
-            sample,
-            token_ids=np.append(sample.token_ids, 0),
-            loss_mask=np.append(sample.loss_mask, False),
-            logprobs=np.append(sample.logprobs, np.float32(0)),
-            advantage=np.append(sample.advantage, np.float32(0)),
-        )
-
-
-@pytest.mark.parametrize(
-    "builder_class",
-    [_MaskedSampleBuilder, _LongerSampleBuilder],
-    ids=["mask", "length"],
-)
-def test_packing_raises_when_a_sample_disagrees_with_its_spec(builder_class) -> None:
-    """A sample whose loss mask drifts from its spec would silently rescale the loss, whose
-    divisor is the specs' counts summed, and a longer one overfills the microbatch the specs
-    planned (here, exactly full); packing raises a `ValueError` naming the two methods."""
-    batcher = Batcher.Config().build(
-        num_tokens_per_microbatch_per_dp_rank=5,
-        max_context_length=5,
-        num_prompts_per_train_step=1,
-        dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
-    )
-    group = RolloutGroup(
-        group_id=0,
-        rollouts=[
-            _rollout(0, [([1, 2], [-0.1, -0.2])], reward=0.0),
-            _rollout(1, [([1, 2], [-0.3])], reward=1.0),
-        ],
-    )
-    batcher._training_sample_builder = builder_class(TrainingSampleBuilder.Config())
-
-    with pytest.raises(ValueError, match="rollout_to_training_sample_specs"):
-        batcher.add_group(rollout_group=group)
-
-
-def test_the_step_trigger_frees_each_groups_arrays_before_the_next_materializes() -> None:
-    """The step's arrays and their samples (copies) are never all alive at once: each group's
-    arrays go as soon as its samples exist."""
-    num_groups = 3
-    array_refs: list[weakref.ref] = []
-    num_alive_at_materialize = []
-
-    class _CountingBuilder(TrainingSampleBuilder):
-        def materialize(self, *, training_sample_specs, rollout_group):
-            num_alive_at_materialize.append(
-                sum(array_ref() is not None for array_ref in array_refs)
-            )
-            return super().materialize(
-                training_sample_specs=training_sample_specs,
-                rollout_group=rollout_group,
-            )
-
-    batcher = Batcher.Config().build(
-        num_tokens_per_microbatch_per_dp_rank=64,
-        max_context_length=64,
-        num_prompts_per_train_step=num_groups,
-        dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
-    )
-    batcher._training_sample_builder = _CountingBuilder(TrainingSampleBuilder.Config())
-    for group_id in range(num_groups):
-        group = RolloutGroup(
-            group_id=group_id,
-            rollouts=[
-                _rollout(0, [([1, 2], [-0.1, -0.2])], group_id=group_id, reward=0.0),
-                _rollout(1, [([1, 2], [-0.3])], group_id=group_id, reward=1.0),
-            ],
-        )
-        array_refs.append(weakref.ref(group.rollouts[0].turns[0].completion_logprobs))
-        batch, _ = batcher.add_group(rollout_group=group)
-        del group
-
-    assert batch is not None
-    # Groups materialize in id order; each one's arrays are gone before the next starts.
-    assert num_alive_at_materialize == [3, 2, 1]
-
-
-@pytest.mark.parametrize(
-    "prompt_prefix_len, prompt_delta_token_ids, match",
-    [
-        # The full prompt as the delta: `split_prompt` stores (3, [3]).
-        (0, [1, 2, 200, 3], "could reuse more"),
-        # Past the previous turn's end: its prompt + completion has 3 tokens.
-        (9, [3], "previous turn has only 3"),
-    ],
-)
-def test_add_group_checks_the_prompt_prefixes_of_rollouts_it_drops(
-    prompt_prefix_len: int, prompt_delta_token_ids: list[int], match: str
-) -> None:
-    """The prompt prefix checks run on every rollout of a group before any filter: here on a
-    zero-std group, which trains nothing, whose rollout reuses fewer tokens than it could or
-    more than there are."""
-    batcher = Batcher.Config().build(
-        num_tokens_per_microbatch_per_dp_rank=64,
-        max_context_length=64,
-        num_prompts_per_train_step=1,
-        dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
-    )
-    malformed = _rollout(0, [([1, 2], [-0.1]), ([1, 2, 200, 3], [-0.2])], reward=1.0)
-    malformed.turns[1].prompt_prefix_len = prompt_prefix_len
-    malformed.turns[1].prompt_delta_token_ids = np.array(
-        prompt_delta_token_ids, dtype=np.int32
-    )
-    group = RolloutGroup(
-        group_id=0, rollouts=[malformed, _rollout(1, [([1, 2], [-0.1])], reward=1.0)]
-    )
-
-    with pytest.raises(ValueError, match=match):
-        batcher.add_group(rollout_group=group)

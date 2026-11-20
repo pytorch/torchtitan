@@ -4,91 +4,55 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch's `RDMAObject` (`rl/rdma_object.py`): the owner registers a value's large
-tensors and bytes as Monarch RDMA buffers, and a reader reads them all in one RDMA action. The
-batcher sends trainer microbatches this way (`Batcher.Config.rdma_min_tensor_bytes`), and the
-rollout workers send prompt image files (`BaseRolloutWorker.Config.rdma_min_image_bytes`).
+"""Monarch's `RDMAObject` (`rl/rdma_object.py`): the owner registers a large bytes value as a
+Monarch RDMA buffer, and a reader reads it by RDMA. The rollout workers send prompt image files
+this way (`BaseRolloutWorker.Config.rdma_min_image_bytes`).
 """
 
 from __future__ import annotations
 
-import asyncio
 import ctypes
 import dataclasses
 import logging
-from collections.abc import Callable
-from typing import Any, Generic, TypeVar
 
 import torch
 from monarch.rdma import RDMAAction, RDMABuffer
-from torch.utils import _pytree as pytree
 
 logger = logging.getLogger(__name__)
 
-_ValueT = TypeVar("_ValueT")
-
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class MonarchRDMAObject(Generic[_ValueT]):
-    """A value whose large tensors and bytes stay in its owner, the process that registered it.
+class MonarchRDMAObject:
+    """A bytes value that stays in its owner, the process that registered it, when it has at
+    least `min_bytes`.
 
-    Example (a microbatch: its 4 KiB ``input`` stays in the batcher, its 8-byte token counts go
-    by value):
-        rdma_microbatch = MonarchRDMAObject.register(microbatch, min_bytes=1024)  # owner
-        microbatch = await rdma_microbatch.read()  # reader: one RDMA action reads every buffer
-        await rdma_microbatch.drop()               # owner, after every reader has read it
+    Example (a 5 MB prompt image file stays in the rollout worker):
+        rdma_file = MonarchRDMAObject.register(image.data, min_bytes=1 << 20)  # owner
+        data = await rdma_file.read()  # reader: one RDMA read
+        await rdma_file.drop()         # owner, after every reader has read it
     """
 
-    value: _ValueT
-    """The value, with each tensor and bytes leaf of at least `min_bytes` replaced by its buffer
-    reference (see `_map_leaves` for where leaves are found)."""
+    value: bytes | _BytesRef
+    """The bytes, or their buffer reference when they have at least `min_bytes`."""
 
     @classmethod
-    def register(cls, value: _ValueT, *, min_bytes: int) -> MonarchRDMAObject[_ValueT]:
-        def register_leaf(leaf: torch.Tensor | bytes) -> Any:
-            if isinstance(leaf, torch.Tensor):
-                return _TensorRef.register(leaf) if leaf.nbytes >= min_bytes else leaf
-            return _BytesRef.register(leaf) if len(leaf) >= min_bytes else leaf
-
-        return cls(value=_map_leaves(value, (torch.Tensor, bytes), register_leaf))
-
-    async def read(self) -> _ValueT:
-        action = RDMAAction()
-        # Tensors are filled in place when the action runs; bytes are copied out after.
-        value = _map_leaves(
-            self.value, _BUFFER_REFS, lambda ref: ref.queue_read(action)
+    def register(cls, value: bytes, *, min_bytes: int) -> MonarchRDMAObject:
+        return cls(
+            value=_BytesRef.register(value) if len(value) >= min_bytes else value
         )
+
+    async def read(self) -> bytes:
+        if isinstance(self.value, bytes):
+            return self.value
+        destination = torch.empty(self.value.buffer.size(), dtype=torch.uint8)
+        action = RDMAAction()
+        action.read_remote(destination, self.value.buffer)
         await action.submit()
-        return _map_leaves(value, _BytesRead, _BytesRead.to_bytes)
+        return destination.numpy().tobytes()
 
     async def drop(self) -> None:
-        await asyncio.gather(*(ref.buffer.drop() for ref in _buffer_refs(self.value)))
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _TensorRef:
-    """A tensor as its RDMA buffer, plus the shape and dtype to rebuild it."""
-
-    buffer: RDMABuffer
-    shape: torch.Size
-    dtype: torch.dtype
-
-    @classmethod
-    def register(cls, tensor: torch.Tensor) -> _TensorRef:
-        # A view, not a copy: the buffer keeps the tensor's storage alive until drop().
-        # view(-1) needs a contiguous tensor; the batcher builds only contiguous ones.
-        return cls(
-            buffer=RDMABuffer(tensor.view(-1).view(torch.uint8)),
-            shape=tensor.shape,
-            dtype=tensor.dtype,
-        )
-
-    def queue_read(self, action: RDMAAction) -> torch.Tensor:
-        # TODO: allocate pinned tensors here. With max_num_documents also set, that removed the
-        # ~4 ms per microbatch in `TrainingEngine._forward_backward_body`'s TODO; pinned alone did not.
-        tensor = torch.empty(self.shape, dtype=self.dtype)
-        action.read_remote(tensor.view(-1).view(torch.uint8), self.buffer)
-        return tensor
+        if isinstance(self.value, _BytesRef):
+            await self.value.buffer.drop()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -104,56 +68,6 @@ class _BytesRef:
         return cls(
             buffer=RDMABuffer(torch.frombuffer(bytearray(data), dtype=torch.uint8))
         )
-
-    def queue_read(self, action: RDMAAction) -> _BytesRead:
-        destination = torch.empty(self.buffer.size(), dtype=torch.uint8)
-        action.read_remote(destination, self.buffer)
-        return _BytesRead(destination=destination)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _BytesRead:
-    """A bytes object being read into `destination`; `to_bytes` once the action has run."""
-
-    destination: torch.Tensor
-
-    def to_bytes(self) -> bytes:
-        return self.destination.numpy().tobytes()
-
-
-_BUFFER_REFS = (_TensorRef, _BytesRef)
-
-
-def _map_leaves(
-    value: Any, leaf_types: type | tuple[type, ...], fn: Callable[[Any], Any]
-) -> Any:
-    """Return `value` with each `leaf_types` instance replaced by `fn(instance)`. Leaves are found
-    in the containers pytree flattens (dict, list, tuple, ...) and, when `value` is a dataclass
-    (e.g. a `TrainingMicrobatch`), in each of its fields; a leaf inside any other object,
-    including a nested dataclass, is kept. A dataclass `value` is rebuilt with
-    `dataclasses.replace`, so its `__post_init__` sees the replaced leaves."""
-    if isinstance(value, leaf_types) or not _is_dataclass_instance(value):
-        return pytree.tree_map_only(leaf_types, fn, value)
-    return dataclasses.replace(
-        value,
-        **{
-            field.name: pytree.tree_map_only(leaf_types, fn, getattr(value, field.name))
-            for field in dataclasses.fields(value)
-        },
-    )
-
-
-def _buffer_refs(value: Any) -> list[_TensorRef | _BytesRef]:
-    """The buffer references `_map_leaves` finds in `value`, without rebuilding `value`."""
-    if _is_dataclass_instance(value) and not isinstance(value, _BUFFER_REFS):
-        value = [getattr(value, field.name) for field in dataclasses.fields(value)]
-    return [
-        leaf for leaf in pytree.tree_leaves(value) if isinstance(leaf, _BUFFER_REFS)
-    ]
-
-
-def _is_dataclass_instance(value: Any) -> bool:
-    return dataclasses.is_dataclass(value) and not isinstance(value, type)
 
 
 # The CUDA driver's `CU_LIMIT_STACK_SIZE` (cuda.h).

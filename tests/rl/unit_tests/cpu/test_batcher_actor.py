@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""BatcherActor, in its own process, returns the same batches as an in-process Batcher."""
+"""BatcherActor, in its own process, returns the same plans as an in-process Batcher."""
 
 import asyncio
 import dataclasses
@@ -14,7 +14,7 @@ import pytest
 import torch
 from monarch.actor import ActorError, this_host
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
-from torchtitan.rl.actors.monarch.rdma_object import _TensorRef
+from torchtitan.rl.rollout.packed_group import pack_rollout_group
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutGroup,
@@ -30,8 +30,6 @@ _BATCHER_KWARGS = dict(
     max_context_length=16,
     num_prompts_per_train_step=2,
     dp_degree=2,
-    pad_id=0,
-    temperature=1.0,
 )
 
 
@@ -62,65 +60,49 @@ def _group(group_id: int, rewards: list[float]) -> RolloutGroup:
     return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
 
-def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> None:
-    # TCP, not ibverbs: works on any CI host. The batcher process inherits the env var.
-    monkeypatch.setenv("MONARCH_RDMA_DISABLE_IBVERBS", "1")
-    # Batch A after group 2, batch B after group 4. Group 1 has zero reward spread, so the
+def test_batcher_actor_returns_the_in_process_plan(tmp_path) -> None:
+    # Plan A after group 2, plan B after group 4. Group 1 has zero reward spread, so the
     # builder drops it: it rides along but isn't trainable.
-    groups = [
-        _group(0, [0.0, 1.0]),
-        _group(1, [1.0, 1.0]),
-        _group(2, [1.0, 0.0]),
-        _group(3, [0.0, 1.0]),
-        _group(4, [1.0, 0.0]),
+    summaries = [
+        pack_rollout_group(group)[0]
+        for group in (
+            _group(0, [0.0, 1.0]),
+            _group(1, [1.0, 1.0]),
+            _group(2, [1.0, 0.0]),
+            _group(3, [0.0, 1.0]),
+            _group(4, [1.0, 0.0]),
+        )
     ]
 
     batcher = Batcher.Config().build(**_BATCHER_KWARGS)
-    expected = [batcher.add_group(rollout_group=group) for group in groups]
+    expected = [batcher.add_group(summary=summary) for summary in summaries]
 
-    async def run() -> tuple[list, list, list]:
+    async def run() -> list:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
         try:
-            spawn_kwargs = dict(
+            actor = mesh.spawn(
+                "batcher",
+                BatcherActor,
+                Batcher.Config(),
                 **_BATCHER_KWARGS,
                 output_dir=str(tmp_path),
                 enable_structured_logging=False,
             )
-            actor = mesh.spawn(
-                "batcher",
-                BatcherActor,
-                Batcher.Config(rdma_min_tensor_bytes=1024),
-                **spawn_kwargs,
-            )
-            by_value = mesh.spawn(
-                "batcher_by_value", BatcherActor, Batcher.Config(), **spawn_kwargs
-            )
             results = [
-                await actor.add_group.call_one(rollout_group=group) for group in groups
-            ]
-            by_value_results = [
-                await by_value.add_group.call_one(rollout_group=group)
-                for group in groups
-            ]
-            # Release A once: B, still held, must read back exactly, as a trainer rank reads it.
-            await actor.maybe_release_oldest_batch.call_one()
-            microbatch_groups_b = [
-                [
-                    [await rdma_microbatch.read() for rdma_microbatch in row]
-                    for row in group
-                ]
-                for group in results[4][0].microbatch_groups
+                await actor.add_group.call_one(summary=summary) for summary in summaries
             ]
             # A builder error surfaces at call_one.
             no_advantage = _group(5, [0.0, 1.0])
             no_advantage.rollouts[0].advantage = None
             with pytest.raises(ActorError, match="has no advantage"):
-                await actor.add_group.call_one(rollout_group=no_advantage)
-            return results, by_value_results, microbatch_groups_b
+                await actor.add_group.call_one(
+                    summary=pack_rollout_group(no_advantage)[0]
+                )
+            return results
         finally:
             await mesh.stop()
 
-    results, by_value_results, microbatch_groups_b = asyncio.run(run())
+    results = asyncio.run(run())
 
     assert [(batch is None, trainable) for batch, trainable, _ in results] == [
         (True, True),
@@ -131,30 +113,13 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
     ]
     # Each call also returns its handler time, for the controller's hop metrics.
     assert all(handler_s > 0 for _, _, handler_s in results)
-    batch_b = results[4][0]
-    assert [results[2][0].group_ids, batch_b.group_ids] == [[0, 1, 2], [3, 4]]
-    # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
-    registered = batch_b.microbatch_groups[0][0][0].microbatch.value
-    assert isinstance(registered.input, _TensorRef)
-    assert isinstance(registered.loss_token_counts, torch.Tensor)
+    assert [results[2][0].group_ids, results[4][0].group_ids] == [[0, 1, 2], [3, 4]]
 
     def comparable(batch) -> dict:
         # assert_close can't compare metric objects; every other field must match exactly.
         return dataclasses.asdict(dataclasses.replace(batch, metrics=[]))
 
-    torch.testing.assert_close(
-        comparable(dataclasses.replace(batch_b, microbatch_groups=microbatch_groups_b)),
-        comparable(expected[4][0]),
-        rtol=0,
-        atol=0,
-    )
-    # Without the threshold, the batches come back by value and match the in-process ones.
-    assert [batch is None for batch, _, _ in by_value_results] == [
-        batch is None for batch, _ in expected
-    ]
-    for (batch, _, _), (expected_batch, _) in zip(
-        by_value_results, expected, strict=True
-    ):
+    for (batch, _, _), (expected_batch, _) in zip(results, expected, strict=True):
         if expected_batch is not None:
             torch.testing.assert_close(
                 comparable(batch), comparable(expected_batch), rtol=0, atol=0

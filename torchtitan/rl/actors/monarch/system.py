@@ -102,8 +102,7 @@ class MonarchActorSystem(ActorSystem):
         # controller's process so routing does not contend with the training
         # loop for the controller's GIL.
         self._router_mesh = spawn_cpu_procs(1)
-        # Same for the batcher: build + pack would contend for the controller's GIL.
-        # It drops its own buffers (maybe_release_oldest_batch): Monarch's drop must run on the owner's host.
+        # Same for the batcher: deciding and planning would contend for the controller's GIL.
         self._batcher_mesh = spawn_cpu_procs(1)
 
         await setup_torch_elastic_env(self._trainer_mesh)
@@ -142,6 +141,11 @@ class MonarchActorSystem(ActorSystem):
             all_ranks=trainer,
             rank0=trainer.flatten("rank").slice(rank=0),
             by_dp_rank=trainer_by_dp_rank,
+            # The first rank of each DP replica: pipeline stage 0, CP and TP rank 0.
+            leader_by_dp_rank=[
+                trainer_pp_dp_cp_tp.slice(pp=0, dp=dp_rank, cp_tp=0)
+                for dp_rank in range(dp_degree)
+            ],
         )
 
     async def spawn_generator_router(

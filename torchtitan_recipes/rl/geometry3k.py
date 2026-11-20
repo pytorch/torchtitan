@@ -53,7 +53,7 @@ from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
-from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.batcher import Batcher, MicrobatchPacker
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 
@@ -91,7 +91,9 @@ def rl_grpo_qwen3_5_0_8b_geometry3k() -> Controller.Config:
             # One pass over the 601 test problems (the dataset reshuffles each epoch).
             validation=ValidationConfig(steps=601),
             # Qwen3.5's image tokens take M-RoPE positions.
-            batcher=Batcher.Config(build_mrope_positions=True),
+            batcher=Batcher.Config(
+                microbatch_packer=MicrobatchPacker.Config(build_mrope_positions=True)
+            ),
         ),
         rollouter=Rollouter.Config(
             training_dataloader=IterableRolloutDataLoader.Config(

@@ -455,6 +455,26 @@ def rollout_turn_lengths(rollout: Rollout) -> tuple[RolloutTurnLengths, ...]:
     return tuple(turn_lengths)
 
 
+@dataclass(frozen=True, slots=True)
+class RolloutGroupSummary:
+    """A rollout group without its bytes: what the batcher decides and plans from
+    (`pack_rollout_group` makes it in the rollout worker).
+
+    `group` keeps every field except the bytes: each `np.ndarray` field of each turn is cut to 0
+    rows (same dtype and trailing shape, e.g. int32 [0, 32] for top-k ids) and each image's
+    `data` is b"". The turns keep their class.
+
+    So any value derived from a turn's arrays is 0 on a summary turn, with no error (e.g.
+    `len(turn.completion_token_ids)` and the delta part of `turn.num_prompt_tokens`): read
+    lengths from `turn_lengths`.
+    """
+
+    group: RolloutGroup
+
+    turn_lengths: tuple[tuple[RolloutTurnLengths, ...], ...]
+    """[rollout][turn], in `group.rollouts` and `Rollout.turns` order."""
+
+
 def check_prompt_prefixes(rollout: Rollout) -> None:
     """Raise if a turn of `rollout` reuses more of the previous turn's tokens than there are, or
     fewer than it could.
