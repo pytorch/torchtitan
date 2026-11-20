@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +36,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
     EngineRequest,
     FinishedRequest,
+    KVCacheReading,
     RequestMetricsInputs,
     SamplingConfig,
 )
@@ -62,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 # Byte budget of `VLLMEngine`'s pixel values cache: ~400 Geometry3K images (2.4 MB each).
 _PIXEL_VALUES_LRU_CACHE_BYTES = 1 << 30
+# Finished requests carry a KV cache reading taken at most this long ago: the read walks vLLM's
+# free queue (about 4 ms over 60k free blocks), too slow for every engine step on a large cache.
+_KV_CACHE_READ_MAX_AGE_S = 1.0
 
 
 def add_extra_vllm_engine_args(
@@ -204,8 +210,11 @@ class VLLMEngine(GenerationEngine):
             serves_images=vision_processor is not None,
         )
         tp_degree = parallelism.tensor_parallel_degree
+        # Only TP rank 0's finished requests reach the dispatcher, so only it logs vLLM's stats
+        # and reads the KV cache.
+        self._is_tp_rank_0 = rank % tp_degree == 0
         stat_loggers = None
-        if rank % tp_degree == 0:
+        if self._is_tp_rank_0:
             stat_loggers = self._build_stat_loggers(
                 StatLoggerContext(
                     rank=rank,
@@ -226,6 +235,8 @@ class VLLMEngine(GenerationEngine):
         self._session_kv_evictor = VLLMSessionKVEvictor(
             scheduler=self._engine.engine_core.engine_core.scheduler
         )
+        self._kv_cache_reading: KVCacheReading | None = None
+        self._kv_cache_read_time = -math.inf
 
     @staticmethod
     def _setup(
@@ -490,7 +501,17 @@ class VLLMEngine(GenerationEngine):
         with torch.no_grad():
             request_outputs = self._engine.step()
         self._session_kv_evictor.after_step()
-        return [_finished_request(request_output) for request_output in request_outputs]
+        kv_cache_reading = None
+        if request_outputs and self._is_tp_rank_0:
+            now = time.monotonic()
+            if now - self._kv_cache_read_time >= _KV_CACHE_READ_MAX_AGE_S:
+                self._kv_cache_reading = self._session_kv_evictor.kv_cache_reading()
+                self._kv_cache_read_time = now
+            kv_cache_reading = self._kv_cache_reading
+        return [
+            _finished_request(request_output, kv_cache_reading=kv_cache_reading)
+            for request_output in request_outputs
+        ]
 
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         self._session_kv_evictor.release(session_ids=session_ids, group_ids=group_ids)
@@ -577,7 +598,9 @@ def _build_sampling_params(sampling: SamplingConfig) -> SamplingParams:
     )
 
 
-def _finished_request(request_output: RequestOutput) -> FinishedRequest:
+def _finished_request(
+    request_output: RequestOutput, *, kv_cache_reading: KVCacheReading | None
+) -> FinishedRequest:
     """Convert a finished ``RequestOutput`` into a ``FinishedRequest``."""
     # We enforce n=1 in sampling params -> exactly one CompletionOutput per finished request
     # Here we just sanity check it (a single engine.step may still finish several requests).
@@ -595,12 +618,14 @@ def _finished_request(request_output: RequestOutput) -> FinishedRequest:
         token_ids=list(completion_output.token_ids),
         token_logprobs=list(completion_output.logprobs.logprobs),
         finish_reason=completion_output.finish_reason,
-        metrics_inputs=_extract_request_metrics_inputs(request_output),
+        metrics_inputs=_extract_request_metrics_inputs(
+            request_output, kv_cache_reading=kv_cache_reading
+        ),
     )
 
 
 def _extract_request_metrics_inputs(
-    request_output: RequestOutput,
+    request_output: RequestOutput, *, kv_cache_reading: KVCacheReading | None
 ) -> RequestMetricsInputs:
     """Pull the raw metric inputs off a finished ``RequestOutput``.
 
@@ -610,7 +635,9 @@ def _extract_request_metrics_inputs(
     stats = request_output.metrics
     if stats is None:
         return RequestMetricsInputs(
-            num_cached_tokens=request_output.num_cached_tokens, has_stats=False
+            num_cached_tokens=request_output.num_cached_tokens,
+            has_stats=False,
+            kv_cache_reading=kv_cache_reading,
         )
     return RequestMetricsInputs(
         num_cached_tokens=request_output.num_cached_tokens,
@@ -622,4 +649,5 @@ def _extract_request_metrics_inputs(
         first_token_latency=stats.first_token_latency,
         num_generation_tokens=stats.num_generation_tokens,
         num_preemptions=stats.num_preemptions,
+        kv_cache_reading=kv_cache_reading,
     )

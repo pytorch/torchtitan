@@ -76,6 +76,22 @@ class EngineRequest:
     prefix cache."""
 
 
+@dataclass(frozen=True, kw_only=True, slots=True)
+class KVCacheReading:
+    """One read of an engine's KV cache, as fractions of its usable blocks.
+
+    Example: 200 blocks; 50 used by running requests, 90 cached for live rollouts, 60 free.
+        usage = 50 / 200 = 0.25
+        occupancy = (50 + 90) / 200 = 0.70
+    """
+
+    occupancy: float
+    """Blocks that running requests use or that stay cached for live rollouts."""
+    usage: float
+    """Blocks that running requests use: vLLM's `kv_cache_usage`, which counts every cached
+    free block as free."""
+
+
 @dataclass(kw_only=True, slots=True)
 class RequestMetricsInputs:
     """Raw inputs needed to build a request's metrics. Used to pass
@@ -91,6 +107,9 @@ class RequestMetricsInputs:
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
     num_preemptions: int = 0
+    kv_cache_reading: KVCacheReading | None = None
+    """The engine's KV cache when the request finished (a recent reading); None on engines that
+    don't read it (SGLang) and on vLLM TP ranks other than 0."""
 
 
 @dataclass(kw_only=True, slots=True)

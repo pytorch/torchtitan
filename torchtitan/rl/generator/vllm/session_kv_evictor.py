@@ -14,6 +14,8 @@ from typing import Any
 
 from vllm.v1.core.kv_cache_utils import BlockHash, make_block_hash_with_group_id
 
+from torchtitan.rl.generator.types import KVCacheReading
+
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +89,28 @@ class VLLMSessionKVEvictor:
     def num_sessions(self) -> int:
         """Live sessions on this engine."""
         return len(self._sessions)
+
+    def kv_cache_reading(self) -> KVCacheReading:
+        """Read the KV cache. Ended rollouts' blocks lose their hash, so a cached free block is
+        one a live rollout may reuse: occupancy counts it, vLLM's usage counts it as free.
+
+        Walks the free queue: 0.3-0.7 ms per 10k free blocks on CPU.
+        """
+        block_pool = self._block_pool
+        num_free_uncached_blocks = sum(
+            block.block_hash is None
+            for block in block_pool.free_block_queue.iter_blocks_after(None)
+        )
+        # TODO: on hybrid models (Qwen3.5) vLLM caches a Mamba state at every block boundary,
+        # so a waiting rollout keeps several Mamba state blocks per layer group where its next
+        # turn needs 1, and its cached blocks reach about twice its need. Fix: evict all but
+        # each live session's newest state. Its own PR: it can drop a preempted request's state.
+
+        # The null block is never free; vLLM's usage leaves it out too.
+        return KVCacheReading(
+            occupancy=1.0 - num_free_uncached_blocks / (block_pool.num_gpu_blocks - 1),
+            usage=block_pool.get_usage(),
+        )
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
         """Make this request its session's history; evict what its prompt dropped from the

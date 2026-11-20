@@ -14,6 +14,7 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import math
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -38,7 +39,7 @@ from torchtitan.rl.generator.dispatcher import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.types import EngineRequest, KVCacheReading, SamplingConfig
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
@@ -147,7 +148,12 @@ def _vllm_engine(*, reset_kv_cache_on_model_state_dict_load=False, model=None):
         reset_kv_cache_on_model_state_dict_load
     )
     engine._get_model = lambda: model
-    engine._session_kv_evictor = Mock()
+    engine._session_kv_evictor = Mock(
+        **{"kv_cache_reading.return_value": KVCacheReading(occupancy=0.0, usage=0.0)}
+    )
+    engine._is_tp_rank_0 = True
+    engine._kv_cache_reading = None
+    engine._kv_cache_read_time = -math.inf
     engine._vision_processor = None
     engine._pixel_values_lru_cache = LRUCache(
         1 << 20, getsizeof=lambda pixel_values: pixel_values.nbytes
@@ -246,16 +252,13 @@ def test_process_finished_requests_resolves_reply_with_completion():
         generation.min_policy_version = 7
         dispatcher._rank0_outstanding_generations = {"r0": generation}
 
-        dispatcher.process_finished_requests(
-            [
-                _finished_request(
-                    _request_output(
-                        outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
-                    )
-                )
-            ],
-            policy_version=8,
+        finished = _finished_request(
+            _request_output(
+                outputs=[_sample(token_ids=(10, 11), finish_reason="length")]
+            ),
+            kv_cache_reading=KVCacheReading(occupancy=0.7, usage=0.25),
         )
+        dispatcher.process_finished_requests([finished], policy_version=8)
 
         completion = await asyncio.wrap_future(reply)
         assert completion.request_id == "r0"
@@ -267,12 +270,10 @@ def test_process_finished_requests_resolves_reply_with_completion():
         # The request is popped from the in-flight map.
         assert dispatcher._rank0_outstanding_generations == {}
         # The per-generation metrics ride on the completion (built on rank 0).
-        assert (
-            m.MetricsProcessor._aggregate_metrics(completion.metrics)[
-                "generator/inflight_requests_at_completion/max"
-            ]
-            == 1
-        )
+        metrics = m.MetricsProcessor._aggregate_metrics(completion.metrics)
+        assert metrics["generator/inflight_requests_at_completion/max"] == 1
+        assert metrics["generator/kv_cache_occupancy/max"] == 0.7
+        assert metrics["generator/kv_cache_usage/max"] == 0.25
 
     asyncio.run(main())
 
@@ -282,7 +283,8 @@ def test_process_finished_requests_noop_on_nonzero_tp_rank():
     dispatcher = _dispatcher(rank=1, dp_degree=1, tp_degree=2)
     assert dispatcher._tp_rank != 0
     dispatcher.process_finished_requests(
-        [_finished_request(_request_output(request_id="r0"))], policy_version=7
+        [_finished_request(_request_output(request_id="r0"), kv_cache_reading=None)],
+        policy_version=7,
     )
     assert dispatcher._rank0_outstanding_generations == {}
 
@@ -302,7 +304,12 @@ def test_process_finished_requests_releases_dp_router_load():
         assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [1, 0]
 
         dispatcher.process_finished_requests(
-            [_finished_request(_request_output(request_id="r0"))], policy_version=7
+            [
+                _finished_request(
+                    _request_output(request_id="r0"), kv_cache_reading=None
+                )
+            ],
+            policy_version=7,
         )
 
         await asyncio.wrap_future(reply)
@@ -406,6 +413,35 @@ def test_session_kv_evictor_tracks_admitted_requests_and_releases_sessions():
     evictor.release.assert_called_once_with(
         session_ids=["group=3/rollout=0"], group_ids=[3]
     )
+
+
+def test_step_stamps_finished_requests_with_a_kv_cache_reading_at_most_a_second_old(
+    monkeypatch,
+):
+    # TP rank 0 reads the KV cache when its last reading is 1 s old; other ranks never read.
+    first = KVCacheReading(occupancy=0.1, usage=0.0)
+    second = KVCacheReading(occupancy=0.2, usage=0.0)
+    readings = iter([first, second])
+    now = [100.0]
+    monkeypatch.setattr(vllm_engine_module.time, "monotonic", lambda: now[0])
+    engine = _vllm_engine()
+    engine._session_kv_evictor.kv_cache_reading.side_effect = lambda: next(readings)
+
+    def step(*request_ids: str, at: float) -> list[KVCacheReading | None]:
+        now[0] = at
+        engine._engine.step = lambda: [
+            _request_output(request_id=request_id) for request_id in request_ids
+        ]
+        return [
+            finished_request.metrics_inputs.kv_cache_reading
+            for finished_request in engine.step()
+        ]
+
+    assert step("r0", "r1", at=100.0) == [first, first]
+    assert step("r2", at=100.5) == [first]
+    assert step("r3", at=101.1) == [second]
+    engine._is_tp_rank_0 = False
+    assert step("r4", at=103.0) == [None]
 
 
 def test_admission_salts_prompt_with_min_policy_version():
@@ -658,7 +694,9 @@ def test_sampling_config_rejects_top_p_below_one():
 
 def test_metric_timing_math():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output(num_preemptions=2))
+        _extract_request_metrics_inputs(
+            _request_output(num_preemptions=2), kv_cache_reading=None
+        )
     )
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
     assert all(key.startswith("generator/") for key in aggregate)
@@ -672,7 +710,9 @@ def test_metric_timing_math():
 
 def test_decode_metrics_absent_for_single_generated_token():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output(num_generation_tokens=1))
+        _extract_request_metrics_inputs(
+            _request_output(num_generation_tokens=1), kv_cache_reading=None
+        )
     )
     keys = {metric.key for metric in metrics}
     assert "generator/prefill_time_ms" in keys

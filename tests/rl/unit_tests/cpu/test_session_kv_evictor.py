@@ -504,3 +504,43 @@ def test_a_copy_a_kv_connector_holds_keeps_its_hash_and_the_free_copy_goes(
     assert held.block_hash == key and held.ref_cnt == 1
     assert free.block_hash is None
     assert get(key) is held
+
+
+def test_occupancy_counts_live_rollouts_cached_blocks_but_not_ended_ones(
+    manager, scheduler, evictor
+):
+    num_usable_blocks = manager.block_pool.num_gpu_blocks - 1  # minus vLLM's null block
+    assert evictor.kv_cache_reading().occupancy == 0.0
+    live = _turn(
+        manager,
+        scheduler,
+        evictor,
+        "live/turn=0",
+        session_id="live",
+        group_id=0,
+        tokens=list(range(50)),
+        output_tokens=list(range(100, 120)),
+    )
+    ended = _turn(
+        manager,
+        scheduler,
+        evictor,
+        "ended/turn=0",
+        session_id="ended",
+        group_id=1,
+        tokens=list(range(500, 550)),
+        output_tokens=list(range(600, 620)),
+    )
+    num_live_blocks = _num_cached_blocks(manager, live)
+    num_ended_blocks = _num_cached_blocks(manager, ended)
+    reading = evictor.kv_cache_reading()
+    # Nothing runs, so vLLM's usage reads 0; both rollouts' cached blocks count here.
+    assert reading.usage == 0.0
+    assert reading.occupancy == pytest.approx(
+        (num_live_blocks + num_ended_blocks) / num_usable_blocks
+    )
+
+    evictor.release(session_ids=["ended"], group_ids=[1])
+    assert evictor.kv_cache_reading().occupancy == pytest.approx(
+        num_live_blocks / num_usable_blocks
+    )
