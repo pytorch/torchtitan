@@ -96,12 +96,10 @@ and prefill in separate batches; `"decode"` captures full graphs for decode
 batches. The default, `"full"`, also captures prefill batches as SGLang's full
 prefill CUDA graphs, one per token-count bucket, with a request slot per running
 request. Without them, prefill is bound by the eager model's CPU overhead (about
-7x the GPU time of a 16K-token prefill chunk of Qwen3-0.6B at TP 2). SGLang's
-linear attention backend fails to capture full prefill graphs, so linear
-attention models (GDN, KDA) raise with `"full"` and need `"breakable"`: SGLang's
-breakable prefill graphs, where the model runs in graph segments, with attention
-eager in between, at a CPU cost per layer in every prefill step. Capture adds
-about 30 s to startup; `"decode"` skips it.
+7x the GPU time of a 16K-token prefill chunk of Qwen3-0.6B at TP 2).
+`"breakable"` captures SGLang's breakable prefill graphs instead, where the model
+runs in graph segments, with attention eager in between, at a CPU cost per layer
+in every prefill step. Capture adds about 30 s to startup; `"decode"` skips it.
 
 Attention kernels compile on first use for each kernel variant, so the first
 prefill batches of a run can take a few seconds.
