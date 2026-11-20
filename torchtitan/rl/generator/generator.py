@@ -135,7 +135,8 @@ class Generator(Configurable):
         over its own, smaller, expert-parallel mesh."""
 
         gpu_memory_limit: float = 0.9
-        """Fraction of GPU memory to use for the engine (0.0 to 1.0)."""
+        """Fraction of GPU memory to use for the engine (0.0 to 1.0). The rest must hold
+        what weight sync allocates after the engine starts."""
 
         max_num_batched_tokens: int | None = None
         """The engine's chunked-prefill chunk size: max tokens scheduled per engine step
