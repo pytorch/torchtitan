@@ -1424,9 +1424,10 @@ class Controller(Configurable):
 
                 # Finish the push before forward/backward N+1: forward/backward blocks the trainer's event loop,
                 # so a push still running then would reply after it and start the pull late.
-                # TODO: to hide the push, run forward_backward on a thread (or reply from the push's worker thread), and
-                # before optimizer N+1 wait only for the GPU -> CPU copy, not later processing (e.g. quantization).
-                # Not needed while the push is short: 0.12 s vs a 45 s forward/backward (Qwen3.5-27B, 2 GB300 hosts).
+                # TODO: to hide the push, reply from the push's worker thread (or run forward_backward on a thread),
+                # and order optimizer N+1 after the stage on the device, not with a host wait (TorchStore's put still
+                # needs one). Worth it once timing/step/blocking_trainer_push_model_state_dict grows: today 0.12 s
+                # vs a 45 s forward/backward (Qwen3.5-27B, 2 GB300 hosts).
                 with (
                     sl.log_trace_span("blocking_trainer_push_model_state_dict"),
                     step_timer.record(
@@ -1485,7 +1486,8 @@ class Controller(Configurable):
             self._maybe_start_validation(step=step)
 
         # TODO: if this loop raises (e.g. a failed forward/backward, optimizer step or validation), the pull
-        # still in flight keeps running while run() tears down. Cancel or await it in a `finally`.
+        # still in flight keeps running while run() tears down, and nobody reads its error ("Task exception was
+        # never retrieved"). Cancel or await it in a `finally`.
         # Finish the last pull so generators hold the final weights for the validation after training
         # (`validate_after_training`).
         if pull_task is not None:
