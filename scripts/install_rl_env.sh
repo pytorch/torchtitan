@@ -34,7 +34,7 @@ set -euo pipefail
 
 cuda="cu132"
 # Also set VLLM_VERSION in .github/workflows/validate_release_gpu.yml (2 places).
-vllm_version="0.33.0"
+vllm_version="0.34.0"
 skip_base=0
 flash_attn="auto"
 install_nvcc=0
