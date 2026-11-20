@@ -833,18 +833,18 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "hip_version, sm90_or_newer, expected",
+    "hip_version, sm90_or_newer, expected_max_num_seqs",
     [
-        # CUDA, compute capability >= 9.0: vllm serve's default
-        (None, True, 4096),
-        # FlashAttention-2 GPUs: capped at 64 * max_num_seqs (8)
-        (None, False, 512),
-        # ROCm: vllm serve's default
-        ("7.0", False, 4096),
+        # CUDA, compute capability >= 9.0
+        (None, True, 8),
+        # FlashAttention-2 GPUs: at least the budget / 64
+        (None, False, 64),
+        # ROCm
+        ("7.0", False, 8),
     ],
 )
 def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
-    monkeypatch, tmp_path, hip_version, sm90_or_newer, expected
+    monkeypatch, tmp_path, hip_version, sm90_or_newer, expected_max_num_seqs
 ):
     monkeypatch.setattr(torch.version, "hip", hip_version)
     monkeypatch.setattr(
@@ -855,9 +855,11 @@ def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
         monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG)
     )
 
-    assert engine_kwargs["max_num_batched_tokens"] == expected
+    budget = _VLLM_SERVE_MAX_NUM_BATCHED_TOKENS
+    assert engine_kwargs["max_num_batched_tokens"] == budget
+    assert engine_kwargs["max_num_seqs"] == expected_max_num_seqs
     # FULL graphs (the default) capture mixed steps up to the same budget.
-    assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == expected
+    assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == budget
 
 
 @pytest.mark.parametrize(

@@ -41,6 +41,7 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import (
+    fit_max_num_seqs,
     resolve_max_num_batched_tokens,
     VLLMCudaGraphConfig,
 )
@@ -364,7 +365,9 @@ class VLLMEngine(GenerationEngine):
 
         # FULL CUDA graphs capture mixed steps up to the step budget, so resolve it first.
         max_num_batched_tokens = resolve_max_num_batched_tokens(engine_kwargs)
+        max_num_seqs = fit_max_num_seqs(max_num_seqs, max_num_batched_tokens)
         engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+        engine_kwargs["max_num_seqs"] = max_num_seqs
         vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,

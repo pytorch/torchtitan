@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -41,22 +42,30 @@ def resolve_max_num_batched_tokens(engine_kwargs: dict[str, Any]) -> int:
     vllm_config = EngineArgs(**engine_kwargs).create_engine_config(
         UsageContext.OPENAI_API_SERVER
     )
-    vllm_serve_default = vllm_config.scheduler_config.max_num_batched_tokens
-    max_num_batched_tokens = vllm_serve_default
-
-    if torch.version.hip is None and not has_cuda_capability(9, 0):
-        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's CUDA graph memory
-        # profile gives each of max_num_seqs requests 1 key; FA2 writes out of bounds past 64 query tokens.
-        max_num_batched_tokens = min(
-            max_num_batched_tokens, 64 * engine_kwargs["max_num_seqs"]
-        )
-
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     logger.info(
-        "max_num_batched_tokens is unset: vllm serve's default for this device is %d, using %d",
-        vllm_serve_default,
+        "max_num_batched_tokens is unset: using vllm serve's default for this device, %d",
         max_num_batched_tokens,
     )
     return max_num_batched_tokens
+
+
+def fit_max_num_seqs(max_num_seqs: int, max_num_batched_tokens: int) -> int:
+    """Return ``max_num_seqs`` moved into the range vLLM can run with ``max_num_batched_tokens``.
+
+    Example:
+        max_num_seqs 4096, budget 2048                       -> 2048  (vLLM needs max_num_seqs <= budget)
+        max_num_seqs 8, budget 2048, FlashAttention-2 GPU    -> 32    (see the TODO)
+        max_num_seqs 8, budget 2048, other GPUs              -> 8
+    """
+    if torch.version.hip is None and not has_cuda_capability(9, 0):
+        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's CUDA graph memory
+        # profile splits the budget over max_num_seqs requests with 1 key each; FA2 writes out of bounds past 64.
+        max_num_seqs = 2 ** math.ceil(
+            math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
+        )
+
+    return min(max_num_seqs, max_num_batched_tokens)
 
 
 @dataclass(kw_only=True, slots=True)
