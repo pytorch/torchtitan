@@ -112,6 +112,40 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     return config
 
 
+def kimi_k3_1_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
+    from torchtitan.distributed.pipeline_parallel import (
+        _generate_llm_fqn_per_model_part,
+    )
+    from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
+
+    from torchtitan_recipes.tests.models.kimi_k3_1 import kimi_k3_1_debugmodel
+
+    config = kimi_k3_1_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.enable_sequence_parallel = True
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 4
+    parallelism = config.parallelism
+    split = _generate_llm_fqn_per_model_part(
+        4 * parallelism.pipeline_parallel_degree,
+        len(config.model.layers),
+        parallelism.pipeline_parallel_first_stage_less_layers,
+        parallelism.pipeline_parallel_last_stage_less_layers,
+    )
+    split[0][:0] = KimiK3MultimodalModel.pipeline_first_stage_module_fqns
+    split[-1].extend(KimiK3MultimodalModel.pipeline_last_stage_module_fqns)
+    parallelism.pipeline_parallel_module_fqns_per_model_part = split
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+    )
+    return config
+
+
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> Trainer.Config:
     """Exercise eager PP schedule-derived Dist-MoE activation slots."""
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
@@ -154,6 +188,15 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             configs=[kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4],
             test_descr="Kimi K3 FSDP, TP, EP and PP with 4 VPP stages",
             test_name="kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
+            ngpu=8,
+        ),
+        # TODO: add a golden loss once Attention Gym gather_attn has a
+        # deterministic backward for (latent, rope) pairs:
+        # https://github.com/meta-pytorch/attention-gym/issues/795
+        IntegrationTestDefinition(
+            configs=[kimi_k3_1_debugmodel_fsdp2_tp2_ep2_pp2_vpp4],
+            test_descr="Kimi K3.1 FSDP, TP, EP and PP with 4 VPP stages",
+            test_name="kimi_k3_1_fsdp2_tp2_ep2_pp2_vpp4",
             ngpu=8,
         ),
         IntegrationTestDefinition(
