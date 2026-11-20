@@ -198,8 +198,8 @@ class Rollouter(Configurable):
             generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
             run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
 
-        Why wait: if a worker stops while a generator (or the generator router) still owes it a reply,
-        Monarch fails that actor and the finished job exits 130.
+        Why wait: so each in-flight `run_group` ends on its own (closing its envs and releasing its
+        sessions) instead of being cut off when its worker stops.
         """
         actor_system = self._actor_system
         self._worker_actors = None
@@ -209,8 +209,7 @@ class Rollouter(Configurable):
             _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
             if pending:
                 logger.warning(
-                    "Stopping rollout workers with %d run_group calls still running; "
-                    "the job may exit 130",
+                    "Stopping rollout workers with %d run_group calls still running",
                     len(pending),
                 )
                 for call in pending:
