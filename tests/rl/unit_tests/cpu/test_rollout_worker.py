@@ -24,7 +24,7 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout import Prompt, PromptImage, RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
-from torchtitan.rl.rollout.rollouter import RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
@@ -90,7 +90,7 @@ class _AdvantageEstimator:
         return [rollout.reward * 10 for rollout in group.rollouts]
 
 
-class _CustomWorker(RolloutWorker):
+class _CustomWorker(MessageEnvRolloutWorker):
     def __init__(self, config) -> None:
         super().__init__(config)
         self.custom_setting = config.custom_setting
@@ -124,7 +124,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
     async def run() -> None:
         generate_fn = _GenerateFn()
         token_env_config = _TokenEnvConfig()
-        # A RolloutWorker takes its own config, so the worker is usable without a
+        # A MessageEnvRolloutWorker takes its own config, so the worker is usable without a
         # Rollouter or an actor mesh.
         worker_config = SimpleNamespace(
             custom_setting="custom",
@@ -248,7 +248,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
     rng = random.Random(0)
-    worker = RolloutWorker(
+    worker = MessageEnvRolloutWorker(
         SimpleNamespace(
             rubric=_Config(None),
             message_env=None,
@@ -326,7 +326,7 @@ def test_rollout_sends_and_records_prompt_images() -> None:
                 status=RolloutStatus.ONGOING,
             )
 
-    worker = RolloutWorker(
+    worker = MessageEnvRolloutWorker(
         SimpleNamespace(
             rubric=_Config(None),
             message_env=None,

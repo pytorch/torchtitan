@@ -103,7 +103,6 @@ class KDAKernel(Module):
             gate_1THK,
             beta_1TH,
             cu_seqlens=cu_seqlens,
-            autotune=not torch.are_deterministic_algorithms_enabled(),
             kernel_options=chunk_kernel_options(q_1THK),
         )
         return output_1THV
@@ -130,10 +129,9 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
-        autotune = not torch.are_deterministic_algorithms_enabled()
         return (
-            l2norm(q_1THK, autotune=autotune),
-            l2norm(k_1THK, autotune=autotune),
+            l2norm(q_1THK),
+            l2norm(k_1THK),
             gate_1THK,
             raw_beta_1TH.float().sigmoid(),
         )

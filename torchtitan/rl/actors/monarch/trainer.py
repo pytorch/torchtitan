@@ -13,6 +13,11 @@ from typing import Any
 import torch
 from monarch.actor import Actor, concurrent_endpoint
 
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
 
@@ -23,6 +28,17 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def initialize_torchstore_client(self) -> None:
         await super().initialize_torchstore_client()
+
+    @concurrent_endpoint
+    async def register_model_state_dict_source(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
+    ) -> TrainerSource:
+        return super().register_model_state_dict_source(
+            config, generator_rank_layouts=generator_rank_layouts
+        )
 
     @concurrent_endpoint
     async def get_policy_version(self) -> int:
@@ -60,12 +76,10 @@ class _TrainerActorEndpoints:
         )
 
     @concurrent_endpoint
-    async def optim_step(self, *, resume_state: dict[str, Any]) -> OptimizerStepOutput:
-        return await super().optim_step(resume_state=resume_state)
-
-    @concurrent_endpoint
-    async def save_checkpoint(self, *, last_step: bool) -> None:
-        await super().save_checkpoint(last_step=last_step)
+    async def optim_step(
+        self, *, resume_state: dict[str, Any], last_step: bool = False
+    ) -> OptimizerStepOutput:
+        return await super().optim_step(resume_state=resume_state, last_step=last_step)
 
     @concurrent_endpoint
     async def push_model_state_dict(self) -> None:

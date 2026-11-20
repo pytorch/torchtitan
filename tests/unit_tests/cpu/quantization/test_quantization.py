@@ -43,7 +43,6 @@ from torchtitan.models.common.linear import (
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.quantization import MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
@@ -90,21 +89,6 @@ def _router_config_for_quantization(dim: int):
         score_func=Sigmoid.Config(),
         gate_param_init={"weight": torch.nn.init.zeros_},
     )
-
-
-@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
-def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
-    config_cls = get_quantized_linear(_ScaledLinear, parallel_cls).Config
-    converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)
-
-    assert converted._owner is not None
-    assert issubclass(converted._owner, parallel_cls)
-    assert issubclass(converted._owner, _ScaledLinear)
-
-    linear = converted.build()
-    input = torch.randn(2, 16)
-    expected = 3.0 * torch.nn.functional.linear(input, linear.weight, linear.bias)
-    torch.testing.assert_close(linear(input), expected)
 
 
 @pytest.mark.parametrize("config_cls", [HiMidLoLinear.Config])
@@ -377,8 +361,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
     sc = module._sharding_config
     assert sc.local_spmd
     input_layout = dense_activation_placement(tp=input_tp, cp=spmd.S(0))
-    assert sc.in_src_shardings == {"input": input_layout}
-    assert sc.in_dst_shardings == {"input": input_layout}
+    assert sc.input_shardings == {"input": input_layout}
     assert list(inspect.signature(module.forward).parameters) == ["input"]
     assert "weight" in sc.state_shardings
     assert sc.state_shardings["_sr_seed"] == SpmdType(
@@ -409,11 +392,9 @@ def test_nvfp4_parallel_build_preserves_collective_boundary(parallel_cls):
     ).build()
 
     assert not module._sharding_config.local_spmd
-    assert module._sharding_config.in_src_shardings == (
-        sharding_config.in_src_shardings
-    )
-    assert module._sharding_config.out_src_shardings == (
-        sharding_config.out_src_shardings
+    assert module._sharding_config.input_shardings == (sharding_config.input_shardings)
+    assert module._sharding_config.output_shardings == (
+        sharding_config.output_shardings
     )
     assert "_sr_seed" in module._sharding_config.state_shardings
 

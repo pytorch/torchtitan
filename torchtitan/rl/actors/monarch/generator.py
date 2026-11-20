@@ -15,6 +15,11 @@ from torchtitan.config import PrecisionConfig
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
 from torchtitan.rl.rollout.types import Completion, Prompt
 
 
@@ -28,6 +33,7 @@ class _GeneratorActorEndpoints:
         max_num_seqs: int,
         output_dir: str,
         vision_processor: VisionProcessor.Config | None = None,
+        mooncake_master_address: str | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -39,11 +45,28 @@ class _GeneratorActorEndpoints:
             generator_name=context().actor_instance.actor_id.actor_name,
             open_result_channel=Channel.open,
             vision_processor=vision_processor,
+            mooncake_master_address=mooncake_master_address,
         )
 
     @concurrent_endpoint
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         await super().initialize_torchstore_client(requester_index)
+
+    @concurrent_endpoint
+    async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:
+        return await super().model_state_dict_layout()
+
+    @concurrent_endpoint
+    async def connect_model_state_dict_transport(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        trainer_sources: list[TrainerSource],
+        generator_index: int,
+    ) -> None:
+        await super().connect_model_state_dict_transport(
+            config, trainer_sources=trainer_sources, generator_index=generator_index
+        )
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
