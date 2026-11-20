@@ -5,33 +5,26 @@
   draft: false
 
 "ciflow/fake-pg":
-  # Files the core integration suites (features, models, flux) read. RL has ciflow/rl; experiments run their
-  # own path-filtered workflows.
+  # Every file except what the core suites (features, models, flux) never read: RL (ciflow/rl), experiments,
+  # unit tests and Markdown. pytorch-bot can't exclude paths, so each glob opts out with !(...).
   globs:
     - .ci/docker/**
     - .github/requirements-torchao.txt
     - .github/scripts/integration_test_real_pg.sh
-    - .github/workflows/integration_test.yaml
-    - .github/workflows/set-matrix.yaml
+    - .github/workflows/{integration_test,set-matrix}.yaml
     - run_train.sh
-    - scripts/_checkpoint_test_config.py
-    - scripts/loss_compare.py
+    - scripts/!(install_rl_env.sh|*.md)
+    - scripts/!(rl)/**/!(*.md)
     - tests/!(*.md)
-    - tests/assets/!(*.md)
-    - tests/assets/!(losses)/**/!(*.md)
-    - tests/assets/losses/fake_pg/**
-    - tests/assets/losses/real_pg/**
+    - tests/!(rl|unit_tests|integration_tests)/**/!(rl_grpo_cuda.txt|*.md)
     - tests/integration_tests/!(rl|h100|b200).py
-    - tests/integration_tests/hardware_skips/!(*.md)
+    - tests/integration_tests/*/**/!(*.md)
     - torchtitan/!(*.md)
     - torchtitan/!(rl|experiments)/**/!(*.md)
-    - torchtitan_recipes/__init__.py
-    - torchtitan_recipes/data.py
-    - torchtitan_recipes/models/**/!(*.md)
-    - torchtitan_recipes/overrides/**/!(*.md)
-    - torchtitan_recipes/tests/__init__.py
-    - torchtitan_recipes/tests/datasets/**/!(*.md)
-    - torchtitan_recipes/tests/models/**/!(*.md)
+    - torchtitan_recipes/!(*.md)
+    - torchtitan_recipes/!(rl|graph_trainer|torchft|tests)/**/!(*.md)
+    - torchtitan_recipes/tests/!(*.md)
+    - torchtitan_recipes/tests/!(rl|graph_trainer|torchft)/**/!(*.md)
   draft: false
 
 "ciflow/b200":
@@ -57,19 +50,15 @@
     - torchtitan/models/qwen3_8/**
     - torchtitan_recipes/rl/**
     - torchtitan_recipes/tests/rl/**
+    # CI files the RL jobs run or read
     - .ci/docker/requirements.txt
+    - .github/workflows/set-matrix.yaml
     - pyproject.toml
-    - scripts/_checkpoint_test_config.py
-    - scripts/install_rl_env.sh
-    - scripts/loss_compare.py
+    - scripts/{install_rl_env.sh,loss_compare.py,_checkpoint_test_config.py}
     - tests/__init__.py
     - tests/assets/losses/rl_grpo_cuda.txt
-    - tests/integration_tests/__init__.py
-    - tests/integration_tests/hardware_skips/__init__.py
-    - tests/integration_tests/hardware_skips/skipped_tests.toml
-    - tests/integration_tests/rl.py
-    - tests/integration_tests/run_tests.py
-    - .github/workflows/set-matrix.yaml
+    - tests/integration_tests/{__init__.py,rl.py,run_tests.py}
+    - tests/integration_tests/hardware_skips/**
     - .github/workflows/integration_test_8gpu_rl.yaml
     - .github/workflows/integration_test_rl_h100.yaml
     - .github/workflows/unit_test_cpu_rl.yaml
