@@ -769,11 +769,17 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-# vLLM's default step budget by usage context. Injected: vLLM's config builder needs a real model.
-_MAX_NUM_BATCHED_TOKENS_BY_USAGE_CONTEXT = {
-    UsageContext.OPENAI_API_SERVER: 4096,  # vllm serve
-    UsageContext.ENGINE_CONTEXT: 2048,  # LLMEngine.from_engine_args
-}
+# vllm serve's default step budget. Injected: vLLM's config builder needs a real model.
+_VLLM_SERVE_MAX_NUM_BATCHED_TOKENS = 4096
+
+
+def _vllm_serve_engine_config(engine_args, usage_context):
+    assert usage_context == UsageContext.OPENAI_API_SERVER
+    return SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=_VLLM_SERVE_MAX_NUM_BATCHED_TOKENS
+        )
+    )
 
 
 def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
@@ -782,15 +788,7 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
     engine_args = Mock()
     monkeypatch.setattr(vllm_engine_module, "EngineArgs", engine_args)
     monkeypatch.setattr(
-        vllm_config_module.EngineArgs,
-        "create_engine_config",
-        lambda engine_args, usage_context: SimpleNamespace(
-            scheduler_config=SimpleNamespace(
-                max_num_batched_tokens=_MAX_NUM_BATCHED_TOKENS_BY_USAGE_CONTEXT[
-                    usage_context
-                ]
-            )
-        ),
+        vllm_config_module.EngineArgs, "create_engine_config", _vllm_serve_engine_config
     )
     monkeypatch.setattr(vllm_engine_module, "LLMEngine", Mock())
     monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
@@ -835,19 +833,26 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "sm90_or_newer, usage_context",
-    [(True, UsageContext.OPENAI_API_SERVER), (False, UsageContext.ENGINE_CONTEXT)],
+    "hip_version, sm90_or_newer, expected",
+    [
+        # CUDA, compute capability >= 9.0: vllm serve's default
+        (None, True, 4096),
+        # FlashAttention-2 GPUs: capped at 64 * max_num_seqs (8)
+        (None, False, 512),
+        # ROCm: vllm serve's default
+        ("7.0", False, 4096),
+    ],
 )
-def test_unset_max_num_batched_tokens_uses_vllm_default(
-    monkeypatch, tmp_path, sm90_or_newer, usage_context
+def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
+    monkeypatch, tmp_path, hip_version, sm90_or_newer, expected
 ):
+    monkeypatch.setattr(torch.version, "hip", hip_version)
     monkeypatch.setattr(
         vllm_config_module, "has_cuda_capability", lambda major, minor: sm90_or_newer
     )
     engine_kwargs = _build_engine_kwargs(
         monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG)
     )
-    expected = _MAX_NUM_BATCHED_TOKENS_BY_USAGE_CONTEXT[usage_context]
     assert engine_kwargs["max_num_batched_tokens"] == expected
     # FULL graphs (the default) capture mixed steps up to the same budget.
     assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == expected

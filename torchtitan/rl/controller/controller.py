@@ -556,8 +556,8 @@ class Controller(Configurable):
         def max_num_seqs_per_generator_dp_rank(self) -> int:
             """2x each generator DP rank's even share of the training rollouts in flight,
             rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
-            budget is ``generator.max_num_batched_tokens``. When it is unset, each generator picks it
-            for its GPU, and the clamp uses 2048: the smallest default vLLM picks on CUDA.
+            budget is ``generator.max_num_batched_tokens``. When it is unset, each generator takes
+            its engine's default for its GPU, at least 2048, so the clamp uses 2048.
 
             Example (token budget unset):
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512

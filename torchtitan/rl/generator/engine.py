@@ -43,8 +43,8 @@ class GenerationEngine(Configurable, abc.ABC):
             mirrors: it computes in ``param_dtype`` and receives the trainer's weights
             in the dtypes the trainer sends them.
         gpu_memory_limit: Fraction of GPU memory the engine may use.
-        max_num_batched_tokens: Max tokens scheduled per engine step, or None for the
-            engine's server default (``Generator.Config.max_num_batched_tokens``).
+        max_num_batched_tokens: Max tokens scheduled per engine step on each DP rank, or None
+            for the engine's default for this device (``Generator.Config.max_num_batched_tokens``).
         checkpointer: Optional initial-weight loader; None when weights arrive through
             model state dict loads.
         dist_moe_runtime: Dist-MoE runtime policy, when the model has Dist-MoE experts.
