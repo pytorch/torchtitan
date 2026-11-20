@@ -33,6 +33,7 @@ from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationServer,
     GenerationSession,
 )
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.rubric import RewardFn, Rubric, RubricOutput
 from torchtitan.rl.rollout.types import (
@@ -238,12 +239,23 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             episode_task.add_done_callback(self._episode_tasks.discard)
         # return_exceptions: every sibling ends before the controller frees the group's KV
         # cache. A sibling still generating would hold it again, and nothing would free it.
-        rollouts_or_errors = await asyncio.gather(
+        episode_outputs_or_errors = await asyncio.gather(
             *episode_tasks, return_exceptions=True
         )
-        return await self.make_scored_group(
+        rollouts_or_errors: list[Rollout | BaseException] = []
+        group_metrics: list[m.Metric] = []
+        for episode_output_or_error in episode_outputs_or_errors:
+            if isinstance(episode_output_or_error, BaseException):
+                rollouts_or_errors.append(episode_output_or_error)
+                continue
+            rollout, rollout_metrics = episode_output_or_error
+            rollouts_or_errors.append(rollout)
+            group_metrics.extend(rollout_metrics)
+        group = await self.make_scored_group(
             rollouts_or_errors=rollouts_or_errors, sample=sample, group_id=group_id
         )
+        group.metrics = m.fold(group_metrics)
+        return group
 
     async def score_group(
         self, rollouts: list[Rollout], env_input: object
@@ -304,17 +316,22 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         sampling: SamplingConfig,
         group_id: int,
         episode_index: int,
-    ) -> Rollout:
+    ) -> tuple[Rollout, list[m.Metric]]:
         """Run one Verifiers episode and turn its trainable trace into a rollout, with the
-        episode's index as its id."""
+        episode's index as its id. Also returns the rollout's metrics: its phase times (a rollout
+        whose setup failed before its first turn included) and its number of attempts."""
         # One slot per episode, as `env.slots(task, n)` would plan: nothing couples them. The slot
         # holds the episode's traces, so they are freed when this episode returns.
         (slot,) = env.slots(task)
         # Each trace Verifiers mints, a retried attempt's included, is a routing session.
         session_ids: list[str] = []
+        # The trainable agent's attempts: more than one when Verifiers retried it.
+        trainable_attempt_ids: list[str] = []
 
         def open_session(trace: vf.Trace) -> None:
             session_ids.append(trace.id)
+            if trace.agent.trainable:
+                trainable_attempt_ids.append(trace.id)
             self._generation_server.open_session(session_id=trace.id, group_id=group_id)
 
         model_context = vf.ModelContext(
@@ -355,13 +372,21 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                 f"(episode error: {episode.last_error})"
             )
         (trace,) = trainable_traces
-        return trace_to_rollout(
+        rollout = trace_to_rollout(
             episode=episode,
             trace=trace,
             session=sessions[trace.id],
             group_id=group_id,
             rollout_id=episode_index,
         )
+        # Phase times cover only the final attempt: count the attempts, so a step slowed down by
+        # retries shows it.
+        # TODO: count attempts per agent once several agents of one episode train: this list holds
+        #   every trainable agent's traces.
+        num_attempts = m.Metric(
+            "verifiers/num_attempts", m.Mean(len(trainable_attempt_ids))
+        )
+        return rollout, [*phase_time_metrics(trace), num_attempts]
 
 
 def trace_to_rollout(
@@ -467,6 +492,48 @@ def rollout_status(episode: vf.Episode, trace: vf.Trace) -> RolloutStatus:
     if trace.is_truncated:
         return RolloutStatus.TRUNCATED_LENGTH
     return RolloutStatus.COMPLETED
+
+
+def phase_time_metrics(trace: vf.Trace) -> list[m.Metric]:
+    """Where a rollout's time went, per Verifiers phase, each as a Mean and a Max over the
+    step's rollouts.
+
+    Example, one rollout:
+        phase      what runs                                        seconds   metric
+        boot       the sandbox starts                               20        verifiers/boot_time_s
+        setup      the task and the harness get ready in it         12        verifiers/setup_time_s
+        agent      the agent's turns                                300       verifiers/agent_time_s
+          model    of which model calls                             260       verifiers/model_time_s
+        finalize   the task's wrap-up after the agent stops         5         verifiers/finalize_time_s
+        scoring    the task's grading, e.g. its tests               40        verifiers/scoring_time_s
+
+    A phase that never finished is left out, so it doesn't pull its Mean toward 0:
+
+        sandbox failed to start    boot only
+        agent past its deadline    agent too: Verifiers ends the span when the rollout closes.
+                                   The model call the deadline cut off counts in agent_time_s
+                                   but not in model_time_s: Verifiers keeps only calls that
+                                   returned.
+    """
+    timing = trace.timing
+    spans = {
+        "boot": timing.boot,
+        "setup": timing.setup,
+        "agent": timing.agent,
+        "finalize": timing.finalize,
+        "scoring": timing.scoring,
+    }
+    # A span without an end never finished; Verifiers reports its duration as 0.
+    seconds_per_phase = {
+        phase: span.duration for phase, span in spans.items() if span.end
+    }
+    if timing.agent.end:
+        seconds_per_phase["model"] = timing.agent.model.duration
+    return [
+        m.Metric(f"verifiers/{phase}_time_s", reduction(seconds))
+        for phase, seconds in seconds_per_phase.items()
+        for reduction in (m.Mean, m.Max)
+    ]
 
 
 def trace_to_rollout_turns(

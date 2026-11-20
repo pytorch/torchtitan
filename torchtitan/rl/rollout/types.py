@@ -439,4 +439,5 @@ class RolloutGroup:
     """Sibling rollouts sampled from the group's shared prompt. Empty on a failed generation."""
 
     metrics: list[m.Metric] = field(default_factory=list)
-    """Rollout-origin metrics that ride with this group to the trainer (a failed group carries its failure metric)."""
+    """Rollout-origin metrics that ride with this group to the trainer: the worker's own (e.g. its
+    timings), then the controller's rollout metrics. A failed group carries its failure metric."""

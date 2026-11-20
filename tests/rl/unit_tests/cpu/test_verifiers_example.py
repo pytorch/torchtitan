@@ -205,6 +205,16 @@ def test_a_group_runs_end_to_end_in_a_rollout_worker(monkeypatch) -> None:
     assert turn.completion_message["content"].endswith(r"\boxed{2}.")
     # One routing session per trace, each released once.
     assert release_session_fn.await_count == 2
+    # Verifiers' phase times, from both rollouts, ride on the group.
+    assert {metric.key for metric in group.metrics} == {
+        "verifiers/boot_time_s",
+        "verifiers/setup_time_s",
+        "verifiers/agent_time_s",
+        "verifiers/model_time_s",
+        "verifiers/finalize_time_s",
+        "verifiers/scoring_time_s",
+        "verifiers/num_attempts",
+    }
 
 
 def test_verifiers_dapo_recipe_loads() -> None:
