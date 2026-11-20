@@ -188,6 +188,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(memory_policy="none"),
             dist_moe_runtime=None,
+            optim=SimpleNamespace(enable_accelerator_graph=False),
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             profiler=Profiler.Config(),
             sdc_replayer=None,
@@ -239,6 +240,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             device=engine.device,
             loss_fn=engine.loss_fn,
             trainer_config=engine.config,
+            optimizer_update=None,
         )
 
     def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):
@@ -1034,7 +1036,7 @@ class TestTraceModule(unittest.TestCase):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         opt = torch.optim.Adam(model.parameters())
         with self.assertRaises(ValueError, msg="optimizer"):
-            minimal_fx_tracer(lambda: None, optimizer=opt)
+            minimal_fx_tracer(lambda: None, optimizers=[opt])
 
     def test_kwargs_roundtrip(self):
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
@@ -1311,7 +1313,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
             optimizer.step()
             return torch.stack([p.detach().sum() for p in module.parameters()])
 
-        traced = minimal_fx_tracer(train_step, module=module, optimizer=optimizer)(x)
+        traced = minimal_fx_tracer(train_step, module=module, optimizers=[optimizer])(x)
 
         model_sd = deepcopy(module.state_dict())
         optim_sd = deepcopy(optimizer.state_dict())
@@ -1321,7 +1323,138 @@ class TestReparametrizeOptimizer(unittest.TestCase):
 
         module.load_state_dict(model_sd)
         optimizer.load_state_dict(optim_sd)
-        traced_out = run_traced(traced, module=module, optimizer=optimizer)(x)
+        traced_out = run_traced(traced, module=module, optimizers=[optimizer])(x)
+        traced_params = [p.detach().clone() for p in module.parameters()]
+
+        self.assertTrue(torch.equal(eager_out, traced_out))
+        for ep, tp in zip(eager_params, traced_params, strict=True):
+            self.assertTrue(torch.equal(ep, tp))
+
+
+class TestTracedOptimizerUpdate(unittest.TestCase):
+    def test_dead_code_elimination_keeps_optimizer_update_assert(self):
+        from torch.fx.traceback import annotate
+
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            OPTIMIZER_UPDATE_META,
+        )
+        from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+            eliminate_dead_code_pass,
+        )
+
+        def fn(x):
+            torch._assert_async(torch.isfinite(x).all(), "runtime guard")
+            with annotate({OPTIMIZER_UPDATE_META: True}):
+                torch._assert_async(torch.isfinite(x).all(), "optimizer guard")
+            return x * 2
+
+        gm = eliminate_dead_code_pass(minimal_fx_tracer(fn)(torch.ones(2)).gm)
+        messages = [
+            node.args[1]
+            for node in gm.graph.nodes
+            if node.target is torch.ops.aten._assert_async.msg
+        ]
+        self.assertEqual(messages, ["optimizer guard"])
+
+    def test_waits_for_staging_before_traced_update(self):
+        from unittest.mock import MagicMock, patch
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+        from torchtitan.training_engine import TrainingEngine
+
+        events = []
+        engine = object.__new__(GraphTrainingEngine)
+        engine._optimizer_update = MagicMock()
+        engine.checkpointer = MagicMock()
+        engine.checkpointer.maybe_wait_for_staging.side_effect = lambda: events.append(
+            "wait"
+        )
+
+        with patch.object(
+            TrainingEngine,
+            "forward_backward",
+            side_effect=lambda *args, **kwargs: events.append("step"),
+        ):
+            engine.forward_backward(
+                microbatch_groups=[],
+                global_loss_token_counts=1,
+                global_routing_token_counts=torch.zeros(1),
+            )
+
+        self.assertEqual(events, ["wait", "step"])
+
+
+@unittest.skipUnless(torch.accelerator.is_available(), "accelerator required")
+class TestTraceCapturableOptimizers(unittest.TestCase):
+    def test_minimal_fx_tracer_with_capturable_optimizer_list(self):
+        """Trace several capturable optimizers with a device ``lr`` tensor.
+
+        The ``state_dict`` hook mirrors ``OptimizersContainer``, which saves the
+        device ``lr`` as a host float. Tracing must ignore it so ``lr`` stays a
+        graph input that later in-place scheduler updates reach.
+
+        ``foreach=False`` pins eager to the single-tensor implementation, which
+        ``torch.optim`` also selects for the plain fake tensors seen at trace time.
+        """
+
+        def save_host_lr(_optimizer, state_dict):
+            for group in state_dict["param_groups"]:
+                group["lr"] = float(group["lr"])
+            return state_dict
+
+        device = torch.accelerator.current_accelerator()
+        torch.manual_seed(0)
+        module = nn.Sequential(nn.Linear(3, 5), nn.ReLU(), nn.Linear(5, 7)).to(device)
+        weights = [p for n, p in module.named_parameters() if n.endswith("weight")]
+        biases = [p for n, p in module.named_parameters() if n.endswith("bias")]
+        optimizers = [
+            torch.optim.AdamW(
+                params,
+                lr=torch.tensor(lr, device=device),
+                capturable=True,
+                foreach=False,
+            )
+            for params, lr in ((weights, 0.1), (biases, 0.01))
+        ]
+        for optimizer in optimizers:
+            optimizer.register_state_dict_post_hook(save_host_lr)
+
+        x = torch.randn(2, 3, device=device)
+        module(x).sum().backward()
+        for optimizer in optimizers:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+        def train_step(x):
+            for optimizer in optimizers:
+                optimizer.zero_grad(set_to_none=True)
+            module(x).sum().backward()
+            for optimizer in optimizers:
+                optimizer.step()
+            return torch.stack([p.detach().sum() for p in module.parameters()])
+
+        traced = minimal_fx_tracer(train_step, module=module, optimizers=optimizers)(x)
+        self.assertEqual(traced.num_static_inputs, len(traced.example_inputs) - 1)
+
+        for optimizer in optimizers:
+            optimizer.param_groups[0]["lr"].fill_(0.05)
+        params = [p.detach().clone() for p in module.parameters()]
+        states = [
+            {p: {k: v.clone() for k, v in s.items()} for p, s in opt.state.items()}
+            for opt in optimizers
+        ]
+
+        eager_out = train_step(x)
+        eager_params = [p.detach().clone() for p in module.parameters()]
+
+        with torch.no_grad():
+            for p, saved in zip(module.parameters(), params, strict=True):
+                p.copy_(saved)
+        for optimizer, saved_state in zip(optimizers, states, strict=True):
+            for p, saved in saved_state.items():
+                for k, v in saved.items():
+                    optimizer.state[p][k].copy_(v)
+        traced_out = run_traced(traced, module=module, optimizers=optimizers)(x)
         traced_params = [p.detach().clone() for p in module.parameters()]
 
         self.assertTrue(torch.equal(eager_out, traced_out))

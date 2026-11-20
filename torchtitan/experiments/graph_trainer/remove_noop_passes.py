@@ -28,6 +28,7 @@ import torch
 from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    OPTIMIZER_UPDATE_META,
     PARAMETER_GRADIENT_FQNS_META,
 )
 
@@ -97,10 +98,15 @@ def _is_impure_for_dce(node: torch.fx.Node) -> bool:
 
     Mirrors the default ``node.is_impure()`` for every node except the targets in
     :data:`_FORCE_PURE_TARGETS`, which we report as pure so dead-code elimination
-    can drop them (and their now-orphaned input chains). See
+    can drop them (and their now-orphaned input chains). Asserts traced from the
+    optimizer update stay: they stop a non-finite step before it is applied. See
     ``eliminate_dead_code_pass``.
     """
-    if node.op == "call_function" and node.target in _FORCE_PURE_TARGETS:
+    if (
+        node.op == "call_function"
+        and node.target in _FORCE_PURE_TARGETS
+        and not node.meta.get("custom", {}).get(OPTIMIZER_UPDATE_META)
+    ):
         return False
     return node.is_impure()
 
