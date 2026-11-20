@@ -5,3 +5,5 @@ opentelemetry-sdk
 opentelemetry-exporter-otlp-proto-http
 pygtrie
 portpicker
+# Delta model state dict sync (ModelStateDictDeltaTransport).
+zstandard==0.25.0
