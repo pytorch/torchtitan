@@ -7,7 +7,7 @@ on:
   workflow_call:
     outputs:
       is-draft:
-        description: "'true' when the tag's PR is a draft, else 'false'"
+        description: "'true' when the tag's PR is a draft. 'false', or empty when the job skips, otherwise"
         value: ${{ jobs.check.outputs.is-draft }}
 
 jobs:
