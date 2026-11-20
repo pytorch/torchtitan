@@ -255,11 +255,11 @@ def _zero_aux_losses(model_parts) -> None:
 
 def collect_aux_loss_metrics(
     parallelism_context: ParallelismContext,
-) -> dict[str, float]:
+) -> dict[str, torch.Tensor]:
     """Reduce the current step's ``group_acc`` registers for logging.
 
-    Returns ``{metric_name}/mean`` per group, ``{}`` if none configured.  All
-    ranks call this at log time.
+    Returns ``{metric_name}/mean`` per group as device scalars, ``{}`` if none
+    configured.  All ranks call this at log time.
 
     TODO(#4202): migrate aux-loss metric collection to the distributed tensor
     logging framework once it lands.
@@ -291,7 +291,7 @@ def collect_aux_loss_metrics(
             # build-time instance count below (identical on every rank) then
             # gives the mean over all layers.
             total = all_reduce(total, reduceOp="sum", group=mesh)
-        metrics[f"{tag}/mean"] = float(total.item()) / AuxLoss._group_counts[key]
+        metrics[f"{tag}/mean"] = total.double() / AuxLoss._group_counts[key]
     return metrics
 
 
