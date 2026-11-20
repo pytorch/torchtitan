@@ -18,6 +18,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -27,8 +28,13 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
+from torchtitan.distributed.utils import build_alternative_fsdp_mesh, get_local_tensor
 
+from .offloading import (
+    check_pinned_host_rounding,
+    cuda_pinned_host_zeros_like,
+    pinned_host_bytes,
+)
 from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -58,19 +64,188 @@ class BaseOptimizer(Optimizer, Configurable):
         """Regex matched against parameter fully qualified names."""
 
 
-def _validate_moment_dtype(
+def _validate_adam_moments(
     *,
     moment_dtype: MomentDType,
+    pinned_host_moment_fraction: float,
     fused: bool | None,
 ) -> None:
     if moment_dtype not in ("parameter", "bfloat16"):
         raise ValueError(f"Unsupported Adam moment dtype {moment_dtype!r}")
     if moment_dtype == "bfloat16" and fused is not True:
         raise ValueError("bfloat16 Adam moments require fused=True")
+    if not 0.0 <= pinned_host_moment_fraction <= 1.0:
+        raise ValueError(
+            "pinned_host_moment_fraction must be in [0, 1], got "
+            f"{pinned_host_moment_fraction}"
+        )
+    if pinned_host_moment_fraction == 0.0:
+        return
+    if fused is not True:
+        raise ValueError("Pinned host Adam moments require fused=True")
+    accelerator = torch.accelerator.current_accelerator()
+    # A host without an accelerator only builds configs, e.g. CPU recipe tests.
+    if accelerator is not None and (
+        accelerator.type != "cuda" or torch.version.hip is not None
+    ):
+        raise ValueError(
+            "Pinned host Adam moments require CUDA. "
+            "Set pinned_host_moment_fraction=0."
+        )
+
+
+def _as_dtensor_like(param: Tensor, local: Tensor) -> Tensor:
+    """Wrap a local state shard as a DTensor with ``param``'s mesh and placements.
+
+    Returns ``local`` unchanged if ``param`` is not a DTensor. DCP then saves and
+    reshards the state like the parameter.
+    """
+    if not isinstance(param, DTensor):
+        return local
+    return DTensor.from_local(
+        local,
+        param.device_mesh,
+        param.placements,
+        run_check=False,
+        shape=param.shape,
+        stride=param.stride(),
+    )
+
+
+def _as_cpu_like(moment: Tensor, host: Tensor) -> Tensor:
+    """Wrap the CPU tensor ``host`` like ``moment``, without copying it.
+
+    ``DTensor.from_local`` would copy a CPU tensor to the mesh device.
+    """
+    if not isinstance(moment, DTensor):
+        return host
+    # TODO: Use a public API once DTensor can wrap a local tensor on another device
+    # without a copy (upstream issue not filed yet). FSDP2 CPU offload uses this
+    # private constructor the same way.
+    return DTensor(host, moment._spec, requires_grad=False)
+
+
+def _register_cpu_moment_hooks(
+    optimizer: torch.optim.Optimizer, cpu_moments: dict[Tensor, dict[str, Tensor]]
+) -> None:
+    """Save and load pinned host moments through their CPU tensors.
+
+    ``cpu_moments`` maps each parameter with pinned host moments to its CPU
+    moments. Other parameters keep the default behavior. ``state_dict()`` returns
+    the CPU moments, so checkpointers copy them on the CPU. A CUDA copy between two
+    host buffers is synchronous and much slower. ``load_state_dict()`` keeps the
+    CUDA moments in the state and copies loaded values into them, unless the values
+    were loaded in place into the CPU moments. Without that, it would move the CPU
+    tensors to the parameter device.
+    """
+
+    def params() -> list[Tensor]:
+        return [param for group in optimizer.param_groups for param in group["params"]]
+
+    def use_cpu_moments(
+        _optimizer: Optimizer, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        # Checkpointers copy these CPU tensors on the host, outside stream order.
+        # Wait for queued optimizer steps that write the moments.
+        torch.accelerator.current_stream().synchronize()
+        for index, param in enumerate(params()):
+            if param in cpu_moments:
+                state = state_dict["state"][index]
+                state_dict["state"][index] = {**state, **cpu_moments[param]}
+        return state_dict
+
+    def load_into_pinned_memory(
+        _optimizer: Optimizer, state_dict: dict[str, Any]
+    ) -> dict[str, Any]:
+        param_list = params()
+        state = dict(state_dict["state"])
+        for index, saved in state.items():
+            param = param_list[index]
+            if param not in cpu_moments:
+                continue
+            saved = dict(saved)
+            for key, cpu_moment in cpu_moments[param].items():
+                moment = optimizer.state[param][key]
+                if saved[key] is not cpu_moment:
+                    # Copy on the stream, after pending optimizer steps. A CPU
+                    # copy into the pinned memory would race with them.
+                    moment.copy_(saved[key])
+                saved[key] = moment
+            state[index] = saved
+        return {**state_dict, "state": state}
+
+    optimizer.register_state_dict_post_hook(use_cpu_moments)
+    optimizer.register_load_state_dict_pre_hook(load_into_pinned_memory)
+
+
+def _init_pinned_host_moments(
+    optimizer: torch.optim.Optimizer,
+    *,
+    fraction: float,
+    moment_dtype: MomentDType,
+) -> None:
+    """Create the Adam state of the first parameters, with moments in pinned memory.
+
+    Parameters are taken in optimizer order until their moments reach ``fraction``
+    of all local moment bytes. Each gets the state ``init_optim_state`` would
+    create, except that ``exp_avg`` and ``exp_avg_sq`` live in pinned CPU memory
+    that CUDA kernels can access. ``init_optim_state`` skips parameters with
+    state, so DCP loads into the pinned memory directly. The moment addresses never
+    change, so a captured optimizer graph stays valid. The other parameters get
+    device moments lazily, in the same fused step.
+    """
+    params = [
+        (name, param)
+        for group in optimizer.param_groups
+        for name, param in zip(group["param_names"], group["params"], strict=True)
+    ]
+
+    def moment_dtype_of(local: Tensor) -> torch.dtype:
+        return torch.bfloat16 if moment_dtype == "bfloat16" else local.dtype
+
+    total_bytes = sum(
+        2 * local.numel() * moment_dtype_of(local).itemsize
+        for local in (get_local_tensor(param) for _, param in params)
+    )
+    target_bytes = fraction * total_bytes
+    offloaded_bytes = 0
+    bytes_before = pinned_host_bytes()
+    cpu_moments: dict[Tensor, dict[str, Tensor]] = {}
+    for name, param in params:
+        if offloaded_bytes >= target_bytes:
+            break
+        local = get_local_tensor(param)
+        # An empty shard needs no memory and keeps lazy device moments.
+        if local.numel() == 0:
+            continue
+        if local.device.type != "cuda":
+            raise ValueError(
+                "Pinned host Adam moments require CUDA parameters, got "
+                f"{local.device}. Set pinned_host_moment_fraction=0 with "
+                "parallelism.fsdp_enable_cpu_offloading or create_seed_checkpoint."
+            )
+        if not local.is_contiguous():
+            raise ValueError(
+                "Pinned host Adam moments require contiguous parameters, got "
+                f"strides {local.stride()} for {name} with "
+                f"shape {tuple(local.shape)}"
+            )
+        state = optimizer.state[param]
+        state["step"] = torch.zeros((), dtype=torch.float32, device=local.device)
+        cpu_moments[param] = {}
+        for key in ("exp_avg", "exp_avg_sq"):
+            moment, host = cuda_pinned_host_zeros_like(local, moment_dtype_of(local))
+            offloaded_bytes += host.nbytes
+            state[key] = _as_dtensor_like(param, moment)
+            cpu_moments[param][key] = _as_cpu_like(state[key], host)
+    check_pinned_host_rounding(
+        requested_bytes=offloaded_bytes, bytes_before=bytes_before
+    )
+    _register_cpu_moment_hooks(optimizer, cpu_moments)
 
 
 def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
-    """Create and restore Adam moment tensors in bfloat16."""
+    """Create Adam moment tensors in bfloat16."""
 
     def initialize_moments(
         optimizer: torch.optim.Optimizer, args: tuple, kwargs: dict
@@ -100,16 +275,7 @@ def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
                         memory_format=torch.preserve_format,
                     )
 
-    def restore_moment_dtype(optimizer: torch.optim.Optimizer) -> None:
-        for group in optimizer.param_groups:
-            for param in group["params"]:
-                state = optimizer.state.get(param, {})
-                for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
-                    if key in state:
-                        state[key] = state[key].to(dtype=torch.bfloat16)
-
     optimizer.register_step_pre_hook(initialize_moments)
-    optimizer.register_load_state_dict_post_hook(restore_moment_dtype)
 
 
 class Adam(torch.optim.Adam, BaseOptimizer):
@@ -123,10 +289,15 @@ class Adam(torch.optim.Adam, BaseOptimizer):
         weight_decay: float = 0.0
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        pinned_host_moment_fraction: float = 0.0
+        """Share of local moment bytes kept in pinned CPU memory, where the fused
+        kernel reads and writes them in place. 0 keeps all moments on the device,
+        1 offloads all. See ``PINNED_HOST_MOMENTS.md``."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_moments(
                 moment_dtype=self.moment_dtype,
+                pinned_host_moment_fraction=self.pinned_host_moment_fraction,
                 fused=self.fused,
             )
 
@@ -144,6 +315,12 @@ class Adam(torch.optim.Adam, BaseOptimizer):
             weight_decay=config.weight_decay,
             fused=config.fused,
         )
+        if config.pinned_host_moment_fraction > 0:
+            _init_pinned_host_moments(
+                self,
+                fraction=config.pinned_host_moment_fraction,
+                moment_dtype=config.moment_dtype,
+            )
         if config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
 
@@ -160,10 +337,15 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         foreach: bool | None = None
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        pinned_host_moment_fraction: float = 0.0
+        """Share of local moment bytes kept in pinned CPU memory, where the fused
+        kernel reads and writes them in place. 0 keeps all moments on the device,
+        1 offloads all. See ``PINNED_HOST_MOMENTS.md``."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_moments(
                 moment_dtype=self.moment_dtype,
+                pinned_host_moment_fraction=self.pinned_host_moment_fraction,
                 fused=self.fused,
             )
 
@@ -182,6 +364,12 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
             foreach=config.foreach,
             fused=config.fused,
         )
+        if config.pinned_host_moment_fraction > 0:
+            _init_pinned_host_moments(
+                self,
+                fraction=config.pinned_host_moment_fraction,
+                moment_dtype=config.moment_dtype,
+            )
         if config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
 
