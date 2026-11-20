@@ -440,15 +440,8 @@ class VLLMModelWrapper(Module):
         if input_ids is None:
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
-        # With EP, the MoE splits its tokens evenly over TP, but vLLM runs eager
-        # steps of any size. Round the step up: attention reads only the real rows
-        # (its metadata's token count), and the extra rows are dropped on return.
         num_tokens = input_ids.shape[0]
-        num_padding_rows = -num_tokens % self._expert_sequence_parallel_size
-        if num_padding_rows:
-            input_ids = F.pad(input_ids, (0, num_padding_rows))
-            positions = F.pad(positions, (0, num_padding_rows))
-
+        input_ids, positions = self._pad_step_to_tp(input_ids, positions)
         with self.parallelism_context.activate_spmd():
             h = self.model(
                 input_ids,
@@ -457,6 +450,24 @@ class VLLMModelWrapper(Module):
                 **self._prepare_step_kwargs(input_ids.shape[0]),
             )
         return h[:num_tokens]
+
+    def _pad_step_to_tp(
+        self, tokens: torch.Tensor, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Pad the step's tokens to a multiple of TP with EP. Callers drop the extra rows.
+
+            TP 4 with EP, 5 tokens:  tokens (5,) or (5, dim)  -> 8 rows
+                                     positions (5,) or (3, 5)  -> 8 on the last dim
+
+        The MoE splits its tokens evenly over TP, but vLLM runs eager steps of any size.
+        Attention reads only the real rows (its metadata's token count).
+        """
+        num_padding_rows = -tokens.shape[0] % self._expert_sequence_parallel_size
+        if num_padding_rows:
+            # F.pad lists dims from the last one: (0, 0) per trailing dim, then dim 0.
+            tokens = F.pad(tokens, (0, 0) * (tokens.ndim - 1) + (0, num_padding_rows))
+            positions = F.pad(positions, (0, num_padding_rows))
+        return tokens, positions
 
     def _prepare_step_kwargs(self, num_tokens: int) -> dict[str, torch.Tensor]:
         """Set this step's Dist-MoE token count and return the layers' padding-mask kwarg.
