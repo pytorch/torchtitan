@@ -5,12 +5,33 @@
   draft: false
 
 "ciflow/fake-pg":
+  # Files the core integration suites (features, models, flux) read. RL has ciflow/rl; experiments run their
+  # own path-filtered workflows.
   globs:
     - .ci/docker/**
-    - .github/workflows/**
-    - scripts/**
-    - tests/**
-    - torchtitan/**
+    - .github/requirements-torchao.txt
+    - .github/scripts/integration_test_real_pg.sh
+    - .github/workflows/integration_test.yaml
+    - .github/workflows/set-matrix.yaml
+    - run_train.sh
+    - scripts/_checkpoint_test_config.py
+    - scripts/loss_compare.py
+    - tests/!(*.md)
+    - tests/assets/!(*.md)
+    - tests/assets/!(losses)/**/!(*.md)
+    - tests/assets/losses/fake_pg/**
+    - tests/assets/losses/real_pg/**
+    - tests/integration_tests/!(rl|h100|b200).py
+    - tests/integration_tests/hardware_skips/!(*.md)
+    - torchtitan/!(*.md)
+    - torchtitan/!(rl|experiments)/**/!(*.md)
+    - torchtitan_recipes/__init__.py
+    - torchtitan_recipes/data.py
+    - torchtitan_recipes/models/**/!(*.md)
+    - torchtitan_recipes/overrides/**/!(*.md)
+    - torchtitan_recipes/tests/__init__.py
+    - torchtitan_recipes/tests/datasets/**/!(*.md)
+    - torchtitan_recipes/tests/models/**/!(*.md)
   draft: false
 
 "ciflow/b200":
@@ -34,6 +55,21 @@
     - torchtitan/models/common/**
     - torchtitan/models/qwen3_5/**
     - torchtitan/models/qwen3_8/**
+    - torchtitan_recipes/rl/**
+    - torchtitan_recipes/tests/rl/**
+    - .ci/docker/requirements.txt
+    - pyproject.toml
+    - scripts/_checkpoint_test_config.py
+    - scripts/install_rl_env.sh
+    - scripts/loss_compare.py
+    - tests/__init__.py
+    - tests/assets/losses/rl_grpo_cuda.txt
+    - tests/integration_tests/__init__.py
+    - tests/integration_tests/hardware_skips/__init__.py
+    - tests/integration_tests/hardware_skips/skipped_tests.toml
+    - tests/integration_tests/rl.py
+    - tests/integration_tests/run_tests.py
+    - .github/workflows/set-matrix.yaml
     - .github/workflows/integration_test_8gpu_rl.yaml
     - .github/workflows/integration_test_rl_h100.yaml
     - .github/workflows/unit_test_cpu_rl.yaml
