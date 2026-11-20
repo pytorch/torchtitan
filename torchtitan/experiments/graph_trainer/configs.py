@@ -9,6 +9,7 @@ from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -177,9 +178,12 @@ class GraphTrainerCompileConfig:
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
-    passes: list[str] = field(default_factory=list)
-    """
-    Additional compiler pass names to apply or prepare inputs for.
+    extra_passes: list[str] = field(default_factory=list)
+    """Names of graph passes registered with ``register_graph_pass`` to apply,
+    in order, on the joint graph after the other GraphTrainer passes and before
+    Inductor compilation. Use them for model- or shape-specialized rewrites
+    such as kernel fusions. The recipe must import the module that registers
+    each pass.
     """
 
     enable_passes: bool = True
@@ -352,7 +356,7 @@ def to_graph_trainer_config(
         }
     )
     # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
-    graph_model.local_compile_regions = []
+    graph_model.local_compile = LocalCompileConfig()
     disable_inplace_wgrad_accum(graph_model)
     d["model"] = graph_model
 

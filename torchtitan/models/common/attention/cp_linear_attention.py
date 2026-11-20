@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+from torch.export import register_dataclass
 
 from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -18,14 +19,59 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attn_gym import (
     _ContextParallelChunk,
-    _MissingKernel,
     ContextParallelRouting,
+    is_missing_kernel,
 )
 
 from .linear_attention import LinearAttentionMetadata
 
-if _ContextParallelChunk is not _MissingKernel:
+if not is_missing_kernel(_ContextParallelChunk):
     spmd.register_local_autograd_function(_ContextParallelChunk)
+
+
+@dataclass(frozen=True, slots=True)
+class UlyssesLinearAttentionMetadata(LinearAttentionMetadata):
+    """Token order shared with load-balanced full-attention layers."""
+
+    permutation: torch.Tensor
+    inverse_permutation: torch.Tensor
+
+    _PERMUTATION_SPMD_TYPE = spmd.SpmdType(
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.R,
+            MeshAxisName.TP: spmd.R,
+        },
+        partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+    )
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate global token orders replicated across CP and TP."""
+        LinearAttentionMetadata.annotate_spmd_types(self)
+        spmd.assert_type(self.permutation, self._PERMUTATION_SPMD_TYPE)
+        spmd.assert_type(self.inverse_permutation, self._PERMUTATION_SPMD_TYPE)
+
+
+def prepare_ulysses_linear_attention_metadata(
+    attention_metadata: LinearAttentionMetadata,
+    *,
+    permutation: torch.Tensor | None,
+) -> LinearAttentionMetadata:
+    """Build Ulysses metadata for computation in original token order."""
+    if permutation is None:
+        return attention_metadata
+    if permutation.ndim != 2 or permutation.shape[0] != 1:
+        raise ValueError(
+            "Ulysses linear attention requires a packed-token permutation "
+            "with shape [1, num_tokens]."
+        )
+    permutation_T = permutation[0]
+    return UlyssesLinearAttentionMetadata(
+        varlen=attention_metadata.varlen,
+        num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
+        permutation=permutation_T,
+        inverse_permutation=permutation_T.argsort(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +96,16 @@ class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
                 spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
-def prepare_linear_attention_cp_metadata(
+# pytree registration is per class; subclasses are not covered by the base.
+register_dataclass(UlyssesLinearAttentionMetadata)
+register_dataclass(ContextParallelLinearAttentionMetadata)
+# TODO: delete once Attention Gym registers ContextParallelRouting:
+# https://github.com/meta-pytorch/attention-gym/issues/850
+if not is_missing_kernel(ContextParallelRouting):
+    register_dataclass(ContextParallelRouting)
+
+
+def prepare_cp_linear_attention_metadata(
     attention_metadata: LinearAttentionMetadata,
     *,
     permutation: torch.Tensor | None,
@@ -78,6 +133,12 @@ def prepare_linear_attention_cp_metadata(
             f"{family} metadata preparation requires an active multi-rank CP "
             "mesh axis."
         )
+    # Upper bound on token ranges per rank, so routing shapes stay fixed across
+    # batches: contiguous sharding gives one range, head-tail gives a head and a
+    # tail chunk. PTRR is rejected for linear attention at config time.
+    max_num_fragments = 1 if permutation is None else 2
+    # Each fragment boundary can split one document into two subsequences.
+    max_subsequences = len(cu_seqlens_global) - 1 + max_num_fragments - 1
     routing = ContextParallelRouting.from_fragments(
         cu_seqlens_global=cu_seqlens_global,
         fragments=get_token_fragments(
@@ -87,6 +148,8 @@ def prepare_linear_attention_cp_metadata(
         ),
         cp_rank=dist.get_rank(group),
         device=device,
+        slots=max_num_fragments,
+        max_subsequences=max_subsequences,
         conv_history=attention_metadata.num_conv_history_tokens,
     )
     return ContextParallelLinearAttentionMetadata(

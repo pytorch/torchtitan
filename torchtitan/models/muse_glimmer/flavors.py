@@ -10,10 +10,14 @@ import dataclasses
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
-import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import (
+    MuseGlimmerPatchGridResize,
+    PixelBudgetResize,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
@@ -21,11 +25,17 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
+from torchtitan.models.common import (
+    ComplexRoPE,
+    Linear,
+    RowParallelLinear,
+    VocabParallelEmbedding,
+)
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import (
@@ -37,33 +47,30 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
     token_embedding_sharding_config,
 )
-from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.param_init import depth_scaled_std
-from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
-    VisionAttention,
-    VisionMLP,
-    VisionTransformerBlock,
+from torchtitan.models.muse_spark.flavors import (
+    muse_spark_navit_adapter_config,
+    muse_spark_navit_configs,
+    muse_spark_navit_encoder_config,
+    NAVIT_MAX_IMAGE_TOKENS,
 )
-from torchtitan.models.common.vision_encoder_sharding import (
-    invariant_norm_sharding_config,
-    vision_attention_sharding_config,
-    vision_colwise_sharding_config,
-    vision_inner_attention_sharding_config,
-    vision_invariant_linear_sharding_config,
-    vision_rowwise_sharding_config,
+from torchtitan.models.muse_spark.vision_encoder import (
+    MuseSparkNaViTAdapter,
+    NaViTEncoder,
 )
+
 from .model import (
     Attention,
     EmbeddingWithNorm,
     MuseGlimmerModel,
+    MuseGlimmerMultimodalModel,
     MuseGlimmerTransformerBlock,
     RMSGainCenterNorm,
     SoftCappedLinear,
@@ -71,32 +78,71 @@ from .model import (
 from .sharding import (
     attention_sharding_config,
     cp_replicated_vision_sharding_config,
-    perception_emb_norm_sharding_config,
     scaleless_head_norm_sharding_config,
-    vision_encoder_sharding_config,
-    vision_pos_embed_sharding_config,
-    vision_rope_freq_sharding_config,
-    vision_token_permute_sharding_config,
-)
-from .vision_encoder import (
-    _VisionPosEmbed,
-    _VisionTokenPermute,
-    MuseGlimmerVisionAdapter,
-    MuseGlimmerVisionEncoder,
-    VisionRopeFreq,
 )
 
 __all__ = [
+    "MUSE_GLIMMER_30B_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS",
+    "MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS",
+    "MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS",
     "MuseGlimmerModel",
+    "MuseGlimmerMultimodalModel",
     "MODEL_FLAVORS",
     "build_model_config",
-    "MuseGlimmerVisionEncoder",
-    "MuseGlimmerVisionAdapter",
-    "VisionRopeFreq",
-    "muse_glimmer_vision_encoder_config",
-    "muse_glimmer_vision_adapter_config",
     "muse_glimmer_vision_configs",
 ]
+
+
+# Multimodal special tokens for the Muse Glimmer debug flavor. The debug tokenizer asset
+# (``./tests/assets/tokenizer``) already defines these (IDs 2004-2008, all <
+# debugmodel_mm's vocab_size=2048), so no asset change is needed.
+MUSE_GLIMMER_DEBUG_SPECIAL_TOKENS = {
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+    "pad_token": "<|endoftext|>",
+}
+
+# Multimodal special tokens of the released Muse Glimmer 30B tokenizer.
+MUSE_GLIMMER_30B_SPECIAL_TOKENS = {
+    "image_token": "<|patch|>",
+    "video_token": "<|video|>",
+    "vision_start_token": "<|image_start|>",
+    "vision_end_token": "<|image_end|>",
+    "pad_token": "<|finetune_right_pad|>",
+}
+
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS)``. The patch
+# sizes match the NaViT encoder (``patch_size``, ``patch_temporal``,
+# ``downsample_factor``), and raster order matches its row-major patch layout.
+MUSE_GLIMMER_DEBUG_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": PixelBudgetResize.Config(min_pixels=784, max_pixels=3136),
+    "patch_order": "raster",
+}
+
+# The released Muse Glimmer 30B image processor: closest-aspect patch grid up to
+# 4096 merged tokens, LANCZOS. Images only.
+MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": MuseGlimmerPatchGridResize.Config(
+        max_image_tokens=NAVIT_MAX_IMAGE_TOKENS
+    ),
+    "patch_order": "raster",
+    "image_interpolation_mode": "lanczos",
+}
 
 
 # The query is scaled by this tuned constant divided by sqrt(head_dim) after
@@ -111,13 +157,6 @@ _LINEAR_INIT: dict[str, Callable] = {
 # weight + gain_center).
 _GAIN_NORM_INIT: dict[str, Callable] = {"weight": nn.init.zeros_}
 _EMBEDDING_INIT: dict[str, Callable] = {"weight": partial(nn.init.normal_, std=1.0)}
-_VISION_LINEAR_INIT: dict[str, Callable] = {
-    "weight": partial(nn.init.trunc_normal_, std=0.02),
-    "bias": nn.init.zeros_,
-}
-_POS_EMB_INIT: dict[str, Callable] = {
-    "positional_embedding_vlm": partial(nn.init.trunc_normal_, std=0.02)
-}
 
 _NORM_EPS = 1e-5
 _POST_NORM_EPS = 1e-8
@@ -198,17 +237,19 @@ def _build_muse_glimmer_attention(
     # (scale_query_by, o_gate, per-layer window_size).
     window = _layer_window_size(layer_id, n_layers, window_pattern)
     inner_attention = get_attention_config(attn_backend)
-    # Varlen carries the per-layer sliding window as an FA3 kernel argument.
-    # Flex uses a distinct backend class so metadata can be keyed by backend.
     if window is not None and isinstance(inner_attention, VarlenInnerAttention.Config):
-        inner_attention = dataclasses.replace(
-            inner_attention, window_size=(window - 1, 0)
+        inner_attention = SlidingWindowVarlenInnerAttention.Config(
+            **{
+                f.name: getattr(inner_attention, f.name)
+                for f in dataclasses.fields(inner_attention)
+            },
+            sliding_window_size=window,
         )
     elif window is not None and isinstance(inner_attention, FlexInnerAttention.Config):
         inner_attention = SlidingWindowFlexInnerAttention.Config(
             block_size=inner_attention.block_size,
             kernel_options=inner_attention.kernel_options,
-            window_size=window,
+            sliding_window_size=window,
         )
     inner_attention = dataclasses.replace(
         inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
@@ -327,179 +368,21 @@ def _build_muse_glimmer_layers(
     return layers
 
 
-def _vision_layer_norm(dim: int) -> LayerNorm.Config:
-    return LayerNorm.Config(
-        normalized_shape=dim,
-        eps=_NORM_EPS,
-        sharding_config=invariant_norm_sharding_config(),
-    )
-
-
-def _vision_linear(
-    in_features: int,
-    out_features: int,
-    *,
-    bias: bool,
-    sharding_config: ShardingConfig,
-) -> Linear.Config:
-    return Linear.Config(
-        in_features=in_features,
-        out_features=out_features,
-        bias=bias,
-        param_init=_VISION_LINEAR_INIT,
-        sharding_config=sharding_config,
-    )
-
-
-def _vision_row_parallel_linear(
-    in_features: int, out_features: int
-) -> InvariantRowParallelLinear.Config:
-    return InvariantRowParallelLinear.Config(
-        in_features=in_features,
-        out_features=out_features,
-        bias=True,
-        param_init=_VISION_LINEAR_INIT,
-        sharding_config=vision_rowwise_sharding_config(),
-    )
-
-
-def muse_glimmer_vision_encoder_config(
-    *,
-    latent_dim: int = 1536,
-    num_layers: int = 50,
-    num_heads: int = 16,
-    mlp_ratio: float = 8960 / 1536,
-    patch_size: int = 14,
-    patch_temporal: int = 2,
-    downsample_factor: int = 2,
-    sparse_attention_factor: int = 4,
-    pos_emb_grid_h: int = 32,
-    pos_emb_grid_w: int = 32,
-    rope_theta: float = 10000.0,
-) -> MuseGlimmerVisionEncoder.Config:
-    head_dim = latent_dim // num_heads
-    mlp_hidden = int(mlp_ratio * latent_dim)
-    output_dim = latent_dim * downsample_factor**2
-    patch_dim = patch_temporal * 3 * patch_size * patch_size
-    return MuseGlimmerVisionEncoder.Config(
-        latent_dim=latent_dim,
-        output_dim=output_dim,
-        num_layers=num_layers,
-        num_heads=num_heads,
-        head_dim=head_dim,
-        patch_size=patch_size,
-        patch_temporal=patch_temporal,
-        downsample_factor=downsample_factor,
-        sparse_attention_factor=sparse_attention_factor,
-        pos_emb_grid_h=pos_emb_grid_h,
-        pos_emb_grid_w=pos_emb_grid_w,
-        rope_freq=VisionRopeFreq.Config(
-            head_dim=head_dim,
-            rope_theta=rope_theta,
-            sharding_config=vision_rope_freq_sharding_config(),
-        ),
-        param_init=_POS_EMB_INIT,
-        # conv1 builds ``self.conv1_linear``. Plain pixel patches enter
-        # invariant; the (bias-free) weight stays Replicate.
-        conv1=_vision_linear(
-            patch_dim,
-            latent_dim,
-            bias=False,
-            sharding_config=vision_invariant_linear_sharding_config(),
-        ),
-        ln_pre=_vision_layer_norm(latent_dim),
-        block=VisionTransformerBlock.Config(
-            norm1=_vision_layer_norm(latent_dim),
-            # ``rope_cache`` is a per-image vision activation, so it flows
-            # {DP: V, CP: R, TP: I}.
-            attn=VisionAttention.Config(
-                dim=latent_dim,
-                num_heads=num_heads,
-                wq=_vision_linear(
-                    latent_dim,
-                    num_heads * head_dim,
-                    bias=True,
-                    sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
-                ),
-                wk=_vision_linear(
-                    latent_dim,
-                    num_heads * head_dim,
-                    bias=True,
-                    sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
-                ),
-                wv=_vision_linear(
-                    latent_dim,
-                    num_heads * head_dim,
-                    bias=True,
-                    sharding_config=vision_colwise_sharding_config(input_tp=spmd.R),
-                ),
-                proj=_vision_row_parallel_linear(num_heads * head_dim, latent_dim),
-                inner_attention=FlexInnerAttention.Config(
-                    sharding_config=vision_inner_attention_sharding_config()
-                ),
-                sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
-            ),
-            norm2=_vision_layer_norm(latent_dim),
-            mlp=VisionMLP.Config(
-                fc1=_vision_linear(
-                    latent_dim,
-                    mlp_hidden,
-                    bias=True,
-                    sharding_config=vision_colwise_sharding_config(),
-                ),
-                fc2=_vision_row_parallel_linear(mlp_hidden, latent_dim),
-                act_fn=GELU.Config(approximate="none"),
-            ),
-        ),
-        ln_post=_vision_layer_norm(latent_dim),
-        pos_embed=_VisionPosEmbed.Config(
-            sharding_config=vision_pos_embed_sharding_config()
-        ),
-        token_permute=_VisionTokenPermute.Config(
-            sharding_config=vision_token_permute_sharding_config()
-        ),
-        sharding_config=vision_encoder_sharding_config(),
-    )
-
-
-def muse_glimmer_vision_adapter_config(
-    *,
-    input_dim: int = 6144,
-    output_dim: int = 4096,
-) -> MuseGlimmerVisionAdapter.Config:
-    # The adapter runs on the flattened 2D [tokens, dim] vision features, so
-    # both linears stay TP-invariant; its output stays {DP: V, CP: R, TP: I},
-    # matching the LLM-side vision_projection input.
-    return MuseGlimmerVisionAdapter.Config(
-        c_fc=_vision_linear(
-            input_dim,
-            output_dim,
-            bias=False,
-            sharding_config=cp_replicated_vision_sharding_config(),
-        ),
-        c_proj=_vision_linear(
-            output_dim,
-            output_dim,
-            bias=False,
-            sharding_config=cp_replicated_vision_sharding_config(),
-        ),
-    )
+def _configure_glimmer_vision(
+    encoder: NaViTEncoder.Config, adapter: MuseSparkNaViTAdapter.Config
+) -> None:
+    encoder.pos_emb_grid_order = "raster"
+    for config in (encoder, adapter):
+        for _, linear_config, _, _ in config.traverse(Linear.Config):
+            linear_config.param_init = _LINEAR_INIT
 
 
 def muse_glimmer_vision_configs(
     vision_adapter_dim: int = 4096,
-) -> tuple[MuseGlimmerVisionEncoder.Config, MuseGlimmerVisionAdapter.Config]:
-    """Production (30B) vision encoder + adapter configs.
-
-    The adapter maps the encoder ``output_dim`` (latent_dim * downsample^2) to the
-    LLM ``vision_adapter_dim`` consumed by ``MuseGlimmerModel.vision_projection``. Pass
-    the same ``vision_adapter_dim`` used to build the LLM config so the adapter
-    output and ``vision_projection`` in_features cannot drift apart.
-    """
-    encoder = muse_glimmer_vision_encoder_config()
-    adapter = muse_glimmer_vision_adapter_config(
-        input_dim=encoder.output_dim, output_dim=vision_adapter_dim
-    )
+) -> tuple[NaViTEncoder.Config, MuseSparkNaViTAdapter.Config]:
+    """Build the production vision tower with Glimmer's raster positional grid."""
+    encoder, adapter = muse_spark_navit_configs(vision_adapter_dim)
+    _configure_glimmer_vision(encoder, adapter)
     return encoder, adapter
 
 
@@ -516,28 +399,11 @@ def _muse_glimmer_config(
     output_multiplier: float,
     attn_backend: str,
     enable_sp: bool,
-    vision_adapter_dim: int | None = None,
-    vision_encoder: MuseGlimmerVisionEncoder.Config | None = None,
-    vision_adapter: MuseGlimmerVisionAdapter.Config | None = None,
+    vision: tuple[NaViTEncoder.Config, MuseSparkNaViTAdapter.Config] | None = None,
 ) -> MuseGlimmerModel.Config:
-    # LLM-side multimodal injection: project adapter output -> model dim, then
-    # apply a scaleless norm. Left as None for the text-only model.
-    vision_projection = None
-    perception_emb_norm = None
-    if vision_adapter_dim is not None:
-        vision_projection = Linear.Config(
-            in_features=vision_adapter_dim,
-            out_features=dim,
-            param_init=_LINEAR_INIT,
-            sharding_config=cp_replicated_vision_sharding_config(),
-        )
-        perception_emb_norm = _scaleless_norm(
-            dim,
-            _NORM_EPS,
-            sharding_config=perception_emb_norm_sharding_config(enable_sp=enable_sp),
-        )
-
-    return MuseGlimmerModel.Config(
+    """Build the multimodal config when ``vision`` (encoder, adapter) is given,
+    else the text-only one."""
+    fields = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
@@ -547,7 +413,7 @@ def _muse_glimmer_config(
         # all-reduce happens before the scaleless norm (normalizing a Partial
         # sum would be wrong); the norm runs on the reduced activation.
         tok_embeddings=EmbeddingWithNorm.Config(
-            embedding=Embedding.Config(
+            embedding=VocabParallelEmbedding.Config(
                 num_embeddings=vocab_size,
                 embedding_dim=dim,
                 param_init=_EMBEDDING_INIT,
@@ -577,7 +443,7 @@ def _muse_glimmer_config(
                 dim,
                 _NORM_EPS,
                 gain_center=0.0,
-                sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp),
+                sharding_config=norm_sharding_config(enable_sp=enable_sp),
             ),
             param_init={"weight": nn.init.ones_},
         ),
@@ -592,10 +458,27 @@ def _muse_glimmer_config(
             attn_backend=attn_backend,
             enable_sp=enable_sp,
         ),
-        vision_projection=vision_projection,
-        perception_emb_norm=perception_emb_norm,
+    )
+    if vision is None:
+        return MuseGlimmerModel.Config(**fields)
+    vision_encoder, vision_adapter = vision
+    return MuseGlimmerMultimodalModel.Config(
+        **fields,
         vision_encoder=vision_encoder,
         vision_adapter=vision_adapter,
+        # LLM-side multimodal injection: project adapter output -> model dim,
+        # then apply a scaleless norm.
+        vision_projection=Linear.Config(
+            in_features=vision_adapter.c_proj.out_features,
+            out_features=dim,
+            param_init=_LINEAR_INIT,
+            sharding_config=cp_replicated_vision_sharding_config(),
+        ),
+        perception_emb_norm=_scaleless_norm(
+            dim,
+            _NORM_EPS,
+            sharding_config=cp_replicated_vision_sharding_config(),
+        ),
     )
 
 
@@ -624,14 +507,6 @@ def _muse_glimmer_30b(
     seq_len: int,
     parallelism: ParallelismConfig,
 ) -> MuseGlimmerModel.Config:
-    vision_adapter_dim = None
-    vision_encoder = None
-    vision_adapter = None
-    if with_vision:
-        vision_adapter_dim = 4096
-        vision_encoder, vision_adapter = muse_glimmer_vision_configs(
-            vision_adapter_dim=vision_adapter_dim
-        )
     return _muse_glimmer_config(
         dim=6656,
         n_layers=52,
@@ -644,9 +519,11 @@ def _muse_glimmer_30b(
         output_multiplier=0.19611613513,
         attn_backend=attn_backend,
         enable_sp=parallelism.enable_sequence_parallel,
-        vision_adapter_dim=vision_adapter_dim,
-        vision_encoder=vision_encoder,
-        vision_adapter=vision_adapter,
+        vision=(
+            muse_glimmer_vision_configs(vision_adapter_dim=4096)
+            if with_vision
+            else None
+        ),
     )
 
 
@@ -658,23 +535,24 @@ def _muse_glimmer_debugmodel_mm(
 
     The encoder is small (few layers, ``num_heads`` divisible by intended TP) and
     its ``output_dim`` (``latent_dim * downsample_factor**2 = 256``) feeds the
-    adapter, whose ``output_dim`` equals ``vision_adapter_dim`` so the LLM-side
-    ``vision_projection`` (``vision_adapter_dim -> dim``) lines up.
+    adapter, and the LLM-side ``vision_projection`` maps the adapter's
+    ``output_dim`` to ``dim``.
     """
-    encoder = muse_glimmer_vision_encoder_config(
+    encoder = muse_spark_navit_encoder_config(
         latent_dim=64,
         num_layers=3,
         num_heads=4,
-        mlp_ratio=2.0,
+        mlp_hidden_dim=128,
         downsample_factor=2,
         sparse_attention_factor=2,
         pos_emb_grid_h=2,
         pos_emb_grid_w=2,
     )
     adapter_dim = 128
-    adapter = muse_glimmer_vision_adapter_config(
+    adapter = muse_spark_navit_adapter_config(
         input_dim=encoder.output_dim, output_dim=adapter_dim
     )
+    _configure_glimmer_vision(encoder, adapter)
     return _muse_glimmer_config(
         dim=256,
         n_layers=8,
@@ -687,9 +565,7 @@ def _muse_glimmer_debugmodel_mm(
         output_multiplier=1.0,
         attn_backend=attn_backend,
         enable_sp=parallelism.enable_sequence_parallel,
-        vision_adapter_dim=adapter_dim,
-        vision_encoder=encoder,
-        vision_adapter=adapter,
+        vision=(encoder, adapter),
     )
 
 

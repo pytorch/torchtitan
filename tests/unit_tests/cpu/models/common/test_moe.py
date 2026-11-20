@@ -43,31 +43,34 @@ from torchtitan.models.common.moe import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
+from torchtitan.models.muse_spark.moe import MuseSparkMoE
 
 
 class _PassthroughRoutedExperts(nn.Module):
     def __init__(self):
         super().__init__()
-        self.num_tokens_per_expert_E = None
+        self.routing_map_TE = None
 
     def forward(
         self,
         x_TD,
         topk_scores_TK,
         topk_expert_ids_TK,
-        num_local_tokens_per_expert_E,
+        routing_map_TE,
         *,
         padding_mask_T=None,
     ):
-        self.num_tokens_per_expert_E = num_local_tokens_per_expert_E
+        self.routing_map_TE = routing_map_TE
         return x_TD
 
 
 class _RecordingRoutedExperts:
     def __init__(self) -> None:
+        self.routing_map_TE: torch.Tensor | None = None
         self.kwargs: dict | None = None
 
-    def __call__(self, x_TD, scores_TK, expert_ids_TK, counts_E, **kwargs):
+    def __call__(self, x_TD, scores_TK, expert_ids_TK, routing_map_TE, **kwargs):
+        self.routing_map_TE = routing_map_TE
         self.kwargs = kwargs
         return x_TD
 
@@ -90,9 +93,16 @@ def _forward_with_routed_mask(
         routed_down=lambda x: x,
         routed_norm=lambda x: x,
         routed_up=lambda x: x,
+        # MuseSparkMoE pools tokens around the routed experts, in remat regions.
+        pooler=lambda x: x,
+        pre_expert_norm=lambda x: x,
+        unpooler=lambda x: x,
+        remat_region_name=lambda name: name,
+        remat_should_recompute=lambda name: False,
         _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
         shared_experts=None,
         _maybe_all_reduce_moe_output_across_tp=lambda out: out,
+        _add_shared_experts_and_reduce_across_tp=lambda out, x: out,
     )
     moe_cls.forward(cast(Any, moe), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
     return routed_mask_T
@@ -123,10 +133,10 @@ class _IdentityDispatcher(nn.Module):
         x_TD,
         topk_scores_TK,
         topk_expert_ids_TK,
-        num_local_tokens_per_expert_E,
+        routing_map_TE,
     ):
         del topk_scores_TK, topk_expert_ids_TK
-        return x_TD, num_local_tokens_per_expert_E, None
+        return x_TD, routing_map_TE.sum(dim=0), None
 
     def combine(self, routed_output_RD, metadata, x_TD):
         del metadata, x_TD
@@ -227,7 +237,7 @@ class TestMoE(unittest.TestCase):
             x_TD,
             torch.ones(2, 1),
             torch.zeros(2, 1, dtype=torch.int64),
-            torch.tensor([2, 0]),
+            torch.tensor([[True, False], [True, False]]),
         )
         expected_TD = F.rms_norm(
             x_TD + 1,
@@ -388,7 +398,7 @@ class TestMoE(unittest.TestCase):
         moe(x_TD, padding_mask_T=padding_mask_T)
 
         self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 3)
-        self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
+        self.assertEqual(moe.routed_experts.routing_map_TE.sum().item(), 6)
 
     def test_moe_hands_the_routed_padding_mask_to_the_experts(self):
         for moe_cls in (MoE, KimiLatentMoE):
@@ -399,6 +409,17 @@ class TestMoE(unittest.TestCase):
                 )
                 self.assertEqual(experts.kwargs, {"padding_mask_T": routed_mask_T})
                 self.assertIs(experts.kwargs["padding_mask_T"], routed_mask_T)
+
+    def test_moe_hands_the_routing_map_to_the_experts(self):
+        """The experts get the router's ``(T, E)`` map; the MoE sums nothing."""
+        for moe_cls in (MoE, KimiLatentMoE, MuseSparkMoE):
+            with self.subTest(moe_cls=moe_cls.__name__):
+                experts = _RecordingRoutedExperts()
+                _forward_with_routed_mask(
+                    moe_cls, experts, torch.zeros(4, dtype=torch.bool)
+                )
+                self.assertEqual(experts.routing_map_TE.dtype, torch.bool)
+                self.assertEqual(experts.routing_map_TE.shape, (4, 4))
 
     def test_router_masks_padding_only_for_aux_loss(self):
         router = make_router_config(
@@ -451,17 +472,15 @@ class TestMoE(unittest.TestCase):
         for enable_sp in (False, True):
             with self.subTest(enable_sp=enable_sp):
                 moe_config = moe_sharding.moe_sharding_config(enable_sp=enable_sp)
-                assert moe_config.in_src_shardings is not None
-                self.assertIsNone(moe_config.in_dst_shardings)
+                assert moe_config.input_shardings is not None
                 self.assertEqual(
-                    _per_axis_types(moe_config.in_src_shardings["padding_mask_T"]),
+                    _per_axis_types(moe_config.input_shardings["padding_mask_T"]),
                     _per_axis_types(token_id_placement()),
                 )
 
                 router_config = moe_sharding.router_sharding_config()
-                router_inputs = router_config.in_src_shardings
+                router_inputs = router_config.input_shardings
                 assert router_inputs is not None
-                self.assertIsNone(router_config.in_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(router_inputs["x_TD"])[MeshAxisName.TP],
                     spmd.S(0),
@@ -491,22 +510,19 @@ class TestMoE(unittest.TestCase):
         )
         shared_config, w13_config = shared.sharding_config, shared.w13.sharding_config
 
-        assert moe_config.in_src_shardings is not None
-        assert shared_config.in_src_shardings is not None
-        assert w13_config.in_src_shardings is not None
-        self.assertIsNone(moe_config.in_dst_shardings)
-        self.assertIsNone(shared_config.in_dst_shardings)
-        self.assertIsNone(w13_config.in_dst_shardings)
+        assert moe_config.input_shardings is not None
+        assert shared_config.input_shardings is not None
+        assert w13_config.input_shardings is not None
         self.assertEqual(
-            _per_axis_types(moe_config.in_src_shardings["x_TD"])[MeshAxisName.TP],
+            _per_axis_types(moe_config.input_shardings["x_TD"])[MeshAxisName.TP],
             spmd.S(0),
         )
         self.assertEqual(
-            _per_axis_types(shared_config.in_src_shardings["x"])[MeshAxisName.TP],
+            _per_axis_types(shared_config.input_shardings["x"])[MeshAxisName.TP],
             spmd.S(0),
         )
         self.assertEqual(
-            _per_axis_types(w13_config.in_src_shardings["input"])[MeshAxisName.TP],
+            _per_axis_types(w13_config.input_shardings["input"])[MeshAxisName.TP],
             spmd.S(0),
         )
 
@@ -636,9 +652,9 @@ class TestMoE(unittest.TestCase):
                     enable_ep=True,
                 ).sharding_config
 
-                shared_output = shared.out_src_shardings
-                w2_output = w2.out_src_shardings
-                routed_output = routed.out_src_shardings
+                shared_output = shared.output_shardings
+                w2_output = w2.output_shardings
+                routed_output = routed.output_shardings
                 assert isinstance(shared_output, SpmdType)
                 assert isinstance(w2_output, SpmdType)
                 assert isinstance(routed_output, SpmdType)
@@ -649,12 +665,10 @@ class TestMoE(unittest.TestCase):
                 self.assertEqual(
                     _per_axis_types(w2_output).get(MeshAxisName.TP), expected
                 )
-                self.assertIsNone(w2.out_dst_shardings)
                 self.assertEqual(
                     _per_axis_types(routed_output).get(MeshAxisName.TP),
                     spmd.S(0),
                 )
-                self.assertIsNone(routed.out_dst_shardings)
 
     def test_explicit_padding_mask_sharding_with_sp(self):
         moe = MoE.__new__(MoE)

@@ -11,7 +11,10 @@ globs: torchtitan/models/**
   keeps its `Trainer`/`Validator` subclass, data and inference next to the model.
 - Weight initialization belongs in the config or a dedicated init function, not
   scattered through `Module.__init__`.
-- After any model change, ensure original checkpoints still load correctly.
+- After any model change, ensure HF checkpoints still load correctly (numerics
+  verified against the HF reference, e.g. via `scripts/checkpoint_conversion`).
+- A new model ships with a short `README.md` listing the parallelisms that are
+  supported and verified, and the HF numerics check.
 
 ## Audit All Variants
 When changing shared components (attention, normalization, MoE routing), check and
@@ -23,6 +26,9 @@ stale patterns in sibling models.
 ## Unify Across Models
 - Don't create per-model wrappers for the same functionality. Aim for at most one
   general wrapper shared by all models.
+- Model-tied behavior (state dict adapter, PP split, FSDP application, flops,
+  optimizer hooks) lives on the model class or its family base, not in side
+  registries or per-model free functions.
 - If multiple models have near-identical code (e.g. sharding helpers or
   `_apply_fsdp` overrides), consolidate into `torchtitan/models/common/` or
   `torchtitan/distributed/`.
@@ -59,7 +65,12 @@ adapter bases. Concrete components used by multiple models belong in
 ## Don't Over-Specialize
 If a feature is only needed by one model (e.g. HFTransformerModel), implement it
 in that model's folder. Don't modify shared infrastructure or base classes to
-accommodate a single model's needs.
+accommodate a single model's needs -- a subclass or a little duplicated code in
+the model folder is better than a new hook or branch in `models/common/`.
+
+## Training and Inference Share Modules
+RL trains and serves the same model definition. Avoid inference-only or
+training-only module variants; keep trainer and generator numerics consistent.
 
 ## Control Flow in Forward
 Keep control flow (routing decisions, conditional logic) in the `forward` method.

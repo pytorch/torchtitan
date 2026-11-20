@@ -4,33 +4,56 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Text-only Muse Spark Open renderer for supervised fine-tuning and generation."""
+"""Muse Spark Open renderer for supervised fine-tuning and generation.
+
+Content parts may be text or images. Each image renders as one ``<|patch|>`` token, which
+the multimodal SFT data expands. Built with a ``vision_processor`` (RL image prompts), an
+image part ``{"type": "image", "path": ...}`` renders expanded instead, as
+``<|image_start|>`` + N x ``<|patch|>`` + ``<|image_end|>``, with N from the patch grid of
+the size in the file header (no pixels are decoded). ``multi_modal_data`` then carries
+each image's file hash, ``image_grid_thw`` and its ``<|patch|>`` run, as
+``Qwen35ImageRefRenderer`` does; the rollout reads the file, and the generator and the
+trainer decode it.
+"""
 
 from __future__ import annotations
 
 import datetime
 import html
+import io
 import json
 import re
 from dataclasses import dataclass
 from typing import Any, cast, NamedTuple
 
-from renderers import Message, Renderer, ToolSpec
+import numpy as np
+from PIL import Image
+from renderers import Message, MultiModalData, PlaceholderRange, Renderer, ToolSpec
 from renderers.base import (
     attribute_text_segments,
+    extract_message_tool_names,
     ParsedResponse,
     ParsedToolCall,
+    reject_assistant_in_extension,
     RenderedTokens,
     ToolCallParseStatus,
+    trim_to_turn_close,
 )
 from renderers.parsing import _build_param_type_index, _coerce_arg_value
 
-from torchtitan.components.renderer import RendererConfig, RendererTokenizerWrapper
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.renderer import (
+    hash_image_file,
+    RendererConfig,
+    RendererTokenizerWrapper,
+)
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
 START_STR, MESSAGE_STR = "<|start|>", "<|message|>"
 EOM_STR, EOT_STR = "<|eom|>", "<|eot|>"
+IMAGE_STR = "<|patch|>"
+IMAGE_START_STR, IMAGE_END_STR = "<|image_start|>", "<|image_end|>"
 
 START_ID = 200022
 MESSAGE_ID = 200023
@@ -40,9 +63,8 @@ EOS_ID = 200001
 
 _DEFAULT_CUTOFF_DATE = "2026-01-04"
 _REASONING_EFFORT = {
-    "minimal": 1,
-    "low": 16,
-    "medium": 64,
+    "low": 8,
+    "medium": 32,
     "high": 256,
     "xhigh": 512,
 }
@@ -84,8 +106,20 @@ class MuseSparkRendererConfig(RendererConfig):
         if self.current_date is not None and not isinstance(self.current_date, str):
             raise TypeError("current_date must be a string or None")
 
-    def build(self, *, tokenizer: HuggingFaceTokenizer) -> Renderer:
-        return MuseSparkRenderer(RendererTokenizerWrapper(tokenizer), self)
+    def build(
+        self,
+        *,
+        tokenizer: HuggingFaceTokenizer,
+        vision_processor: VisionProcessor | None = None,
+    ) -> Renderer:
+        """Build the renderer; with ``vision_processor`` (Muse Spark's, e.g.
+        ``VisionProcessor.Config(**MUSE_SPARK_VISION_PROCESSOR_KWARGS)``) it renders image
+        parts from their files. TitanRL passes ``Controller.Config.vision_processor``."""
+        return MuseSparkRenderer(
+            RendererTokenizerWrapper(tokenizer),
+            self,
+            vision_processor=vision_processor,
+        )
 
 
 class _Piece(NamedTuple):
@@ -147,7 +181,115 @@ def _escape_attribute(value: Any) -> str:
     return html.escape(_escape_header(value), quote=True).replace("&#x27;", "&#39;")
 
 
-def _render_content(content: Any) -> str:
+class _ImageFile(NamedTuple):
+    hash_value: str
+    grid_thw: tuple[int, int, int]
+    num_tokens: int
+
+
+class _MuseImagePlaceholders:
+    """Image spans of a Muse Spark prompt, from image files.
+
+    An image part ``{"type": "image", "path": ...}`` becomes ``<|image_start|>`` + N x
+    ``<|patch|>`` + ``<|image_end|>``, with N from the patch grid of the file header's
+    size. After encoding, `multi_modal_data` finds each image's ``<|patch|>`` run. E.g. a
+    640x480 image with Muse Spark's processor (14-pixel patches, 2x2 merge) has a
+    ``(1, 34, 46)`` patch grid and renders 391 ``<|patch|>`` tokens.
+    """
+
+    def __init__(self, vision_processor: VisionProcessor, tokenizer: Any) -> None:
+        self._vision_processor = vision_processor
+        self.image_start_id, self.patch_id, image_end_id = (
+            tokenizer.convert_tokens_to_ids(token)
+            for token in (IMAGE_START_STR, IMAGE_STR, IMAGE_END_STR)
+        )
+        if None in (self.image_start_id, self.patch_id, image_end_id):
+            raise ValueError(
+                f"Image rendering needs {IMAGE_START_STR}, {IMAGE_STR} and "
+                f"{IMAGE_END_STR} in the tokenizer."
+            )
+
+    def _image(self, part: dict[str, Any]) -> _ImageFile:
+        path = part.get("path")
+        if path is None:
+            raise ValueError(
+                "Muse Spark image parts need a 'path' to an image file, got keys "
+                f"{sorted(part)}."
+            )
+        with open(path, "rb") as f:
+            data = f.read()
+        # The header gives the stored size; decoding applies no EXIF rotation either.
+        width, height = Image.open(io.BytesIO(data)).size
+        grid_thw = self._vision_processor.grid_thw(height, width)
+        return _ImageFile(
+            hash_image_file(data),
+            grid_thw,
+            self._vision_processor.num_placeholder_tokens(grid_thw),
+        )
+
+    def span(self, part: dict[str, Any]) -> str:
+        return (
+            IMAGE_START_STR + IMAGE_STR * self._image(part).num_tokens + IMAGE_END_STR
+        )
+
+    def multi_modal_data(
+        self,
+        messages: list[dict[str, Any]],
+        token_ids: list[int],
+        *,
+        start: int = 0,
+        previous: MultiModalData | None = None,
+    ) -> MultiModalData | None:
+        """Place the images of ``messages`` on the ``<|patch|>`` runs of ``token_ids[start:]``.
+
+        Messages render in order and each image part becomes one run, so the n-th image
+        part owns the n-th run. ``previous`` holds the images before ``start``.
+        """
+        images = [
+            self._image(part)
+            for message in messages
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+            if part.get("type") == "image"
+        ]
+        runs: list[PlaceholderRange] = []
+        index = start
+        while True:
+            try:
+                index = token_ids.index(self.image_start_id, index) + 1
+            except ValueError:
+                break
+            end = index
+            while end < len(token_ids) and token_ids[end] == self.patch_id:
+                end += 1
+            runs.append(PlaceholderRange(offset=index, length=end - index))
+            index = end
+        if [run.length for run in runs] != [image.num_tokens for image in images]:
+            raise ValueError(
+                f"Rendered image runs {[run.length for run in runs]} do not match the "
+                f"messages' images {[image.num_tokens for image in images]}."
+            )
+        hashes = list(previous.mm_hashes.get("image", [])) if previous else []
+        placeholders = (
+            list(previous.mm_placeholders.get("image", [])) if previous else []
+        )
+        items = list(previous.mm_items.get("image", [])) if previous else []
+        for image, run in zip(images, runs):
+            hashes.append(image.hash_value)
+            placeholders.append(run)
+            items.append(
+                {"pixel_values": None, "image_grid_thw": np.array([image.grid_thw])}
+            )
+        if not hashes:
+            return None
+        return MultiModalData(
+            mm_hashes={"image": hashes},
+            mm_placeholders={"image": placeholders},
+            mm_items={"image": items},
+        )
+
+
+def _render_content(content: Any, images: _MuseImagePlaceholders | None = None) -> str:
     if content is None:
         return ""
     if isinstance(content, str):
@@ -155,8 +297,16 @@ def _render_content(content: Any) -> str:
     rendered: list[str] = []
     for part in content:
         kind = part.get("type", "")
+        if kind == "image":
+            if images is None:
+                # One image token per image; the processor expands it, as in
+                # transformers' MuseSparkProcessor.
+                rendered.append(IMAGE_STR)
+            else:
+                # Added after escaping, so these are the only image tokens in the body.
+                rendered.append(images.span(part))
+            continue
         if kind in {
-            "image",
             "input_image",
             "image_url",
             "video",
@@ -166,7 +316,9 @@ def _render_content(content: Any) -> str:
             "input_audio",
             "audio_url",
         }:
-            raise ValueError("Muse Spark SFT rendering supports text-only content.")
+            raise ValueError(
+                f"Muse Spark rendering does not support {kind!r} content parts."
+            )
         if kind in {"text", "input_text", "output_text"}:
             rendered.append(_escape(part.get("text", "")))
     return "".join(rendered)
@@ -199,13 +351,21 @@ def _render_tool_definitions(tools: list[dict[str, Any]]) -> str:
     ]
     for tool in tools:
         function = _tool_function(tool)
+        # As the published template prints a function: a schema without
+        # additionalProperties gets "additionalProperties": false appended, and
+        # missing parameters become an empty object schema.
+        parameters = function.get("parameters") or {}
+        if not parameters:
+            parameters = {"type": "object", "properties": {}}
+        if isinstance(parameters, dict) and "additionalProperties" not in parameters:
+            parameters = {**parameters, "additionalProperties": False}
         parts.append(
             "\n"
             + _json(
                 {
                     "name": function["name"],
                     "description": function.get("description") or "",
-                    "parameters": function.get("parameters") or {},
+                    "parameters": parameters,
                 }
             )
         )
@@ -295,6 +455,8 @@ class MuseSparkRenderer:
         self,
         tokenizer: Any,
         config: MuseSparkRendererConfig | None = None,
+        *,
+        vision_processor: VisionProcessor | None = None,
     ) -> None:
         self._tokenizer = tokenizer
         config = config or MuseSparkRendererConfig()
@@ -303,6 +465,11 @@ class MuseSparkRenderer:
         self._reasoning_effort = config.reasoning_effort
         self._bos = tokenizer.bos_token or ""
         self._verify_special_ids()
+        self._images = (
+            None
+            if vision_processor is None
+            else _MuseImagePlaceholders(vision_processor, tokenizer)
+        )
 
     def _verify_special_ids(self) -> None:
         for token, expected in (
@@ -440,7 +607,7 @@ class MuseSparkRenderer:
         rest = messages
         instructions = None
         if messages and messages[0].get("role") in {"system", "developer"}:
-            instructions = _render_content(messages[0].get("content"))
+            instructions = _render_content(messages[0].get("content"), self._images)
             rest = messages[1:]
         block(
             "system",
@@ -481,14 +648,14 @@ class MuseSparkRenderer:
             else:
                 raise ValueError(f"Unsupported Muse Spark chat role: {role!r}")
 
-    @staticmethod
     def _build_plain_message(
+        self,
         role: str,
         message: dict[str, Any],
         index: int,
         block: Any,
     ) -> None:
-        body = _render_content(message.get("content"))
+        body = _render_content(message.get("content"), self._images)
         if (
             role == "user"
             and message.get("render_timestamp")
@@ -511,7 +678,7 @@ class MuseSparkRenderer:
         name = self._tool_name(message, all_messages)
         body = (
             f'<tool_output name="{_escape_attribute(name)}">\n'
-            f"{_render_content(message.get('content'))}\n</tool_output>"
+            f"{_render_content(message.get('content'), self._images)}\n</tool_output>"
         )
         block(
             f"tool {_escape_header(name)}",
@@ -671,7 +838,13 @@ class MuseSparkRenderer:
             is_content=is_content,
             message_roles=[cast(str, message.get("role")) for message in messages],
             message_tool_names=[message.get("name") for message in messages],
-            multi_modal_data=None,
+            multi_modal_data=(
+                None
+                if self._images is None
+                else self._images.multi_modal_data(
+                    cast(list[dict[str, Any]], messages), token_ids
+                )
+            ),
         )
 
     def bridge_to_next_turn(
@@ -681,9 +854,120 @@ class MuseSparkRenderer:
         new_messages: list[Message],
         *,
         tools: list[ToolSpec] | None = None,
-    ) -> None:
-        """Have TokenEnv re-render the full history for the next turn."""
-        return None
+        previous_multi_modal_data: MultiModalData | None = None,
+    ) -> RenderedTokens | None:
+        """Extend the previous turn's exact tokens with new tool or user messages.
+
+        A full re-render replaces the sampled completion with its parsed, canonical
+        form: stripped whitespace, merged reasoning channels, re-serialized tool
+        arguments. When the completion was not canonical, the next prompt then stops
+        extending it, and training starts a new sample that repeats the history.
+        Keeping the sampled tokens verbatim avoids that. The new messages render as in
+        ``render``, piece by piece, followed by the generation prompt.
+
+        Returns None, so the caller re-renders, when there is no previous turn, the
+        completion did not close its turn with <|eot|>, or the tool results do not
+        match the completion's tool calls one to one. Muse Spark tool calls carry no
+        ids, so tool results are matched to the calls in order, and a result's own
+        ``name``, when given, must agree.
+
+        With images, ``previous_multi_modal_data`` places the previous prompt's images; the
+        new messages' images follow them. Without it, a previous prompt with images is
+        re-rendered.
+        """
+        if (
+            not previous_prompt_ids
+            or not new_messages
+            or reject_assistant_in_extension(new_messages)
+        ):
+            return None
+        previous_ids = trim_to_turn_close(
+            previous_prompt_ids, previous_completion_ids, {EOT_ID}
+        )
+        if previous_ids is None:
+            return None
+        if (
+            self._images is not None
+            and previous_multi_modal_data is None
+            and self._images.image_start_id in previous_prompt_ids
+        ):
+            return None
+
+        tool_results = [m for m in new_messages if m.get("role") == "tool"]
+        tool_names: list[str] = []
+        if tool_results:
+            calls = self.parse_response(previous_completion_ids, tools=tools).tool_calls
+            if len(calls) != len(tool_results):
+                return None
+            for message, call in zip(tool_results, calls):
+                if call.name is None or message.get("name") not in (None, call.name):
+                    return None
+                tool_names.append(call.name)
+
+        pieces: list[_Piece] = []
+
+        def block(
+            header: str,
+            body: str,
+            end: str,
+            *,
+            message_index: int,
+            sampled: bool,
+            assistant_output: bool = False,
+        ) -> None:
+            del sampled, assistant_output
+            for text, token_id, is_content in (
+                (START_STR, START_ID, False),
+                (header, None, False),
+                (MESSAGE_STR, MESSAGE_ID, False),
+                (body, None, True),
+                (end, EOT_ID if end == EOT_STR else EOM_ID, False),
+            ):
+                if text:
+                    pieces.append(
+                        _Piece(text, token_id, False, message_index, is_content, 0)
+                    )
+
+        names = iter(tool_names)
+        for index, message in enumerate(cast(list[dict[str, Any]], new_messages)):
+            role = message.get("role")
+            if role == "tool":
+                self._build_tool_message(
+                    {**message, "name": next(names)}, [], index, block
+                )
+            elif role in {"system", "developer", "user"}:
+                self._build_plain_message(role, message, index, block)
+            else:
+                return None
+        pieces.append(_Piece(START_STR, START_ID, False, -1, False, 0))
+        pieces.append(_Piece("assistant", None, False, -1, False, 0))
+
+        token_ids = list(previous_ids)
+        message_indices = [-1] * len(previous_ids)
+        is_content = [False] * len(previous_ids)
+        for piece in pieces:
+            encoded, _ = self._encode(piece)
+            token_ids.extend(encoded)
+            message_indices.extend([piece.message_index] * len(encoded))
+            is_content.extend([piece.is_content] * len(encoded))
+        return RenderedTokens(
+            token_ids=token_ids,
+            message_indices=message_indices,
+            sampled_mask=[False] * len(token_ids),
+            is_content=is_content,
+            message_roles=[m.get("role") or "" for m in new_messages],
+            message_tool_names=extract_message_tool_names(new_messages),
+            multi_modal_data=(
+                None
+                if self._images is None
+                else self._images.multi_modal_data(
+                    cast(list[dict[str, Any]], new_messages),
+                    token_ids,
+                    start=len(previous_ids),
+                    previous=previous_multi_modal_data,
+                )
+            ),
+        )
 
     def parse_response(
         self,

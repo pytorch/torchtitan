@@ -46,7 +46,8 @@ from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan.observability.metrics import MetricsProcessor
+
+from torchtitan.observability.metrics import MetricsProcessor, WandBLogger
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
@@ -99,7 +100,6 @@ def qwen3_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -224,7 +224,6 @@ def qwen3_debugmodel_flex_flash(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -260,7 +259,6 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -295,7 +293,6 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=100,
         ),
         checkpointer=None,
@@ -340,7 +337,6 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(
@@ -357,7 +353,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
             ),
             max_num_documents=32,
         ),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         checkpointer=CheckpointManager.Config(initial_load_in_hf=True),
         activation_remat=DefaultActivationRematConfig(),
     )
@@ -418,7 +414,6 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -460,7 +455,6 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -500,7 +494,6 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -527,7 +520,7 @@ def qwen3_moe_debug(
     )
     num_tokens_per_microbatch_per_dp_rank = 4 * model_config.max_context_length
     # The stock all-to-all EP dispatcher syncs with the CPU.
-    disable_cuda_graphs = parallelism.expert_parallel_degree > 1
+    disable_accelerator_graphs = parallelism.expert_parallel_degree > 1
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -540,7 +533,7 @@ def qwen3_moe_debug(
         dataloader=GrainDataLoader.Config(
             max_num_documents=(
                 c4_document_capacity(num_tokens_per_microbatch_per_dp_rank)
-                if attn_backend == "varlen" and not disable_cuda_graphs
+                if attn_backend == "varlen" and not disable_accelerator_graphs
                 else None
             ),
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
@@ -553,9 +546,8 @@ def qwen3_moe_debug(
             lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         ),
         training=TrainingConfig(
-            disable_cuda_graphs=disable_cuda_graphs,
+            disable_accelerator_graphs=disable_accelerator_graphs,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -606,9 +598,8 @@ def qwen3_moe_deepep(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -671,7 +662,6 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(
@@ -689,7 +679,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
             max_num_documents=32,
         ),
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
         ),
         checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,

@@ -83,6 +83,10 @@ jobs:
         python -m pip uninstall -y torch
         PIP_EXTRA_INDEX_URL= python -m pip install --pre \
           torch --index-url ${{ matrix.index-url }}
+        # DeepSeek V3 MLA has unequal Q/K and V head dimensions, so its
+        # bitwise tests require FA3 instead of PyTorch's FA2 fallback.
+        python -m pip install flash-attn-3 \
+          --extra-index-url https://download.pytorch.org/whl/test/cu130
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
 
         mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

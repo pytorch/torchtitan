@@ -27,11 +27,11 @@ class RLDataset(Configurable, ABC):
         pass
 
 
-class RLDataLoader(Stateful, ABC, Configurable):
+class RolloutDataLoader(Stateful, ABC, Configurable):
     """Checkpointable iterator of globally identified RL inputs.
 
     Subclasses may generate inputs, stream them, or mix sources. They must
-    restore every yielded but unacknowledged input after a checkpoint load.
+    restore every yielded but uncommitted input after a checkpoint load.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -40,7 +40,7 @@ class RLDataLoader(Stateful, ABC, Configurable):
         """Builds the dataset consumed by this dataloader."""
 
     @abstractmethod
-    def __iter__(self) -> RLDataLoader:
+    def __iter__(self) -> RolloutDataLoader:
         ...
 
     @abstractmethod
@@ -48,14 +48,14 @@ class RLDataLoader(Stateful, ABC, Configurable):
         ...
 
     @abstractmethod
-    def acknowledge(self, indices: Iterable[int]) -> None:
+    def commit(self, indices: Iterable[int]) -> None:
         ...
 
 
-class IterableRLDataLoader(RLDataLoader):
+class IterableRolloutDataLoader(RolloutDataLoader):
     """Checkpointable RL loader backed by a stateful iterable dataset.
 
-    Unacknowledged samples are stored in the checkpoint and replayed before new
+    Uncommitted samples are stored in the checkpoint and replayed before new
     samples after resume. The wrapped dataset remains responsible for its own
     cursor, RNG, and any external source state.
     """
@@ -64,7 +64,7 @@ class IterableRLDataLoader(RLDataLoader):
     """Increment when the serialized fields or their interpretation changes."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RLDataLoader.Config):
+    class Config(RolloutDataLoader.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -77,7 +77,7 @@ class IterableRLDataLoader(RLDataLoader):
         self._pending: dict[int, object] = {}
         self._replay: deque[tuple[int, object]] = deque()
 
-    def __iter__(self) -> IterableRLDataLoader:
+    def __iter__(self) -> IterableRolloutDataLoader:
         return self
 
     def __next__(self) -> tuple[int, object]:
@@ -90,14 +90,14 @@ class IterableRLDataLoader(RLDataLoader):
         self._pending[index] = sample
         return index, sample
 
-    def acknowledge(self, indices: Iterable[int]) -> None:
+    def commit(self, indices: Iterable[int]) -> None:
         for index in indices:
             if index not in self._pending:
-                raise RuntimeError(f"cannot acknowledge an unyielded index {index}")
+                raise RuntimeError(f"cannot commit an unyielded index {index}")
             del self._pending[index]
 
     def state_dict(self) -> dict[str, Any]:
-        """Save all unacknowledged samples as one ordered replay set.
+        """Save all uncommitted samples as one ordered replay set.
 
         Pending and replay samples are intentionally merged because both must
         be yielded again after a restart.
@@ -112,10 +112,10 @@ class IterableRLDataLoader(RLDataLoader):
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore every unacknowledged sample into the replay queue.
+        """Restore every uncommitted sample into the replay queue.
 
         The pre-checkpoint pending state is not restored directly: those
-        samples must be yielded again before they can be acknowledged.
+        samples must be yielded again before they can be committed.
         """
         if state_dict.get("version") != self._STATE_VERSION:
             raise ValueError(
@@ -138,10 +138,10 @@ class IterableRLDataLoader(RLDataLoader):
         self._replay = deque(sorted(pending))
 
 
-class MapStyleRLDataLoader(RLDataLoader):
+class MapStyleRolloutDataLoader(RolloutDataLoader):
     """Checkpointable RL input iterator backed by a random-access source.
 
-    This class is not thread-safe. Call next, acknowledge, state_dict, and
+    This class is not thread-safe. Call next, commit, state_dict, and
     load_state_dict serially from the controller data-input thread.
     """
 
@@ -149,7 +149,7 @@ class MapStyleRLDataLoader(RLDataLoader):
     """Increment when the serialized fields or their interpretation changes."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RLDataLoader.Config):
+    class Config(RolloutDataLoader.Config):
         seed: int = 42
         shuffle: bool = True
 
@@ -171,7 +171,7 @@ class MapStyleRLDataLoader(RLDataLoader):
         self._pending: set[int] = set()
         self._replay: deque[int] = deque()
 
-    def __iter__(self) -> MapStyleRLDataLoader:
+    def __iter__(self) -> MapStyleRolloutDataLoader:
         return self
 
     def __next__(self) -> tuple[int, object]:
@@ -183,14 +183,14 @@ class MapStyleRLDataLoader(RLDataLoader):
         self._pending.add(index)
         return index, self._dataset[index]
 
-    def acknowledge(self, indices: Iterable[int]) -> None:
+    def commit(self, indices: Iterable[int]) -> None:
         for index in indices:
             if index not in self._pending:
-                raise RuntimeError(f"cannot acknowledge an unyielded index {index}")
+                raise RuntimeError(f"cannot commit an unyielded index {index}")
             self._pending.remove(index)
 
     def state_dict(self) -> dict[str, Any]:
-        """Save the cursor and all unacknowledged indices for replay."""
+        """Save the cursor and all uncommitted indices for replay."""
         return {
             "version": self._STATE_VERSION,
             "seed": self._seed,
@@ -201,10 +201,10 @@ class MapStyleRLDataLoader(RLDataLoader):
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        """Restore every unacknowledged index into the replay queue.
+        """Restore every uncommitted index into the replay queue.
 
         The pre-checkpoint pending state is not restored directly: those
-        indices must be yielded again before they can be acknowledged.
+        indices must be yielded again before they can be committed.
         """
         expected = {
             "version": self._STATE_VERSION,

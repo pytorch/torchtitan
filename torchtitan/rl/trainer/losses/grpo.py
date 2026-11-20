@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from torchtitan.components.loss import Loss
 from torchtitan.rl.trainer.losses.dapo import DAPOLoss
 
 
@@ -21,9 +22,12 @@ class GRPOLoss(DAPOLoss):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(DAPOLoss.Config):
+    class Config(Loss.Config):
         clip_eps: float = 0.2
         """Symmetric PPO clip: the ratio is clamped to ``[1 - clip_eps, 1 + clip_eps]``."""
+
+        global_vocab_size: int | None = None
+        """Full vocabulary size from the model spec."""
 
     def __init__(self, config: Config, **kwargs) -> None:
         super().__init__(

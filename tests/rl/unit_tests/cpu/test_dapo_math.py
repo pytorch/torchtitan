@@ -23,9 +23,11 @@ from torchtitan.rl.examples.dapo_math import (
     data as math_data,
     math_verify_pool,
     MathVerifyPool,
+    MathVerifyResult,
     RewardMathVerify,
     score_math_response,
 )
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.types import RolloutTurnID
 
@@ -153,10 +155,13 @@ def test_math_verify_pool_matches_in_process_scores() -> None:
         (r"\boxed{2\sqrt{3}}", r"2\sqrt{3}"),
     ]
 
-    async def score_all() -> list[float]:
+    async def score_all() -> list[MathVerifyResult]:
         return await asyncio.gather(*(pool.score(*case) for case in cases))
 
-    assert asyncio.run(score_all()) == [score_math_response(*case) for case in cases]
+    assert asyncio.run(score_all()) == [
+        MathVerifyResult(score=score_math_response(*case), status="scored")
+        for case in cases
+    ]
 
 
 def test_reward_scores_a_hung_answer_zero_while_other_answers_finish() -> None:
@@ -187,8 +192,74 @@ def test_reward_scores_a_hung_answer_zero_while_other_answers_finish() -> None:
 def test_math_verify_pool_replaces_a_killed_process() -> None:
     # One process, so the second score runs on its replacement.
     pool = MathVerifyPool(num_processes=1, timeout_seconds=1.0)
-    assert asyncio.run(pool.score(r"\boxed{2000^{2000^{2000}}}", "34")) == 0.0
-    assert asyncio.run(pool.score(r"\boxed{34}", "34")) == 1.0
+    assert asyncio.run(pool.score(r"\boxed{2000^{2000^{2000}}}", "34")) == (
+        MathVerifyResult(score=0.0, status="timed_out")
+    )
+    assert asyncio.run(pool.score(r"\boxed{34}", "34")) == MathVerifyResult(
+        score=1.0, status="scored"
+    )
+
+
+def test_math_verify_pool_reports_a_worker_death(monkeypatch, tmp_path) -> None:
+    script = tmp_path / "dies.py"
+    script.write_text(
+        "import sys\nprint('ready', flush=True)\nsys.stdin.readline()\nsys.exit(7)\n"
+    )
+    monkeypatch.setattr(math_verify_pool, "__file__", str(script))
+    pool = MathVerifyPool(num_processes=1, timeout_seconds=1.0)
+
+    result = asyncio.run(pool.score(r"\boxed{34}", "34"))
+
+    assert result == MathVerifyResult(score=0.0, status="worker_died")
+
+
+def test_math_verify_pool_reports_invalid_worker_output(monkeypatch, tmp_path) -> None:
+    script = tmp_path / "invalid_output.py"
+    script.write_text(
+        "import sys\nprint('ready', flush=True)\nsys.stdin.readline()\n"
+        "print('not-a-score', flush=True)\nsys.stdin.read()\n"
+    )
+    monkeypatch.setattr(math_verify_pool, "__file__", str(script))
+    pool = MathVerifyPool(num_processes=1, timeout_seconds=1.0)
+
+    result = asyncio.run(pool.score(r"\boxed{34}", "34"))
+
+    assert result == MathVerifyResult(score=0.0, status="invalid_output")
+
+
+@pytest.mark.parametrize(
+    "status, expected_values",
+    [
+        ("timed_out", (1.0, 0.0, 0.0)),
+        ("worker_died", (0.0, 1.0, 0.0)),
+        ("invalid_output", (0.0, 0.0, 1.0)),
+    ],
+)
+def test_reward_records_math_verify_failures_as_metrics(
+    monkeypatch, status, expected_values
+) -> None:
+    reward = RewardMathVerify.Config().build()
+
+    async def score(*args, **kwargs) -> MathVerifyResult:
+        del args, kwargs
+        return MathVerifyResult(score=0.0, status=status)
+
+    monkeypatch.setattr(reward._pool, "score", score)
+    rollout = _rollout(r"\boxed{34}")
+    sample = DapoMathSample(prompt="problem", ground_truth="34")
+
+    assert asyncio.run(reward(rollout, sample)) == 0.0
+    expected_keys = [
+        "math_verify/timeouts",
+        "math_verify/worker_deaths",
+        "math_verify/invalid_outputs",
+    ]
+    for metric, expected_key, expected_value in zip(
+        rollout.turns[-1].metrics, expected_keys, expected_values, strict=True
+    ):
+        assert metric.key == expected_key
+        assert isinstance(metric.value, m.Sum)
+        assert metric.value.value == expected_value
 
 
 def test_math_verify_pool_raises_when_a_process_fails_to_start(
@@ -208,3 +279,46 @@ def test_reward_handles_equivalent_latex_and_units() -> None:
     sample = DapoMathSample(prompt="problem", ground_truth=r"336^\circ")
     assert asyncio.run(reward(_rollout(r"work\nAnswer: \boxed{336}"), sample)) == 1.0
     assert asyncio.run(reward(_rollout(r"work\nAnswer: \boxed{335}"), sample)) == 0.0
+
+
+def test_muse_spark_gb300_recipe_shards_sequences_in_the_trainer_only() -> None:
+    from torchtitan.models.common.attention import (
+        SlidingWindowVarlenInnerAttention,
+        VarlenInnerAttention,
+    )
+    from torchtitan.models.common.attention.cp_attention import (
+        UlyssesSlidingWindowVarlenInnerAttention,
+        UlyssesVarlenInnerAttention,
+    )
+    from torchtitan_recipes.rl.dapo_math import (
+        muse_spark_816b_a42b_dapo_math_gb300_config,
+    )
+
+    config = muse_spark_816b_a42b_dapo_math_gb300_config(
+        hf_assets_path="assets", dapo_math_repo_id="dapo", aime2025_repo_id="aime"
+    )
+
+    def attention_windows(model, full_type, sliding_type):
+        windows = []
+        for layer in model.layers:
+            inner = layer.attention.inner_attention
+            assert type(inner) in (full_type, sliding_type)
+            windows.append(
+                inner.sliding_window_size if type(inner) is sliding_type else None
+            )
+        return windows
+
+    # Every layer, sliding-window ones included, runs Ulysses CP in the trainer
+    # and plain varlen attention in the generator, with the same windows.
+    trainer_windows = attention_windows(
+        config.trainer.model,
+        UlyssesVarlenInnerAttention.Config,
+        UlyssesSlidingWindowVarlenInnerAttention.Config,
+    )
+    generator_windows = attention_windows(
+        config.generator.model,
+        VarlenInnerAttention.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    )
+    assert trainer_windows == generator_windows
+    assert len(set(trainer_windows)) == 2

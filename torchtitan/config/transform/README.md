@@ -19,9 +19,9 @@ config = apply_transforms(
     [
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                FlexInnerAttention: AllGatherKVFlexInnerAttention,
                 SlidingWindowFlexInnerAttention: (
-                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                    AllGatherKVSlidingWindowFlexInnerAttention
                 ),
             }
         )
@@ -107,6 +107,12 @@ A CP transform specializes the selected attention for distributed execution.
 It may change input sharding and preprocessing, but it preserves the selected
 attention algorithm and metadata format.
 
+Graph-safe varlen K/V all-gather supports contiguous and head-tail sharding.
+Set `context_parallel_load_balancer=None` for one varlen call per rank.
+Head-tail uses two calls to balance long causal documents. It also works for
+sliding-only models because it does not need attention metadata. PTRR is not
+supported by these varlen backends.
+
 ## Dependency direction
 
 This package may import other `torchtitan` packages. Those packages must not
@@ -186,7 +192,8 @@ requirements.
 
 See [Configuration validation](../README.md#validation) for where validation
 belongs. `apply_transforms` validates the final trainer config after the last
-transform. The trainer validates it again after command-line overrides.
+transform. `ConfigLoader.load` validates again after launch options, and
+`apply_overrides` validates again after registered overrides.
 
 `__post_init__` also runs when a config is constructed. Set related training
 options before calling `apply_transforms`. It can then validate the final

@@ -15,6 +15,7 @@ Shape suffixes:
 - D = vision dim
 - M = merged tokens
 - K = merged feature dim (kh*kw*D)
+- C = two spatial coordinates (row, column)
 """
 
 from dataclasses import dataclass, field
@@ -24,13 +25,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_types import disable_dense_sp
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
-
 from torchtitan.models.common import Linear
+
+from torchtitan.models.common.flops import active_parameter_flops_per_token
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
+    get_packed_vision_grids,
     VisionTransformerBlock,
 )
 
@@ -125,64 +129,39 @@ def _compute_learned_pos_embeds(
     return packed_pos
 
 
-def _compute_2d_rope_cache(
-    freq_table: torch.Tensor,
-    grids: list[list[int]],
-    head_dim: int,
-) -> torch.Tensor:
-    """Compute the packed 2D-RoPE complex ``freqs_cis`` cache in raster order.
+def _compute_2d_positions(grids: list[list[int]], device: torch.device) -> torch.Tensor:
+    """Compute packed 2D RoPE coordinates in raster order.
 
-    For head-dim pair index ``k`` (``k`` in ``[0, head_dim/4)``), even output
-    pairs are rotated by the *column* (x) position and odd pairs by the *row*
-    (y) position. The per-axis angle for a position ``p`` is ``p * inv_freq[k]``;
-    this looks it up by gathering row ``p`` of ``freq_table`` (built once by
-    ``VisionRotaryEmbedding2D`` and cached by the encoder) rather than
-    recomputing ``p * inv_freq`` each call. Frames repeat the spatial pattern.
-
-    Returns a complex cache consumed by ``ComplexRoPE.apply_rotary_emb``; only
-    the cache is 2D/per-grid, which is why it is built here rather than by the
-    1D ``ComplexRoPE`` cache machinery.
+    Frames repeat the spatial pattern.
 
     Args:
-        freq_table: ``(max_hw, head_dim/4)`` position-to-frequency table, where
-            ``freq_table[p, k] = p * inv_freq[k]``.
         grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
             read to CPU once by the caller, so the per-item loop adds no syncs).
-        head_dim: Attention head dim (must be divisible by 4).
+        device: Device for the position indices.
 
     Returns:
-        ``(total_num_patches, 1, head_dim/2)`` complex64. The singleton head
-        axis broadcasts over attention heads.
+        ``(total_num_patches, 2)`` row/column coordinates.
     """
-    device = freq_table.device
-
-    angles: dict[int, torch.Tensor] = {}
-
-    # Group by (h, w) so the per-resolution angle grid is built once.
+    positions: dict[int, torch.Tensor] = {}
+    # Group by (h, w) so the per-resolution coordinate grid is built once.
     hw_to_indices: dict[tuple[int, int], list[int]] = {}
     for i, (_, h, w) in enumerate(grids):
         hw_to_indices.setdefault((h, w), []).append(i)
 
     for (h, w), indices in hw_to_indices.items():
-        # Raster order: position p -> (row = p // w, col = p % w). Gather each
-        # axis's angles from the precomputed table (freq_table[pos] = pos*inv_freq).
-        flat = torch.arange(h * w, device=device)
+        # Raster order: position p -> (row = p // w, col = p % w).
+        flat_T = torch.arange(h * w, device=device)
         if spmd.is_type_checking():
-            flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
-            flat = spmd.mutate_type(flat, "cp", src=spmd.R, dst=spmd.I)
-        x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
-        y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
-        # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
-        ang = torch.stack([x_ang, y_ang], dim=-1).reshape(h * w, head_dim // 2)
+            flat_T = spmd.mutate_type(flat_T, "tp", src=spmd.R, dst=spmd.I)
+            flat_T = spmd.mutate_type(flat_T, "cp", src=spmd.R, dst=spmd.I)
+        spatial_TC = torch.stack((flat_T // w, flat_T % w), dim=-1)
         for i in indices:
-            t = grids[i][0]
-            angles[i] = ang.repeat(t, 1)
+            positions[i] = spatial_TC.repeat(grids[i][0], 1)
 
-    # Complex unit-modulus cache; unsqueeze the head axis for broadcast.
-    packed_angles = torch.cat([angles[i] for i in range(len(grids))], dim=0)
+    positions_TC = torch.cat([positions[i] for i in range(len(grids))], dim=0)
     if spmd.is_type_checking():
-        packed_angles = spmd.mutate_type(packed_angles, "dp", src=spmd.R, dst=spmd.V)
-    return torch.polar(torch.ones_like(packed_angles), packed_angles).unsqueeze(1)
+        positions_TC = spmd.mutate_type(positions_TC, "dp", src=spmd.R, dst=spmd.V)
+    return positions_TC
 
 
 def _tpool_patch_merger(
@@ -226,59 +205,6 @@ def _tpool_patch_merger(
 
     packed_merged = torch.cat(merged, dim=0)
     return packed_merged
-
-
-class VisionRotaryEmbedding2D(Module):
-    """2D rotary position embedding for the vision tower.
-
-    Holds the per-axis frequencies ``inv_freq`` (``head_dim/4`` of them, shared
-    by the row and column axes). ``forward(seqlen)`` returns the
-    position-to-frequency table ``freq_table[p, k] = p * inv_freq[k]`` for
-    positions up to ``seqlen``; ``_compute_2d_rope_cache`` gathers per-patch
-    row/col angles from it, and ``ComplexRoPE.apply_rotary_emb`` applies them.
-    ``head_dim`` must be divisible by 4.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-        theta: float = 10000.0
-
-    def __init__(self, config: Config):
-        super().__init__()
-        if config.head_dim % 4 != 0:
-            raise ValueError(
-                f"2D RoPE requires head_dim divisible by 4, got {config.head_dim}."
-            )
-        self.head_dim = config.head_dim
-        self.theta = config.theta
-        self.register_buffer("inv_freq", self._compute_inv_freq(), persistent=False)
-
-    def _compute_inv_freq(self, *, device: torch.device | None = None) -> torch.Tensor:
-        # inv_freq[k] = theta**(-4k/head_dim) for k in [0, head_dim/4); the
-        # step of 4 leaves room for the row/col split of the 2D rotation.
-        return 1.0 / (
-            self.theta
-            ** (
-                torch.arange(0, self.head_dim, 4, dtype=torch.float32, device=device)
-                / self.head_dim
-            )
-        )
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        """Re-compute inv_freq on the target device after to_empty()."""
-        device = buffer_device or self.inv_freq.device
-        self.inv_freq = self._compute_inv_freq(device=device)
-
-    def forward(self, seqlen: int) -> torch.Tensor:
-        """Frequency table ``(seqlen, head_dim/4)`` for positions ``[0, seqlen)``."""
-        seq = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
-        if spmd.is_type_checking():
-            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
-            seq = spmd.mutate_type(seq, "cp", src=spmd.R, dst=spmd.I)
-        return torch.outer(seq, self.inv_freq)
 
 
 class VisionProjector(Module):
@@ -338,7 +264,6 @@ class MoonViTEncoder(Module):
 
         # Sub-modules.
         patch_embed_proj: Linear.Config
-        rotary_pos_emb: VisionRotaryEmbedding2D.Config
         block: VisionTransformerBlock.Config
         final_norm: LayerNorm.Config | RMSNorm.Config
         projector: Module.Config
@@ -356,8 +281,6 @@ class MoonViTEncoder(Module):
                 config.init_pos_emb_height, config.init_pos_emb_width, config.dim
             )
         )
-        self.rotary_pos_emb = config.rotary_pos_emb.build()
-        self._cached_freq_table: torch.Tensor | None = None
         self.layers = ModuleDict(
             {str(idx): config.block.build() for idx in range(config.num_layers)}
         )
@@ -367,37 +290,28 @@ class MoonViTEncoder(Module):
     def compute_position_embeddings(
         self, grids: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute both position embeddings for packed visual patches.
+        """Compute both position inputs for packed visual patches.
 
         Delegates to two standalone helpers:
         - ``_compute_learned_pos_embeds``: interpolated learnable spatial table
           (plus a runtime sinusoidal temporal term for videos).
-        - ``_compute_2d_rope_cache``: 2D RoPE complex cache, gathering from the
-          RoPE frequency table (cached here, regrown only when a larger side
-          appears).
+        - ``_compute_2d_positions``: packed row/column coordinates for RoPE.
 
         Args:
             grids: per-item ``[t, h, w]`` patch counts as host ints (``grid_thw``
                 read to CPU once by ``forward``).
         Returns:
             learned_pos: ``(total_num_patches, dim)`` additive positions.
-            rope_cache: ``(total_num_patches, 1, head_dim/2)`` complex RoPE
-                cache for ``ComplexRoPE.apply_rotary_emb``.
+            positions: ``(total_num_patches, 2)`` row/column coordinates.
         """
-        max_hw = max(max(h, w) for _, h, w in grids)
-        if self._cached_freq_table is None or self._cached_freq_table.shape[0] < max_hw:
-            self._cached_freq_table = self.rotary_pos_emb(max_hw)
-
-        learned_pos = _compute_learned_pos_embeds(
+        learned_pos_TD = _compute_learned_pos_embeds(
             self.pos_embed, grids, self.interpolation_mode
         )
-        rope_cache = _compute_2d_rope_cache(
-            self._cached_freq_table,
-            grids,
-            self.rotary_pos_emb.head_dim,
-        )
-        return learned_pos, rope_cache
+        positions_TC = _compute_2d_positions(grids, self.pos_embed.device)
+        return learned_pos_TD, positions_TC
 
+    # Vision activations are never sequence-sharded, so they stay TP-invariant.
+    @disable_dense_sp()
     def forward(
         self,
         pixel_values: torch.Tensor,
@@ -438,8 +352,8 @@ class MoonViTEncoder(Module):
                 f"describes {expected_tokens}."
             )
 
-        learned_pos, rope_cache = self.compute_position_embeddings(grids)
-        x = self.patch_embed(pixel_values) + learned_pos
+        learned_pos_TD, positions_TC = self.compute_position_embeddings(grids)
+        x = self.patch_embed(pixel_values) + learned_pos_TD
 
         # BlockMask creation and use in FlexInnerAttention are blackboxed from
         # typechecking.
@@ -453,8 +367,7 @@ class MoonViTEncoder(Module):
         for block in self.layers.values():
             x = block(
                 x,
-                rope_cache=rope_cache,
-                rope_apply=ComplexRoPE.apply_rotary_emb,
+                positions=positions_TC,
                 attention_mask=attention_mask,
             )
 
@@ -486,3 +399,46 @@ class KimiK25VisionEncoder(MoonViTEncoder):
 
         final_norm: LayerNorm.Config  # pyrefly: ignore [bad-override]
         projector: VisionProjector.Config  # pyrefly: ignore [bad-override]
+
+        def build_flops_estimator(
+            self,
+            encoder: "KimiK25VisionEncoder",
+        ) -> FlopsEstimator:
+            input_patch_flops = sum(
+                active_parameter_flops_per_token(module)
+                for module in (
+                    encoder.patch_embed,
+                    encoder.layers,
+                    encoder.final_norm,
+                )
+            )
+            spatial_patch_flops = active_parameter_flops_per_token(
+                encoder.projector.pre_norm
+            )
+            output_token_flops = sum(
+                active_parameter_flops_per_token(module)
+                for module in (
+                    encoder.projector.linear_1,
+                    encoder.projector.linear_2,
+                )
+            )
+            attention_pair_flops = (
+                self.num_layers * self.block.attn.flops_per_query_key_pair()
+            )
+            merge_h, merge_w = self.merge_kernel_size
+
+            def estimate(input_dict) -> int:
+                total_flops = 0
+                for temporal, grid_h, grid_w in get_packed_vision_grids(input_dict):
+                    num_spatial_patches = grid_h * grid_w
+                    num_input_patches = temporal * num_spatial_patches
+                    num_output_tokens = (grid_h // merge_h) * (grid_w // merge_w)
+                    total_flops += (
+                        num_input_patches * input_patch_flops
+                        + num_spatial_patches * spatial_patch_flops
+                        + num_output_tokens * output_token_flops
+                        + num_input_patches**2 * attention_pair_flops
+                    )
+                return total_flops
+
+            return estimate

@@ -75,7 +75,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
         model = build_model_config(
-            "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+            "debugmodel_mm", attn_backend="varlen", parallelism=ParallelismConfig()
         ).build()
         sink: dict = {}
         for key in list(model.layers.keys()):
@@ -110,7 +110,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             "torchtitan.models.common.attention."
             "VarlenAttentionMetadata.annotate_spmd_types"
         ):
-            inputs, _labels, batch = model.preprocess_inputs(
+            inputs, _labels, batch, _ = model.preprocess_inputs(
                 input_dict,
                 parallelism_context=parallelism_context,
                 parallelism=parallelism,

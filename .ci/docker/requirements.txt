@@ -1,5 +1,7 @@
 grain == 0.2.18
-datasets >= 3.6.0, < 4.8.0
+# datasets caps fsspec in every release; 5.2.0 is the first to allow fsspec
+# 2026.9.0.
+datasets >= 5.2.0
 # PyArrow 26 requires NumPy 2; PyTorch CI also covers NumPy 1.x.
 pyarrow < 26
 tensorboard
@@ -9,8 +11,9 @@ renderers == 0.1.12
 safetensors
 einops
 pillow
-spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@fce1acb1e9bbce66f398893ff7836346f4cf03cd
-attn-gym[linear,cudnn]==0.0.17
-torch_remat @ git+https://github.com/meta-pytorch/remat.git@624f19cbdb70720bd05988d6485a1225f46c074b
-# PyPI 0.1.0 predates torch_checkpointing.default_resharder.
-torch_checkpointing @ git+https://github.com/meta-pytorch/torch_checkpointing.git@dcbb3a59cfad1cbeb95994f0d6cb1802c1d91825
+spmd_types == 0.3.1
+attn-gym[linear,cudnn]==0.0.20
+# TODO: pin a release once torch_remat publishes one with SavedTensorInfo.region
+# (meta-pytorch/remat 6c05e8d), which per-region activation offload needs.
+torch_remat @ git+https://github.com/meta-pytorch/remat.git@6c05e8d8d6895a60dcc02674af0774b28155b5af
+torch_checkpointing == 0.1.1

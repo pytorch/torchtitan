@@ -30,7 +30,6 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.renderer import from_renderers, RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.models.common.attention import (
-    Attention,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -60,9 +59,9 @@ def _load_dataset():
     return Dataset.from_json(_DATA_PATH)
 
 
-def _runtime(max_context_length):
+def _runtime(max_context_length, *, tokenizer=None):
     return DatasetBuildContext(
-        tokenizer=_load_tokenizer(),
+        tokenizer=tokenizer or _load_tokenizer(),
         max_context_length=max_context_length,
         num_tokens_per_microbatch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
@@ -187,9 +186,21 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         labels = inputs.labels
 
         full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+        question = sample["question"]
+        answer = sample["answer"]
+        self.assertEqual(
+            full_text,
+            "<|begin_of_text|>user\n"
+            f"{question}<|end_of_text|>assistant\n"
+            f"{answer}<|end_of_text|>",
+        )
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
         if full_tokens[-1] != tokenizer.eos_id:
             full_tokens.append(tokenizer.eos_id)
+        # encode(add_bos=True) must not insert a second BOS. Both EOS markers
+        # in the rendered string must survive as EOS ids.
+        self.assertEqual(full_tokens.count(tokenizer.bos_id), 1)
+        self.assertEqual(full_tokens.count(tokenizer.eos_id), 2)
 
         self.assertEqual(
             inputs.input.tolist()[: len(full_tokens) - 1],
@@ -327,6 +338,27 @@ class TestChatDatasetPrefixValidation(unittest.TestCase):
             processor(_load_dataset()[0], np.random.default_rng(0))
 
 
+class TestChatTemplateSpecialTokens(unittest.TestCase):
+    """Chat samples get one BOS and supervise only the answer."""
+
+    def test_single_bos_and_answer_only_labels(self):
+        tokenizer = _load_tokenizer()
+        sample = _load_dataset()[0]
+        processor = ChatProcessor.Config(messages_fn=_process_sample).build(
+            context=_runtime(2048, tokenizer=tokenizer)
+        )
+        sequence = processor(sample, np.random.default_rng(0))
+
+        # The template renders bos_token and ChatProcessor also passes add_bos=True.
+        self.assertEqual(sequence.input_ids[0], tokenizer.bos_id)
+        self.assertEqual(sequence.input_ids.tolist().count(tokenizer.bos_id), 1)
+        answer = tokenizer.encode(sample["answer"], add_bos=False, add_eos=False)
+        self.assertEqual(
+            sequence.labels[sequence.labels != IGNORE_INDEX].tolist(),
+            answer + [tokenizer.eos_id],
+        )
+
+
 class TestMultiTurnChatProcessor(unittest.TestCase):
     def setUp(self):
         self.messages = [
@@ -434,6 +466,22 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
         )
         np.testing.assert_array_equal(sequence.input_ids, [1, 2])
         np.testing.assert_array_equal(sequence.labels, [IGNORE_INDEX, 3])
+
+    def test_rejects_image_content(self):
+        messages = [
+            {"role": "user", "content": [{"type": "image", "image": b""}]},
+            {"role": "assistant", "content": "yes"},
+        ]
+        # Without a renderer, apply_chat_template would accept the image part.
+        for renderer in (None, _FakeRendererConfig(renderer=object())):
+            with self.subTest(renderer=renderer):
+                config = ChatProcessor.Config(
+                    messages_fn=lambda row: row["messages"], renderer=renderer
+                )
+                with self.assertRaisesRegex(ValueError, "'image' content part"):
+                    config.build(context=_runtime(256))(
+                        {"messages": messages}, np.random.default_rng(0)
+                    )
 
     def test_rejects_tools_without_renderer(self):
         with self.assertRaisesRegex(ValueError, "^tools_fn requires a renderer$"):
@@ -549,12 +597,9 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             [0, 1, 2, 0, 1, 0, 1, 2, 0, 1, 0, 1, 2, 3, 0, 1],
             dtype=torch.int32,
         )
-        attn_config = Attention.Config(
-            n_heads=1,
-            inner_attention=FlexInnerAttention.Config(block_size=4),
-        )
+        attn_config = FlexInnerAttention.Config(block_size=4)
 
-        mask = attn_config.inner_attention.build_attention_metadata(positions)
+        mask = attn_config.build_attention_metadata(positions)
 
         self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
 

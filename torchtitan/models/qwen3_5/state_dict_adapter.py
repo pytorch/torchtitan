@@ -21,7 +21,8 @@ Other notable conversions:
 - Conv3d patch embedding (HF) <-> Linear (TT) via weight reshape
 - Vision block naming: HF `blocks` <-> TT `layers`
 - Vision QKV: HF fused qkv <-> TT separate wq/wk/wv
-- GatedDeltaNet QKV: HF fused in_proj_qkv <-> TT separate in_proj_q/k/v
+- GatedDeltaNet QKV: HF fused in_proj_qkv <-> TT logical in_proj_q/k/v; the base
+  adapter then packs in_proj_q/k/v/z/a/b into TT's one in_proj
 - GatedDeltaNet Conv1d: HF fused conv1d <-> TT separate conv_q/k/v
 """
 
@@ -31,6 +32,7 @@ from typing import Any, TYPE_CHECKING
 import torch
 
 from torchtitan.models.base.state_dict_adapter import StateDictAdapter
+from torchtitan.models.common.multimodal import MultimodalModel
 
 if TYPE_CHECKING:
     from .model import Qwen35Model
@@ -40,10 +42,19 @@ class Qwen35StateDictAdapter(StateDictAdapter):
     def __init__(self, model_config: Qwen35Model.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
+        has_vision_encoder = isinstance(model_config, MultimodalModel.Config)
+        # Multimodal HF checkpoints nest the decoder under ``model.language_model``.
+        # A text-only flavor (no vision encoder) can still load one, so read the
+        # layout from the checkpoint index when there is one.
+        if self.fqn_to_index_mapping:
+            multimodal_checkpoint = any(
+                key.startswith("model.language_model.")
+                for key in self.fqn_to_index_mapping
+            )
+        else:
+            multimodal_checkpoint = has_vision_encoder
         self.hf_language_model_prefix = (
-            "model.language_model"
-            if model_config.vision_encoder is not None
-            else "model"
+            "model.language_model" if multimodal_checkpoint else "model"
         )
 
         self.from_hf_map = {
@@ -114,13 +125,17 @@ class Qwen35StateDictAdapter(StateDictAdapter):
             "model.visual.merger.linear_fc2.weight": "vision_encoder.merger.linear_fc2.weight",
             "model.visual.merger.linear_fc2.bias": "vision_encoder.merger.linear_fc2.bias",
         }
-        if model_config.vision_encoder is None:
-            # multimodal checkpoints use model.language_model.*, while
-            # text-only checkpoints use model.*.
+        if not has_vision_encoder:
+            self.from_hf_map = {
+                hf_key: tt_key
+                for hf_key, tt_key in self.from_hf_map.items()
+                if not hf_key.startswith("model.visual.")
+            }
+        if not multimodal_checkpoint:
+            # Text-only checkpoints use model.* instead of model.language_model.*.
             self.from_hf_map = {
                 hf_key.replace("model.language_model.", "model.", 1): tt_key
                 for hf_key, tt_key in self.from_hf_map.items()
-                if not hf_key.startswith("model.visual.")
             }
 
     def to_hf(
@@ -215,8 +230,6 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 if tt_key == "lm_head.weight" and getattr(
                     self.model_config, "enable_weight_tying", False
                 ):
-                    if self.fqn_to_index_mapping:
-                        self.fqn_to_index_mapping.pop("lm_head.weight", None)
                     continue
                 hf_value = value
                 # Linear weight (out, C*T*H*W) → Conv3d weight (out, C, T, H, W)
@@ -315,8 +328,8 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 ):
                     # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].attention
-                    kd = dn.in_proj_q.out_features
-                    vd = dn.in_proj_v.out_features
+                    kd = dn.n_key_heads * dn.key_head_dim
+                    vd = dn.n_heads * dn.value_head_dim
                     q, k, v = value.split([kd, kd, vd], dim=0)
                     tt_state_dict[f"layers.{idx}.attention.in_proj_q.weight"] = q
                     tt_state_dict[f"layers.{idx}.attention.in_proj_k.weight"] = k
@@ -330,8 +343,8 @@ class Qwen35StateDictAdapter(StateDictAdapter):
                 ):
                     # pyrefly: ignore [missing-attribute]
                     dn = self.model_config.layers[int(idx)].attention
-                    kd = dn.in_proj_q.out_features
-                    vd = dn.in_proj_v.out_features
+                    kd = dn.n_key_heads * dn.key_head_dim
+                    vd = dn.n_heads * dn.value_head_dim
                     cq, ck, cv = value.split([kd, kd, vd], dim=0)
                     tt_state_dict[f"layers.{idx}.attention.conv_q.weight"] = cq
                     tt_state_dict[f"layers.{idx}.attention.conv_k.weight"] = ck

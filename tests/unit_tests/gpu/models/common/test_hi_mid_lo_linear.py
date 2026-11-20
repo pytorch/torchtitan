@@ -18,7 +18,7 @@ from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.linear import hi_mid_lo_linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
@@ -177,11 +177,11 @@ def test_third_piece_keeps_what_two_pieces_drop(num_pieces, num_tokens, compile)
 @contextlib.contextmanager
 def _compiled_split():
     """Turn on the split's local_compile region, as the models that use HiMidLoLinear do."""
-    apply_local_compile(["fp32_to_bf16_split"])
+    LocalCompileConfig(regions=["fp32_to_bf16_split"]).apply()
     try:
         yield
     finally:
-        apply_local_compile([])
+        LocalCompileConfig().apply()
 
 
 @pytest.mark.parametrize("dim", [0, 1])

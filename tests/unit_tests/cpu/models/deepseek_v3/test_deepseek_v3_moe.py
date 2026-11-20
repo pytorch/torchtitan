@@ -13,6 +13,11 @@ import torch
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.models.common.activation import Sigmoid
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    MLAAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 
 from torchtitan.models.common.linear.async_linear import AsyncRowParallelLinear
@@ -23,6 +28,33 @@ from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
+    def test_attention_uses_compact_mla_attention(self):
+        flex_config = build_model_config(
+            "debugmodel",
+            parallelism=ParallelismConfig(),
+            attn_backend="flex",
+            seq_len=128,
+        )
+        varlen_config = build_model_config(
+            "debugmodel",
+            parallelism=ParallelismConfig(),
+            attn_backend="varlen",
+            seq_len=128,
+        )
+
+        self.assertIsInstance(
+            flex_config.layers[0].attention.inner_attention,
+            MLAAttention.Config,
+        )
+        self.assertIsInstance(
+            flex_config.layers[0].attention.inner_attention.inner_attention,
+            FlexInnerAttention.Config,
+        )
+        self.assertIsInstance(
+            varlen_config.layers[0].attention.inner_attention.inner_attention,
+            VarlenInnerAttention.Config,
+        )
+
     def test_mtp_valid_mask_is_explicitly_sharded(self):
         mtp = MTPTransformerBlock.__new__(MTPTransformerBlock)
         valid_mask_T = torch.ones(4, dtype=torch.bool)
@@ -65,9 +97,8 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
-        assert mtp_config.in_src_shardings is not None
-        self.assertIn("mtp_input_valid_mask", mtp_config.in_src_shardings)
-        self.assertIsNone(mtp_config.in_dst_shardings)
+        assert mtp_config.input_shardings is not None
+        self.assertIn("mtp_input_valid_mask", mtp_config.input_shardings)
 
     def test_select_experts_limits_choices_to_selected_groups(self):
         router = DeepSeekV3Router.Config(
@@ -111,11 +142,9 @@ class TestDeepSeekV3Router(unittest.TestCase):
         attention_config = config.layers[0].attention
         self.assertIs(type(attention_config.wo), RowParallelLinear.Config)
         assert attention_config.sharding_config is not None
-        self.assertIsNotNone(attention_config.sharding_config.in_src_shardings)
-        self.assertIsNone(attention_config.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(attention_config.sharding_config.input_shardings)
         assert attention_config.wo.sharding_config is not None
-        self.assertIsNotNone(attention_config.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(attention_config.wo.sharding_config.out_dst_shardings)
+        self.assertIsNotNone(attention_config.wo.sharding_config.output_shardings)
 
         AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True

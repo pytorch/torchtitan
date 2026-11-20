@@ -21,7 +21,6 @@ from torchtitan.models.common import (
     BatchWiseLoadBalanceLoss,
     ColumnParallelLinear,
     CosSinRoPE,
-    Embedding,
     HiMidLoLinear,
     Linear,
     RMSNorm,
@@ -29,12 +28,14 @@ from torchtitan.models.common import (
     RowParallelLinear,
     Softmax,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import get_attention_config
@@ -43,7 +44,6 @@ from torchtitan.models.common.decoder_sharding import (
     inner_attention_local_spmd_sharding_config,
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     residual_activation_placement,
     rope_cache_sharding_config,
     rowwise_sharding_config,
@@ -58,6 +58,7 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.common.rope import YaRNScalingConfig
 from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
@@ -112,8 +113,12 @@ def _make_gptoss_attn_config(
     if sliding_window_size is not None and isinstance(
         inner_attention, VarlenInnerAttention.Config
     ):
-        inner_attention = dataclasses.replace(
-            inner_attention, window_size=(sliding_window_size - 1, 0)
+        inner_attention = SlidingWindowVarlenInnerAttention.Config(
+            **{
+                f.name: getattr(inner_attention, f.name)
+                for f in dataclasses.fields(inner_attention)
+            },
+            sliding_window_size=sliding_window_size,
         )
     elif sliding_window_size is not None and isinstance(
         inner_attention, FlexInnerAttention.Config
@@ -121,7 +126,7 @@ def _make_gptoss_attn_config(
         inner_attention = SlidingWindowFlexInnerAttention.Config(
             block_size=inner_attention.block_size,
             kernel_options=inner_attention.kernel_options,
-            window_size=sliding_window_size,
+            sliding_window_size=sliding_window_size,
         )
     inner_attention = dataclasses.replace(
         inner_attention, sharding_config=inner_attention_local_spmd_sharding_config()
@@ -299,7 +304,7 @@ def _debugmodel(
         max_context_length=seq_len,
         vocab_size=2048,
         dim=dim,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -310,7 +315,7 @@ def _debugmodel(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -332,12 +337,7 @@ def _debugmodel(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(factor=32, truncate=False),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -358,7 +358,7 @@ def _20b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -369,7 +369,7 @@ def _20b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -391,12 +391,7 @@ def _20b(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(factor=32, truncate=False),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -417,7 +412,7 @@ def _120b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=201088,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=201088,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -428,7 +423,7 @@ def _120b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -450,12 +445,7 @@ def _120b(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(factor=32, truncate=False),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,

@@ -16,8 +16,11 @@ permissions:
 #   numerics, DeepEP v2, and HybridEP.
 # - validate-graph-trainer-h100: 8x H100; GraphTrainer DeepSeek and Qwen3 MoE
 #   tests that require H100-class hardware.
-# - validate-b200: 8x B200; Dist-MoE and MXFP8 unit tests, Kimi K3,
-#   quantized linear layers, and Dist-MoE integration tests.
+# - validate-b200: 8x B200; Dist-MoE and MXFP8 unit tests, quantized linear
+#   layers, and Dist-MoE integration tests.
+# - validate-rl: RL CPU/single-GPU/multi-GPU unit tests, A10G loss guard and
+#   integration tests.
+# - validate-rl-b200: RL Dist-MoE unit tests and the B200 integration suite.
 jobs:
   validate-version:
     runs-on: ubuntu-latest
@@ -64,9 +67,9 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="${{ matrix.validation-suite }}" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
-        TORCHAO_VERSION="0.18.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
+        TORCHAO_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
 
@@ -97,9 +100,9 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="h100" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
-        TORCHAO_VERSION="0.18.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
+        TORCHAO_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
 
@@ -122,9 +125,9 @@ jobs:
       timeout: 180
       script: |
         VALIDATION_SUITE="graph-trainer-h100" \
-        TORCH_VERSION="2.14.0" \
-        TORCHVISION_VERSION="0.29.0" \
-        TORCHAO_VERSION="0.18.0" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
+        TORCHAO_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130" \
         PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
         bash .github/scripts/validate_release_gpu.sh
 
@@ -152,9 +155,9 @@ jobs:
           bash .ci/docker/common/install_base.sh
 
           VALIDATION_SUITE="b200" \
-          TORCH_VERSION="2.14.0" \
-          TORCHVISION_VERSION="0.29.0" \
-          TORCHAO_VERSION="0.18.0" \
+          TORCH_VERSION="2.15.0" \
+          TORCHVISION_VERSION="0.29.2" \
+          TORCHAO_INDEX_URL="https://download.pytorch.org/whl/nightly/cu130" \
           PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
           bash .github/scripts/validate_release_gpu.sh
 
@@ -163,4 +166,75 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: b200-release-outputs
+          path: ${{ runner.temp }}/artifacts-to-be-uploaded
+
+  validate-rl:
+    name: Validate ${{ matrix.validation-suite }} on ${{ matrix.gpu }}
+    needs:
+      - validate-version
+      - set-standard-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - validation-suite: rl-unit
+            gpu: 8x A10G
+            runner: mt-l-x86aavx2-189-704-a10g-8
+          - validation-suite: rl
+            gpu: 8x A10G
+            runner: mt-l-x86aavx2-189-704-a10g-8
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: cuda
+      gpu-arch-version: "13.2"
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-standard-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      upload-artifact: rl-release-outputs
+      timeout: 180
+      script: |
+        VALIDATION_SUITE="${{ matrix.validation-suite }}" \
+        VLLM_VERSION="1.0.0.dev20261005+cu132" \
+        TORCH_VERSION="2.15.0" \
+        TORCHVISION_VERSION="0.29.2" \
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
+        bash .github/scripts/validate_release_gpu.sh
+
+  validate-rl-b200:
+    name: Validate RL on 8x B200
+    needs:
+      - validate-version
+    runs-on: linux.dgx.b200.8
+    timeout-minutes: 180
+    container:
+      image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
+      # TorchStore's same-host model transfers exceed Docker's default /dev/shm.
+      options: --gpus all --shm-size=16g
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          enable-cache: true
+
+      - name: Validate B200 RL release candidate
+        env:
+          VLLM_VERSION: '1.0.0.dev20261005+cu132'
+        run: |
+          bash .ci/docker/common/install_base.sh
+
+          VALIDATION_SUITE="rl-b200" \
+          TORCH_VERSION="2.15.0" \
+          TORCHVISION_VERSION="0.29.2" \
+          PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu132" \
+          bash .github/scripts/validate_release_gpu.sh
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: b200-rl-release-outputs
           path: ${{ runner.temp }}/artifacts-to-be-uploaded

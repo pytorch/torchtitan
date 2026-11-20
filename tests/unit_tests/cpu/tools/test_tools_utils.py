@@ -4,13 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import subprocess
 from unittest.mock import Mock
 
 import pytest
 import torch
 
 from torchtitan.tools.garbage_collector import GarbageCollector
-from torchtitan.tools.utils import get_cuda_flash_attention_impl, get_local_device
+from torchtitan.tools.utils import (
+    get_cuda_flash_attention_impl,
+    get_local_device,
+    get_peak_flops,
+)
 
 
 class _FakeDeviceModule:
@@ -80,6 +85,7 @@ def test_get_cuda_flash_attention_impl(monkeypatch, capability, expected_impl):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: capability)
     monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
 
     assert get_cuda_flash_attention_impl() == expected_impl
 
@@ -95,3 +101,49 @@ def test_get_cuda_flash_attention_impl_on_rocm(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", "7.0")
 
     assert get_cuda_flash_attention_impl() is None
+
+
+@pytest.mark.parametrize(
+    ("capability", "impl", "module"),
+    [((9, 0), "FA3", "flash_attn_interface"), ((10, 0), "FA4", "flash_attn.cute")],
+)
+@pytest.mark.parametrize("missing_parent", [False, True])
+def test_missing_flash_attention_raises(
+    monkeypatch, capability, impl, module, missing_parent
+):
+    monkeypatch.setattr(
+        "torchtitan.tools.utils.has_cuda_capability",
+        lambda major, minor: capability >= (major, minor),
+    )
+    monkeypatch.setattr(torch.version, "hip", None)
+    find_spec = Mock(
+        return_value=None,
+        side_effect=ModuleNotFoundError if missing_parent else None,
+    )
+    monkeypatch.setattr("importlib.util.find_spec", find_spec)
+
+    with pytest.raises(ValueError, match=f"{impl} is required") as exc:
+        get_cuda_flash_attention_impl()
+    find_spec.assert_called_once_with(module)
+    assert module in str(exc.value)
+    assert f"Install a compatible {impl} wheel" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("device_name", "expected"),
+    [
+        ("NVIDIA H100 80GB HBM3", 989e12),
+        ("NVIDIA A100-SXM4-80GB", 312e12),
+        # Catches an unknown device silently using the A100 peak, which gives a
+        # plausible but wrong MFU.
+        ("Unlisted GPU", None),
+        ("TPU v99", None),
+    ],
+)
+def test_get_peak_flops(monkeypatch, device_name, expected):
+    # lspci finds no H100, so the device name decides.
+    monkeypatch.setattr(
+        "torchtitan.tools.utils.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=""),
+    )
+    assert get_peak_flops(device_name) == expected

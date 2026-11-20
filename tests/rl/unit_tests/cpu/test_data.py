@@ -9,10 +9,10 @@ from dataclasses import dataclass
 import pytest
 
 from torchtitan.rl.rollout.data import (
-    IterableRLDataLoader,
-    MapStyleRLDataLoader,
-    RLDataLoader,
+    IterableRolloutDataLoader,
+    MapStyleRolloutDataLoader,
     RLDataset,
+    RolloutDataLoader,
 )
 
 
@@ -56,24 +56,24 @@ class _RowsDataset(RLDataset):
 
 
 def _loader(*, seed: int = 7, shuffle: bool = True, rows=tuple(range(10))):
-    return MapStyleRLDataLoader.Config(
+    return MapStyleRolloutDataLoader.Config(
         dataset=_RowsDataset.Config(rows=rows), seed=seed, shuffle=shuffle
     ).build()
 
 
-def test_next_and_acknowledge() -> None:
+def test_next_and_commit() -> None:
     loader = _loader(shuffle=False)
     assert [next(loader) for _ in range(3)] == [(0, 0), (1, 1), (2, 2)]
-    loader.acknowledge([0, 2])
+    loader.commit([0, 2])
     assert loader.state_dict()["pending_indices"] == [1]
     with pytest.raises(RuntimeError):
-        loader.acknowledge([0])
+        loader.commit([0])
 
 
 def test_state_round_trip_replays_pending_then_continues() -> None:
     loader = _loader()
     assert [next(loader)[0] for _ in range(4)] == [0, 1, 2, 3]
-    loader.acknowledge([1, 3])
+    loader.commit([1, 3])
 
     restored = _loader()
     restored.load_state_dict(loader.state_dict())
@@ -92,16 +92,16 @@ def test_load_rejects_changed_data_identity(key, value) -> None:
         loader.load_state_dict(state)
 
 
-def test_replay_must_be_yielded_before_acknowledgement() -> None:
+def test_replay_must_be_yielded_before_commit() -> None:
     loader = _loader()
     next(loader)
     state = loader.state_dict()
     restored = _loader()
     restored.load_state_dict(state)
     with pytest.raises(RuntimeError):
-        restored.acknowledge([0])
+        restored.commit([0])
     assert next(restored)[0] == 0
-    restored.acknowledge([0])
+    restored.commit([0])
 
 
 def test_checkpoint_before_replay_preserves_unyielded_indices() -> None:
@@ -131,7 +131,7 @@ def test_rejects_empty_or_non_random_access_source() -> None:
             return iter((1, 2))
 
     with pytest.raises(ValueError, match="random access"):
-        MapStyleRLDataLoader.Config(dataset=_StreamingDataset.Config()).build()
+        MapStyleRolloutDataLoader.Config(dataset=_StreamingDataset.Config()).build()
 
 
 def test_dataloader_requires_nominal_subclass() -> None:
@@ -142,7 +142,7 @@ def test_dataloader_requires_nominal_subclass() -> None:
         def __next__(self):
             return 0, "generated"
 
-        def acknowledge(self, indices):
+        def commit(self, indices):
             pass
 
         def state_dict(self):
@@ -151,25 +151,29 @@ def test_dataloader_requires_nominal_subclass() -> None:
         def load_state_dict(self, state_dict):
             pass
 
-    assert not isinstance(_StreamingLoader(), RLDataLoader)
+    assert not isinstance(_StreamingLoader(), RolloutDataLoader)
 
 
 def test_iterable_loader_replays_samples_then_continues_dataset() -> None:
-    loader = IterableRLDataLoader.Config(dataset=_StatefulDataset.Config()).build()
+    loader = IterableRolloutDataLoader.Config(dataset=_StatefulDataset.Config()).build()
     assert [next(loader) for _ in range(3)] == [(0, 0), (1, 1), (2, 2)]
-    loader.acknowledge([1])
+    loader.commit([1])
 
-    restored = IterableRLDataLoader.Config(dataset=_StatefulDataset.Config()).build()
+    restored = IterableRolloutDataLoader.Config(
+        dataset=_StatefulDataset.Config()
+    ).build()
     restored.load_state_dict(loader.state_dict())
     assert [next(restored) for _ in range(3)] == [(0, 0), (2, 2), (3, 3)]
 
 
-def test_iterable_loader_replay_must_be_yielded_before_acknowledgement() -> None:
-    loader = IterableRLDataLoader.Config(dataset=_StatefulDataset.Config()).build()
+def test_iterable_loader_replay_must_be_yielded_before_commit() -> None:
+    loader = IterableRolloutDataLoader.Config(dataset=_StatefulDataset.Config()).build()
     next(loader)
-    restored = IterableRLDataLoader.Config(dataset=_StatefulDataset.Config()).build()
+    restored = IterableRolloutDataLoader.Config(
+        dataset=_StatefulDataset.Config()
+    ).build()
     restored.load_state_dict(loader.state_dict())
 
     with pytest.raises(RuntimeError):
-        restored.acknowledge([0])
+        restored.commit([0])
     assert next(restored) == (0, 0)

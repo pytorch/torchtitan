@@ -14,9 +14,11 @@ from typing import Any
 import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
-
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
+
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
 from torchtitan.components.data.types import (
     DatasetBuildContext,
     DatasetIterationPolicy,
@@ -71,6 +73,10 @@ class GrainDataLoader(BaseDataLoader):
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
         dataset: DatasetConfig
+        per_sample_pad_multiple: int = 1
+        """Pad each emitted document segment to this multiple after shifting labels
+        and splitting. 1 leaves lengths unchanged; larger values require
+        document-aware packing."""
         collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
         shuffle: bool = True
@@ -82,6 +88,22 @@ class GrainDataLoader(BaseDataLoader):
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
 
+        def __post_init__(self) -> None:
+            BaseDataLoader.Config.__post_init__(self)
+            if self.per_sample_pad_multiple < 1:
+                raise ValueError("per_sample_pad_multiple must be positive")
+            if self.per_sample_pad_multiple == 1:
+                return
+            if self.max_num_documents is None:
+                raise ValueError(
+                    "per_sample_pad_multiple requires max_num_documents so documents "
+                    "are emitted as separate segments."
+                )
+            if not isinstance(self.dataset, ConcatThenSplitPackingConfig):
+                raise ValueError(
+                    "per_sample_pad_multiple requires ConcatThenSplitPackingConfig."
+                )
+
     def __init__(
         self,
         config: Config,
@@ -91,6 +113,7 @@ class GrainDataLoader(BaseDataLoader):
         tokenizer: BaseTokenizer,
         max_context_length: int,
         num_tokens_per_microbatch: int,
+        vision_processor: VisionProcessor | None = None,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -118,6 +141,8 @@ class GrainDataLoader(BaseDataLoader):
             read_options=read_options,
             max_num_documents=config.max_num_documents,
             num_mtp_layers=config.num_mtp_layers,
+            per_sample_pad_multiple=config.per_sample_pad_multiple,
+            vision_processor=vision_processor,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,

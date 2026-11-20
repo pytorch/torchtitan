@@ -14,9 +14,14 @@ Activate with::
 
 Scope and limitations
 ---------------------
-This override is specific to TorchTitan's DeepSeek-V3 ``DeepSeekMLAAttention`` module and
+This override is specific to TorchTitan's ``DeepSeekMLAAttention`` module and
 its packed MLA Q/KV projection layout. It is not a generic RoPE fusion and does
 not apply to non-MLA models such as Qwen3, Qwen3.5, or GPT-OSS.
+
+AllGather and Ulysses MLA context parallelism retain their compact communication.
+With CP, the unrotated shared key and its position IDs are gathered in the same
+token order. The fused kernel applies RoPE while assembling K after communication.
+Backward inverse-rotates each rank's contribution before CP gradient reduction.
 
 The kernels implement TorchTitan ``ComplexRoPE`` and require its complex-valued
 cache. They do not support ``CosSinRoPE`` or ``MRoPE``, whose real cos/sin cache
@@ -55,7 +60,7 @@ The implementation differs from Megatron Core in several important ways:
 * Every Triton launch is exposed as a stable ``torch.library`` custom operator,
   so GraphTrainer's fake-tensor ``make_fx`` trace keeps the fused boundaries.
 
-The override keeps the stock DeepSeekMLAAttention parameters and state-dict layout.  It
+The override keeps the stock attention parameters and state-dict layout. It
 only replaces the Q/KV layout boundary around ComplexRoPE:
 
 * Q RoPE rotates the positional tail of the Q projection into a new tensor.
@@ -69,6 +74,7 @@ No Megatron-Core or TransformerEngine dependency is required.
 """
 
 from dataclasses import dataclass
+from functools import partial
 
 import spmd_types as spmd
 import torch
@@ -78,10 +84,16 @@ import triton.language as tl
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
+from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 from torchtitan.models.common.attention import VarlenAttentionMetadata
+from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention.cp_mla import (
+    AllGatherKVMLAFlexAttention,
+    UlyssesMLAAttention,
+)
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
-from torchtitan.models.deepseek_v3.model import DeepSeekMLAAttention
+from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
 
 __all__ = [
     "FusedMLAAttention",
@@ -827,8 +839,8 @@ class _FusedMLAQ(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.q_nope_dim = q_nope_dim
         ctx.save_for_backward(rope_cache_real, positions)
-        # Deliberately out of place. DeepSeekMLAAttention.forward hands us a view of the
-        # query projection, so rotating in place would need ctx.mark_dirty and
+        # Deliberately out of place. The attention forward hands us a view of
+        # the query projection, so rotating in place would need ctx.mark_dirty and
         # autograd would then record a CopySlices whose backward materializes
         # the entire projection -- five full-size copies at the 671B shape.
         # See docs/pytorch-performance-pitfalls.md.
@@ -869,16 +881,12 @@ class _FusedMLAKV(torch.autograd.Function):
         rope_cache_real: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        kv_partition = spmd.PartitionSpec(None, ("dp", "cp"), "tp", None)
-        k_pe_partition = spmd.PartitionSpec(None, ("dp", "cp"), None)
-        positions_partition = spmd.PartitionSpec(None, ("dp", "cp"))
-        spmd.assert_type(kv, spmd.V, kv_partition)
-        spmd.assert_type(k_pe, spmd.V, k_pe_partition)
+        # CP gathers tokens; Ulysses also shards heads. Infer the resulting layout.
+        kv_type = spmd.rules.einsum("bthp,btr,bt->bthp", kv, k_pe, positions)
         spmd.assert_type(rope_cache_real, spmd.R)
-        spmd.assert_type(positions, spmd.V, positions_partition)
         k, v = outputs
-        spmd.assert_type(k, spmd.V, kv_partition)
-        spmd.assert_type(v, spmd.V, kv_partition)
+        spmd.assert_type_like(k, kv_type)
+        spmd.assert_type_like(v, kv_type)
 
     @staticmethod
     def forward(
@@ -971,6 +979,25 @@ def fused_mla_kv(
     )
 
 
+def _materialize_fused_mla_kv(
+    q_THK: torch.Tensor,
+    kv_THP: torch.Tensor,
+    k_shared_TR: torch.Tensor,
+    *,
+    rope_cache: torch.Tensor,
+    positions_T: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adapt packed MLA inputs to the fused shared-key RoPE and KV assembly."""
+    k_1THK, v_1THV = fused_mla_kv(
+        kv_THP.unsqueeze(0),
+        k_shared_TR.unsqueeze(0),
+        rope_cache,
+        positions_T,
+        q_THK.shape[-1] - k_shared_TR.shape[-1],
+    )
+    return k_1THK.squeeze(0), v_1THV.squeeze(0)
+
+
 class FusedMLAAttention(DeepSeekMLAAttention):
     """Stock DeepSeek-V3 attention with fused MLA tensor assembly."""
 
@@ -979,6 +1006,16 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         pass
 
     def __init__(self, config: Config):
+        if isinstance(
+            config.inner_attention, CPInnerAttention.Config
+        ) and not isinstance(
+            config.inner_attention,
+            (AllGatherKVMLAFlexAttention.Config, UlyssesMLAAttention.Config),
+        ):
+            raise ValueError(
+                "FusedMLAAttention supports AllGatherKVMLAFlexAttention and "
+                "UlyssesMLAAttention context-parallel backends."
+            )
         super().__init__(config)
         if not isinstance(self.rope, ComplexRoPE):
             raise TypeError(
@@ -1037,39 +1074,31 @@ class FusedMLAAttention(DeepSeekMLAAttention):
         # kv_norm and the fused kernel read the wkv_a projection output with bare ops.
         remat.recompute_needs_tensor(kv_down)
 
-        kv = self.wkv_b(self.kv_norm(kv_latent))
-        with spmd.local():
-            kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            # The fused kernel reads the wkv_b projection output outside any region.
-            remat.recompute_needs_tensor(kv)
-            k, v = fused_mla_kv(
-                kv.unsqueeze(0),
-                k_pe.unsqueeze(0),
-                self.rope.cache,
-                positions,
-                self.qk_nope_head_dim,
+        positions_T = (
+            torch.arange(num_tokens, device=k_pe.device, dtype=torch.int32)
+            if positions is None
+            else positions.reshape(-1).contiguous()
+        )
+        if isinstance(self.inner_attention, CPInnerAttention):
+            # Gather positions in the same rank/token order as the shared key,
+            # including packed documents and CP load-balancing permutations.
+            (positions_T,) = cp_all_gather_tensors(
+                (positions_T,), reduce_dtype=positions_T.dtype
             )
-            k, v = k.squeeze(0), v.squeeze(0)
-            if spmd.is_type_checking() and not torch.compiler.is_compiling():
-                for tensor in (k, v):
-                    spmd.assert_type(
-                        tensor,
-                        spmd.V,
-                        spmd.PartitionSpec(("dp", "cp"), "tp", None),
-                    )
-
-        output = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
-        )(
+        output = self.inner_attention(
             q,
-            k,
-            v,
+            self.kv_norm(kv_latent),
+            k_pe,
+            materialize_kv=partial(
+                _materialize_fused_mla_kv,
+                rope_cache=self.rope.cache,
+                positions_T=positions_T,
+            ),
             attention_metadata=attention_metadata,
             scale=self.softmax_scale,
         )
-        # The copy below reads the inner_attention output with bare ops.
+
+        # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)

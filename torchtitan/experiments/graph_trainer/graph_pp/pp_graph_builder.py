@@ -1158,7 +1158,7 @@ def _build_stage_graphs(
         _compile_stage_graphs(
             stage,
             compile_config=compile_config,
-            use_cuda_graph=not config.training.disable_cuda_graphs,
+            use_cuda_graph=not config.training.disable_accelerator_graphs,
         )
 
 

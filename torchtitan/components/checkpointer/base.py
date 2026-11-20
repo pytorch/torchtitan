@@ -23,8 +23,10 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
+from torchtitan.components.checkpointer.utils import canonical_fqn
 
-from torchtitan.config import Configurable, Function
+from torchtitan.config import CallableFunction, Configurable
+from torchtitan.models.base.module import Module
 from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -155,6 +157,32 @@ class ModelWrapper(Stateful):
         self.cached_state_dict = self._get_state_dict()
 
 
+def export_state_dict(
+    state_dict: dict[str, Any], *, dtype: torch.dtype, model_parts: list[nn.Module]
+) -> dict[str, Any]:
+    """Cast the floating-point tensors of a model state dict to ``dtype``.
+
+    Parameters of ``model_parts`` listed in ``preserve_dtype_params`` are never
+    cast to a lower precision. Model parts that are not a ``Module`` list none.
+    """
+    preserve_dtype_keys = {
+        canonical_fqn(key)
+        for model in model_parts
+        if isinstance(model, Module)
+        for key, _ in model.named_preserve_dtype_params()
+    }
+    exported = {}
+    for key, value in state_dict.items():
+        if isinstance(value, torch.Tensor) and value.is_floating_point():
+            value = value.to(
+                torch.promote_types(value.dtype, dtype)
+                if key in preserve_dtype_keys
+                else dtype
+            )
+        exported[key] = value
+    return exported
+
+
 @runtime_checkable
 class CheckpointStorage(Protocol):
     """The path operations a checkpoint manager needs from its storage.
@@ -217,6 +245,7 @@ class BaseCheckpointManager(Configurable, ABC):
     initial_load_model_only: bool
     initial_load_in_hf: bool
     initial_load_in_hf_quantized: bool
+    last_save_model_only: bool
     sd_adapter: BaseStateDictAdapter | None
     purge_exempt: Callable[[int], bool] | None = None
     purge_thread: threading.Thread | None
@@ -233,6 +262,24 @@ class BaseCheckpointManager(Configurable, ABC):
             raise ValueError(
                 "extra_states contains checkpoint-manager-owned keys: "
                 f"{sorted(collisions)}"
+            )
+
+    @staticmethod
+    def _validate_hf_export(
+        model_parts: list[nn.Module], *, last_save_in_hf: bool
+    ) -> None:
+        """Reject an HF export of a model with frozen parameters, e.g. a LoRA model.
+
+        State dict adapters do not map LoRA adapters to HF keys, so the export would
+        hold only the base weights.
+        """
+        # TODO: export LoRA adapters in PEFT format.
+        if last_save_in_hf and any(
+            not p.requires_grad for part in model_parts for p in part.parameters()
+        ):
+            raise ValueError(
+                "checkpointer.last_save_in_hf does not support models with frozen "
+                "parameters (e.g. LoRA) yet: the export would drop the LoRA adapters."
             )
 
     @torch.no_grad()
@@ -324,14 +371,30 @@ class BaseCheckpointManager(Configurable, ABC):
                         step,
                     )
 
+            # Explicit load_step and initial_load_path are only checked to be
+            # directories above; automatic selection already filtered on this.
+            if not from_hf and not self._is_resumable_checkpoint(checkpoint_id):
+                raise ValueError(
+                    f"Checkpoint {checkpoint_id} is not a complete checkpoint: it "
+                    "has no completed checkpoint metadata, so its save never "
+                    "finished, or it is a Hugging Face checkpoint. Load a full "
+                    "checkpoint instead, or set checkpointer.initial_load_in_hf "
+                    "to load Hugging Face weights."
+                )
+
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
             begin = time.monotonic()
+            states = self._states_to_load(model_only)
             self._load_checkpoint(
-                self._states_to_load(model_only),
+                states,
                 checkpoint_id,
                 from_hf=from_hf,
                 from_quantized=from_quantized,
             )
+            # Reseed EMA from the just-loaded weights if it wasn't itself
+            # restored (excluded, or a model_only load).
+            if EMA in self.states and EMA not in states:
+                self.states[EMA].load_state_dict({})
             GarbageCollector.collect("GC collection for checkpoint loading.")
             logger.info(
                 "Finished loading the checkpoint in %.2f seconds.",
@@ -387,6 +450,20 @@ class BaseCheckpointManager(Configurable, ABC):
         """Standardized checkpoint path, e.g. ``checkpoints/step-100``."""
         folder = folder or self.folder
         return filesystem.join(folder, f"step-{step}")
+
+    def _create_last_step_id(self, step: int) -> str:
+        """Path for the final save of a training run.
+
+        A model-only final save is an export that cannot restore the training
+        state, so it goes to ``exports/step-N``, where automatic loading never
+        looks. Step 0 is the seed checkpoint (``create_seed_checkpoint``), which
+        ``load()`` restores as model-only, so it stays at ``step-0``.
+        """
+        if self.last_save_model_only and step > 0:
+            return self._create_checkpoint_id(
+                step, folder=filesystem.join(self.folder, "exports")
+            )
+        return self._create_checkpoint_id(step)
 
     @abstractmethod
     def _load_checkpoint(
@@ -447,12 +524,16 @@ class BaseCheckpointManager(Configurable, ABC):
         """Whether ``checkpoint_dir`` holds a completed checkpointer.
 
         This includes model-only exports that retention must preserve even
-        when they cannot restore the full training state.
+        when they cannot restore the full training state. Final model-only
+        saves go under ``exports/``, which retention does not scan, so the
+        only model-only ``step-N`` it sees are seed checkpoints (step 0)
+        and exports left by older TorchTitan versions.
         """
 
     @abstractmethod
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
-        """Whether automatic loading may select ``checkpoint_dir``."""
+        """Whether ``checkpoint_dir`` is a completed checkpoint in this manager's
+        native format, which every non-Hugging Face load requires."""
 
     def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.
@@ -575,7 +656,7 @@ class BaseCheckpointManager(Configurable, ABC):
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
 
-        purge_exempt: Function.Config | None = None
+        purge_exempt: CallableFunction.Config | None = None
         """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1
@@ -591,7 +672,15 @@ class BaseCheckpointManager(Configurable, ABC):
         load_only: bool = False
         """Whether to permit loads while disabling all saves."""
 
+        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
+        """Save mode: synchronous, threaded async, or pinned-memory async. A
+        checkpoint manager raises on a mode it does not support."""
+
         def __post_init__(self) -> None:
+            async_lowered = self.async_mode.lower()
+            if async_lowered not in ("disabled", "async", "async_with_pinned_mem"):
+                raise ValueError(f"Invalid async_mode: {async_lowered}")
+            self.async_mode = async_lowered
             if not self.folder.strip():
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:

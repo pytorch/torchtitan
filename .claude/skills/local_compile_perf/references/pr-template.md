@@ -130,7 +130,7 @@ baselines: eager 243.9, per-layer compile 213.1
 stack (biggest first)
 1 skill
 2 mhc                    -35.7%
-3 complex_rope code       0      (enables 4)
+3 rope code               0      (enables 4)
 4 attention RoPE glue    -22.2%
 ...
 ```

@@ -8,12 +8,10 @@
 
 from dataclasses import replace
 
-from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
-    VisionProcessor,
-)
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -31,24 +29,15 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 
-from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    QWEN3_5_SPECIAL_TOKENS,
+    QWEN3_5_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
-
-
-def _multimodal_collator_config(
-    dataset_config: SingleDatasetConfig,
-) -> MultiModalCollator.Config:
-    processor_config = dataset_config.processor
-    assert isinstance(processor_config, VisionProcessor.Config)
-    return replace(
-        MultiModalCollator.Config(build_mrope_positions=True),
-        patch_size=processor_config.patch_size,
-        temporal_patch_size=processor_config.temporal_patch_size,
-        spatial_merge_size=processor_config.spatial_merge_size,
-    )
 
 
 def qwen35_debugmodel(
@@ -58,7 +47,7 @@ def qwen35_debugmodel(
 ) -> Trainer.Config:
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -71,12 +60,13 @@ def qwen35_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
+        vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         parallelism=parallelism,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -92,7 +82,6 @@ def qwen35_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -108,9 +97,9 @@ def qwen35_debugmodel_video(
     config.dataloader = replace(
         config.dataloader,
         dataset=dataset,
-        collator=_multimodal_collator_config(dataset),
+        collator=MultiModalCollator.Config(build_mrope_positions=True),
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -119,12 +108,12 @@ def qwen35_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend="varlen",
         parallelism=config.parallelism,
     )
-    config.training.disable_cuda_graphs = True
+    config.training.disable_accelerator_graphs = True
     return config
 
 
@@ -142,7 +131,10 @@ def qwen35_debugmodel_moe(
             tensor_parallel_degree=2,
         )
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+        "debugmodel_moe_mm",
+        seq_len=seq_len,
+        attn_backend="flex",
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -152,11 +144,12 @@ def qwen35_debugmodel_moe(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         tokenizer=MultiModalTokenizer.Config(**QWEN3_5_SPECIAL_TOKENS),
+        vision_processor=VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=MM_DATASETS["cc12m-test"],
-            collator=_multimodal_collator_config(MM_DATASETS["cc12m-test"]),
+            collator=MultiModalCollator.Config(build_mrope_positions=True),
             streaming_shuffle_buffer_size=128,
         ),
         optim=Optim.Config(
@@ -167,9 +160,8 @@ def qwen35_debugmodel_moe(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
@@ -190,6 +182,27 @@ def qwen35_debugmodel_moe_lora(
                 rank=8,
                 alpha=16.0,
                 target_modules=["w13", "w2"],
+            )
+        ],
+    )
+
+
+def qwen35_debugmodel_moe_lora_shared_outer(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Routed-expert adapters in the shared-outer layout: one lora_a for every
+    expert's w13 and one lora_b for every expert's w2."""
+    config = qwen35_debugmodel_moe(seq_len=seq_len, parallelism=parallelism)
+    return apply_transforms(
+        config,
+        [
+            LoRATransform(
+                rank=8,
+                alpha=16.0,
+                target_modules=["w13", "w2"],
+                expert_adapter_layout="shared_outer",
             )
         ],
     )

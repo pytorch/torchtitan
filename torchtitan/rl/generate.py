@@ -36,17 +36,16 @@ from vllm.config import AttentionConfig
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.rl.generator.generator import add_extra_vllm_engine_args
+from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
+    vllm_attention_backend,
 )
 from torchtitan.tools import filesystem
 from torchtitan.tools.utils import has_cuda_capability
@@ -87,7 +86,7 @@ def _shutdown_engine(engine: LLMEngine) -> None:
     """Release the vLLM engine and its process groups before the process exits.
 
     In RL, Monarch's ``ProcMesh.stop()`` ends the generator processes, so
-    ``VLLMGenerator`` only releases renderer-local resources. This script owns
+    ``Generator`` only releases renderer-local resources. This script owns
     its process: leaving vLLM's NCCL process group alive lets the NCCL watchdog
     query CUDA events while the driver unloads at interpreter exit.
     """
@@ -102,6 +101,12 @@ def generate() -> None:
     if config.override.imports:
         apply_overrides(config.override, config)
     gen_config = config.generator
+    engine_config = gen_config.engine
+    if not isinstance(engine_config, VLLMEngine.Config):
+        raise ValueError(
+            "generate.py runs vLLM; set generator.engine to VLLMEngine.Config, "
+            f"got {type(engine_config).__qualname__}"
+        )
     model_config = gen_config.model
     model_path = config.hf_assets_path
     # Recipes name local assets relative to the repo root, while
@@ -115,22 +120,15 @@ def generate() -> None:
     register_to_vllm(
         model_config,
         parallelism=gen_config.parallelism,
+        precision=config.precision,
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
         dist_moe_runtime=gen_config.dist_moe_runtime,
+        model_state_dict_load_mode="cpu_prefetch",
     )
     logger.info("Registered TorchTitan model with vLLM")
-
-    attention = model_config.first_full_attention
-    if attention is None:
-        raise ValueError("No full attention layer found in the model spec.")
-    attention_backend = attention.inner_attention
-    if not isinstance(
-        attention_backend, (VarlenInnerAttention.Config, FlexInnerAttention.Config)
-    ):
-        raise ValueError("Only varlen and flex attention backends are supported.")
 
     os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
@@ -149,7 +147,7 @@ def generate() -> None:
         model=model_path,
         trust_remote_code=True,
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=gen_config.model_dtype,
+        dtype=config.precision.param_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
@@ -160,13 +158,9 @@ def generate() -> None:
         distributed_executor_backend=("external_launcher"),
         # Memory and performance
         gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=gen_config.cuda_graph.mode == "NONE",
+        enforce_eager=engine_config.cuda_graph.mode == "NONE",
         attention_config=AttentionConfig(
-            backend=(
-                AttentionBackendEnum.FLEX_ATTENTION
-                if isinstance(attention_backend, FlexInnerAttention.Config)
-                else AttentionBackendEnum.CUSTOM
-            ),
+            backend=vllm_attention_backend(model_config),
         ),
         disable_log_stats=False,
     )
@@ -174,11 +168,13 @@ def generate() -> None:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
+    engine_kwargs["watermark"] = engine_config.watermark
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = gen_config.cuda_graph.get_vllm_compilation_config(
+    vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_model_len=model_config.max_context_length,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
@@ -187,7 +183,7 @@ def generate() -> None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.debug.seed is not None:
         engine_kwargs["seed"] = gen_config.debug.seed
-    add_extra_vllm_engine_args(engine_kwargs, gen_config.extra_vllm_engine_args)
+    add_extra_vllm_engine_args(engine_kwargs, engine_config.extra_engine_args)
     engine_args = EngineArgs(**engine_kwargs)
 
     logger.debug("Initializing LLMEngine from EngineArgs...")

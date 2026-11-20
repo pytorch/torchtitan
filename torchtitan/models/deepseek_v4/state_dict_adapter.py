@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 
 class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
+    # V4 converts its MTP layers to its own HF names (mtp.N.*) in to_hf().
+    _MTP_SHARED_COPIES: dict[str, str] = {}
+
     hf_experts_key_fragment = "ffn.experts"
 
     def __init__(
@@ -121,6 +124,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         ),
                     }
                 )
+            # pyrefly: ignore [missing-attribute]
             if layer_id < model_config.layers[0].feed_forward.router.n_hash_layers:
                 self.from_hf_map.update(
                     {

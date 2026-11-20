@@ -15,9 +15,9 @@ import torch
 from torch.cuda._graph_annotations import _is_tools_id_unavailable
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.distributed.cuda_graph import (
-    cuda_graph_teardown,
-    get_cuda_graph_annotations,
+from torchtitan.distributed.accelerator_graph import (
+    accelerator_graph_teardown,
+    get_accelerator_graph_annotations,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
@@ -97,7 +97,7 @@ class TestKernelAnnotationsE2E(TestCase):
         run_traced(traced, module=model)(x, labels)  # replay
 
         # Check annotations were captured.
-        annotations = get_cuda_graph_annotations()
+        annotations = get_accelerator_graph_annotations()
         self.assertGreater(len(annotations), 0, "No annotations captured")
 
         all_fqns = set()
@@ -166,7 +166,7 @@ class TestKernelAnnotationsE2E(TestCase):
 
         # Cleanup.
         os.unlink(trace_path)
-        cuda_graph_teardown()
+        accelerator_graph_teardown()
 
 
 class TestTraceAnnotationExport(TestCase):
@@ -185,7 +185,7 @@ class TestTraceAnnotationExport(TestCase):
             tempfile.TemporaryDirectory() as tmp,
             patch("torch.distributed.get_rank", return_value=0),
             patch(
-                "torchtitan.observability.profiler.get_cuda_graph_annotations",
+                "torchtitan.observability.profiler.get_accelerator_graph_annotations",
                 return_value=self.ANNOTATIONS,
             ),
             patch(

@@ -79,7 +79,7 @@ jobs:
           echo "HIPBLASLT_TENSILE_LIBPATH=${HIPBLASLT_TENSILE_LIBPATH}"
         fi
 
-        USE_CPP=0 python -m pip install --pre torchao --index-url ${{ matrix.index-url }}
+        USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url ${{ matrix.index-url }}
 
         # MoE parallelism requires transformers >= 5.0.0 (grouped experts format).
         # Install here rather than in the shared Docker image to avoid affecting

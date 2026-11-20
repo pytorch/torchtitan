@@ -1,7 +1,8 @@
 # Llama 3
 
-Llama 3 is the reference decoder model in torchtitan. Training recipes cover
-Llama 3.1 8B, 70B, and 405B, plus a small debug model used by CI.
+Llama 3 is the reference decoder model in torchtitan. Shipped training recipes
+are Llama 3.1 8B and 70B, plus a small debug model used by CI. 405B is a model
+flavor in `flavors.py` and has no shipped recipe.
 
 ## Download the tokenizer
 
@@ -12,8 +13,8 @@ Follow the access instructions on the official
 python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets tokenizer
 ```
 
-The 8B, 70B, and 405B recipes expect tokenizer assets under
-`./assets/hf/Llama-3.1-8B` (and the matching 70B / 405B paths).
+The shipped 8B and 70B recipes expect tokenizer assets at
+`./assets/hf/Llama-3.1-8B` and `./assets/hf/Llama-3.1-70B`.
 
 ## Training
 

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-import os
 from typing import cast
 
 import torch
@@ -46,12 +45,12 @@ def main() -> None:
         trainer = config.build()
 
         if config.create_seed_checkpoint:
-            assert (
-                int(os.environ["WORLD_SIZE"]) == 1
-            ), "Must create seed checkpoint using a single device, to disable sharding."
-            assert (
-                config.checkpointer is not None
-            ), "Must configure checkpointer when creating a seed checkpoint."
+            world_size = trainer.engine.parallelism_context.world_size
+            if world_size != 1:
+                raise ValueError(
+                    "Must create a seed checkpoint using a single device, to "
+                    f"disable sharding. Got world size {world_size}."
+                )
             trainer.engine.save_checkpoint(last_step=True)
             logger.info("Created seed checkpoint")
         else:

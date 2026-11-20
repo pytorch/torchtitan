@@ -4,12 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import unittest
+from unittest import mock
 
+import spmd_types as spmd
+import torch
+import torch.distributed as dist
 import torch.nn as nn
+from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.config import TrainingConfig
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
@@ -23,7 +31,6 @@ def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
         attn_backend="flex", seq_len=max_context_length, parallelism=ParallelismConfig()
     )
     # Replace tok_embeddings param_init based on weight tying flag.
-    import dataclasses
     from functools import partial
 
     tok_init = (
@@ -69,6 +76,44 @@ class TestLlama3WeightTying(unittest.TestCase):
             "tok_embeddings.weight and output.weight must remain tied after init_states",
         )
 
+    def test_weights_remain_tied_after_parallelize(self):
+        """Distributing states must leave one shared weight for FSDP to group."""
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
+        self.addCleanup(dist.destroy_process_group)
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=2,
+            enable_sequence_parallel=True,
+        )
+        with mock.patch(
+            "torchtitan.distributed.parallelism_context.device_type", "cpu"
+        ):
+            parallelism_context.build_mesh()
+        with parallelism_context.activate_spmd(), torch.device("meta"):
+            model = Llama3Model(_make_config(enable_weight_tying=True))
+            model._parallelize(parallelism_context)
+        self.assertIs(model.tok_embeddings.weight, model.lm_head.weight)
+
+    def test_tying_rejects_different_weight_shardings(self):
+        """Tied modules share one distributed weight, so their layouts must match."""
+        config = _make_config(enable_weight_tying=True)
+        lm_head_sharding = dataclasses.replace(
+            config.lm_head.sharding_config,
+            state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        )
+        with self.assertRaisesRegex(ValueError, "same weight sharding"):
+            dataclasses.replace(
+                config,
+                lm_head=dataclasses.replace(
+                    config.lm_head, sharding_config=lm_head_sharding
+                ),
+            )
+
     def test_tied_parameter_count_matches_unique_parameters(self):
         """Tied embeddings should be counted once, not subtracted away."""
         config = _make_config(enable_weight_tying=True)
@@ -76,7 +121,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         unique_param_count = sum(
             p.numel() for p in {id(p): p for p in model.parameters()}.values()
         )
-        reported_param_count, _ = config.get_nparams_and_flops(model, seq_len=512)
+        reported_param_count, _ = config.get_parameter_counts(model)
 
         self.assertEqual(reported_param_count, unique_param_count)
 
@@ -88,8 +133,7 @@ class TestLlama3WeightTying(unittest.TestCase):
             Trainer.Config(
                 model=config,
                 training=TrainingConfig(
-                    max_context_length=config.max_context_length,
-                    disable_cuda_graphs=True,
+                    disable_accelerator_graphs=True,
                 ),
                 parallelism=ParallelismConfig(pipeline_parallel_degree=2),
             )
@@ -101,8 +145,7 @@ class TestLlama3WeightTying(unittest.TestCase):
         Trainer.Config(
             model=config,
             training=TrainingConfig(
-                max_context_length=config.max_context_length,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
             parallelism=ParallelismConfig(pipeline_parallel_degree=2),
         )

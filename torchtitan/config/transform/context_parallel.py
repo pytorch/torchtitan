@@ -7,12 +7,19 @@
 """Context-parallel transform."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import spmd_types as spmd
 
 from torchtitan.models.base.module import Module
 
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention.cp_mla import (
+    AllGatherKVMLAFlexAttention,
+    UlyssesMLAAttention,
+)
+from torchtitan.models.common.decoder_sharding import mla_kv_projection_sharding_config
 
 from .base import convert_config_type, ModelConfigTransform
 
@@ -59,6 +66,25 @@ class ContextParallelTransform(ModelConfigTransform):
                 traversed,
                 self.inner_attention_map[inner_attention],
             )
+            if isinstance(
+                converted,
+                (AllGatherKVMLAFlexAttention.Config, UlyssesMLAAttention.Config),
+            ):
+                # Ordinary attention projects before CP communication. For MLA,
+                # wkv_b runs after all-gather (CP replicated), or before Ulysses
+                # all-to-all (token-sharded; head sharding happens afterward).
+                cp = (
+                    spmd.R
+                    if isinstance(converted, AllGatherKVMLAFlexAttention.Config)
+                    else spmd.S(0)
+                )
+                converted = replace(
+                    converted,
+                    wkv_b=replace(
+                        converted.wkv_b,
+                        sharding_config=mla_kv_projection_sharding_config(cp=cp),
+                    ),
+                )
             assert isinstance(
                 field_name, str
             ), "Inner-attention configs must be stored in named decoder fields."

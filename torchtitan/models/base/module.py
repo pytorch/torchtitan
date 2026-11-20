@@ -23,12 +23,9 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
-    current_spmd_mesh,
     set_current_spmd_mesh,
     spmd_axes,
     spmd_distribute_tensor,
-    spmd_redistribute_per_axis,
-    spmd_validate_redistributions,
 )
 from torchtitan.models.base.sharding import ShardingConfig
 
@@ -42,10 +39,17 @@ class Module(nn.Module, Configurable):
     Subclasses should NOT override ``init_states`` unless they need custom
     ordering (e.g., weight tying before init). Override ``_init_self_buffers``
     for buffer initialization.
+
+    Materialized buffers owned by this module reject dtype changes. Cast a
+    meta-built model before ``to_empty`` and ``init_states``, which rebuild
+    buffers in their intended dtypes. The guard keeps a buffer's current dtype.
+    It does not restore a canonical dtype after direct assignment or loading.
+    A failed cast may leave earlier parameters or children converted.
     """
 
     _param_init: dict[str, Callable] | None = None
     _sharding_config: ShardingConfig | None = None
+    _preserve_dtype_params: tuple[str, ...] = ()
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
     # ActivationRematConfig.apply replaces these defaults on every Module in a
@@ -54,6 +58,10 @@ class Module(nn.Module, Configurable):
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
     _remat_recompute_patterns: tuple[str, ...] = ()
+    # Set by ActivationRematConfig.apply on each transformer block it
+    # checkpoints: the block's FQN in the full model (e.g. "layers.3",
+    # "vision_encoder.layers.0"). The activation offloader hooks these blocks.
+    _remat_block_fqn: str = ""
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
@@ -70,6 +78,21 @@ class Module(nn.Module, Configurable):
             fnmatch(qualified_name, pattern)
             for pattern in self._remat_recompute_patterns
         )
+
+    def named_preserve_dtype_params(self) -> Iterator[tuple[str, nn.Parameter]]:
+        """Yield ``(fqn, parameter)`` for the ``preserve_dtype_params`` of every
+        module in this tree, with FQNs relative to this module.
+
+        Parameters are looked up when called, so after FSDP these are the sharded
+        parameters.
+        """
+        for module_fqn, module in self.named_modules():
+            if not isinstance(module, Module):
+                continue
+            for name in module._preserve_dtype_params:
+                yield f"{module_fqn}.{name}" if module_fqn else name, getattr(
+                    module, name
+                )
 
     def configure_remat_regions(
         self,
@@ -96,6 +119,14 @@ class Module(nn.Module, Configurable):
     class Config(Configurable.Config):
         param_init: dict | None = None
         sharding_config: ShardingConfig | None = None
+        preserve_dtype_params: tuple[str, ...] = ()
+        """Names of this module's own parameters that bulk casts never lower in
+        precision: FSDP's mixed precision ``param_dtype`` and the checkpoint
+        ``export_dtype`` keep a parameter's own dtype when it is wider, frozen
+        parameters keep it instead of moving to ``param_dtype`` storage, and the RL
+        weight sync sends it in its own dtype. For parameters whose numerics
+        need master precision, e.g. a linear-attention decay that the reference
+        checkpoint stores in float32."""
 
         def build(self, **kwargs):
             # slots=True prevents super().build() from working; call explicitly.
@@ -106,6 +137,18 @@ class Module(nn.Module, Configurable):
                 instance._param_init = self.param_init
             if self.sharding_config is not None:
                 instance._sharding_config = self.sharding_config
+            if self.preserve_dtype_params:
+                params = {
+                    name for name, p in instance._parameters.items() if p is not None
+                }
+                unknown = set(self.preserve_dtype_params) - params
+                if unknown:
+                    raise ValueError(
+                        f"preserve_dtype_params names {sorted(unknown)}, which are "
+                        f"not parameters of {type(instance).__name__}. Its "
+                        f"parameters are {sorted(params)}."
+                    )
+                instance._preserve_dtype_params = self.preserve_dtype_params
             return instance
 
     def init_states(
@@ -139,9 +182,37 @@ class Module(nn.Module, Configurable):
             self._init_self_buffers(buffer_device=buffer_device)
 
     def _apply(self, fn, recurse=True):
-        """Override to preserve annotations across model.to_empty() in trainer.py"""
+        """Preserve SPMD annotations and reject dtype changes to materialized buffers.
+
+        Check each conversion result before PyTorch installs it. The conversion
+        runs once per tensor, with no rollback of earlier changes. Functions that
+        mutate their input in place are outside this guard's contract.
+        """
+        protected = {
+            id(buffer): (name, buffer.dtype)
+            for name, buffer in self.named_buffers(
+                recurse=False, remove_duplicate=False
+            )
+            if not buffer.is_meta
+        }
+
+        def checked_fn(tensor):
+            result = fn(tensor)
+            if (requirement := protected.get(id(tensor))) is not None:
+                name, dtype = requirement
+                if result.dtype != dtype:
+                    raise ValueError(
+                        f"Cannot convert {type(self).__name__}.{name} from "
+                        f"{dtype} to {result.dtype}. "
+                        "torchtitan Module buffers keep their dtype. "
+                        "For a model constructed on meta, apply the dtype cast "
+                        "before to_empty() and init_states(). Earlier tensors may "
+                        "already have changed; recreate the model after failure."
+                    )
+            return result
+
         with self._preserve_buffer_spmd_types():
-            return super()._apply(fn, recurse=recurse)
+            return super()._apply(checked_fn if protected else fn, recurse=recurse)
 
     @contextlib.contextmanager
     def _preserve_buffer_spmd_types(self) -> Iterator[None]:
@@ -299,19 +370,33 @@ class Module(nn.Module, Configurable):
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
+            # With TP/EP enabled, a module that owns parameters but declares
+            # no sharding_config would silently replicate them instead of
+            # sharding them. Buffers alone do not trip this: auxiliary
+            # modules such as the MoE load-balance losses own only
+            # per-rank statistics buffers that are intentionally replicated.
+            if (
+                parallelism_context.tp_enabled or parallelism_context.ep_enabled
+            ) and next(self.parameters(recurse=False), None) is not None:
+                raise RuntimeError(
+                    f"{type(self).__name__} owns parameters but declares no "
+                    "sharding_config, so they would be silently replicated "
+                    "over TP/EP. Add a sharding_config or move the parameters "
+                    "into a sharded module."
+                )
             return
 
-        spmd_validate_redistributions(self._sharding_config)
         self._distribute_states(parallelism_context)
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_region(self.forward)
 
-        def forward_with_redistribution(*args, **kwargs):
-            args, kwargs = self._redistribute_inputs(args, kwargs)
+        def forward_with_boundary_checks(*args, **kwargs):
+            self._assert_input_types(args, kwargs)
             outputs = fn(*args, **kwargs)
-            return self._redistribute_outputs(outputs)
+            self._assert_output_type(outputs)
+            return outputs
 
-        self.forward = forward_with_redistribution
+        self.forward = forward_with_boundary_checks
 
     def _spmd_distribute_state(
         self,
@@ -443,40 +528,37 @@ class Module(nn.Module, Configurable):
     ) -> Callable:
         """Wrap ``fn`` with a local-tensor region if configured.
 
-        Input layouts come from ``in_dst_shardings`` (the same dict
-        ``_redistribute_inputs`` uses to pre-align inputs); output layouts
-        come from ``out_src_shardings``.
+        Input layouts come from ``input_shardings``; output layouts come
+        from ``output_shardings``.
         """
         sharding_config = self._sharding_config
         assert sharding_config is not None
         if not sharding_config.local_spmd:
             return fn
 
-        in_dst = (
-            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
-        )
+        input_shardings = sharding_config.input_shardings or {}
         pos_args = self._cache_pos_arg_names()
-        out_src = sharding_config.out_src_shardings or sharding_config.out_dst_shardings
-        if out_src is None:
+        output_shardings = sharding_config.output_shardings
+        if output_shardings is None:
             raise AssertionError(
                 f"{type(self).__name__}: local_spmd is set but "
-                "out_src_shardings is None."
+                "output_shardings is None."
             )
-        missing_in = [name for name in pos_args if name not in in_dst]
+        missing_in = [name for name in pos_args if name not in input_shardings]
         if missing_in:
             raise AssertionError(
-                f"{type(self).__name__}: local_spmd is set but in_dst_shardings "
+                f"{type(self).__name__}: local_spmd is set but input_shardings "
                 f"is missing entries for: {missing_in}"
             )
-        in_named: list[SpmdType] = [in_dst[name] for name in pos_args]
+        in_named: list[SpmdType] = [input_shardings[name] for name in pos_args]
 
-        return self._spmd_apply_local_region(fn, in_named, out_src)
+        return self._spmd_apply_local_region(fn, in_named, output_shardings)
 
     def _spmd_apply_local_region(
         self,
         fn: Callable,
         in_named: list[SpmdType],
-        out_src: SpmdType | tuple[SpmdType | None, ...],
+        output_shardings: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
         """Typecheck a local-tensor compute region with ``spmd.local_map``."""
         in_types = tuple(
@@ -484,7 +566,7 @@ class Module(nn.Module, Configurable):
         )
         out_types = tree_map(
             lambda layout: (layout.local_type, layout.partition_spec),
-            out_src,
+            output_shardings,
             is_leaf=lambda x: isinstance(x, SpmdType),
         )
         return spmd.local_map(
@@ -492,109 +574,39 @@ class Module(nn.Module, Configurable):
             out_types=out_types,
         )(fn)
 
-    def _redistribute_inputs(
-        self,
-        args: tuple,
-        kwargs: dict,
-    ) -> tuple[tuple, dict]:
-        """Redistribute inputs to desired placements.
-
-        Per input present in ``in_src_shardings`` / ``in_dst_shardings``,
-        assert the source SPMD layout and redistribute to the destination.
-        """
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-
-        if (
-            sharding_config.in_dst_shardings is None
-            and sharding_config.in_src_shardings is None
-        ):
-            return args, kwargs
-
+    def _assert_input_types(self, args: tuple, kwargs: dict) -> None:
+        """Assert each tensor input's SPMD type against ``input_shardings``."""
+        assert self._sharding_config is not None
+        input_shardings = self._sharding_config.input_shardings
+        if not input_shardings or not spmd.is_type_checking():
+            return
         pos_arg_names = [
             name for name in self._cache_pos_arg_names() if name not in kwargs
         ]
-        new_kwargs = dict(zip(pos_arg_names, args, strict=False))
-        new_kwargs.update(kwargs)
+        named_inputs = dict(zip(pos_arg_names, args, strict=False))
+        named_inputs.update(kwargs)
+        for name, value in named_inputs.items():
+            layout = input_shardings.get(name)
+            if layout is not None and isinstance(value, torch.Tensor):
+                spmd.assert_type(value, layout)
 
-        in_dst_shardings = sharding_config.in_dst_shardings or {}
-        in_src_shardings = sharding_config.in_src_shardings or {}
+    def _assert_output_type(self, outputs: Any) -> None:
+        """Assert a single tensor output's SPMD type against ``output_shardings``.
 
-        for name, value in new_kwargs.items():
-            if not isinstance(value, torch.Tensor):
-                continue
-            src_spmd_layout = in_src_shardings.get(name)
-            dst_spmd_layout = in_dst_shardings.get(name)
-
-            if src_spmd_layout is None:
-                if dst_spmd_layout is not None:
-                    raise ValueError(
-                        f"{type(self).__name__}.{name}: SPMD input "
-                        "redistribution requires explicit in_src_shardings."
-                    )
-                continue
-
-            # SPMD source layouts are part of the config contract: assert before
-            # redistributing so typechecking catches layout mismatches.
-            if spmd.is_type_checking():
-                spmd.assert_type(value, src_spmd_layout)
-
-            if dst_spmd_layout is not None:
-                # Module-boundary collectives (e.g. the sequence-parallel
-                # all-gather) overlap with compute until first use.
-                value = spmd_redistribute_per_axis(
-                    value,
-                    current_spmd_mesh(),
-                    src_spmd_layout,
-                    dst_spmd_layout,
-                    async_op=True,
-                )
-            new_kwargs[name] = value
-
-        new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
-        return new_args, new_kwargs
-
-    def _redistribute_outputs(self, outputs: Any) -> Any:
-        """Redistribute output to desired placement.
-
-        TODO: Currently only handles a single tensor output. Extend to
-        support nested outputs (tuples, dicts) when models with
-        multi-tensor forward returns (e.g., Flux, MoE) adopt config-based
-        sharding. ``out_dst_shardings`` would also need to become a nested
-        structure.
+        TODO: Extend to nested outputs (tuples, dicts) once multi-tensor
+        forward returns need a boundary check.
         """
-        sharding_config = self._sharding_config
-        assert sharding_config is not None
-
-        out_src = sharding_config.out_src_shardings
-        out_dst = sharding_config.out_dst_shardings
-        if not isinstance(outputs, torch.Tensor):
-            return outputs
-
-        if out_src is None:
-            if out_dst is not None:
-                raise ValueError(
-                    f"{type(self).__name__}: SPMD output redistribution "
-                    "requires explicit out_src_shardings."
-                )
-            return outputs
-        if isinstance(out_src, tuple):
+        assert self._sharding_config is not None
+        output_shardings = self._sharding_config.output_shardings
+        if output_shardings is None or not isinstance(outputs, torch.Tensor):
+            return
+        if isinstance(output_shardings, tuple):
             raise ValueError(
-                f"{type(self).__name__}: SPMD output redistribution only "
-                "supports a single tensor output."
+                f"{type(self).__name__}: output_shardings is a tuple but "
+                "forward returned a single tensor."
             )
         if spmd.is_type_checking():
-            spmd.assert_type(outputs, out_src)
-
-        if out_dst is None:
-            return outputs
-        return spmd_redistribute_per_axis(
-            outputs,
-            current_spmd_mesh(),
-            out_src,
-            out_dst,
-            async_op=True,
-        )
+            spmd.assert_type(outputs, output_shardings)
 
 
 _ModuleT = TypeVar("_ModuleT", bound=nn.Module)

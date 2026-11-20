@@ -7,6 +7,7 @@
 from .activation import (
     BinaryActivationFn,
     ClampedSwiGLU,
+    LimitedSwiGLU,
     Sigmoid,
     SiLU,
     SiTUGLU,
@@ -32,11 +33,12 @@ from .attention import (
     LinearAttentionMetadata,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from .decoder import Decoder, TransformerBlock
-from .embedding import Embedding
+from .embedding import VocabParallelEmbedding
 from .feed_forward import compute_ffn_hidden_dim, DenseFeedForward, FeedForward
 from .linear import ColumnParallelLinear, GroupedLinear, Linear, RowParallelLinear
 from .linear.hi_mid_lo_linear import HiMidLoLinear
@@ -59,11 +61,11 @@ __all__ = [
     "create_varlen_metadata_for_document",
     "Decoder",
     "DenseFeedForward",
-    "Embedding",
     "FeedForward",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "HiMidLoLinear",
+    "LimitedSwiGLU",
     "QKVLinear",
     "GELU",
     "GatedRMSNorm",
@@ -88,6 +90,7 @@ __all__ = [
     "RoPE",
     "RowParallelLinear",
     "SlidingWindowFlexInnerAttention",
+    "SlidingWindowVarlenInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",
@@ -99,5 +102,6 @@ __all__ = [
     "UnaryActivationFn",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
+    "VocabParallelEmbedding",
     "compute_ffn_hidden_dim",
 ]

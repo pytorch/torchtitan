@@ -10,10 +10,19 @@ Unit tests for TP-degree / n_kv_heads divisibility validation.
 Covers Issue #2574: models with GQA (n_kv_heads < n_heads) would crash deep in
 the forward pass when tensor_parallel_degree > n_kv_heads. The fix adds an
 early ValueError while validating the complete trainer config.
+
+Also covers Issue #5854: Flux declares no TP/EP sharding, so
+tensor_parallel_degree / expert_parallel_degree above 1 must raise at config
+time instead of being silently ignored.
 """
 
 import unittest
 from unittest.mock import patch
+
+# Flux needs no optional dependency, so import it at module top level:
+# a broken Flux import must fail loudly instead of silently skipping this
+# file's tests (including the pre-existing GQA ones) via _IMPORTS_OK.
+from torchtitan.models.flux import build_model_config as build_flux_model_config
 
 try:
     import sys
@@ -30,10 +39,11 @@ try:
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
-        Embedding,
         Linear,
         RMSNorm,
+        VocabParallelEmbedding,
     )
+    from torchtitan.models.common.rope import Llama3ScalingConfig
     from torchtitan.models.llama3 import Llama3Model
     from torchtitan.models.llama3.model import Llama3TransformerBlock
 
@@ -51,8 +61,7 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
         config,
         parallelism=ParallelismConfig(tensor_parallel_degree=tp),
         training=TrainingConfig(
-            max_context_length=config.max_context_length,
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         debug=DebugConfig(),
         activation_remat=None,
@@ -87,7 +96,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                         dim=_DIM // n_heads,
                         max_context_length=4096,
                         theta=500000,
-                        scaling="llama",
+                        scaling=Llama3ScalingConfig(),
                     ),
                     enable_sp=True,
                 ),
@@ -105,7 +114,9 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
         max_context_length=4096,
         dim=_DIM,
         vocab_size=_VOCAB_SIZE,
-        tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),
+        tok_embeddings=VocabParallelEmbedding.Config(
+            num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM
+        ),
         norm=RMSNorm.Config(normalized_shape=_DIM),
         lm_head=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
         layers=layers,
@@ -156,6 +167,25 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
         _validate(cfg, tp=1)
 
+    def test_llama3_partial_tp_sharding_raises(self):
+        """One dense layout without TP must raise even if all others name TP."""
+        import spmd_types as spmd
+
+        from torchtitan.distributed.parallelism_context import MeshAxisName
+        from torchtitan.models.common.attention import GQAttention
+
+        cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
+        # Strip TP from a single dense layout; the union still names TP.
+        attention = cfg.layers[0].attention
+        assert isinstance(attention, GQAttention.Config)
+        qkv_linear = attention.qkv_linear
+        qkv_linear.wqkv.sharding_config.state_shardings["weight"] = spmd.SpmdType(
+            {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+            partition_spec=spmd.PartitionSpec(None, None),
+        )
+        with self.assertRaisesRegex(ValueError, r"declares no 'tp' sharding"):
+            _validate(cfg, tp=2)
+
     def test_checks_full_attention_after_sliding_attention(self):
         from torchtitan.models.common.attention import SlidingWindowFlexInnerAttention
 
@@ -163,7 +193,7 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         cfg.layers[
             0
         ].attention.inner_attention = SlidingWindowFlexInnerAttention.Config(
-            window_size=128
+            sliding_window_size=128
         )
         cfg.layers[1].attention.n_heads = 3
 
@@ -172,6 +202,44 @@ class TestTPKVHeadsValidation(unittest.TestCase):
         with patch("torchtitan.distributed.spmd_types.spmd_mesh_size", return_value=2):
             with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
                 cfg.build()
+
+
+def _validate_flux(
+    *,
+    tensor_parallel_degree: int = 1,
+    expert_parallel_degree: int = 1,
+) -> None:
+    # Build with the same parallelism being validated: sharding is derived
+    # at build time and must not be patched afterwards.
+    parallelism = ParallelismConfig(
+        tensor_parallel_degree=tensor_parallel_degree,
+        expert_parallel_degree=expert_parallel_degree,
+    )
+    config = build_flux_model_config("flux-debug", parallelism=parallelism, seq_len=256)
+    validate_model_training_config(
+        config,
+        parallelism=parallelism,
+        training=TrainingConfig(disable_accelerator_graphs=True),
+        debug=DebugConfig(),
+        activation_remat=None,
+        max_num_documents=None,
+    )
+
+
+@unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")
+class TestFluxParallelismValidation(unittest.TestCase):
+    """Flux declares no TP/EP sharding, so TP/EP degrees above 1 must raise."""
+
+    def test_flux_tp1_ep1_does_not_raise(self):
+        _validate_flux()
+
+    def test_flux_tensor_parallel_degree_gt1_raises(self):
+        with self.assertRaisesRegex(ValueError, r"declares no 'tp' sharding"):
+            _validate_flux(tensor_parallel_degree=2)
+
+    def test_flux_expert_parallel_degree_gt1_raises(self):
+        with self.assertRaisesRegex(ValueError, r"has no routed experts"):
+            _validate_flux(expert_parallel_degree=2)
 
 
 if __name__ == "__main__":

@@ -14,13 +14,14 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from torch.export import register_dataclass
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attn_gym import (
     _ConfiguredShortConv,
     _L2Norm,
-    _MissingKernel,
     _ShortConv,
+    is_missing_kernel,
     KernelOptions,
 )
 
@@ -29,7 +30,7 @@ from .attention import Attention, VarlenAttentionMetadata
 # The shared Attention Gym kernels run on rank-local heads inside each family's
 # local SPMD region. Family modules register their family-specific kernels.
 for _kernel_function in (_ShortConv, _ConfiguredShortConv, _L2Norm):
-    if _kernel_function is not _MissingKernel:
+    if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
 
@@ -52,6 +53,10 @@ class LinearAttentionMetadata:
         """Annotate sequence offsets."""
         if self.varlen is not None:
             self.varlen.annotate_spmd_types()
+
+
+# Expose tensor fields to pytree so CUDA graph replay copies fresh offsets.
+register_dataclass(LinearAttentionMetadata)
 
 
 def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:

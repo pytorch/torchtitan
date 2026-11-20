@@ -91,28 +91,35 @@ example); no `triton_rope.py` is shipped. It is a valid override: each attention
 module owns a `rope` submodule (a `RoPE.Config`), so swapping in a custom RoPE is
 an ordinary component override.
 
+The example targets `ComplexRoPE.Config`, the format its kernel implements. RoPE
+formats read `positions` differently (1D ids for text, `(T, 2)` coordinates for
+the vision RoPEs), so target the format you replace; `target=RoPE.Config` would
+match all of them. Vision attention works the same way:
+`VisionAttention.Config.rope` holds a `ComplexVisionRoPE.Config` or a
+`CosSinVisionRoPE.Config`.
+
 ```python
 from dataclasses import dataclass
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import ComplexRoPE
 
 
-class TritonRoPE(RoPE):
+class TritonRoPE(ComplexRoPE):
     """RoPE applied with a Triton kernel (illustrative)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
+    class Config(ComplexRoPE.Config):
         block_size: int = 128
 
     def __init__(self, config: Config): ...
     def forward(self, query, key, positions=None): ...
 
 
-@override(target=RoPE.Config,
+@override(target=ComplexRoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
-def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
-    # `derive` copies every field shared with RoPE.Config; the factory states
+def triton_rope(cfg: ComplexRoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
+    # `derive` copies every field shared with ComplexRoPE.Config; the factory states
     # only its deltas. See "Deriving the replacement config" below. `block_size`
     # defaults to 128 but can be tuned per config tree via a per-entry kwarg
     # (see "Optional per-entry kwargs" below).
@@ -137,14 +144,14 @@ This matters for version-robustness. Hand-copying couples a factory to the
 target's field set at the time it was written:
 
 ```python
-# Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
+# Fragile: ComplexRoPE.Config has many fields (theta, scaling, sharding_config,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
 return TritonRoPE.Config(
     dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
-# Robust: every RoPE.Config field (including ones added later, inherited by the
+# Robust: every ComplexRoPE.Config field (including ones added later, inherited by the
 # subclass TritonRoPE.Config) is copied automatically; only block_size is a delta.
 return derive(cfg, TritonRoPE.Config, block_size=128)
 ```
@@ -225,13 +232,13 @@ In `Trainer.__init__`, before any component is built:
    re-traversed). An override that changes a module's sharding contract must set
    the replacement's `sharding_config`; `derive()` preserves it when the contract
    is unchanged.
-7. Log every replacement.
+7. Log one line per distinct (override, source class -> replacement class,
+   kwargs) group, with the match count and every replaced FQN.
+   `apply_overrides()` returns one line per replaced node.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
-...
-INFO: Applied 32 override(s)
+INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=2 fqns=['model.layers.0.feed_forward', 'model.layers.1.feed_forward']
+INFO: Applied 2 override(s)
 ```
 
 The model config is a `Configurable.Config` nested directly at `model` in the
@@ -478,16 +485,17 @@ for the full recipe.
   while retaining the core `DenseFeedForward` parameter layout and checkpoint
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
-- `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
-  `ComplexRoPE` for a fused Helion kernel (forward + backward) wrapped in a
-  `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
-  recipe from "Custom kernels and `torch.compile`". `helion` is an optional
-  dependency, so the module imports without it and falls back to the PyTorch RoPE
-  when it (or CUDA) is unavailable; it is checkpoint-compatible with stock.
+- `torchtitan_recipes/overrides/higher_precision_rms_norm.py` -- **a
+  higher-precision norm example.** It replaces every exact `RMSNorm.Config`
+  (decoder norms and QK norms) with `HigherPrecisionRMSNorm`, which keeps the
+  `nn.RMSNorm` parameter layout and accumulates the sum of squares with
+  compensated FP32 summation (FP64 with `use_kahan_summation=False`). The Triton
+  kernels are registered as `torch.library.custom_op`s with fake and autograd
+  registrations. It runs as a local SPMD region typed by the norm's own
+  `ShardingConfig`.
 The `TritonRoPE` snippets above are illustrative — no `triton_rope.py` is
-shipped — but RoPE is a fully valid override target (`helion_rope.py` is a real
-one): each attention module owns a `rope` submodule (`RoPE.Config`), so a custom
-RoPE is an ordinary component override.
+shipped — but RoPE is a fully valid override target: each attention module owns a
+`rope` submodule (`RoPE.Config`), so a custom RoPE is an ordinary component override.
 
 ## Code map
 
@@ -498,7 +506,7 @@ RoPE is an ordinary component override.
 | `torchtitan/models/base/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field and applies recipe-provided overrides before builds. |
 | `torchtitan/rl/controller/controller.py` | Holds the RL `override` field and applies it to the trainer and generator models before spawning actors. |
-| `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
+| `torchtitan_recipes/overrides/` | In-repo example implementations (`fused_swiglu.py`). |
 | `tests/unit_tests/cpu/config/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |
 
 Overriding a component requires no changes to a recipe or model package; that

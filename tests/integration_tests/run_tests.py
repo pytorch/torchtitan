@@ -17,6 +17,8 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+import torch
+
 from torchtitan.observability.logging import init_logger
 from torchtitan.trainer import Trainer
 
@@ -27,6 +29,7 @@ from tests.integration_tests import (
     SELF_LAUNCHING_ENTRYPOINTS,
     validate_fake_pg_compatibility,
 )
+from tests.integration_tests.hardware_skips import get_tests_to_skip_on_current_hardware
 
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,7 @@ _TEST_SUITES = {
     "h100": ("tests.integration_tests.h100", "build_h100_tests_list"),
     "b200": ("tests.integration_tests.b200", "build_b200_tests_list"),
     "rl": ("tests.integration_tests.rl", "build_rl_test_list"),
-    "rl_kda": ("tests.integration_tests.rl", "build_rl_kda_test_list"),
+    "rl_h100": ("tests.integration_tests.rl", "build_h100_rl_test_list"),
     "rl_b200": ("tests.integration_tests.rl", "build_b200_rl_test_list"),
 }
 
@@ -52,7 +55,7 @@ def _build_test_list(test_suite: str) -> list[IntegrationTestDefinition]:
 
 
 # Suites that need hardware-specific kernels or a real multi-process runtime.
-_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_kda", "rl_b200"})
+_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_h100", "rl_b200"})
 
 # Held while a test writes its captured output so concurrent tests do not
 # interleave their lines.
@@ -229,13 +232,14 @@ def run_single_test(
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     # When running in parallel, pin each test to a disjoint subset of physical
-    # GPUs. Setting both CUDA_/HIP_VISIBLE_DEVICES makes this a no-op for the
-    # architecture that does not apply.
+    # GPUs. Setting CUDA_/HIP_VISIBLE_DEVICES and ZE_AFFINITY_MASK together
+    # makes this a no-op for the two architectures that do not apply.
     base_env = os.environ.copy()
     if gpu_ids is not None:
         visible = ",".join(map(str, gpu_ids))
         base_env["CUDA_VISIBLE_DEVICES"] = visible
         base_env["HIP_VISIBLE_DEVICES"] = visible
+        base_env["ZE_AFFINITY_MASK"] = visible
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
     base_env.pop("COMM_BACKEND", None)
@@ -372,17 +376,26 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[IntegrationTestDefinition]
-) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
-    """Filter tests by name, scope, disabled state, architecture, and GPU count.
+) -> tuple[
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+]:
+    """Filter tests by name, scope, disabled state, hardware skips, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu).
+    Hardware skips are matched by test name, the same way ``--exclude`` is.
+
+    Returns (runnable, skipped_ngpu, skipped_by_hardware).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
+    tests_to_skip = get_tests_to_skip_on_current_hardware()
+
     runnable: list[IntegrationTestDefinition] = []
     skipped_ngpu: list[IntegrationTestDefinition] = []
+    skipped_by_hardware: list[IntegrationTestDefinition] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -396,16 +409,14 @@ def _filter_tests(
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-        if (
-            getattr(args, "gpu_arch_type", "cuda") == "rocm"
-            and test_flavor.skip_rocm_test
-        ):
+        if test_flavor.test_name in tests_to_skip:
+            skipped_by_hardware.append(test_flavor)
             continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu
+    return runnable, skipped_ngpu, skipped_by_hardware
 
 
 def run_tests(
@@ -414,7 +425,9 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    runnable, skipped_ngpu, skipped_by_hardware = _filter_tests(args, test_list)
+    for test_flavor in skipped_by_hardware:
+        logger.info(f"Skipping test {test_flavor.test_name} (hardware-specific skip)")
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
@@ -436,6 +449,20 @@ def run_tests(
 
     def physical_ngpu(test_flavor: IntegrationTestDefinition) -> int:
         return 1 if execution_mode == "fake_pg" else test_flavor.ngpu
+
+    # CUDA drops a missing id and every later id from a child's visible-device
+    # mask, so every id the pool hands out or a sequential launch spawns must
+    # exist on the host. Fail before scheduling rather than with rank errors.
+    if runnable:
+        num_devices = torch.accelerator.device_count()
+        required_devices = (
+            args.ngpu if parallel else max(physical_ngpu(t) for t in runnable)
+        )
+        if num_devices < required_devices:
+            raise ValueError(
+                f"Requires {required_devices} accelerator(s), but only "
+                f"{num_devices} accelerator(s) are visible"
+            )
 
     if parallel and runnable:
         # Schedule tests concurrently, packing them onto a fixed pool of
@@ -532,18 +559,19 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda", "rocm", "xpu"],
+        help="GPU architecture type: 'cuda', 'rocm' or 'xpu'.",
     )
     parser.add_argument(
         "--gpu_arch",
         default=None,
-        choices=["a10g", "h100", "b200", "mi350x"],
+        choices=["a10g", "h100", "b200", "mi350x", "pvc"],
         help=(
             "Specific GPU model, used to select the matching golden numerics "
-            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
-            "otherwise, so a caller can't silently resolve ROCm goldens "
-            "under an A10G path by omitting this flag."
+            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm, 'pvc' for "
+            "--gpu_arch_type=xpu, and 'a10g' otherwise, so a caller can't "
+            "silently resolve ROCm/XPU goldens under an A10G path by "
+            "omitting this flag."
         ),
     )
     parser.add_argument(
@@ -603,7 +631,7 @@ def main():
     )
     args = parser.parse_args()
     if args.gpu_arch is None:
-        args.gpu_arch = "mi350x" if args.gpu_arch_type == "rocm" else "a10g"
+        args.gpu_arch = {"rocm": "mi350x", "xpu": "pvc"}.get(args.gpu_arch_type, "a10g")
 
     try:
         test_suites = _parse_test_suites(args.test_suite)

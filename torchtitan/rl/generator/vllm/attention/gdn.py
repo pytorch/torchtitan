@@ -1,0 +1,446 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""vLLM paged-cache adapter for TorchTitan's Gated DeltaNet.
+
+The enclosing Qwen3.5 module owns all parameters. This adapter runs Attention
+Gym's paging-aware convolution and GDN kernels.
+
+Batch-invariant execution has two additional requirements:
+
+* The accumulated SSM cache state uses float32. Decode otherwise rounds the state
+  through bfloat16 after every token, unlike a single prefill call. The convolution
+  cache stays in model dtype because it only stores trailing input columns.
+* Batch-invariant recurrence uses the same Attention Gym scan as the trainer.
+
+Decode and prefill update the paged convolution and SSM state pools directly.
+"""
+
+from dataclasses import dataclass
+
+import torch
+from vllm.config import get_current_vllm_config
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    is_conv_state_dim_first,
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import InnerAttention, LinearAttentionMetadata
+from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attn_gym import (
+    causal_conv1d_decode,
+    paged_causal_conv1d,
+    recurrent_gdn_decode,
+)
+from torchtitan.models.common.decoder import Decoder
+from torchtitan.rl.generator.attention.gdn import paged_gdn
+from torchtitan.rl.generator.vllm.attention.linear_attention import (
+    configure_hybrid_state,
+    LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionBackend,
+    TorchTitanLinearAttentionMetadata,
+    unique_state_shape,
+)
+
+
+class VLLMInnerGDN(InnerAttention, MambaBase):
+    """Paged-cache inner GDN implementation.
+
+    The enclosing ``common.attention.gdn.GDN`` owns all parameters. This
+    module owns only vLLM cache plumbing and kernel dispatch.
+
+    The enclosing module and vLLM cache are both head-sharded under tensor
+    parallelism. Speculative decoding is not supported.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(InnerAttention.Config):
+        layer_idx: int
+        num_k_heads: int
+        num_v_heads: int
+        head_k_dim: int
+        head_v_dim: int
+        conv_kernel_size: int = 4
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+
+        vllm_config = get_current_vllm_config()
+        self.tensor_parallel_size = vllm_config.parallel_config.tensor_parallel_size
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        speculative_config = vllm_config.speculative_config
+        self.num_speculative_tokens = (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+        # vLLM speculative decoding retains one state per draft position and
+        # commits the accepted state; Attention Gym currently mutates one slot.
+        if self.num_speculative_tokens != 0:
+            raise ValueError("Attention Gym GDN does not support speculative decoding.")
+
+        self.num_k_heads = config.num_k_heads
+        self.num_v_heads = config.num_v_heads
+        self.head_k_dim = config.head_k_dim
+        self.head_v_dim = config.head_v_dim
+        self.conv_kernel_size = config.conv_kernel_size
+
+        # vLLM's state-shape calculator takes global head counts, while the
+        # computation and allocated cache use local head counts.
+        if (
+            self.num_k_heads % self.tensor_parallel_size != 0
+            or self.num_v_heads % self.tensor_parallel_size != 0
+        ):
+            raise ValueError(
+                f"num_k_heads ({self.num_k_heads}) and num_v_heads "
+                f"({self.num_v_heads}) must both be divisible by "
+                f"tensor_parallel_size ({self.tensor_parallel_size})."
+            )
+        self.local_num_k_heads = self.num_k_heads // self.tensor_parallel_size
+        self.local_num_v_heads = self.num_v_heads // self.tensor_parallel_size
+
+        if is_conv_state_dim_first():
+            raise ValueError(
+                "Attention Gym GDN requires VLLM_SSM_CONV_STATE_LAYOUT=SD so "
+                "the paged convolution history has contiguous channels."
+            )
+
+        # Attention Gym's paged kernels mutate the SSM state pool directly and
+        # require FP32 state in both regular and batch-invariant execution.
+        if self.cache_config.mamba_ssm_cache_dtype not in {"auto", "float32"}:
+            raise ValueError(
+                "Attention Gym GDN requires mamba_ssm_cache_dtype='float32', "
+                f"got {self.cache_config.mamba_ssm_cache_dtype!r}."
+            )
+        self.cache_config.mamba_ssm_cache_dtype = "float32"
+
+        # vLLM populates this via the KV-cache allocator: (conv_state, ssm_state).
+        self.kv_cache = (torch.tensor([]), torch.tensor([]))
+
+        self.prefix = f"model.layers.{config.layer_idx}.linear_attn"
+        compilation_config = vllm_config.compilation_config
+        if self.prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate GDN layer name: {self.prefix}")
+        compilation_config.static_forward_context[self.prefix] = self
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return TorchTitanLinearAttentionBackend
+
+    @property
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.GDN_ATTN
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        """Return the (conv_state, ssm_state) cache dtypes.
+
+        Required by vLLM's MambaBase interface: the KV-cache allocator calls this
+        to allocate the paged conv and SSM state before the model runs.
+        """
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        """Return the per-slot (conv_state, ssm_state) cache shapes.
+
+        Required by vLLM's MambaBase interface: the KV-cache allocator calls this
+        to size the paged conv and SSM state before the model runs.
+        """
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            self.tensor_parallel_size,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.conv_kernel_size,
+            self.num_speculative_tokens,
+        )
+
+    def _forward(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        conv_weight: torch.Tensor,
+        conv_bias: torch.Tensor | None,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run convolution and recurrence against vLLM's paged state in place.
+
+        Returns the ``[tokens, heads, head_v_dim]`` output, zero on rows no sequence owns
+        so padded rows stay defined across graph replays.
+        """
+        assert (
+            conv_bias is None
+        ), "Attention Gym convolution kernels do not support bias"
+        num_tokens = mixed_qkv.shape[0]
+        output_shape = (num_tokens, self.local_num_v_heads, self.head_v_dim)
+        attn_metadata = get_forward_context().attn_metadata
+        # vLLM's profiling/warmup runs have no attention metadata.
+        if attn_metadata is None:
+            return mixed_qkv.new_zeros(output_shape)
+        assert isinstance(attn_metadata, dict)
+        gdn_metadata = attn_metadata[self.prefix]
+        assert isinstance(gdn_metadata, TorchTitanLinearAttentionMetadata)
+        assert (
+            gdn_metadata.spec_sequence_masks is None
+        ), "VLLMInnerGDN does not support speculative decoding"
+
+        num_actual_tokens = gdn_metadata.num_actual_tokens
+        if num_actual_tokens == 0:
+            return mixed_qkv.new_zeros(output_shape)
+        state_indices = gdn_metadata.non_spec_state_indices_tensor
+        cu_seqlens = gdn_metadata.non_spec_query_start_loc
+        has_initial_state = gdn_metadata.has_initial_state
+        assert (
+            state_indices is not None
+            and cu_seqlens is not None
+            and has_initial_state is not None
+        )
+        # SP/model-input rounding need not pad attention metadata. FULL bucket
+        # padding does: its prepared rows and captured slices stay fixed while
+        # the builder restages slots and freshness, including null padding.
+        if gdn_metadata.execution_path is LinearAttentionExecutionPath.SINGLE_TOKEN:
+            num_decode_rows = state_indices.numel()
+            output = mixed_qkv.new_empty(output_shape)
+            conv_output = causal_conv1d_decode(
+                mixed_qkv[:num_decode_rows],
+                conv_weight,
+                self.kv_cache[0],
+                activation="silu",
+                state_indices=state_indices,
+                has_initial_state=has_initial_state,
+            )
+            if not is_in_batch_invariant_mode():
+                recurrent_gdn_decode(
+                    conv_output,
+                    a[:num_decode_rows].unsqueeze(0),
+                    b[:num_decode_rows].unsqueeze(0),
+                    A_log,
+                    dt_bias,
+                    self.kv_cache[1],
+                    state_indices,
+                    has_initial_state=has_initial_state,
+                    scale=self.head_k_dim**-0.5,
+                    out=output[:num_decode_rows].unsqueeze(0),
+                )
+            else:
+                output[:num_decode_rows] = self._forward_gdn(
+                    conv_output,
+                    a[:num_decode_rows],
+                    b[:num_decode_rows],
+                    A_log,
+                    dt_bias,
+                    cu_seqlens,
+                    state_indices,
+                    has_initial_state,
+                )
+            # Rows past the decode batch must stay defined across graph replays.
+            output[num_decode_rows:].zero_()
+            return output
+
+        conv_output = paged_causal_conv1d(
+            mixed_qkv[:num_actual_tokens].unsqueeze(0),
+            conv_weight,
+            self.kv_cache[0],
+            state_indices,
+            activation="silu",
+            cu_seqlens=cu_seqlens,
+            has_initial_state=has_initial_state,
+        ).squeeze(0)
+        if is_in_batch_invariant_mode():
+            output = self._forward_gdn(
+                conv_output,
+                a[:num_actual_tokens],
+                b[:num_actual_tokens],
+                A_log,
+                dt_bias,
+                cu_seqlens,
+                state_indices,
+                has_initial_state,
+            )
+        else:
+            # Decode rows: decode kernel; the rest: chunk kernel (see _stage_decode_split).
+            decode_state_indices = gdn_metadata.decode_state_indices
+            # A captured graph replays with any decode count, so capture runs every request row.
+            # Capture may be this kernel's first launch at a packed size: fine, it picks its
+            # launch config by heuristic and never autotunes.
+            num_decode_rows = (
+                decode_state_indices.numel()
+                if torch.cuda.is_current_stream_capturing()
+                else gdn_metadata.num_decodes
+            )
+            output = self._forward_gdn(
+                conv_output,
+                a[:num_actual_tokens],
+                b[:num_actual_tokens],
+                A_log,
+                dt_bias,
+                gdn_metadata.prefill_query_start_loc,
+                gdn_metadata.prefill_state_indices,
+                has_initial_state,
+            )
+            if num_decode_rows:
+                # TODO: Attention Gym's decode kernel launches programs for null rows
+                # (14-57 us over 256 rows); a capped grid looping over rows makes them cheap.
+                decode_output = output.new_empty(num_decode_rows, *output.shape[1:])
+                recurrent_gdn_decode(
+                    conv_output[:num_decode_rows],
+                    a[:num_decode_rows].unsqueeze(0),
+                    b[:num_decode_rows].unsqueeze(0),
+                    A_log,
+                    dt_bias,
+                    self.kv_cache[1],
+                    decode_state_indices[:num_decode_rows],
+                    has_initial_state=has_initial_state[:num_decode_rows],
+                    scale=self.head_k_dim**-0.5,
+                    out=decode_output.unsqueeze(0),
+                )
+                # Adding keeps each row's one kernel result: both kernels give null slots
+                # zero output (Attention Gym's paged GDN contract).
+                output[:num_decode_rows].add_(decode_output)
+        # Zero the rows past the metadata (eager SP/model-input rounding; see above).
+        if num_actual_tokens < num_tokens:
+            padding = output.new_zeros(
+                num_tokens - num_actual_tokens, *output.shape[1:]
+            )
+            output = torch.cat([output, padding])
+        return output
+
+    def _forward_gdn(
+        self,
+        conv_output: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        all_slots: torch.Tensor,
+        has_initial_state: torch.Tensor,
+    ) -> torch.Tensor:
+        """Map each cu_seqlens interval to its paged SSM slot in all_slots (see
+        ``paged_gdn``)."""
+        return paged_gdn(
+            conv_output,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            self.kv_cache[1],
+            cu_seqlens=cu_seqlens,
+            state_indices=all_slots,
+            has_initial_state=has_initial_state,
+            num_k_heads=self.local_num_k_heads,
+            head_k_dim=self.head_k_dim,
+            num_v_heads=self.local_num_v_heads,
+            head_v_dim=self.head_v_dim,
+        )
+
+    def forward(
+        self,
+        mixed_qkv_TC: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+        *,
+        key_head_dim: int,
+        value_head_dim: int,
+        attention_metadata: LinearAttentionMetadata | None,
+    ) -> torch.Tensor:
+        """Run the flattened vLLM cache operation on rank-local tensors.
+
+        The GDN kernels take ``A_log_H`` and ``dt_bias_H`` only in float32, and
+        they arrive in the trainer's master dtype (``preserve_dtype_params``).
+        """
+        del attention_metadata
+        assert key_head_dim == self.head_k_dim
+        assert value_head_dim == self.head_v_dim
+        conv_weight_CW = torch.cat(
+            [conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W],
+            dim=0,
+        ).squeeze(1)
+        assert conv_weight_CW.shape[-1] == self.conv_kernel_size
+
+        return self._forward(
+            mixed_qkv_TC,
+            a_TH,
+            b_TH,
+            conv_weight_CW,
+            None,
+            A_log_H.float(),
+            dt_bias_H.float(),
+        )
+
+
+def maybe_configure_gdn_hybrid_model(
+    model_cls: type, model_config: Decoder.Config
+) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains GDN layers.
+
+    GDN layers may differ otherwise, but every field that determines the
+    model-level recurrent-state shape must match.
+    """
+    state_shape = unique_state_shape(
+        "GDN",
+        (
+            (
+                gdn_config.n_key_heads,
+                gdn_config.n_heads,
+                gdn_config.key_head_dim,
+                gdn_config.value_head_dim,
+                gdn_config.conv_kernel_size,
+            )
+            for layer in model_config.layers
+            if isinstance(gdn_config := layer.attention, GDN.Config)
+        ),
+    )
+    if state_shape is None:
+        return
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size = state_shape
+
+    def get_state_shape(vllm_config):
+        speculative_config = vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            num_speculative_tokens,
+        )
+
+    def get_state_dtype(vllm_config):
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    # Align-mode prefix caching copies both the convolution and SSM state at
+    # block boundaries, matching vLLM's native GDN models.
+    configure_hybrid_state(
+        model_cls,
+        get_state_shape=get_state_shape,
+        get_state_dtype=get_state_dtype,
+        get_state_copy_func=MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func,
+    )

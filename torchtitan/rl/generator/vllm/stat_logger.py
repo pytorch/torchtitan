@@ -9,7 +9,7 @@
 See ``torchtitan/rl/observability/metrics/README.md`` for setup and
 the exported metric definitions.
 
-``VLLMGenerator`` registers the logger only when its TorchTitan config explicitly
+``Generator`` registers the logger only when its TorchTitan config explicitly
 enables it. If logger is enabled, ``OTEL_METRICS_EXPORTER`` will be used to select
 the exporter.
 """

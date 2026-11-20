@@ -14,6 +14,7 @@ import pytest
 import torch
 from monarch.actor import ActorError, this_host
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
+from torchtitan.rl.actors.monarch.rdma_microbatch import _TensorRef
 from torchtitan.rl.rollout.types import (
     Rollout,
     RolloutGroup,
@@ -23,7 +24,6 @@ from torchtitan.rl.rollout.types import (
 )
 
 from torchtitan.rl.trainer.batcher import Batcher
-from torchtitan.rl.trainer.rdma_microbatch import _TensorRef
 
 _BATCHER_KWARGS = dict(
     num_tokens_per_microbatch_per_dp_rank=256,
@@ -104,20 +104,23 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
             ]
             # Release A once: B, still held, must read back exactly, as a trainer rank reads it.
             await actor.maybe_release_oldest_batch.call_one()
-            microbatches_b = [
-                [await rdma_microbatch.read() for rdma_microbatch in row]
-                for row in results[4][0].microbatches
+            microbatch_groups_b = [
+                [
+                    [await rdma_microbatch.read() for rdma_microbatch in row]
+                    for row in group
+                ]
+                for group in results[4][0].microbatch_groups
             ]
             # A builder error surfaces at call_one.
             no_advantage = _group(5, [0.0, 1.0])
             no_advantage.rollouts[0].advantage = None
             with pytest.raises(ActorError, match="has no advantage"):
                 await actor.add_group.call_one(rollout_group=no_advantage)
-            return results, by_value_results, microbatches_b
+            return results, by_value_results, microbatch_groups_b
         finally:
             await mesh.stop()
 
-    results, by_value_results, microbatches_b = asyncio.run(run())
+    results, by_value_results, microbatch_groups_b = asyncio.run(run())
 
     assert [(batch is None, trainable) for batch, trainable in results] == [
         (True, True),
@@ -129,9 +132,9 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
     batch_b = results[4][0]
     assert [results[2][0].group_ids, batch_b.group_ids] == [[0, 1, 2], [3, 4]]
     # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
-    assert isinstance(batch_b.microbatches[0][0].fields["input"], _TensorRef)
+    assert isinstance(batch_b.microbatch_groups[0][0][0].fields["input"], _TensorRef)
     assert isinstance(
-        batch_b.microbatches[0][0].fields["loss_token_counts"], torch.Tensor
+        batch_b.microbatch_groups[0][0][0].fields["loss_token_counts"], torch.Tensor
     )
 
     def comparable(batch) -> dict:
@@ -139,7 +142,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         return dataclasses.asdict(dataclasses.replace(batch, metrics=[]))
 
     torch.testing.assert_close(
-        comparable(dataclasses.replace(batch_b, microbatches=microbatches_b)),
+        comparable(dataclasses.replace(batch_b, microbatch_groups=microbatch_groups_b)),
         comparable(expected[4][0]),
         rtol=0,
         atol=0,

@@ -10,12 +10,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.common.attention.cp_attention import (
-    UlyssesCPVarlenInnerAttention,
-)
+from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import (
@@ -23,20 +22,19 @@ from tests.integration_tests import (
     IntegrationTestDefinition,
     validate_fake_pg_compatibility,
 )
-from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import (
     build_features_test_list,
     llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
-    muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph,
+    muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph,
 )
-from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
-from tests.integration_tests.models import (
-    build_model_tests_list,
-    llama3_debugmodel_fsdp2_tp2_pp2,
+from tests.integration_tests.models import build_model_tests_list
+from tests.integration_tests.run_tests import (
+    _parse_test_suites,
+    run_single_test,
+    run_tests,
 )
-from tests.integration_tests.run_tests import _parse_test_suites, run_single_test
 
 
 def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
@@ -46,7 +44,7 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
     config = llama3_debugmodel_hf_checkpoint_load()
 
     assert config.checkpointer.initial_load_path == (
-        f"{test_output_dir}/hf_checkpoint/step-10/"
+        f"{test_output_dir}/hf_checkpoint/exports/step-10/"
     )
 
 
@@ -54,7 +52,7 @@ def test_spmd_typechecking_config_disables_local_compile() -> None:
     config = llama3_debugmodel_default()
 
     assert config.debug.spmd_typechecking
-    assert config.model.local_compile_regions == []
+    assert config.model.local_compile.regions == []
     config.__post_init__()
 
 
@@ -79,6 +77,72 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
     assert captured_env["TORCHTITAN_TEST_OUTPUT_DIR"] == str(
         tmp_path / "output_dir_test"
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "num_devices",
+        "ngpu_arg",
+        "test_ngpu",
+        "execution_mode",
+        "entrypoints",
+        "parallel",
+        "should_raise",
+    ),
+    [
+        (7, 8, 8, "real_pg", (), True, True),
+        (8, 8, 8, "real_pg", (), True, False),
+        (7, 8, 8, "real_pg", (), False, True),
+        (4, 8, 4, "real_pg", (), False, False),
+        (4, 8, 4, "real_pg", ("torchtitan.rl.train",), True, False),
+        (2, 8, 8, "fake_pg", (), True, True),
+        (1, 1, 8, "fake_pg", (), True, False),
+        (1, 8, 8, "fake_pg", (), False, False),
+        (0, 8, 8, "fake_pg", (), False, True),
+    ],
+)
+def test_run_tests_requires_visible_devices(
+    monkeypatch,
+    tmp_path: Path,
+    num_devices,
+    ngpu_arg,
+    test_ngpu,
+    execution_mode,
+    entrypoints,
+    parallel,
+    should_raise,
+) -> None:
+    monkeypatch.setattr(torch.accelerator, "device_count", lambda: num_devices)
+    started = []
+
+    def record_run(*args, **kwargs):
+        started.append(kwargs)
+
+    monkeypatch.setattr("tests.integration_tests.run_tests.run_single_test", record_run)
+    test = IntegrationTestDefinition(
+        configs=[llama3_debugmodel],
+        test_name="device_check_test",
+        ngpu=test_ngpu,
+        entrypoints=list(entrypoints),
+    )
+    args = SimpleNamespace(
+        test_name="all",
+        ngpu=ngpu_arg,
+        output_dir=str(tmp_path),
+        execution_mode=execution_mode,
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match=f"only {num_devices} accelerator"):
+            run_tests(args, [test], parallel=parallel)
+        assert not started
+    else:
+        run_tests(args, [test], parallel=parallel)
+        assert len(started) == 1
+        if not parallel or entrypoints:
+            assert "gpu_ids" not in started[0]
+        else:
+            assert all(gpu_id < num_devices for gpu_id in started[0]["gpu_ids"])
 
 
 def test_config_module_resolves_python_m_entrypoint(monkeypatch) -> None:
@@ -124,23 +188,14 @@ def test_numerics_run_uses_seed_config(monkeypatch, tmp_path: Path) -> None:
     assert f"--seed-config={seed_config.__name__}" in captured_command
 
 
-def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
-    config = llama3_debugmodel_fsdp2_tp2_pp2()
-
-    assert (
-        config.parallelism.num_pp_microbatches
-        >= config.parallelism.pipeline_parallel_degree
-    )
-
-
-def test_split_backward_pp_cases_exercise_varlen_cuda_graphs() -> None:
+def test_split_backward_pp_cases_exercise_varlen_accelerator_graphs() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
 
     for test_name in ("pp_looped_zero_bubble", "pp_zbv", "pp_custom_csv"):
         test = tests_by_name[test_name]
         config = test.configs[0]()
         assert not test.disabled
-        assert not config.training.disable_cuda_graphs
+        assert not config.training.disable_accelerator_graphs
         assert isinstance(
             config.model.layers[0].attention.inner_attention,
             VarlenInnerAttention.Config,
@@ -164,38 +219,29 @@ def test_varlen_cp_combinations_require_real_collectives(
     assert config.parallelism.context_parallel_degree == 2
     assert config.parallelism.tensor_parallel_degree == tp_degree
     assert config.parallelism.context_parallel_load_balancer is None
-    assert not config.training.disable_cuda_graphs
+    assert not config.training.disable_accelerator_graphs
     assert config.dataloader.max_num_documents is not None
     assert all(
-        isinstance(
-            layer.attention.inner_attention, UlyssesCPVarlenInnerAttention.Config
-        )
+        isinstance(layer.attention.inner_attention, UlyssesVarlenInnerAttention.Config)
         for layer in config.model.layers
     )
     config.__post_init__()
 
 
-def test_per_group_cuda_graph_integration_supports_fake_pg() -> None:
+def test_per_group_accelerator_graph_integration_supports_fake_pg() -> None:
     tests_by_name = {test.test_name: test for test in build_features_test_list()}
-    test = tests_by_name["fsdp_per_group_cuda_graph"]
+    test = tests_by_name["fsdp_per_group_accelerator_graph"]
     config = test.configs[0]()
 
-    assert test.configs == [muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph]
+    assert test.configs == [muse_glimmer_debugmodel_fsdp2_per_group_accelerator_graph]
     assert not test.use_real_pg
     assert test.ngpu == 2
     assert config.parallelism.data_parallel_shard_degree == 2
-    assert config.training.cuda_graph_per_accumulation_group
+    assert config.training.accelerator_graph_per_microbatch_group
     assert config.training.steps == 10
     assert config.training.num_tokens_per_train_step == (
         3 * test.ngpu * config.training.num_tokens_per_microbatch_per_dp_rank
     )
-
-
-def test_llama3_debug_config_defaults_to_short_context() -> None:
-    config = llama3_debugmodel()
-
-    assert config.model.max_context_length == 2048
-    assert config.training.max_context_length == 2048
 
 
 def test_parse_multiple_integration_test_suites() -> None:
@@ -207,39 +253,9 @@ def test_parse_multiple_integration_test_suites() -> None:
     )
 
 
-def test_h100_tests_are_registered_in_separate_suite() -> None:
-    h100_tests = build_h100_tests_list()
-    assert {test.test_name for test in h100_tests} == {
-        "deepseek_v3_fsdp+hybridep",
-        "dist_gemm",
-        "fsdp_symm_mem",
-        "kimi_k3_mm_allgather_kv_cp",
-        "kimi_k3_mm_ulysses_cp",
-        "qwen3_fsdp+deepep",
-        "qwen3_5_mm_allgather_kv_cp",
-        "qwen3_5_mm_ulysses_cp",
-        "qwen3_5_moe_lora",
-    }
-    assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
-    assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
-
-
-def test_b200_tests_are_registered_in_separate_suite() -> None:
-    assert {test.test_name for test in build_b200_tests_list()} == {
-        "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
-        "kimi_k3_mm",
-        "kimi_k3_mm_muon",
-        "dist_moe_eager_fsdp_ep_cudagraph",
-        "dist_moe_eager_fsdp_ep_pp_cudagraph",
-        "mxfp8_linear_fsdp",
-        "nvfp4_linear_fsdp",
-    }
-    assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
-
-
 def test_specialized_moe_backends_have_ep_coverage() -> None:
     specialized_names = {
-        "deepseek_v3_fsdp+hybridep",
+        "fsdp+hybridep",
         "qwen3_fsdp+deepep",
     }
     h100_model_tests = [
@@ -247,8 +263,8 @@ def test_specialized_moe_backends_have_ep_coverage() -> None:
     ]
 
     for test in h100_model_tests:
-        config = test.configs[0]()
-        assert config.parallelism.expert_parallel_degree > 1
+        for config_fn in test.configs:
+            assert config_fn().parallelism.expert_parallel_degree > 1
 
 
 def test_models_select_fake_and_real_pg_cases() -> None:
@@ -267,15 +283,8 @@ def test_models_select_fake_and_real_pg_cases() -> None:
     } <= fake_pg_model_tests
     assert {
         "deepseek_v3_fsdp+cp+pp+ep",
-        "deepseek_v4_fsdp+tp+ep",
+        "deepseek_v4_fsdp+tp+ep+pp",
     } <= real_pg_model_tests
-
-
-def test_flux_fake_pg_filters_real_collective_cases() -> None:
-    flux_tests = build_flux_test_list()
-    fake_pg_tests = {test.test_name for test in flux_tests if not test.use_real_pg}
-
-    assert fake_pg_tests == set()
 
 
 @pytest.mark.parametrize(

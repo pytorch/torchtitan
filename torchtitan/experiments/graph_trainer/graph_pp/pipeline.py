@@ -21,7 +21,7 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_remat import ActivationRematConfig
@@ -31,7 +31,7 @@ from torchtitan.distributed.pipeline_parallel import (
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
-    _split_module,
+    split_module,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -786,6 +786,7 @@ def graph_pipeline_llm(
     *,
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
+    precision: PrecisionConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
     activation_remat: ActivationRematConfig | None,
@@ -800,6 +801,7 @@ def graph_pipeline_llm(
         model: The full model before PP stage splitting.
         parallelism_context: TorchTitan parallel dimension helper.
         training: Training config used for local batch size.
+        precision: Parameter, compute, and gradient-reduction dtypes.
         parallelism: Parallelism config used for PP schedule and module split.
         compile_config: GraphTrainer compile config.
         activation_remat: Activation remat config forwarded to the model.
@@ -841,9 +843,10 @@ def graph_pipeline_llm(
     model_parts: list[BaseModel] = []
     stages: list[GraphPipelineStage] = []
     for stage_index in pp_rank_to_stage_indices:
-        model_part = _split_module(model, module_names_per_stage[stage_index])
+        model_part = split_module(model, module_names_per_stage[stage_index])
         model_part = model_part.parallelize(
             parallelism_context=parallelism_context,
+            precision=precision,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
