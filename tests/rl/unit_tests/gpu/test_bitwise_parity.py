@@ -228,8 +228,6 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
             set_batch_invariance(True)
         backend_enum = AttentionBackendEnum.CUSTOM
     if gen_config.debug.batch_invariant:
-        # The v2 logprob and temperature Triton kernels bypass the aten overrides.
-        # Apply the same generator-side patch the production Generator does.
         from torchtitan.rl.generator.vllm.batch_invariance import (
             force_trainer_logprobs_for_batch_invariance,
         )
@@ -518,8 +516,9 @@ def vllm_prefill(engine, all_prompt_ids):
 
 def vllm_generate(engine, all_prompt_ids, max_tokens):
     """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
-    # TODO: add a temperature 0.8 arm (processed logprobs, trainer logits / T). Greedy
-    # decoding never runs vLLM's temperature kernel, so no test checks that patch.
+    # TODO: add a temperature 0.8 arm: build the engine with
+    # logprobs_mode="processed_logprobs" and compare against compute_logprobs(..., temperature=).
+    # Greedy skips vLLM's temperature kernel, so this GPU test never runs that patch.
     params = SamplingParams(
         temperature=0.0,
         top_p=1.0,

@@ -125,11 +125,13 @@ def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
     def vllm_apply_temperature(logits, expanded_idx_mapping, temperature):
         raise AssertionError("vLLM's Triton temperature kernel ran")
 
-    sample = "vllm.v1.worker.gpu.sample"
+    sampler_package = "vllm.v1.worker.gpu.sample"
     for name in ("logprob", "prompt_logprob"):
-        modules[f"{sample}.{name}"].compute_token_logprobs = vllm_compute_token_logprobs
+        modules[
+            f"{sampler_package}.{name}"
+        ].compute_token_logprobs = vllm_compute_token_logprobs
     for name in ("gumbel", "states", "new_importer"):
-        modules[f"{sample}.{name}"].apply_temperature = vllm_apply_temperature
+        modules[f"{sampler_package}.{name}"].apply_temperature = vllm_apply_temperature
 
     calls = []
     compute_logprobs = loss_module.compute_logprobs
@@ -146,7 +148,7 @@ def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
         dtype=torch.bfloat16,
     )
     token_ids = torch.tensor([[3, 0, 2], [2, 1, 3]], dtype=torch.int32)
-    actual = modules[f"{sample}.prompt_logprob"].compute_token_logprobs(
+    actual = modules[f"{sampler_package}.prompt_logprob"].compute_token_logprobs(
         logits, token_ids
     )
     expected = torch.log_softmax(logits.float(), dim=-1).gather(
@@ -165,11 +167,11 @@ def test_vllm_sampler_patch_uses_trainer_ops(monkeypatch):
     temperature = torch.tensor([0.0, 0.8, 0.7])  # per request
     expanded_idx_mapping = torch.tensor([1, 0, 2])  # row -> request
     scaled = logits.clone()
-    modules[f"{sample}.states"].apply_temperature(
+    modules[f"{sampler_package}.states"].apply_temperature(
         scaled, expanded_idx_mapping, temperature
     )
     row_temperature = torch.tensor([0.8, 1.0, 0.7])
     assert torch.equal(scaled, logits / row_temperature.unsqueeze(-1).expand_as(logits))
     # Any vLLM module that imports a function by name gets the PyTorch version.
-    patched = modules[f"{sample}.gumbel"].apply_temperature
-    assert modules[f"{sample}.new_importer"].apply_temperature is patched
+    patched = modules[f"{sampler_package}.gumbel"].apply_temperature
+    assert modules[f"{sampler_package}.new_importer"].apply_temperature is patched
