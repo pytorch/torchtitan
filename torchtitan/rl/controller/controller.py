@@ -544,8 +544,8 @@ class Controller(Configurable):
         def max_num_seqs_per_generator_dp_rank(self) -> int:
             """2x each generator DP rank's even share of the training rollouts in flight,
             rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
-            budget is ``generator.max_num_batched_tokens``, or 2048 when unset: the smallest value in
-            vLLM's table, and what FA2 GPUs keep (``resolve_max_num_batched_tokens``).
+            budget is ``generator.max_num_batched_tokens``. When it is unset, each generator picks it
+            for its GPU, and the clamp uses 2048: the smallest default vLLM picks on CUDA.
 
             Example (token budget unset):
                 1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
@@ -570,7 +570,7 @@ class Controller(Configurable):
                 math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
             )
             # vLLM requires max_num_seqs <= max_num_batched_tokens. An unset budget resolves to at
-            # least the max_num_seqs returned here (resolve_max_num_batched_tokens).
+            # least min(2048, max_num_seqs * max_model_len), so the value returned here fits.
             return min(max_num_seqs, max_num_batched_tokens)
 
     def __init__(self, config: Config):

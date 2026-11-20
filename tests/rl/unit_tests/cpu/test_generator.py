@@ -769,11 +769,29 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
+# vLLM's default step budget by usage context. Injected: vLLM's config builder needs a real model.
+_MAX_NUM_BATCHED_TOKENS_BY_USAGE_CONTEXT = {
+    UsageContext.OPENAI_API_SERVER: 4096,  # vllm serve
+    UsageContext.ENGINE_CONTEXT: 2048,  # LLMEngine.from_engine_args
+}
+
+
 def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
     monkeypatch.setattr(vllm_engine_module, "EngineArgs", engine_args)
+    monkeypatch.setattr(
+        vllm_config_module.EngineArgs,
+        "create_engine_config",
+        lambda engine_args, usage_context: SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                max_num_batched_tokens=_MAX_NUM_BATCHED_TOKENS_BY_USAGE_CONTEXT[
+                    usage_context
+                ]
+            )
+        ),
+    )
     monkeypatch.setattr(vllm_engine_module, "LLMEngine", Mock())
     monkeypatch.setattr(vllm_engine_module, "register_to_vllm", Mock())
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
@@ -816,27 +834,20 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["scheduling_policy"] == "priority"
 
 
-# max_num_seqs=8 x max_context_length=1024 caps the budget at 8192.
 @pytest.mark.parametrize(
-    "sm90_or_newer, table_value, expected",
-    [(True, 4096, 4096), (True, 16384, 8192), (False, 16384, 2048)],
+    "sm90_or_newer, usage_context",
+    [(True, UsageContext.OPENAI_API_SERVER), (False, UsageContext.ENGINE_CONTEXT)],
 )
-def test_unset_max_num_batched_tokens_uses_gpu_default(
-    monkeypatch, tmp_path, sm90_or_newer, table_value, expected
+def test_unset_max_num_batched_tokens_uses_vllm_default(
+    monkeypatch, tmp_path, sm90_or_newer, usage_context
 ):
-    # Injected table values: 4096 is in no real tier, and 16384 is above the 8192 cap.
-    # GPUs below compute capability 9.0 (FA2) keep 2048 whatever the table says.
     monkeypatch.setattr(
         vllm_config_module, "has_cuda_capability", lambda major, minor: sm90_or_newer
-    )
-    monkeypatch.setattr(
-        vllm_config_module.EngineArgs,
-        "get_batch_defaults",
-        lambda world_size: ({UsageContext.OPENAI_API_SERVER: table_value}, {}),
     )
     engine_kwargs = _build_engine_kwargs(
         monkeypatch, tmp_path, Generator.Config(model=_MODEL_CONFIG)
     )
+    expected = _MAX_NUM_BATCHED_TOKENS_BY_USAGE_CONTEXT[usage_context]
     assert engine_kwargs["max_num_batched_tokens"] == expected
     # FULL graphs (the default) capture mixed steps up to the same budget.
     assert engine_kwargs["compilation_config"].cudagraph_capture_sizes[-1] == expected
@@ -847,7 +858,7 @@ def test_unset_max_num_batched_tokens_uses_gpu_default(
     [
         # Always set by TorchTitan.
         ("scheduling_policy", r"controls: scheduling_policy$"),
-        # Derived from a config field: the error names the field.
+        # Set only when the config field is set, so absent from engine_kwargs here.
         (
             "max_num_batched_tokens",
             r"use Generator\.Config\.max_num_batched_tokens",

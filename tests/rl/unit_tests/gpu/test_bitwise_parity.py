@@ -248,11 +248,8 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
     max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
-    max_num_batched_tokens = resolve_max_num_batched_tokens(
-        gen_config.max_num_batched_tokens,
-        max_num_seqs=max_num_seqs,
-        max_model_len=gen_config.model.max_context_length,
-    )
+    engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
+    max_num_batched_tokens = resolve_max_num_batched_tokens(engine_kwargs)
     engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(

@@ -31,8 +31,7 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig
+from vllm import LLMEngine, SamplingParams
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
@@ -40,16 +39,9 @@ from vllm.sampling_params import RequestOutputKind
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.rl.generator.vllm.config import resolve_max_num_batched_tokens
-from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
-from torchtitan.rl.generator.vllm.registry import (
-    register_to_vllm,
-    TORCHTITAN_CONFIG_FORMAT,
-    TORCHTITAN_WORKER_CLS,
-    vllm_attention_backend,
-)
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
+from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import has_cuda_capability
 
 
 logger = init_logger(__name__)
@@ -142,54 +134,20 @@ def generate() -> None:
     )
     logger.debug(f"Expert Parallel Enabled: {enable_ep}")
 
-    # Create EngineArgs from config
-    engine_kwargs = dict(
-        # Model configuration
-        model=model_path,
-        trust_remote_code=True,
-        config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=config.precision.param_dtype,
-        # Parallelism configuration
-        tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
-        data_parallel_size=gen_config.parallelism.data_parallel_degree,
-        enable_expert_parallel=enable_ep,
-        worker_cls=TORCHTITAN_WORKER_CLS,
-        # Use external_launcher only when launched via torchrun (multi-GPU);
-        # for single-GPU, let vLLM pick the default executor.
-        distributed_executor_backend=("external_launcher"),
-        # Memory and performance
-        gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=engine_config.cuda_graph.mode == "NONE",
-        attention_config=AttentionConfig(
-            backend=vllm_attention_backend(model_config),
-        ),
-        disable_log_stats=False,
-    )
-    engine_kwargs["max_model_len"] = model_config.max_context_length
-    engine_kwargs["max_num_seqs"] = max_num_seqs
-    max_num_batched_tokens = resolve_max_num_batched_tokens(
-        gen_config.max_num_batched_tokens,
+    engine_args = VLLMEngine.build_engine_args(
+        engine_config,
+        model_config,
+        parallelism=gen_config.parallelism,
+        model_path=model_path,
         max_num_seqs=max_num_seqs,
-        max_model_len=model_config.max_context_length,
+        param_dtype=config.precision.param_dtype,
+        gpu_memory_limit=gen_config.gpu_memory_limit,
+        max_num_batched_tokens=gen_config.max_num_batched_tokens,
+        seed=gen_config.debug.seed,
+        serves_images=False,
     )
-    engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
-    engine_kwargs["watermark"] = engine_config.watermark
-    if not has_cuda_capability(9, 0):
-        engine_kwargs["block_size"] = 256
-    expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
-        max_num_seqs=max_num_seqs,
-        max_model_len=model_config.max_context_length,
-        max_num_batched_tokens=max_num_batched_tokens,
-        expert_sequence_parallel_size=expert_sequence_parallel_size,
-        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
-    )
-    if vllm_compilation_config is not None:
-        engine_kwargs["compilation_config"] = vllm_compilation_config
-    if gen_config.debug.seed is not None:
-        engine_kwargs["seed"] = gen_config.debug.seed
-    add_extra_vllm_engine_args(engine_kwargs, engine_config.extra_engine_args)
-    engine_args = EngineArgs(**engine_kwargs)
+    # This script takes text prompts and prints text, so vLLM needs its tokenizer.
+    engine_args.skip_tokenizer_init = False
 
     logger.debug("Initializing LLMEngine from EngineArgs...")
     engine = LLMEngine.from_engine_args(engine_args)
