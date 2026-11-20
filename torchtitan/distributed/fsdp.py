@@ -22,7 +22,7 @@ from torch.distributed.tensor import Shard
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
@@ -380,8 +380,9 @@ def apply_fsdp_to_decoder(
             - "never" disables ``reshard_after_forward`` for all forward passes.
         ep_degree (int, optional): Expert-parallel degree. Defaults to 1 (no EP),
             in which case the MoE-specific sharding and prefetching are no-ops.
-        edp_mesh (DeviceMesh | None, optional): The FSDP mesh for routed-expert
-            parameters when EP > 1. Required (non-None) iff ``ep_degree > 1``.
+        edp_mesh (DeviceMesh | None, optional): The FSDP mesh for params whose
+            declared layout has the EP axis. Required (non-None) iff
+            ``ep_degree > 1``.
         dp_mesh_dims: Under spmd_types, ``fully_shard`` must flatten
             ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
             needs to know which axes of the multi-dimensional SPMD mesh are
@@ -391,7 +392,7 @@ def apply_fsdp_to_decoder(
             strong enough to infer safely, and an explicit declaration
             avoids silent miscategorization when new mesh axes appear.
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
-            used by routed experts.
+            used by params whose declared layout has the EP axis.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
         unshard_in_current_stream: Whether to issue pre-forward/pre-backward
             all-gathers on the current (compute) stream via
@@ -456,8 +457,8 @@ def apply_fsdp_to_decoder(
         stacked_param_placements = linear_param_shard_placements(transformer_block)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
-        # - When EP > 1: routed-expert parameters use edp_mesh, while other
-        #   parameters use dp_mesh.
+        # - When EP > 1: parameters whose declared layout has the EP axis use
+        #   edp_mesh, while other parameters use dp_mesh.
         # - When EP = 1: all params use the same FSDP mesh, but experts may
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
@@ -515,6 +516,16 @@ def apply_fsdp_to_decoder(
 
                 assert edp_mesh is not None
 
+                sparse_params = {
+                    param
+                    for module in transformer_block.modules()
+                    if isinstance(module, Module)
+                    and module._sharding_config is not None
+                    for name, param in module.named_parameters(recurse=False)
+                    if MeshAxisName.EP
+                    in module._sharding_config.state_shardings[name].local_type
+                }
+
                 # Delegate to FSDP2's mesh-info builder. When mesh_dims is set
                 # it extracts and FLATTENS the DP submesh from the full SPMD
                 # mesh.
@@ -527,6 +538,7 @@ def apply_fsdp_to_decoder(
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
+                    _sparse_params: set[nn.Parameter] = sparse_params,
                     _expert_param_placements: dict[
                         nn.Parameter, Shard
                     ] = expert_param_placements,
@@ -534,9 +546,10 @@ def apply_fsdp_to_decoder(
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
-                    if (placement := _expert_param_placements.get(param)) is not None:
+                    if param in _sparse_params:
                         return ShardPlacementResult(
-                            placement=placement, mesh_info=_edp_mesh_info
+                            placement=_expert_param_placements[param],
+                            mesh_info=_edp_mesh_info,
                         )
                     else:
                         return ShardPlacementResult(
