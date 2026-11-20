@@ -1296,20 +1296,17 @@ class Controller(Configurable):
         """Run num_training_steps optimizer steps: train one packed batch, push the trainer's model
         state dict, then pull it into the generators, log metrics.
 
-        The push and pull of policy N overlap forward/backward N+1:
+        The pull of policy N overlaps forward/backward N+1; the push before it does not:
 
-            Trainer:    forward/backward N
-            Controller: await push N-1     (optimizer N must not mutate weights push N-1 reads)
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite pushed weights mid-pull)
-            Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: ModelStateDictTransport stage (or TorchStore put_state_dict) of policy N
+            Controller: await push N       (forward/backward N+1 would hold back its reply; see the await)
+            Controller: start pull N -> release groups, in the background
                           |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
-            Trainer:    forward/backward N+1 (does not mutate persistent model state)
+            Trainer:    forward/backward N+1
 
-        See `Trainer.push_model_state_dict` for why the push can overlap forward/backward, and
-        `Generator.load_model_state_dict` for how a generator applies the load between steps.
+        See `Generator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
@@ -1318,8 +1315,7 @@ class Controller(Configurable):
             waits for:    a TrainerStepBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
-        # The previous step's push and pull, each returning its wall time; None before the first.
-        push_task: asyncio.Task[float] | None = None
+        # The previous step's pull, returning its wall time; None before the first.
         pull_task: asyncio.Task[float] | None = None
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
@@ -1399,15 +1395,6 @@ class Controller(Configurable):
                         logger.error("Loss is NaN/Inf; training diverged")
                         break
 
-                # Await the trainer model state dict push before the optimizer mutates the weights.
-                with (
-                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
-                    step_timer.record(
-                        "timing/step/blocking_trainer_push_model_state_dict"
-                    ),
-                ):
-                    push_s = await push_task if push_task is not None else 0.0
-
                 with (
                     sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
@@ -1435,11 +1422,25 @@ class Controller(Configurable):
                 ):
                     pull_s = await pull_task if pull_task is not None else 0.0
 
-                # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
-                push_task = self._start_push_model_state_dict()
+                # Finish the push before forward/backward N+1: forward/backward blocks the trainer's event loop,
+                # so a push still running then would reply after it and start the pull late.
+                # TODO: to hide the push, run forward_backward on a thread (or reply from the push's worker thread), and
+                # before optimizer N+1 wait only for the GPU -> CPU copy, not later processing (e.g. quantization).
+                # Not needed while the push is short: 0.12 s vs a 45 s forward/backward (Qwen3.5-27B, 2 GB300 hosts).
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
+                ):
+                    push_start = time.perf_counter()
+                    await self.trainer.all_ranks.push_model_state_dict.call()
+                    push_s = time.perf_counter() - push_start
+
+                # Overlap this step's pull -> group release with the next step's fwd/bwd.
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
-                        optimizer_result.policy_version, after=push_task
+                        optimizer_result.policy_version
                     )
                 )
 
@@ -1463,7 +1464,7 @@ class Controller(Configurable):
                         *self._group_buffer.metrics(),
                         *time_metrics,
                         *policy_age_panel,
-                        # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
+                        # This step's push and the previous step's pull.
                         m.Metric(
                             "timing/weight_sync/trainer_push_model_state_dict",
                             m.NoReduce(push_s),
@@ -1483,35 +1484,16 @@ class Controller(Configurable):
 
             self._maybe_start_validation(step=step)
 
-        # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
-        # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
-        # a failed push's error in the pull task ("Task exception was never retrieved"). Cancel or await both
-        # in a `finally`.
-        # Finish the last push and pull so generators hold the final weights for the validation after
-        # training (`validate_after_training`).
-        if push_task is not None:
-            await push_task
+        # TODO: if this loop raises (e.g. a failed forward/backward, optimizer step or validation), the pull
+        # still in flight keeps running while run() tears down. Cancel or await it in a `finally`.
+        # Finish the last pull so generators hold the final weights for the validation after training
+        # (`validate_after_training`).
+        if pull_task is not None:
             await pull_task
 
-    def _start_push_model_state_dict(self) -> asyncio.Task[float]:
-        """Send the trainer's model state dict push now, so each trainer rank starts it before the next
-        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
-        start = time.perf_counter()
-        push = self.trainer.all_ranks.push_model_state_dict.call()
-
-        async def wait() -> float:
-            with sl.log_trace_span("trainer_push_model_state_dict"):
-                await push
-            return time.perf_counter() - start
-
-        return asyncio.create_task(wait())
-
-    async def _pull_model_state_dict_and_release_groups(
-        self, version: int, *, after: asyncio.Task[float]
-    ) -> float:
-        """Once the push ``after`` lands, load policy ``version`` into every generator, then admit
-        the next rollout groups; returns the pull's wall time in seconds."""
-        await after
+    async def _pull_model_state_dict_and_release_groups(self, version: int) -> float:
+        """Load policy ``version`` into every generator, then admit the next rollout groups; returns
+        the pull's wall time in seconds."""
         with sl.log_trace_span("generator_pull_model_state_dict"):
             start = time.perf_counter()
             await self.generator_router.pull_model_state_dict.call_one(version)
