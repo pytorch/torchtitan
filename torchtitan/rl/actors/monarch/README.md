@@ -22,10 +22,10 @@ dependency of its own: it declares the service's methods as
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
-| `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process; supplies `MonarchRDMAMicrobatch.register`. |
+| `batcher.py` | `BatcherActor`, the endpoints of `rl/trainer/batcher.py`'s `Batcher`, in its own CPU process: on the controller's host, or with RDMA microbatches on the host that `batcher_host` picks; supplies `MonarchRDMAMicrobatch.register`. |
 | `rdma_microbatch.py` | `MonarchRDMAMicrobatch`, the `RDMAMicrobatch` (`rl/trainer/rdma_microbatch.py`) on Monarch RDMA buffers: the batcher keeps a microbatch's large tensors and each trainer rank reads its column. |
 | `rollout_worker.py` | `RolloutWorkerActor`, one rollout worker process. The workers spread evenly over the hosts that `Rollouter.Config.worker_roles` picks by role: the trainer's, the generators' and the controller's (`rollout_worker_hosts`). What each env needs on every host: [Rollout workers on more than one host](../../README.md#rollout-workers-on-more-than-one-host). |
-| `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), the rollout workers' hosts (`rollout_worker_hosts`), and the Monarch client's `shutdown`. |
+| `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), the batcher's host with RDMA (`batcher_host`), the rollout workers' hosts (`rollout_worker_hosts`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
 | `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), `PBSLauncher` (`pbs.py`), and the submit command (`submit.py`). |
 

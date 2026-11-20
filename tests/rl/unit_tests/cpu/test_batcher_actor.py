@@ -8,6 +8,7 @@
 
 import asyncio
 import dataclasses
+import socket
 
 import numpy as np
 import pytest
@@ -78,7 +79,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
     batcher = Batcher.Config().build(**_BATCHER_KWARGS)
     expected = [batcher.add_group(rollout_group=group) for group in groups]
 
-    async def run() -> tuple[list, list, list]:
+    async def run() -> tuple[list, list, list, str]:
         mesh = this_host().spawn_procs(per_host={"cpus": 1})
         try:
             spawn_kwargs = dict(
@@ -116,11 +117,14 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
             bad_prefix.rollouts[0].turns[0].prompt_prefix_len = 99
             with pytest.raises(ActorError, match="reuses 99 tokens"):
                 await actor.add_group.call_one(rollout_group=bad_prefix)
-            return results, by_value_results, microbatch_groups_b
+            hostname = await actor.get_hostname.call_one()
+            return results, by_value_results, microbatch_groups_b, hostname
         finally:
             await mesh.stop()
 
-    results, by_value_results, microbatch_groups_b = asyncio.run(run())
+    results, by_value_results, microbatch_groups_b, hostname = asyncio.run(run())
+
+    assert hostname == socket.gethostname()
 
     assert [(batch is None, trainable) for batch, trainable in results] == [
         (True, True),
@@ -130,6 +134,10 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         (False, True),
     ]
     batch_b = results[4][0]
+    # Each batch carries the batcher's RAM.
+    assert {"batcher/ram_gib", "batcher/peak_ram_gib"} <= {
+        metric.key for metric in batch_b.metrics
+    }
     assert [results[2][0].group_ids, batch_b.group_ids] == [[0, 1, 2], [3, 4]]
     # int64 fields (2 KiB) cross processes by ref; the token counts go by value.
     assert isinstance(batch_b.microbatch_groups[0][0][0].fields["input"], _TensorRef)

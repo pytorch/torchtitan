@@ -610,6 +610,18 @@ def test_rollout_worker_hosts_uses_the_default_of_an_unset_role(monkeypatch) -> 
     assert hosts == ["this_host", "g0", "g1"]
 
 
+@pytest.mark.parametrize(
+    "trainer, expected",
+    [("t*3", "t2"), ("t*1", "t0"), (None, "this_host")],
+    ids=["three_trainer_hosts", "one_trainer_host", "no_launcher"],
+)
+def test_batcher_host_is_the_last_trainer_host(monkeypatch, trainer, expected):
+    monkeypatch.setattr(provisioning, "this_host", lambda: "this_host")
+    host_meshes = _host_meshes(trainer, ["g*1"], True)
+
+    assert provisioning.batcher_host(host_meshes=host_meshes) == expected
+
+
 def _simulated_host() -> str:
     """The host this process runs on, as `ProcessJob` names it, e.g. "trainer_1"."""
     # TODO: read a public Monarch value once one names ProcessJob hosts. This env var is private,
