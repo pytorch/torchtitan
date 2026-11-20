@@ -75,7 +75,7 @@ def _wrapper(
 
 
 def test_forward_passes_vllm_padding_mask(forward_context):
-    # CUDA graphs capture vLLM's buffer, so the wrapper must pass it, not a copy.
+    # The wrapper passes vLLM's per-step mask through unchanged.
     forward_context.is_padding = torch.tensor([False, False, False, True, True])
     wrapper = _wrapper(dist_moe=True)
     wrapper.forward(input_ids=torch.arange(5))

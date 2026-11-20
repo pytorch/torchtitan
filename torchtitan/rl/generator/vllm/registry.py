@@ -115,7 +115,7 @@ def vllm_block_size(cfg: Decoder.Config) -> int | None:
     """Return the KV cache block size to pass vLLM for ``cfg``, or ``None`` for vLLM's default.
 
     Example:
-        flex with a pinned BLOCK_N (batch-invariant mode) -> BLOCK_N (16)
+        flex with a pinned BLOCK_N (batch-invariant mode) -> BLOCK_N, e.g. 16
         any other model, GPU older than SM90 (FA2)        -> 256
         any other model, SM90 or newer                    -> None
     """
@@ -126,8 +126,8 @@ def vllm_block_size(cfg: Decoder.Config) -> int | None:
         isinstance(kernel_config, FlexInnerAttention.Config)
         and "BLOCK_N" in kernel_config.kernel_options
     ):
-        # vLLM's flex backend tiles keys by the KV block size (vLLM main's default is
-        # 64). The trainer's pinned BLOCK_N needs blocks of that size to match bitwise.
+        # vLLM's flex backend tiles keys by the KV cache block size, so blocks must be
+        # BLOCK_N long to match the trainer bitwise.
         return kernel_config.kernel_options["BLOCK_N"]
     if not has_cuda_capability(9, 0):
         # FA2 requires block_size to be a multiple of 256.
@@ -303,7 +303,7 @@ def register_to_vllm(
         # be contiguous in vLLM's convolution state cache.
         os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
-    from transformers import PreTrainedConfig
+    from transformers import PretrainedConfig
     from vllm.model_executor.models.registry import ModelRegistry
     from vllm.transformers_utils.config import register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
@@ -381,7 +381,7 @@ def register_to_vllm(
             config_dict = model_config_to_hf_config_dict(
                 model_config, serves_images=vision_processor is not None
             )
-            return config_dict, PreTrainedConfig.from_dict(config_dict)
+            return config_dict, PretrainedConfig.from_dict(config_dict)
 
     # vLLM's default is_deepseek_mla only recognizes a hardcoded list of model
     # types, which excludes model_type="torchtitan", so is_mla would be False.

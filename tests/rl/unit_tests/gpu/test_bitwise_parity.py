@@ -192,18 +192,19 @@ def _set_generator_determinism(debug) -> None:
         torch.manual_seed(debug.seed)
 
 
-def _clear_dtensor_sharding_caches() -> None:
+def clear_dtensor_sharding_caches() -> None:
     """Clear DTensor's sharding-propagation caches before building a generator.
 
     The caches match meshes by equality, not identity. A process that already built
-    other meshes (the trainer here, or an earlier test's engine) holds equal but
+    other meshes (a parity test's trainer, or an earlier test's engine) holds equal but
     separate mesh objects, and the generator's params can pick them up:
-      trainer mesh in this test      -> fully_shard fails its mesh identity check
+      a parity test's trainer mesh   -> fully_shard fails its mesh identity check
       an earlier test's engine mesh  -> its process groups are gone after vLLM's
                                         shutdown, so DTensor collectives fail
     No production impact: production builds one generator per process.
     """
-    # TODO: Revisit DTensor sharding-propagation cache semantics on pytorch side
+    # TODO: delete this helper once DTensor's sharding-propagation caches drop the
+    # entries of meshes whose process groups were destroyed; needs a PyTorch change.
     torch._C._clear_DTensor_sharding_propagator_cache()
     DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
 
@@ -689,7 +690,7 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
 
-        _clear_dtensor_sharding_caches()
+        clear_dtensor_sharding_caches()
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
