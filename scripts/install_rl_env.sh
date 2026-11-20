@@ -71,29 +71,33 @@ uv pip install --upgrade torch torchvision --pre \
   --index-strategy unsafe-best-match \
   "${constraints[@]}"
 
-# The vLLM release pins an older torch, but its compiled kernels use only
-# torch's stable ABI, so they load on the torch nightly; RL CI checks the rest.
+# The vLLM release pins an older torch. Its compiled kernels use only torch's
+# stable ABI, so they load on the nightly; RL CI tests vLLM's Python code on it.
 # The override keeps the installed torch and torchvision over vLLM's pins.
-# An override whose marker is never true removes the package: vLLM uses
-# torchaudio and torchcodec only for audio and video inputs.
 overrides="$(mktemp)"
 uv pip freeze | grep -E '^(torch|torchvision)==' > "$overrides"
+# vLLM needs torchaudio and torchcodec only for audio and video inputs: drop them
+# (a uv override whose marker is never true removes the package).
 printf '%s\n' 'torchaudio; sys_platform == "never"' \
   'torchcodec; sys_platform == "never"' >> "$overrides"
 uv pip install "vllm==${vllm_version}" --override "$overrides" \
   --extra-index-url "https://download.pytorch.org/whl/nightly/${cuda}" \
   --index-strategy unsafe-best-match \
   "${constraints[@]}"
+rm "$overrides"
+
+# Fail if the vLLM install replaced the torch or torchvision nightly.
 python - "$cuda" <<'PY'
 import sys
 from importlib.metadata import version
 
 wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
 print(wheels)
-assert all(
+if not all(
     ".dev" in wheels[name] and f"+{sys.argv[1]}" in wheels[name]
     for name in ("torch", "torchvision")
-), wheels
+):
+    sys.exit(f"Expected {sys.argv[1]} nightlies of torch and torchvision, got {wheels}")
 PY
 
 # Not on PyPI; --no-deps keeps them from replacing the nightly torch.

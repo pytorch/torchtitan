@@ -17,16 +17,14 @@ logger = logging.getLogger(__name__)
 # TODO: delete once vLLM's batch-invariant mode runs the V2 sampler's logprob and
 # temperature kernels as PyTorch ops.
 def force_trainer_logprobs_for_batch_invariance() -> None:
-    """Replace the Triton logprob and temperature kernels of vLLM's v2 sampler with PyTorch ops.
+    """Replace two Triton kernels of vLLM's V2 sampler with PyTorch ops, so generator
+    logprobs match the trainer's bit for bit.
 
-    The v2 GPU sampler computes per-token logprobs with a fused Triton kernel
-    (``compute_token_logprobs`` -> ``_topk_log_softmax_kernel``) that inlines
-    ``log(softmax(logits))`` and never calls PyTorch ops. It also divides logits
-    by the temperature in a Triton kernel (``apply_temperature``).
+        vLLM function            replaced by
+        compute_token_logprobs   the trainer's ``compute_logprobs``, once per token id column
+        apply_temperature        ``logits.div_(temperature)``, the trainer's division
 
-    Swapping both kernels routes the generator and the trainer through
-    the same set of ops, so logprobs match bit-for-bit. The wrapper supplies
-    full logits to vLLM, so the wrapper explicitly selects the replicated path.
+    Batch-invariant mode overrides aten ops only, and these Triton kernels never call aten.
     """
     import vllm.v1.worker.gpu.sample.gumbel as vllm_gumbel
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
@@ -67,9 +65,9 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
         ]
         return torch.stack(per_column, dim=-1)  # [N, K]
 
-    # vLLM's Triton kernel divides less precisely than PyTorch: at temperature 0.8,
-    # 15% of fp32 logits differ by up to 1 ulp (GB300), so the trainer's logprobs
-    # differ too.
+    # vLLM's Triton kernel rounds fp32 division less precisely than PyTorch: at
+    # temperature 0.8, 15% of logits differ by up to 1 ulp (GB300), so generator
+    # logprobs would not match the trainer's.
     def generator_apply_temperature(
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
@@ -77,15 +75,19 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
     ) -> None:
         """In place, divide each row of ``[N, V]`` fp32 logits by its request's temperature.
 
-        Greedy rows (temperature 0) stay unchanged, as in vLLM's kernel.
+        Example:
+
+            temperature = [0.0, 0.8, 0.7]     # one per request; 0.0 = greedy
+            expanded_idx_mapping = [1, 0, 2]  # row -> request
+            # rows are divided by [0.8, 1.0, 0.7]: greedy rows stay unchanged, as in vLLM's kernel
         """
         row_temperature = temperature[expanded_idx_mapping]
         row_temperature = torch.where(row_temperature == 0.0, 1.0, row_temperature)
         logits.div_(row_temperature.unsqueeze(-1))
 
-    # vLLM modules import these functions by name (prompt_logprob.py and states.py
-    # today), so rebind the name in every loaded vLLM module that holds vLLM's
-    # function. Modules loaded later import the patched function.
+    # vLLM modules import these functions by name (e.g. prompt_logprob.py, states.py),
+    # so rebind the name in every loaded vLLM module that holds vLLM's function.
+    # Modules loaded later import the patched function.
     for name, defining_module, replacement in (
         ("compute_token_logprobs", vllm_logprob, generator_compute_token_logprobs),
         ("apply_temperature", vllm_gumbel, generator_apply_temperature),

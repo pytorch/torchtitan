@@ -261,8 +261,6 @@ class VLLMEngine(GenerationEngine):
             vision_processor=vision_processor,
         )
         if batch_invariant:
-            # vLLM's v2 logprob and temperature Triton kernels bypass the batch-invariant
-            # aten overrides; replace them with the trainer's PyTorch ops.
             force_trainer_logprobs_for_batch_invariance()
 
     def _build_engine_args(

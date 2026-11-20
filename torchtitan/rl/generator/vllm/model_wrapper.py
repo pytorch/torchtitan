@@ -25,7 +25,7 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
@@ -305,13 +305,13 @@ class VLLMModelWrapper(Module):
             device=device,
         )
         # forward pads a step to a multiple of TP when TP shards the routed tokens.
-        token_multiple = parallelism.expert_sequence_parallel_size
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         validate_ep_token_dispatcher_capacity(
             self.config,
             parallelism=parallelism,
-            max_num_tokens_per_step=-(-max_num_batched_tokens // token_multiple)
-            * token_multiple,
+            max_num_tokens_per_step=round_up(
+                max_num_batched_tokens, self._expert_sequence_parallel_size
+            ),
         )
         self._initialize_dist_moe_runtime(
             dist_moe_runtime, max_num_batched_tokens, device
@@ -339,9 +339,11 @@ class VLLMModelWrapper(Module):
     def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int:
         """Return the Dist-MoE row count every EP rank passes in this step.
 
-        Every EP rank must pass the same count. ``forward`` pads each step to a
-        multiple of TP and the MoE splits it evenly over TP, so this is the largest
-        step's token count over TP, rounded up: DP counts [5, 3] at TP 4 -> 2 rows.
+        Every EP rank must pass the same count: the largest DP replica's token count
+        over TP, rounded up. At TP 4:
+
+            DP 1, ``forward`` padded 5 rows to 8          -> 8 / 4 = 2
+            DP 2, vLLM's counts [5, 3] (before padding)  -> cdiv(5, 4) = 2
         """
         tp = self.parallelism_context.tp
         dp_metadata = get_forward_context().dp_metadata
@@ -469,21 +471,25 @@ class VLLMModelWrapper(Module):
 
         Call once per forward.
         """
-        # vLLM's padding mask (graph size, DP equalization, an idle DP rank's
-        # dummy rows), captured by graphs and rewritten every step, plus the rows
-        # forward padded. Only Dist-MoE reads it: padding rows go to expert -1.
+        # Only Dist-MoE reads the padding mask: padding rows go to expert -1.
         if self._dist_moe_runtime is None:
             return {}
+
+        # True for the rows vLLM added: padding to a CUDA-graph size or to the
+        # largest DP replica, or an idle DP rank's dummy batch. vLLM refills this
+        # buffer before every step, so a CUDA-graph replay reads the current mask.
         padding_mask = get_forward_context().is_padding
         if padding_mask is None:
             raise RuntimeError(
                 "vLLM set no ForwardContext.is_padding for this forward, so "
                 "Dist-MoE can't tell padding rows from real ones."
             )
-        # forward padded vLLM's step to num_tokens rows.
+
+        # The rows `forward` added to reach a multiple of TP are padding too.
         num_padding_rows = num_tokens - padding_mask.shape[0]
         if num_padding_rows:
             padding_mask = F.pad(padding_mask, (0, num_padding_rows), value=True)
+
         self._dist_moe_runtime.set_num_local_input_tokens_per_call(
             self._dist_moe_num_local_input_tokens(num_tokens)
         )

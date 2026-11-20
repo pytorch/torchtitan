@@ -26,7 +26,7 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 Supported entries completed a two-step end-to-end RL run with a representative
 debug model, including rollout generation, training, and the model state dict transfer to the generators.
 Generator DP and TP were tested together at degree 2; EP was tested at degree 4
-for MoE models. Generator sequence parallelism was disabled. DeepSeek V3 and
+for MoE models. DeepSeek V3 and
 Kimi K3 were tested on H100 with two generators at TP=1 and no EP; their MLA decode
 and KDA kernels need SM90+. Image prompts were run end to end with Qwen3.5-0.8B on
 Geometry3K (`rl_grpo_qwen3_5_0_8b_geometry3k`) and Muse Spark 816B-A42B on SLAKE
@@ -234,8 +234,8 @@ Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
 `attn-gym[linear,cudnn]` dependency installs them.
 
 **NOTE:** The pinned vLLM release (`vllm_version` in `scripts/install_rl_env.sh`)
-is a CUDA 13 wheel. Its compiled kernels use only torch's stable ABI, so they
-load on the PyTorch nightly; RL CI checks the rest.
+is a CUDA 13 wheel. It pins an older PyTorch, but its compiled kernels use only
+torch's stable ABI, so they load on the PyTorch nightly.
 
 2. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash
