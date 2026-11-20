@@ -40,6 +40,7 @@ class TestVisionAttention(unittest.TestCase):
                 wk=Linear.Config(in_features=dim, out_features=dim),
                 wv=Linear.Config(in_features=dim, out_features=dim),
                 proj=Linear.Config(in_features=dim, out_features=dim),
+                rope=None,
             )
         )
         identity_attention = _IdentityAttention()
@@ -57,8 +58,7 @@ class TestVisionAttention(unittest.TestCase):
 
         out_TD = attention(
             x_TD,
-            rope_cache=torch.empty(0),
-            rope_apply=lambda q, k, cache: (q, k),
+            positions=torch.empty(0),
             attention_mask=attention_mask,
         )
 
@@ -97,7 +97,7 @@ def test_vision_block_disables_dense_sp_outside_the_encoder_scope() -> None:
         spmd_types_module._MESH_TLS, "dense_sp_enabled", True, create=True
     ):
         # The decoder registered SP; replay runs outside the encoder forward.
-        block(torch.zeros(2, 3), rope_cache=None, rope_apply=None, attention_mask=None)
+        block(torch.zeros(2, 3), positions=None, attention_mask=None)
         assert spmd_dense_sp_enabled()
 
     assert block.attn.seen == [False]

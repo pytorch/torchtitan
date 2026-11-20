@@ -202,8 +202,9 @@ class Trainer(Configurable):
             return
 
         # Capture the dependency when weights become final: the push must wait
-        # for optimizer updates, but not for next-step forward/backward kernels
-        # that may be queued before the concurrent push starts.
+        # for the optimizer updates. optim_step syncs the host before the push
+        # starts, so the stream saves nothing today; it is kept for the TODO in
+        # `Controller._trainer_loop` that overlaps the push with forward/backward.
         self._push_model_state_dict_stream.wait_stream(
             torch.accelerator.current_stream(self.engine.device)
         )
@@ -451,18 +452,15 @@ class Trainer(Configurable):
         TorchStore copies (and casts) each tensor straight into StorageVolume
         memory; other transports make a GPU cast copy of each batch first.
 
-        The controller overlaps this push with the next forward/backward (see
-        `Controller._trainer_loop`), which is safe because:
+        Ordering (see `Controller._trainer_loop`):
         - The worker synchronizes the push stream and runs the put with it
-          current, so TorchStore reads weights after the last optimizer step
-          without waiting on later forward/backward work, and forward/backward
-          does not mutate persistent model state.
+          current, so TorchStore reads weights after the last optimizer step.
         - The TorchStore put runs in an `asyncio.to_thread` worker, so it
-          progresses while a synchronous forward/backward blocks this actor's
-          event loop.
-        - The controller awaits this push before the next optimizer step mutates
-          the model, and awaits the generators' pull of it before the next push
-          overwrites the TorchStore key.
+          doesn't block this actor's event loop.
+        - The controller awaits this push before the next forward/backward,
+          which blocks this actor's event loop and would delay the push's reply.
+        - The controller awaits the generators' pull of this push before the
+          next push overwrites the TorchStore key.
 
         Every push carries the trainable parameters and the buffers. Generators load the
         frozen parameters from `generator.checkpointer`: for LoRA the base, so a push
@@ -471,12 +469,8 @@ class Trainer(Configurable):
         With a ``ModelStateDictTransport``, the push instead stages the tensors in
         its pinned staging buffer, which generators read directly; the same
         ordering applies, and the next push overwrites the staging buffer.
-        Staging issues collectives, so it runs on the push stream from this
-        thread before the first ``await``: the controller sends the push before
-        the next forward/backward, and Monarch starts concurrent endpoints from
-        one sender in send order, so every rank issues the staging collectives
-        before forward/backward's. Only the wait for staging is off the event
-        loop.
+        Staging enqueues its copies on the push stream from this thread; only
+        the wait for them is off the event loop.
         """
         transport = self._model_state_dict_transport
         if transport is not None:

@@ -143,7 +143,7 @@ def test_push_model_state_dict_carries_the_trainable_params_and_the_buffers() ->
     assert asyncio.run(push(frozen_part)) == {"expert_bias"}
 
 
-def test_push_model_state_dict_stages_before_first_await() -> None:
+def test_push_model_state_dict_stages_on_push_stream() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         weight_part = Module()
@@ -156,8 +156,7 @@ def test_push_model_state_dict_stages_before_first_await() -> None:
         sync_thread_ids = []
 
         def stage(model_state_dict) -> None:
-            # Staging issues collectives: it runs on the push stream from the
-            # actor thread.
+            # Staging runs on the push stream from the actor thread.
             stream.__enter__.assert_called_once()
             stream.__exit__.assert_not_called()
             assert threading.get_ident() == main_thread_id
@@ -168,14 +167,10 @@ def test_push_model_state_dict_stages_before_first_await() -> None:
         )
         trainer._model_state_dict_transport = SimpleNamespace(stage=stage)
 
-        # Staging must finish before the push's first await: Monarch starts the
-        # next forward/backward on this rank once the push yields.
-        asyncio.get_running_loop().set_task_factory(asyncio.eager_task_factory)
-        push = asyncio.create_task(trainer.push_model_state_dict())
+        await trainer.push_model_state_dict()
         assert len(staged) == 1
         assert staged[0]["weight"].data_ptr() == weight_part.weight.data_ptr()
-        assert not push.done()
-        await push
+        stream.__exit__.assert_called_once()
         # The wait for staging is off the event loop.
         assert len(sync_thread_ids) == 1
         assert sync_thread_ids[0] != main_thread_id

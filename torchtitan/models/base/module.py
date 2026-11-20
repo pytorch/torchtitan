@@ -58,6 +58,10 @@ class Module(nn.Module, Configurable):
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
     _remat_recompute_patterns: tuple[str, ...] = ()
+    # Set by ActivationRematConfig.apply on each transformer block it
+    # checkpoints: the block's FQN in the full model (e.g. "layers.3",
+    # "vision_encoder.layers.0"). The activation offloader hooks these blocks.
+    _remat_block_fqn: str = ""
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
@@ -366,6 +370,20 @@ class Module(nn.Module, Configurable):
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
+            # With TP/EP enabled, a module that owns parameters but declares
+            # no sharding_config would silently replicate them instead of
+            # sharding them. Buffers alone do not trip this: auxiliary
+            # modules such as the MoE load-balance losses own only
+            # per-rank statistics buffers that are intentionally replicated.
+            if (
+                parallelism_context.tp_enabled or parallelism_context.ep_enabled
+            ) and next(self.parameters(recurse=False), None) is not None:
+                raise RuntimeError(
+                    f"{type(self).__name__} owns parameters but declares no "
+                    "sharding_config, so they would be silently replicated "
+                    "over TP/EP. Add a sharding_config or move the parameters "
+                    "into a sharded module."
+                )
             return
 
         self._distribute_states(parallelism_context)

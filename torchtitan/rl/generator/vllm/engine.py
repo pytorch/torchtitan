@@ -160,10 +160,13 @@ class VLLMEngine(GenerationEngine):
         reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
         vision_processor: VisionProcessor.Config | None,
+        mooncake_master_address: str | None,
         rank: int,
         generator_name: str,
         output_dir: str,
     ):
+        # TODO(acisseJZhong): use it once vLLM's Mooncake Store connector lands.
+        del mooncake_master_address
         if (
             config.session_kv_holder is not None
             and reset_kv_cache_on_model_state_dict_load
@@ -494,6 +497,10 @@ class VLLMEngine(GenerationEngine):
 
     def has_unfinished_requests(self) -> bool:
         """Whether any admitted request is still running."""
+        # NOTE: with data parallelism, vLLM's has_unfinished_requests is a CPU (gloo)
+        # all-reduce over the DP group on every call, i.e. every step; SGLangEngine
+        # does the same over the DP x TP world (SGLang's attention DP has no DP-only
+        # group).
         return self._engine.has_unfinished_requests()
 
     def step(self) -> list[FinishedRequest]:
