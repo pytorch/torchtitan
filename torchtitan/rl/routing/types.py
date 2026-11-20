@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Routing data types shared by both routing layers in the RL generator.
+"""Routing data types shared by both routing layers in the RL generator and the rollouter.
 
 - ``RoutingCandidate``: a routable target carrying a ``reserved_load``. Each
-  routing layer supplies its own candidate type (``_GeneratorHandle`` for
-  generator meshes, ``_DPRankHandle`` for DP ranks).
+  caller supplies its own candidate type (``_GeneratorHandle`` for generator
+  meshes, ``_DPRankHandle`` for DP ranks, ``_RolloutWorkerLoad`` for the
+  rollouter's rollout workers).
 - ``RoutingContext``: per-request metadata a strategy may consult.
 
 A ``RoutingStrategy`` (see ``strategies.py``) picks one ``RoutingCandidate``
