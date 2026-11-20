@@ -16,6 +16,7 @@ from typing import Any
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.model_state_dict_transport import ModelStateDictTransferMetadata
 from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
@@ -195,17 +196,24 @@ class InterGeneratorRouter(Configurable):
 
         await asyncio.gather(*(wait(generator) for generator in self._generators))
 
-    async def pull_model_state_dict(self, policy_version: int) -> None:
+    async def pull_model_state_dict(
+        self,
+        policy_version: int,
+        *,
+        metadata_by_trainer_rank: tuple[ModelStateDictTransferMetadata, ...],
+    ) -> None:
         """Pull the given policy version's state dict into every generator.
 
         Args:
             policy_version: Trainer policy version whose state dict to pull.
+            metadata_by_trainer_rank: Opaque results from the corresponding
+                all-rank trainer push, in trainer-rank order.
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
             # Transfer over RDMA while the generator remains available. A no-op
             # with model_state_dict_load_mode="gpu_fetch", where the load does it.
-            await h.actor.prefetch_model_state_dict.call()
+            await h.actor.prefetch_model_state_dict.call(metadata_by_trainer_rank)
             drain = not self._config.hot_swap
             h.draining = drain
             try:

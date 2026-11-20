@@ -82,6 +82,11 @@ class GenerationEngine(Configurable, abc.ABC):
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
 
+    @property
+    @abc.abstractmethod
+    def model_state_dict_load_groups(self) -> list[list[str]]:
+        """The keys of each ``fetch`` call of a load that fills every key, in load order."""
+
     @abc.abstractmethod
     def add_requests(
         self, requests: list[EngineRequest]
