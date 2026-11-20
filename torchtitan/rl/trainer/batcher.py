@@ -325,16 +325,13 @@ class Batcher(Configurable):
             )
         self._training_sample_builder = config.training_sample_builder.build()
         self.seq_len = max_context_length
-        self._num_rows_per_microbatch, remainder = divmod(
-            num_tokens_per_microbatch_per_dp_rank,
-            max_context_length,
-        )
-        if remainder:
+        if num_tokens_per_microbatch_per_dp_rank < max_context_length:
             raise ValueError(
                 "num_tokens_per_microbatch_per_dp_rank "
-                f"({num_tokens_per_microbatch_per_dp_rank}) must be divisible by "
+                f"({num_tokens_per_microbatch_per_dp_rank}) must be at least "
                 f"max_context_length ({max_context_length})."
             )
+        self._num_tokens_per_microbatch = num_tokens_per_microbatch_per_dp_rank
         self.pad_id = pad_id
         self._temperature = temperature
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
@@ -652,7 +649,7 @@ class Batcher(Configurable):
         ``[G * M][D]``; the trainer runs each M consecutive microbatches as
         one pipeline step.
         """
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_rank = self._num_tokens_per_microbatch
 
         # Step 1: find the bin count with FFD, retaining its fallback packing.
         ordered_samples = sorted(
@@ -721,7 +718,7 @@ class Batcher(Configurable):
         For packed sample lengths L and token capacity T, let
         ``q, r = divmod(T - sum(L), seq_len)``. The estimate is
         ``sum(L**2) + q * seq_len**2 + r**2``. Padding positions reset at
-        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2``.
+        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2 + (T % seq_len)**2``.
         This models the existing padding segments without increasing their
         number or changing fixed-size varlen metadata.
         """
@@ -730,7 +727,7 @@ class Batcher(Configurable):
         sample_lengths = [
             self.num_tokens_to_pack(sample) for sample in training_samples
         ]
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_bin = self._num_tokens_per_microbatch
         num_full_padding_segments, remaining_padding = divmod(
             num_tokens_per_bin - sum(sample_lengths), self.seq_len
         )
@@ -757,7 +754,7 @@ class Batcher(Configurable):
         Return None if token or document capacity blocks a sample; the caller
         then discards this partial assignment and uses the FFD fallback.
         """
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_bin = self._num_tokens_per_microbatch
         bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
         bin_num_tokens = [0] * target_num_bins
         bin_workloads = [self._attention_workload([])] * target_num_bins
@@ -814,7 +811,7 @@ class Batcher(Configurable):
         either appends a non-empty bin or stops and pads the remaining slots, so
         neither loop can stall when no further redistribution is possible.
         """
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_bin = self._num_tokens_per_microbatch
         donor_heap = [
             (-self._attention_workload(bin_), -len(bin_), index)
             for index, bin_ in enumerate(bins)
@@ -949,7 +946,7 @@ class Batcher(Configurable):
             )
             sample_lens.append(sample_len)
 
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_rank = self._num_tokens_per_microbatch
         pad_len = num_tokens_per_rank - sum(sample_lens)
         assert pad_len >= 0
         if pad_len > 0:
@@ -1136,7 +1133,7 @@ class Batcher(Configurable):
         num_microbatches: int,
         training_samples: list[TrainingSample],
     ) -> float:
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_rank = self._num_tokens_per_microbatch
         total_slots = num_microbatches * self._dp_degree * num_tokens_per_rank
         num_real_tokens = sum(len(sample.token_ids) - 1 for sample in training_samples)
         return (total_slots - num_real_tokens) / total_slots
