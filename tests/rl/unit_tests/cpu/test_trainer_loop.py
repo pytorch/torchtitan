@@ -246,6 +246,12 @@ def test_step_total_covers_the_previous_metrics_log(monkeypatch) -> None:
         log(**kwargs)
 
     controller.metrics_processor.log = slow_log
+
+    def slow_validation_log(*, step):
+        nonlocal now
+        now += 0.5
+
+    controller._log_ended_validations = slow_validation_log
     _run(controller, num_training_steps=2)
 
     first, second = (
@@ -255,9 +261,9 @@ def test_step_total_covers_the_previous_metrics_log(monkeypatch) -> None:
     # Step 1: only sync_log_step. No earlier metrics log, so no `unaccounted`.
     assert first["timing/step/total"] == 1.0
     assert "perf/trainer/step_time_ratio/unaccounted" not in first
-    # Step 2 starts at step 1's metrics log: 2 + 1, all inside a phase.
-    assert second["timing/step/metrics_log"] == 2.0
-    assert second["timing/step/total"] == 3.0
+    # Step 2 starts at step 1's metrics log, which also logs ended validations: 2.5 + 1, all in a phase.
+    assert second["timing/step/metrics_log"] == 2.5
+    assert second["timing/step/total"] == 3.5
     assert second["perf/trainer/step_time_ratio/unaccounted"] == pytest.approx(0.0)
 
 

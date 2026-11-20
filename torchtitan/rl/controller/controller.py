@@ -1487,8 +1487,8 @@ class Controller(Configurable):
                         ),
                     ],
                 )
-
-            self._maybe_start_validation(step=step)
+                # In this span: it logs the validations that ended; starting a due one doesn't wait.
+                self._maybe_start_validation(step=step)
 
         # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
         # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
