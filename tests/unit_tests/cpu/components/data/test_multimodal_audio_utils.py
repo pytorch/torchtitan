@@ -87,3 +87,23 @@ def test_resample_waveform_interpolates_channels_last_input():
             dtype=torch.float32,
         ),
     )
+
+
+def test_resample_waveform_keeps_source_positions_on_long_clips():
+    # Each sample's value is its own index, so every output sample should
+    # equal the exact source position it was interpolated from.
+    source_sample_rate, target_sample_rate = 44_100, 16_000
+    waveform = torch.arange(30 * source_sample_rate, dtype=torch.float64)[:, None]
+
+    result = resample_waveform(
+        waveform,
+        source_sample_rate=source_sample_rate,
+        target_sample_rate=target_sample_rate,
+    )
+
+    expected = (
+        torch.arange(result.shape[0], dtype=torch.float64)
+        * source_sample_rate
+        / target_sample_rate
+    )
+    torch.testing.assert_close(result[:, 0], expected, rtol=0, atol=1e-4)
