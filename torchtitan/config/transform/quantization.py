@@ -21,7 +21,6 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.nvfp4 import _get_nvfp4_grouped_linear_cls, NVFP4Linear
@@ -37,7 +36,6 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
-    InvariantRowParallelLinear,
 )
 
 

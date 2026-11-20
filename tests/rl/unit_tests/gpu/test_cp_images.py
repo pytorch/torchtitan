@@ -175,7 +175,7 @@ def _build_trainer(layout: str) -> Trainer:
     )
     model, _ = build_rl_model_configs(
         build_qwen3_5_model_config,
-        "0.8B",
+        "0.8B_mm",
         trainer_parallelism=parallelism,
         generator_parallelism=InferenceParallelismConfig(tensor_parallel_degree=1),
         seq_len=SEQ_LEN,
