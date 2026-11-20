@@ -8,10 +8,14 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 from renderers import PlaceholderRange
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
+from torchtitan.rl.rollout.finished_group import slim_rollout_group
 from torchtitan.rl.rollout.types import Prompt, PromptImage, RolloutTurnID, split_prompt
 
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
@@ -503,3 +507,59 @@ def test_group_filters_preserve_group_id_for_commit() -> None:
     filtered_groups = [failed, untrainable, zero_std, no_valid_tokens]
     assert [group.group_id for group in filtered_groups] == [7, 8, 9, 10]
     assert all(not group.training_samples for group in filtered_groups)
+
+
+def test_a_slim_group_builds_the_same_training_samples() -> None:
+    # Rollout workers send the slim group (`slim_rollout_group`) to the controller and the
+    # batcher, so the builder must read nothing that slimming drops.
+    image_a, image_b = _image("a"), _image("b")
+    at_1 = PlaceholderRange(offset=1, length=1)
+    at_5 = PlaceholderRange(offset=5, length=1)
+    with_images = [
+        _turn(prompt_token_ids=[1, 7, 2], completion_token_ids=[4], version=1),
+        _turn(prompt_token_ids=[1, 7, 2, 4, 3, 7], completion_token_ids=[5], version=2),
+    ]
+    with_images[0].prompt_delta_images = (image_a,)
+    with_images[0].prompt_delta_image_placeholders = (at_1,)
+    with_images[1].prompt_delta_images = (image_a, image_b)
+    with_images[1].prompt_delta_image_placeholders = (at_1, at_5)
+    first = _scored_rollout(with_images, reward=1.0, advantage=0.5)
+    # A history edit: two training samples.
+    second = _scored_rollout(
+        [
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
+            _turn(prompt_token_ids=[90, 91], completion_token_ids=[5], version=1),
+        ],
+        reward=0.0,
+        advantage=-0.5,
+    )
+    second.rollout_id = 1
+    for rollout in (first, second):
+        rollout.reward_breakdown = {"correct": 1.0}
+        rollout.logs = {"finish": "stop"}
+        for rollout_turn in rollout.turns:
+            rollout_turn.prompt_messages = [{"role": "user", "content": "q"}]
+            rollout_turn.env_messages = [{"role": "tool", "content": "r"}]
+            rollout_turn.env_rewards = {"format": 1.0}
+            rollout_turn.metrics = [m.Metric("generator/queue_time_ms", m.Mean(2.0))]
+    group = RolloutGroup(group_id=_GROUP_ID, rollouts=[first, second])
+    builder = TrainingSampleBuilder.Config().build()
+
+    full = builder.build_from_group(rollout_group=group)
+    slim = builder.build_from_group(rollout_group=slim_rollout_group(group))
+
+    assert len(full.training_samples) == 3
+    assert m.MetricsProcessor._aggregate_metrics(
+        slim.metrics
+    ) == m.MetricsProcessor._aggregate_metrics(full.metrics)
+    for full_sample, slim_sample in zip(
+        full.training_samples, slim.training_samples, strict=True
+    ):
+        for sample_field in dataclasses.fields(full_sample):
+            full_value = getattr(full_sample, sample_field.name)
+            slim_value = getattr(slim_sample, sample_field.name)
+            if isinstance(full_value, np.ndarray):
+                assert full_value.dtype == slim_value.dtype
+                np.testing.assert_array_equal(full_value, slim_value)
+            else:
+                assert full_value == slim_value

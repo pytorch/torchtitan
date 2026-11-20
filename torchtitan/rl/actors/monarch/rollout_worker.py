@@ -23,8 +23,12 @@ from torchtitan.rl.actors.monarch.rdma_object import (
     create_cuda_context_to_silence_monarch_log,
     MonarchRDMAObject,
 )
+from torchtitan.rl.rollout.finished_group import (
+    finish_rollout_group,
+    FinishedRolloutGroup,
+)
+from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
-from torchtitan.rl.rollout.types import RolloutGroup
 
 
 class RolloutWorkerActor(Actor):
@@ -61,8 +65,10 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        rollout_recorder_config: RolloutSampleRecorder.Config,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
+        self._encoder = RolloutSampleEncoder(rollout_recorder_config)
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
@@ -80,9 +86,11 @@ class RolloutWorkerActor(Actor):
         group_id: int,
         group_size: int,
         sampling: Any,
-    ) -> tuple[RolloutGroup, float]:
-        """Returns the group and the seconds this handler took; the caller subtracts them from
-        its wall time to get the hop's transfer time (see `compute_hop_metrics`)."""
+        for_training: bool,
+    ) -> tuple[FinishedRolloutGroup, float]:
+        """Returns the finished group (see `finish_rollout_group`) and the seconds this handler
+        took; the caller subtracts them from its wall time to get the hop's transfer time (see
+        `compute_hop_metrics`)."""
         start = time.perf_counter()
         group = await self._worker.run_group(
             generate_fn=generate_fn,
@@ -92,7 +100,10 @@ class RolloutWorkerActor(Actor):
             group_size=group_size,
             sampling=sampling,
         )
-        return group, time.perf_counter() - start
+        finished = finish_rollout_group(
+            group, for_training=for_training, encoder=self._encoder
+        )
+        return finished, time.perf_counter() - start
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

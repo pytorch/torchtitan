@@ -20,6 +20,7 @@ from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutT
 
 from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
+    RolloutSampleEncoder,
     RolloutSampleRecorder,
 )
 from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
@@ -282,9 +283,11 @@ def test_none_policy_version_and_completion_message(tmp_path) -> None:
     assert record["turns"][0]["completion_message"] is None
 
 
-def test_encode_turn_covers_all_rollout_turn_fields(tmp_path) -> None:
-    recorder = _recorder(tmp_path, log_tensors=True, log_logprobs=True)
-    encoded = recorder._encode_turn(_turn(completion_logprobs=[-0.5, -1.5]))
+def test_encode_turn_covers_all_rollout_turn_fields() -> None:
+    encoder = RolloutSampleEncoder(
+        RolloutSampleRecorder.Config(log_tensors=True, log_logprobs=True)
+    )
+    encoded = encoder._encode_turn(_turn(completion_logprobs=[-0.5, -1.5]))
 
     # rollout_id is flattened to turn_id; metrics is not JSON-serializable;
     # prompt_delta_image_placeholders is folded into each prompt_delta_images entry.

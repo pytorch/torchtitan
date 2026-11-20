@@ -30,6 +30,7 @@ from torchtitan.rl.controller.work_buffer import (
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.rollout.finished_group import FinishedRolloutGroup
 from torchtitan.rl.rollout.types import (
     Prompt,
     Rollout,
@@ -847,16 +848,8 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
     asyncio.run(run())
 
 
-def test_rollout_loop_keeps_the_rollouter_metrics() -> None:
-    """The rollouter's metrics on a group (e.g. its run_group hop) reach the batcher with the
-    rollout metrics the controller adds."""
-
-    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
-        return RolloutGroup(
-            group_id=group_id,
-            rollouts=[],
-            metrics=[m.Metric("timing/hop/run_group/wall", m.Mean(0.1))],
-        )
+def _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder) -> RolloutGroup:
+    """Run `_rollout_loop` on one admitted group and return the group it finalizes."""
 
     async def run() -> RolloutGroup:
         buffer = _buffer(capacity=1, window_size=None)
@@ -867,7 +860,7 @@ def test_rollout_loop_keeps_the_rollouter_metrics() -> None:
         )
         controller._sampling = SamplingConfig()
         controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
-        controller.rollout_recorder = Mock()
+        controller.rollout_recorder = recorder
         controller.generator_router = SimpleNamespace(
             release_groups=SimpleNamespace(call_one=AsyncMock())
         )
@@ -881,9 +874,44 @@ def test_rollout_loop_keeps_the_rollouter_metrics() -> None:
         await loop
         return group
 
-    group = asyncio.run(asyncio.wait_for(run(), timeout=10))
-    keys = {metric.key for metric in group.metrics}
-    assert {"timing/hop/run_group/wall", "rollout/response_length"} <= keys
+    return asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+
+def test_rollout_loop_appends_the_worker_lines_and_keeps_the_group_metrics() -> None:
+    """The rollout worker computes the group's rollout metrics and recorder lines; the
+    controller appends the lines and passes the group, with its metrics, to the batcher."""
+    run_group_kwargs = []
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> FinishedRolloutGroup:
+        run_group_kwargs.append(kwargs)
+        group = RolloutGroup(
+            group_id=group_id,
+            rollouts=[],
+            metrics=[m.Metric("timing/hop/run_group/wall", m.Mean(0.1))],
+        )
+        return FinishedRolloutGroup(group=group, recorder_lines='{"group_id": 0}\n')
+
+    recorder = Mock()
+    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
+
+    assert [metric.key for metric in group.metrics] == ["timing/hop/run_group/wall"]
+    assert [kwargs["for_training"] for kwargs in run_group_kwargs] == [True]
+    recorder.append_lines.assert_called_once_with('{"group_id": 0}\n')
+    recorder.record.assert_not_called()
+
+
+def test_rollout_loop_turns_a_failed_group_into_one_failure_metric() -> None:
+    async def run_group_rollouts(**kwargs) -> FinishedRolloutGroup:
+        raise RuntimeError("scoring failed")
+
+    recorder = Mock()
+    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
+
+    assert (group.group_id, group.rollouts) == (0, [])
+    assert m.MetricsProcessor._aggregate_metrics(group.metrics) == {
+        "rollout/group_failures/sum": 1.0
+    }
+    recorder.append_lines.assert_not_called()
 
 
 def test_batcher_loop_times_each_add_group_call() -> None:
@@ -1264,7 +1292,11 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     """Validation prefixes its turns' metrics with `validation_` (`generator/x` -> `validation_generator/x`,
     `math_verify/x` -> `validation_math_verify/x`). Two validations never share a group id."""
 
-    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+    async def run_group_rollouts(
+        *, group_id: int, for_training: bool, **kwargs
+    ) -> FinishedRolloutGroup:
+        # Validation gets the full group and logs it in the controller.
+        assert not for_training
         turn = RolloutTurn(
             rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
             prompt_prefix_len=0,
@@ -1285,7 +1317,8 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
             reward=0.0,
             turns=[turn],
         )
-        return RolloutGroup(group_id=group_id, rollouts=[rollout])
+        group = RolloutGroup(group_id=group_id, rollouts=[rollout])
+        return FinishedRolloutGroup(group=group, recorder_lines="")
 
     controller = object.__new__(Controller)
     controller._validation_group_ids = itertools.count(start=-1, step=-1)

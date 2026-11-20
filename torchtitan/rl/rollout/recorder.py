@@ -96,11 +96,14 @@ class RolloutSampleRecorder(Configurable):
 
     The filter selects which rollouts to record each step (default: highest + lowest reward per group);
     raw token / logprob arrays are recorded only when `Config.log_tensors` / `log_logprobs` opt in.
+    Training groups are encoded in the rollout worker (`RolloutSampleEncoder`), which holds the full
+    group, and their lines appended here; validation groups are encoded and appended by `record`.
 
     Example:
 
         recorder = RolloutSampleRecorder.Config().build(dump_dir="outputs/rl")
-        recorder.record(is_validation=False, rollout_groups=groups)
+        recorder.record(is_validation=True, rollout_groups=groups)  # encodes here
+        recorder.append_lines(lines)  # lines a rollout worker's RolloutSampleEncoder encoded
         recorder.close()
         # -> outputs/rl/rollout_samples.jsonl, one JSON line per recorded rollout
     """
@@ -110,7 +113,9 @@ class RolloutSampleRecorder(Configurable):
         filter: KeepExtremeRewardsFilter.Config = field(
             default_factory=KeepExtremeRewardsFilter.Config
         )
-        """Selects which rollouts to record each step."""
+        """Selects which rollouts to record. Each rollout worker builds its own and calls it with
+        one training group at a time, so a filter that keeps state across calls sees only its
+        worker's groups."""
         filename: str = "rollout_samples.jsonl"
         """JSONL filename written under `dump_dir`."""
         log_tensors: bool = False
@@ -120,13 +125,11 @@ class RolloutSampleRecorder(Configurable):
         """Also record the raw per-token completion logprob arrays per turn."""
 
     def __init__(self, config: Config, *, dump_dir: str) -> None:
-        self._filter = config.filter.build()
-        self._log_tensors = config.log_tensors
-        self._log_logprobs = config.log_logprobs
+        self._encoder = RolloutSampleEncoder(config)
         self._path = Path(dump_dir) / config.filename
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        # `record` runs on the controller's event loop, so a writer thread does the file
-        # I/O; one thread keeps the lines in call order. The file stays open: reopening
+        # `record` and `append_lines` run on the controller's event loop, so a writer thread does
+        # the file I/O; one thread keeps the lines in call order. The file stays open: reopening
         # it per call is slow on a network filesystem (FUSE/NFS).
         self._file = self._path.open("a", encoding="utf-8")
         self._write_executor = ThreadPoolExecutor(
@@ -140,20 +143,16 @@ class RolloutSampleRecorder(Configurable):
         is_validation: bool,
         rollout_groups: list[RolloutGroup],
     ) -> None:
-        """Queue the filtered rollouts for the JSONL, one JSON object per rollout.
+        """Encode the filtered rollouts here and queue them for the JSONL."""
+        self.append_lines(
+            self._encoder.encode(
+                is_validation=is_validation, rollout_groups=rollout_groups
+            )
+        )
 
-        The rollouts are encoded here; the writer thread appends them to the file.
-        """
-        lines = []
-        for rollout in self._filter(rollout_groups):
-            record = {
-                "is_validation": is_validation,
-                **self._encode_rollout(rollout),
-            }
-            # Rollout messages can hold objects json.dumps can't serialize
-            # natively, e.g. tool-calling results
-            lines.append(json.dumps(record, default=_json_default) + "\n")
-        write_future = self._write_executor.submit(self._append, "".join(lines))
+    def append_lines(self, lines: str) -> None:
+        """Queue already encoded JSONL lines (`RolloutSampleEncoder.encode`) for the writer thread."""
+        write_future = self._write_executor.submit(self._append, lines)
         write_future.add_done_callback(_log_write_error)
 
     def _append(self, text: str) -> None:
@@ -164,6 +163,39 @@ class RolloutSampleRecorder(Configurable):
         """Wait until every recorded rollout is in the file, then close it."""
         self._write_executor.shutdown(wait=True)
         self._file.close()
+
+
+class RolloutSampleEncoder:
+    """Encode rollouts into `RolloutSampleRecorder` JSONL lines.
+
+    Runs where the full groups are: in each rollout worker for training groups, and in the
+    controller's recorder for validation groups.
+
+    Example:
+
+        encoder = RolloutSampleEncoder(RolloutSampleRecorder.Config(log_logprobs=True))
+        lines = encoder.encode(is_validation=False, rollout_groups=[group])
+        # -> '{"is_validation": false, "group_id": 3, ...}\n{"is_validation": false, ...}\n'
+    """
+
+    def __init__(self, config: RolloutSampleRecorder.Config) -> None:
+        self._filter = config.filter.build()
+        self._log_tensors = config.log_tensors
+        self._log_logprobs = config.log_logprobs
+
+    @sl.log_trace_span("rollout_encode")
+    def encode(self, *, is_validation: bool, rollout_groups: list[RolloutGroup]) -> str:
+        """Return the filtered rollouts as JSONL, one JSON object per rollout."""
+        lines = []
+        for rollout in self._filter(rollout_groups):
+            record = {
+                "is_validation": is_validation,
+                **self._encode_rollout(rollout),
+            }
+            # Rollout messages can hold objects json.dumps can't serialize
+            # natively, e.g. tool-calling results
+            lines.append(json.dumps(record, default=_json_default) + "\n")
+        return "".join(lines)
 
     def _encode_rollout(self, rollout: Rollout) -> dict:
         """One JSON object per rollout: its scalar fields + each turn (see `_encode_turn`)."""

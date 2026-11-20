@@ -16,10 +16,11 @@ Detailed diagram:
 _data_input_loop                                      _rollout_loop[N] (group workers)
 +--------------------------------------------------+  +--------------------------------------------------+
 | group_buffer.wait_for_slot()                     |  | work = group_buffer.claim_next()                  |
-| index, sample = rollouter.get_training_sample()  |  | group = rollouter.run_group_rollouts(work.sample) |
-| work = RolloutGroupWork(group_id, sample)        |  | group_buffer.finalize_work(group)                 |
-| group_buffer.add_work(work)                      |  +-----------------------+--------------------------+
-+-----------------------+--------------------------+                          ^ |
+| index, sample = rollouter.get_training_sample()  |  | finished = rollouter.run_group_rollouts(work)     |
+| work = RolloutGroupWork(group_id, sample)        |  | recorder.append_lines(finished.recorder_lines)    |
+| group_buffer.add_work(work)                      |  | group_buffer.finalize_work(finished.group)        |
++-----------------------+--------------------------+  +-----------------------+--------------------------+
+                        |                                                     ^ |
                         |                                                     | |
                         | adds work entry                                     | | updates same entry
                         v                                                     | v
@@ -809,6 +810,7 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
+                rollout_recorder_config=config.rollout_recorder,
                 vision_processor_config=config.vision_processor,
             )
 
@@ -876,6 +878,7 @@ class Controller(Configurable):
                     group_id=group_id,
                     group_size=1,
                     sampling=sampling,
+                    for_training=False,
                 )
                 for group_id, sample in zip(group_ids, samples, strict=True)
             ),
@@ -895,7 +898,7 @@ class Controller(Configurable):
                 )
                 num_failed_groups += 1
                 continue
-            rollout_groups.append(result)
+            rollout_groups.append(result.group)
 
         metrics = compute_rollout_metrics(
             prefix="validation",
@@ -1192,7 +1195,9 @@ class Controller(Configurable):
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
         Staleness is bounded by the buffer's active-slot budget. Raw rollouts are recorded before any drop,
-        so dropped groups stay inspectable on disk.
+        so dropped groups stay inspectable on disk. The rollout worker computes the group's rollout metrics
+        and encodes its recorder lines from the full group, and returns the slim group (see
+        `finish_rollout_group`).
 
         consumes: a WAITING RolloutGroupWork (group_buffer.claim_next)
             waits for:    a claimable WAITING entry
@@ -1208,23 +1213,19 @@ class Controller(Configurable):
                 return
             try:
                 with sl.log_trace_span("rollout_group"):
-                    group = await self._rollouter.run_group_rollouts(
+                    finished = await self._rollouter.run_group_rollouts(
                         generate_fn=generate_fn,
                         release_session_fn=release_session_fn,
                         sample=work.sample,
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
+                        for_training=True,
                     )
-                group.metrics.extend(
-                    compute_rollout_metrics(prefix="rollout", rollouts=group.rollouts)
-                )
-
                 # save rollout for inspection
-                self.rollout_recorder.record(
-                    is_validation=False,
-                    rollout_groups=[group],
-                )
+                self.rollout_recorder.append_lines(finished.recorder_lines)
+                group = finished.group
+                del finished
             except Exception:
                 logger.exception(f"rollout group {work.group_id} failed; dropping")
                 group = RolloutGroup(

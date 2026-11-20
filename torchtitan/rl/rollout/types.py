@@ -291,21 +291,26 @@ class RolloutTurn:
     prompt_messages: list[Message] = field(
         default_factory=list
     )  # [num_prompt_messages]
-    """Full conversation up to this turn, not a delta."""
+    """Full conversation up to this turn, not a delta. Empty for training groups once they leave
+    the rollout worker (`slim_rollout_group`)."""
 
     completion_message: Message | None = None
     """This turn's completion decoded into a message by the renderer (the TokenEnv's parse,
-    not the raw generator output)."""
+    not the raw generator output). Empty for training groups once they leave the rollout worker
+    (`slim_rollout_group`)."""
 
     env_messages: list[Message] = field(default_factory=list)  # [num_env_messages]
-    """This turn env's reply messages (tool / user)."""
+    """This turn env's reply messages (tool / user). Empty for training groups once they leave
+    the rollout worker (`slim_rollout_group`)."""
 
     # For rubrics
     env_rewards: dict[str, float] = field(default_factory=dict)
-    """This turn optional reward signals the env attached; the rubric decides how to use them."""
+    """This turn optional reward signals the env attached; the rubric decides how to use them.
+    Empty for training groups once they leave the rollout worker (`slim_rollout_group`)."""
 
     metrics: list[m.Metric] = field(default_factory=list)
-    """Per-turn metrics produced during rollouts"""
+    """Per-turn metrics produced during rollouts. Empty for training groups once they leave the
+    rollout worker (`slim_rollout_group`)."""
 
     @property
     def num_prompt_tokens(self) -> int:
@@ -392,7 +397,8 @@ class Rollout:
     """Final weighted reward, filled by the rubric."""
 
     reward_breakdown: dict[str, float] = field(default_factory=dict)
-    """Raw per-reward-function values, filled by the rubric."""
+    """Raw per-reward-function values, filled by the rubric. Empty for training groups once they
+    leave the rollout worker (`slim_rollout_group`)."""
 
     # TODO: make it per token
     advantage: float | None = None
@@ -400,7 +406,8 @@ class Rollout:
 
     logs: dict[str, Any] = field(default_factory=dict)
     """Rollouter-specific debug record, e.g. why the rollout failed. Saved with the rollout
-    by `RolloutSampleRecorder`; not used for training."""
+    by `RolloutSampleRecorder`; not used for training. Empty for training groups once they leave
+    the rollout worker (`slim_rollout_group`)."""
 
 
 @dataclass(kw_only=True, slots=True)
