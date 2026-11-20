@@ -286,7 +286,9 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
         generation_server=GenerationServer.Config(max_rollout_tokens=64),
     )
     rollouter = object.__new__(VerifiersRollouter)
-    rollouter._config = SimpleNamespace(worker=worker, num_threads_per_worker=3)
+    rollouter._config = SimpleNamespace(
+        worker=worker, rollouts_per_worker=12, rollouts_per_thread=4
+    )
     rollouter._verifiers_env_server = SimpleNamespace(
         start=start, close=close_env_server
     )
