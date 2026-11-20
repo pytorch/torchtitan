@@ -264,9 +264,6 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            engine=VLLMEngine.Config(
-                cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY")
-            ),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
@@ -526,7 +523,6 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
