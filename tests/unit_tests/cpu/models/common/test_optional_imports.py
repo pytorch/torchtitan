@@ -477,6 +477,7 @@ def test_attention_modules_report_their_own_backend_at_build(
 ) -> None:
     """A module fails at build when an export it calls lacks its backend."""
     script = r"""
+from dataclasses import make_dataclass
 import importlib.abc
 import importlib.util
 import sys
@@ -512,6 +513,8 @@ class FakeAttentionGym(importlib.abc.MetaPathFinder, importlib.abc.Loader):
                 raise AttributeError(name)
             if name == broken:
                 raise ImportError(f"{name} needs {missing_backend}") from blocked()
+            if name == "ContextParallelRouting":
+                return make_dataclass(name, [])
             return type(name, (), {})
 
         module.__getattr__ = export

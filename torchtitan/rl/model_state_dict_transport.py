@@ -323,7 +323,7 @@ class ModelStateDictTransport(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        backend: Literal["mooncake", "nixl"] = "mooncake"
+        backend: Literal["mooncake", "nixl"] = "nixl"
         """The ``torch.distributed._transport`` backend."""
 
         read_timeout_s: float = 600.0
