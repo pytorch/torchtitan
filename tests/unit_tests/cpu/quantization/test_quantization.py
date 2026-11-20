@@ -129,6 +129,28 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         converter.convert(_router_config_for_quantization(128))
 
 
+@pytest.mark.parametrize("symbol", ["quantize_tensor", "ScalingAlgorithm"])
+def test_mxfp8_converter_reports_missing_pytorch_api(monkeypatch, symbol):
+    monkeypatch.delattr(quantization_transform.F, symbol, raising=False)
+    monkeypatch.setattr(quantization_transform, "MXFP8Linear", None)
+
+    with pytest.raises(ImportError, match="require PyTorch with"):
+        MXFP8LinearConverter.Config().build()
+
+
+@pytest.mark.parametrize("module", ["cutlass", "tvm_ffi"])
+def test_mxfp8_converter_reports_missing_quantizer_dependency(monkeypatch, module):
+    find_spec = quantization_transform.find_spec
+    monkeypatch.setattr(
+        quantization_transform,
+        "find_spec",
+        lambda name: None if name == module else find_spec(name),
+    )
+
+    with pytest.raises(ImportError, match="nvidia-cutlass-dsl and apache-tvm-ffi"):
+        MXFP8LinearConverter.Config().build()
+
+
 @pytest.mark.parametrize(
     ("config_cls", "parallel_cls"),
     [
