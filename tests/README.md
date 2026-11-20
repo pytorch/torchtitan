@@ -36,8 +36,8 @@ This directory contains tests for the torchtitan project, including unit tests a
 ## TorchTitan CI Design
 
 Draft PRs run no test jobs, not even for a `ciflow/*` label
-(`.github/workflows/check-draft.yaml`). Once the PR is ready, push a commit. A
-skipped `ciflow/*` tag run can also be re-run.
+(`.github/workflows/check-draft.yaml`). Once the PR is ready, push a commit. For
+a skipped `ciflow/*` tag run, "Re-run all jobs" also works.
 
 ### Integration tests (Goal: E2E composability)
 

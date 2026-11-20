@@ -25,9 +25,13 @@ jobs:
           # A hand-pushed tag can end in a commit (ciflow/b200/main-3b1714ab03) instead of a PR number.
           is_draft=false
           if [[ "${GITHUB_REF##*/}" =~ ^[0-9]+$ ]]; then
+            # The callers' token has no pull-requests scope; the read works because the repo is public.
             is_draft=$(gh api "repos/$GITHUB_REPOSITORY/pulls/${GITHUB_REF##*/}" --jq .draft)
           fi
           echo "is-draft=$is_draft" >> "$GITHUB_OUTPUT"
+          # TODO: a label already on a draft gets no new tag when the PR is marked ready, so this skipped
+          # run stays the last one on that commit until a push. pytorch-bot's ciflowPushTrigger.ts could
+          # re-push ciflow tags on pull_request.ready_for_review (it handles opened, reopened, synchronize).
           if [[ "$is_draft" == true ]]; then
-            echo "::notice::Skipped: the PR is a draft. Once it is ready, push a commit or re-run this run."
+            echo "::notice::Skipped: the PR is a draft. Once it is ready, push a commit or re-run all jobs of this run."
           fi
