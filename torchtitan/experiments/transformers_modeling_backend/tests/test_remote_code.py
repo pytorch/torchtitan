@@ -60,7 +60,7 @@ class TestRemoteCode(unittest.TestCase):
         self.addCleanup(os.environ.pop, "TT_REMOTE_CODE_MARKER", None)
         _write_repo(self.repo_dir)
 
-    def test_default_does_not_run_remote_code(self) -> None:
+    def test_does_not_run_remote_code(self) -> None:
         config = HFTransformerModel.Config(
             model_config=TitanModelConfig(dim=64, n_layers=2, n_heads=4, n_kv_heads=4)
         )
