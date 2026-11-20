@@ -521,6 +521,39 @@ def mark_invoke_subgraph(
     return region_node
 
 
+def outline_backward_subgraph_pass(gm, example_inputs=None):
+    """Pass to outline backward regions into invoke_subgraph calls.
+
+    This allows to force Inductor compilation to materialize the saved for
+    backward Tensors, as invoke_subgraphs subgraph is compiled independently.
+    Without outlining inductor can decide to avoid materialization and do
+    recompute from arguments, which breaks our contract of MUST_SAVE picked
+    activations.
+    """
+    regions = []
+    current_region = []
+    for node in gm.graph.nodes:
+        if node.op not in ("placeholder", "output") and node.meta.get(
+            "autograd_backward", False
+        ):
+            current_region.append(node)
+        elif node.op != "get_attr" and current_region:
+            regions.append(current_region)
+            current_region = []
+    if current_region:
+        regions.append(current_region)
+
+    for index, region_nodes in enumerate(regions):
+        mark_invoke_subgraph(
+            gm.graph,
+            region_nodes,
+            region_name_prefix=f"backward_subgraph_{index}",
+        )
+    gm.graph.lint()
+    gm.recompile()
+    return gm
+
+
 def _record_subgraph_region(
     module: torch.fx.GraphModule,
     region_node: Node,
