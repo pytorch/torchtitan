@@ -138,8 +138,9 @@ fi
 if [[ "$install_sglang" == "1" ]]; then
   # The SGLang engine uses private SGLang APIs and is verified only at this
   # commit, which no SGLang release contains yet.
-  # TODO: move to the merge commit of sgl-project/sglang#49681 (this is its head).
-  sglang_commit="3fdc02fc1d28bd4887d975e8f66bd1142d33975b"
+  # sgl-project/sglang#49681 on SGLang 76589d6fde. TODO: move to its merge commit;
+  # newer SGLang changed the scheduler APIs the engine uses.
+  sglang_commit="10122ebc0a3e1a830959530a0d4935463606e1f8"
   overrides="$(mktemp)"
   # Keep this environment's PyTorch, Monarch and openai (vLLM needs a newer one
   # than SGLang pins).
