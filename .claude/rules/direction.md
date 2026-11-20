@@ -25,7 +25,7 @@ Update this file in the same PR that starts, finishes, or reverses a migration.
   `num_tokens_per_microbatch_per_dp_rank`; padding and document boundaries are
   passed explicitly from the data side, not inferred later.
 - **Activation recompute**: torch_remat via `torchtitan/distributed/activation_remat.py`
-  (`torchtitan/distributed/REMAT.md`).
+  (`torchtitan/distributed/ACTIVATION_REMAT.md`).
 - **MoE**: token dispatch backends (all-to-all, DeepEP, HybridEP under
   `torchtitan/distributed/deepep/`) and Dist-MoE (`torchtitan/models/common/dist_moe/`)
   are all maintained. Build on them rather than adding new dispatch paths.

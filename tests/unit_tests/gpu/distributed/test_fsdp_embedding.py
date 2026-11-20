@@ -11,7 +11,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from spmd_types import SpmdType
 from spmd_types.checker import typecheck
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.tensor import DTensor
@@ -21,11 +20,13 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh
-from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.base.sharding import ShardingConfig
-from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.decoder_sharding import (
+    token_embedding_sharding_config,
+    token_id_placement,
+)
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 
 pytestmark = pytest.mark.multi_gpu
 
@@ -50,15 +51,8 @@ class TestFSDPEmbedding(DTensorTestBase):
         fsdp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         runtime_mesh = parallelism_context.spmd_dense_mesh()
         dp_mesh = parallelism_context.get_mesh("dp_shard")
-        tp_mesh = parallelism_context.get_mesh("tp")
         dp_rank = dp_mesh.get_local_rank()
-        tp_rank = tp_mesh.get_local_rank()
-        dp, cp, tp = MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP
-        input_layout = SpmdType({dp: spmd.S(0), cp: spmd.S(1), tp: spmd.R})
-        output_layout = SpmdType(
-            {dp: spmd.V, cp: spmd.V, tp: spmd.V},
-            partition_spec=spmd.PartitionSpec(dp, (cp, tp), None),
-        )
+        input_layout = token_id_placement()
 
         for padding_idx, reshard_after_forward in product(
             (None, 5, 69, 127, -1), (False, True)
@@ -77,21 +71,12 @@ class TestFSDPEmbedding(DTensorTestBase):
                 with torch.no_grad():
                     reference.weight.normal_()
                 embedding = (
-                    Embedding.Config(
+                    VocabParallelEmbedding.Config(
                         num_embeddings=128,
                         embedding_dim=16,
                         padding_idx=padding_idx,
-                        sharding_config=ShardingConfig(
-                            state_shardings={
-                                "weight": dense_param_placement(tp=spmd.S(0))
-                            },
-                            in_src_shardings={"input": input_layout},
-                            in_dst_shardings={"input": input_layout},
-                            out_src_shardings=SpmdType(
-                                {dp: spmd.S(0), cp: spmd.S(1), tp: spmd.P}
-                            ),
-                            out_dst_shardings=output_layout,
-                            local_spmd=True,
+                        sharding_config=token_embedding_sharding_config(
+                            enable_sp=False
                         ),
                     )
                     .build()
@@ -118,7 +103,7 @@ class TestFSDPEmbedding(DTensorTestBase):
                     # Different DP batches exercise gradient averaging; repeated
                     # IDs straddle the TP boundary and include both padding owners.
                     tokens = torch.tensor(
-                        [[0, 5, 64, 69, 100 + dp_rank + step, 127, 64, 5]],
+                        [0, 5, 64, 69, 100 + dp_rank + step, 127, 64, 5],
                         device=self.device_type,
                     )
                     reference_optimizer.zero_grad(set_to_none=True)
@@ -138,12 +123,9 @@ class TestFSDPEmbedding(DTensorTestBase):
                             self.assertEqual(embedding.weight.shape, (64, 16))
                         output.sum().backward()
 
-                    self.assertEqual(
-                        output,
-                        expected.chunk(tp_mesh.size(), dim=1)[tp_rank],
-                        atol=0,
-                        rtol=0,
-                    )
+                    # Without SP the reduced output is TP-invariant: every rank
+                    # holds the full embeddings.
+                    self.assertEqual(output, expected, atol=0, rtol=0)
                     # FSDP must restore the optimizer's persistent sharded parameter
                     # after backward, including the padding-masked gradient.
                     self.assertIs(embedding.weight, parameter)

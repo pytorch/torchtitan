@@ -103,7 +103,8 @@ def test_local_compile_forwards_compile_kwargs(monkeypatch) -> None:
 
 
 def test_local_compile_keeps_grad_of_async_collective_input() -> None:
-    # Module-boundary redistributions return un-awaited AsyncCollectiveTensors.
+    # Async redistributions (e.g. the CP collectives in cp_mla.py) return
+    # un-awaited AsyncCollectiveTensors.
     class ToAsyncCollective(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x):
