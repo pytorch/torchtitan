@@ -283,9 +283,10 @@ turn 2 on generator B: GPU and host miss, Store hit -> load the history's KV,
 ```
 
 `scripts/install_rl_env.sh` already installs the Mooncake SDK (for the
-transport API). Start a `mooncake_master` as in SGLang's
-[Mooncake deployment guide](https://github.com/sgl-project/sglang/blob/435ee288edbda6d4522ff2bae2fe33f82a3fd1ea/python/sglang/srt/mem_cache/storage/mooncake_store/README.md#L131)
-and configure the generators; each generator contributes the Store memory:
+transport API). The controller starts one `mooncake_master` for the job on its
+host, on a free port, and adds its address to each generator's
+`hicache_storage_backend_extra_config`; the master exits with the controller.
+Configure the generators; each generator contributes the Store memory:
 
 ```python
 SGLangEngine.Config(
@@ -295,7 +296,6 @@ SGLangEngine.Config(
         "hicache_storage_backend": "mooncake",
         "hicache_storage_backend_extra_config": json.dumps(
             {
-                "master_server_address": "<master>:50051",
                 "metadata_server": "P2PHANDSHAKE",
                 "protocol": "rdma",
                 "device_name": "mlx5_0",
@@ -309,6 +309,11 @@ SGLangEngine.Config(
 )
 ```
 
+- Each rank serves its Store memory at `MOONCAKE_LOCAL_HOSTNAME` (default
+  `localhost`). With generators on more than one host, set it on each host to
+  an address the other hosts reach (an IP where hosts cannot resolve each
+  other's names), plus `MC_USE_IPV6=1` for an IPv6 address: without it,
+  Mooncake's handshake cannot resolve IPv6 addresses.
 - The Store sits below HiCache's host memory (a load goes Store -> host -> GPU),
   so it needs `enable_hierarchical_cache`. Keep the default `write_through`
   policy: with `write_back`, KV reaches the Store only when evicted from GPU.
