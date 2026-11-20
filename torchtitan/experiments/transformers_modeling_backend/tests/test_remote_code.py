@@ -18,7 +18,7 @@ from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
 
-_REMOTE_CONFIG = '''
+_REMOTE_CONFIG = """
 import os
 from transformers import LlamaConfig
 
@@ -27,7 +27,7 @@ open(os.environ["TT_REMOTE_CODE_MARKER"], "w").close()
 
 class RemoteConfig(LlamaConfig):
     pass
-'''
+"""
 
 
 def _write_repo(repo_dir: str) -> None:
