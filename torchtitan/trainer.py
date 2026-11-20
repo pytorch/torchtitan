@@ -32,6 +32,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config_json
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -134,9 +135,7 @@ class Trainer(Configurable):
 
         def maybe_log(self) -> None:
             if self.debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config_json(self)}")
 
             if self.debug.save_config_file is not None:
                 config_file = os.path.join(

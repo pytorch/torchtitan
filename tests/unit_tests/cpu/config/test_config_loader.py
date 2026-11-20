@@ -264,3 +264,22 @@ def test_cli_overrides_extend_the_top_level_rl_config() -> None:
         )
 
     assert config.override.imports == ["pkg.recipe", "pkg.cli"]
+
+
+def test_print_config_outputs_compacted_layers_and_exits(capsys) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        ConfigLoader().load(
+            [
+                "--module",
+                "torchtitan_recipes.tests.models.llama3",
+                "--config",
+                "llama3_debugmodel",
+                "--print-config",
+            ]
+        )
+
+    assert exc_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "Trainer.Config(" in out
+    assert "Llama3Model.Config(" in out
+    assert "'[0..5] (6 items)': Llama3TransformerBlock.Config(" in out

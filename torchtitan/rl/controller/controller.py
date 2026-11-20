@@ -111,6 +111,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config_json
 from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
@@ -398,17 +399,14 @@ class Controller(Configurable):
 
         def maybe_log(self) -> None:
             debug = self.trainer.debug
-            config_dict = self.to_dict()
             if debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(config_dict, indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config_json(self)}")
 
             if debug.save_config_file is not None:
                 config_file = os.path.join(self.dump_folder, debug.save_config_file)
                 os.makedirs(os.path.dirname(config_file), exist_ok=True)
                 with open(config_file, "w") as file:
-                    json.dump(config_dict, file, indent=2)
+                    json.dump(self.to_dict(), file, indent=2)
                 logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
