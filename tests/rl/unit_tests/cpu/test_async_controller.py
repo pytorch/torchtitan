@@ -34,16 +34,14 @@ from torchtitan.rl.rollout.finished_group import FinishedRolloutGroup
 from torchtitan.rl.rollout.types import (
     Prompt,
     Rollout,
+    rollout_turn_lengths,
     RolloutStatus,
     RolloutTurn,
     RolloutTurnID,
 )
 
 from torchtitan.rl.trainer.batcher import Batcher
-from torchtitan.rl.trainer.training_sample_builder import (
-    TrainingSample,
-    TrainingSampleGroup,
-)
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleSpec
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
@@ -64,52 +62,63 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
 
 
-def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
-    return TrainingSample(
-        min_policy_version=0,
-        max_policy_version=0,
-        rollout_id=RolloutTurnID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
-        token_ids=np.array([1, 2, 3]),
-        loss_mask=np.array([False, True, True]),
-        logprobs=np.array([0.0, 0.1, 0.2], dtype=np.float32),
-        advantage=np.array([0.0, 1.0, 1.0], dtype=np.float32),
-    )
-
-
-def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
-    return TrainingSampleGroup(
+def _rollout(*, group_id: int, rollout_id: int, token_ids: list[int]) -> Rollout:
+    """A one-turn rollout whose training sample is `token_ids`: its first token is the prompt,
+    the rest the completion (advantage 1). Rewards differ across a group, so no group is
+    zero-std."""
+    return Rollout(
         group_id=group_id,
-        training_samples=[
-            _training_sample(group_id=group_id, rollout_id=i)
-            for i in range(num_samples)
-        ],
-        metrics=[],
-    )
-
-
-def _variable_length_group(
-    group_id: int, *, token_lengths: list[int]
-) -> TrainingSampleGroup:
-    samples = []
-    for rollout_id, token_length in enumerate(token_lengths):
-        samples.append(
-            TrainingSample(
+        rollout_id=rollout_id,
+        status=RolloutStatus.COMPLETED,
+        turns=[
+            RolloutTurn(
+                rollout_id=RolloutTurnID(
+                    group_id=group_id, rollout_id=rollout_id, turn_id=0
+                ),
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.array(token_ids[:1], dtype=np.int32),
+                completion_token_ids=np.array(token_ids[1:], dtype=np.int32),
+                completion_logprobs=np.zeros(len(token_ids) - 1, dtype=np.float32),
                 min_policy_version=0,
                 max_policy_version=0,
-                rollout_id=RolloutTurnID(
-                    group_id=group_id,
-                    rollout_id=rollout_id,
-                    turn_id=0,
-                ),
-                token_ids=np.arange(token_length),
-                loss_mask=np.array([False] + [True] * (token_length - 1)),
-                logprobs=np.zeros(token_length, dtype=np.float32),
-                advantage=np.array(
-                    [0.0] + [1.0] * (token_length - 1), dtype=np.float32
-                ),
             )
-        )
-    return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
+        ],
+        reward=float(rollout_id),
+        advantage=1.0,
+    )
+
+
+def _trainable_group(group_id: int, *, num_samples: int) -> RolloutGroup:
+    return RolloutGroup(
+        group_id=group_id,
+        rollouts=[
+            _rollout(group_id=group_id, rollout_id=i, token_ids=[1, 2, 3])
+            for i in range(num_samples)
+        ],
+    )
+
+
+def _variable_length_group(group_id: int, *, token_lengths: list[int]) -> RolloutGroup:
+    return RolloutGroup(
+        group_id=group_id,
+        rollouts=[
+            _rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                token_ids=list(range(token_length)),
+            )
+            for rollout_id, token_length in enumerate(token_lengths)
+        ],
+    )
+
+
+def _specs(batcher: Batcher, group: RolloutGroup) -> list[TrainingSampleSpec]:
+    """The training sample specs the batcher plans `group` with."""
+    return batcher._training_sample_builder.decide(
+        rollout_group=group,
+        turn_lengths=tuple(map(rollout_turn_lengths, group.rollouts)),
+        num_mtp_layers=0,
+    ).training_sample_specs
 
 
 def _metric_value(batch, key: str) -> float:
@@ -118,8 +127,9 @@ def _metric_value(batch, key: str) -> float:
     return metric.value.value
 
 
-def _untrainable_group(group_id: int) -> TrainingSampleGroup:
-    return TrainingSampleGroup(group_id=group_id, training_samples=[], metrics=[])
+def _untrainable_group(group_id: int) -> RolloutGroup:
+    """A failed group: no rollouts, no training samples."""
+    return RolloutGroup(group_id=group_id, rollouts=[])
 
 
 def _build_batcher(
@@ -141,13 +151,13 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     # Target is 2 GROUPS. A single group with many rollouts is not a full batch; two groups are,
     # regardless of how many rollouts each contributes.
     batcher = _build_batcher(num_prompts_per_train_step=2)
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_trainable_group(0, num_samples=8)
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_trainable_group(0, num_samples=8)
     )
     assert batch is None
     assert group_is_trainable
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_trainable_group(1, num_samples=1)
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
     assert group_is_trainable
@@ -157,12 +167,12 @@ def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=2)
     late_group = _trainable_group(7, num_samples=1)
     early_group = _trainable_group(3, num_samples=1)
-    late_group.training_samples[0].min_policy_version = 7
-    early_group.training_samples[0].min_policy_version = 3
+    late_group.rollouts[0].turns[0].min_policy_version = 7
+    early_group.rollouts[0].turns[0].min_policy_version = 3
 
     # g7 finishes first; the packed batch still lists g3 before g7.
-    batcher.add_training_samples(training_sample_group=late_group)
-    batch, _ = batcher.add_training_samples(training_sample_group=early_group)
+    batcher.add_group(rollout_group=late_group)
+    batch, _ = batcher.add_group(rollout_group=early_group)
 
     assert batch is not None
     assert batch.min_policy_versions == [3, 7]
@@ -173,13 +183,13 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # Metric-only (empty) groups do not count toward the target and cannot form a zero-token batch;
     # they ride along until a trainable group completes the batch.
     batcher = _build_batcher(num_prompts_per_train_step=1)
-    metric_only = TrainingSampleGroup(group_id=0, training_samples=[], metrics=[])
-    assert batcher.add_training_samples(training_sample_group=metric_only) == (
+    metric_only = _untrainable_group(0)
+    assert batcher.add_group(rollout_group=metric_only) == (
         None,
         False,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_trainable_group(1, num_samples=2)
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_trainable_group(1, num_samples=2)
     )
     assert batch is not None
     assert group_is_trainable
@@ -192,9 +202,7 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
 
 def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_trainable_group(1, num_samples=2)
-    )
+    batch, _ = batcher.add_group(rollout_group=_trainable_group(1, num_samples=2))
 
     assert batch is not None
     assert batch.global_loss_token_counts.shape == (3,)
@@ -207,8 +215,8 @@ def test_batcher_warns_after_each_batch_of_untrainable_groups(
     batcher = _build_batcher(num_prompts_per_train_step=2)
 
     with caplog.at_level(logging.WARNING):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(0))
-        batcher.add_training_samples(training_sample_group=_untrainable_group(1))
+        batcher.add_group(rollout_group=_untrainable_group(0))
+        batcher.add_group(rollout_group=_untrainable_group(1))
 
     assert (
         "Consecutive untrainable batches: 1/10 "
@@ -222,13 +230,11 @@ def test_batcher_resets_no_progress_count_on_trainable_group(
     batcher = _build_batcher(num_prompts_per_train_step=2)
 
     with caplog.at_level(logging.WARNING):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(0))
-        batcher.add_training_samples(training_sample_group=_untrainable_group(1))
-        batcher.add_training_samples(
-            training_sample_group=_trainable_group(2, num_samples=1)
-        )
+        batcher.add_group(rollout_group=_untrainable_group(0))
+        batcher.add_group(rollout_group=_untrainable_group(1))
+        batcher.add_group(rollout_group=_trainable_group(2, num_samples=1))
         caplog.clear()
-        batcher.add_training_samples(training_sample_group=_untrainable_group(3))
+        batcher.add_group(rollout_group=_untrainable_group(3))
 
     assert "zero-output batch equivalents" not in caplog.text
 
@@ -237,10 +243,10 @@ def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=2)
 
     for group_id in range(19):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(group_id))
+        batcher.add_group(rollout_group=_untrainable_group(group_id))
 
     with pytest.raises(RuntimeError, match="10 consecutive untrainable batches"):
-        batcher.add_training_samples(training_sample_group=_untrainable_group(19))
+        batcher.add_group(rollout_group=_untrainable_group(19))
 
 
 def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
@@ -254,8 +260,8 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_trainable_group(0, num_samples=5)
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_trainable_group(0, num_samples=5)
     )
     assert batch is not None
     assert group_is_trainable
@@ -281,8 +287,8 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_variable_length_group(
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_variable_length_group(
             0,
             token_lengths=[4, 4, 3],
         )
@@ -307,8 +313,8 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_variable_length_group(0, token_lengths=[4])
+    batch, _ = batcher.add_group(
+        rollout_group=_variable_length_group(0, token_lengths=[4])
     )
 
     assert batch is not None
@@ -336,8 +342,8 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_variable_length_group(
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_variable_length_group(
             0,
             token_lengths=[5, 4, 4, 3],
         )
@@ -360,10 +366,7 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _variable_length_group(
-        0,
-        token_lengths=[11] * 12,
-    ).training_samples
+    samples = _specs(batcher, _variable_length_group(0, token_lengths=[11] * 12))
     bins = [samples[:4], samples[4:8], samples[8:]]
 
     batcher._expand_bins_by_splitting(bins, target_num_bins=4)
@@ -381,7 +384,7 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _variable_length_group(0, token_lengths=[6, 6]).training_samples
+    samples = _specs(batcher, _variable_length_group(0, token_lengths=[6, 6]))
     bins = [[samples[0]], [samples[1]]]
 
     batcher._expand_bins_by_splitting(bins, target_num_bins=4)
@@ -398,12 +401,15 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _variable_length_group(
-        0,
-        # Effective lengths are [6, 6, 6, 4, 4, 4]. FFD finds three bins,
-        # then LPT repacks into four DP inputs.
-        token_lengths=[7, 7, 7, 5, 5, 5],
-    ).training_samples
+    samples = _specs(
+        batcher,
+        _variable_length_group(
+            0,
+            # Effective lengths are [6, 6, 6, 4, 4, 4]. FFD finds three bins,
+            # then LPT repacks into four DP inputs.
+            token_lengths=[7, 7, 7, 5, 5, 5],
+        ),
+    )
 
     assignments = batcher._assign_training_samples_to_microbatches(samples)
     workloads = [
@@ -425,12 +431,15 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _variable_length_group(
-        0,
-        # Effective lengths are [10, 8, 6, 4]. The document limit forces each
-        # sample into its own bin, with padding-aware workloads [100, 68, 52, 52].
-        token_lengths=[11, 9, 7, 5],
-    ).training_samples
+    samples = _specs(
+        batcher,
+        _variable_length_group(
+            0,
+            # Effective lengths are [10, 8, 6, 4]. The document limit forces each
+            # sample into its own bin, with padding-aware workloads [100, 68, 52, 52].
+            token_lengths=[11, 9, 7, 5],
+        ),
+    )
 
     assignments = batcher._assign_training_samples_to_microbatches(samples)
     workloads = [
@@ -451,8 +460,8 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
         pad_id=0,
         temperature=1.0,
     )
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_variable_length_group(
+    batch, _ = batcher.add_group(
+        rollout_group=_variable_length_group(
             0,
             token_lengths=[2, 2, 4, 2, 2, 4],
         )
@@ -478,8 +487,8 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=_trainable_group(0, num_samples=5)
+    batch, group_is_trainable = batcher.add_group(
+        rollout_group=_trainable_group(0, num_samples=5)
     )
 
     assert batch is not None
@@ -502,9 +511,7 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_trainable_group(0, num_samples=2)
-    )
+    batch, _ = batcher.add_group(rollout_group=_trainable_group(0, num_samples=2))
 
     assert batch is not None
     assert len(batch.microbatch_groups) == 2
@@ -522,25 +529,13 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    sample = _training_sample(group_id=0, rollout_id=0)
-    sample.token_ids = np.arange(6)
-    sample.loss_mask = np.zeros(6, dtype=bool)
-    sample.logprobs = np.zeros(6, dtype=np.float32)
-    sample.advantage = np.zeros(6, dtype=np.float32)
-
-    pending, group_is_trainable = batcher.add_training_samples(
-        training_sample_group=TrainingSampleGroup(
-            group_id=0,
-            training_samples=[sample],
-            metrics=[],
-        )
+    pending, group_is_trainable = batcher.add_group(
+        rollout_group=_variable_length_group(0, token_lengths=[6])
     )
     assert pending is None
     assert not group_is_trainable
 
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_trainable_group(1, num_samples=1)
-    )
+    batch, _ = batcher.add_group(rollout_group=_trainable_group(1, num_samples=1))
     assert batch is not None
     assert batch.group_ids == [0, 1]
     dropped_metric = next(
@@ -562,9 +557,7 @@ def test_batcher_logs_the_bytes_each_rank_receives_by_value(rdma: bool) -> None:
         temperature=1.0,
         register_rdma_object=lambda microbatch, **kwargs: microbatch,
     )
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_trainable_group(0, num_samples=2)
-    )
+    batch, _ = batcher.add_group(rollout_group=_trainable_group(0, num_samples=2))
 
     assert batch is not None
     payload = [
@@ -699,13 +692,8 @@ def test_untrainable_group_releases_before_training() -> None:
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
 
-        training_sample_group = TrainingSampleGroup(
-            group_id=0, training_samples=[], metrics=[]
-        )
         await buffer.release_slots([0], reason="untrainable_group")
-        assert batcher.add_training_samples(
-            training_sample_group=training_sample_group
-        ) == (
+        assert batcher.add_group(rollout_group=_untrainable_group(0)) == (
             None,
             False,
         )

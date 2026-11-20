@@ -29,12 +29,14 @@ from torchtitan.rl.rdma_object import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
-from torchtitan.rl.rollout.types import RolloutTurnID
-from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
-from torchtitan.rl.trainer.training_sample_builder import (
-    TrainingSample,
-    TrainingSampleGroup,
+from torchtitan.rl.rollout.types import (
+    Rollout,
+    RolloutGroup,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
 )
+from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
 
 
 class _FakeRDMABuffer:
@@ -158,23 +160,34 @@ def test_batcher_rejects_rdma_without_a_registration() -> None:
         )
 
 
-def _training_sample_group(group_id: int, num_samples: int = 1) -> TrainingSampleGroup:
-    samples = [
-        TrainingSample(
-            min_policy_version=0,
-            max_policy_version=0,
+def _rollout_group(group_id: int, num_samples: int = 1) -> RolloutGroup:
+    rollouts = []
+    for rollout_id in range(num_samples):
+        # Distinct token ids per group and sample, so a swapped column shows.
+        token_ids = np.arange(9, dtype=np.int32) + 1000 * group_id + 100 * rollout_id
+        turn = RolloutTurn(
             rollout_id=RolloutTurnID(
                 group_id=group_id, rollout_id=rollout_id, turn_id=0
             ),
-            # Distinct token ids per group and sample, so a swapped column shows.
-            token_ids=np.arange(9) + 1000 * group_id + 100 * rollout_id,
-            loss_mask=np.array([False] + [True] * 8),
-            logprobs=np.zeros(9, dtype=np.float32),
-            advantage=np.ones(9, dtype=np.float32),
+            prompt_prefix_len=0,
+            prompt_delta_token_ids=token_ids[:1],
+            completion_token_ids=token_ids[1:],
+            completion_logprobs=np.zeros(8, dtype=np.float32),
+            min_policy_version=0,
+            max_policy_version=0,
         )
-        for rollout_id in range(num_samples)
-    ]
-    return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])
+        rollouts.append(
+            Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.COMPLETED,
+                turns=[turn],
+                # Distinct rewards: a zero-std group would be dropped.
+                reward=float(rollout_id),
+                advantage=1.0,
+            )
+        )
+    return RolloutGroup(group_id=group_id, rollouts=rollouts)
 
 
 def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> None:
@@ -184,9 +197,7 @@ def test_batcher_without_rdma_min_tensor_bytes_never_registers(monkeypatch) -> N
     monkeypatch.setattr(rdma_object, "RDMABuffer", fail_to_register)
     batcher = _build_batcher(rdma_min_tensor_bytes=None)
 
-    batch, _ = batcher.add_training_samples(
-        training_sample_group=_training_sample_group(0)
-    )
+    batch, _ = batcher.add_group(rollout_group=_rollout_group(0))
     asyncio.run(batcher.maybe_release_oldest_batch())
 
     assert isinstance(batch.microbatch_groups[0][0][0], TrainingMicrobatch)
@@ -197,9 +208,7 @@ def test_batcher_registers_each_batch_and_releases_the_oldest(monkeypatch) -> No
     batcher = _build_batcher(rdma_min_tensor_bytes=1024)
 
     batches = [
-        batcher.add_training_samples(
-            training_sample_group=_training_sample_group(group_id)
-        )[0]
+        batcher.add_group(rollout_group=_rollout_group(group_id))[0]
         for group_id in (0, 1)
     ]
     asyncio.run(batcher.maybe_release_oldest_batch())
@@ -348,13 +357,9 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
         try:
             ranks = mesh.spawn("rank", _TrainerRank)
             for batch_index in range(3):
-                group = _training_sample_group(batch_index, num_samples=8)
-                batch, _ = rdma_batcher.add_training_samples(
-                    training_sample_group=group
-                )
-                expected, _ = by_value_batcher.add_training_samples(
-                    training_sample_group=group
-                )
+                group = _rollout_group(batch_index, num_samples=8)
+                batch, _ = rdma_batcher.add_group(rollout_group=group)
+                expected, _ = by_value_batcher.add_group(rollout_group=group)
                 # All 4 ranks read at once, while the previous batch is still registered.
                 rows = [row for group in batch.microbatch_groups for row in group]
                 columns = list((await ranks.read_column.call(rows)).values())

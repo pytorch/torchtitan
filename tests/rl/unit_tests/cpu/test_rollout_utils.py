@@ -4,7 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `TrainingSampleBuilder.rollout_to_training_samples` and `split_prompt`."""
+"""Unit tests for `TrainingSampleBuilder` (`decide`, `materialize`, `rollout_to_training_samples`),
+`check_prompt_prefixes` and `split_prompt`."""
 
 from __future__ import annotations
 
@@ -16,16 +17,49 @@ from renderers import PlaceholderRange
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 from torchtitan.rl.rollout.finished_group import slim_rollout_group
-from torchtitan.rl.rollout.types import Prompt, PromptImage, RolloutTurnID, split_prompt
+from torchtitan.rl.rollout.types import (
+    check_prompt_prefixes,
+    Prompt,
+    PromptImage,
+    rollout_turn_lengths,
+    RolloutTurnID,
+    split_prompt,
+)
 
-from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
+from torchtitan.rl.trainer.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleBuilder,
+    TrainingSampleSpecGroup,
+)
 
 _GROUP_ID = "step=1/group=0"
 
-# rollout_to_training_samples is the TrainingSampleBuilder override hook; the transform is config-independent.
-rollout_to_training_samples = (
-    TrainingSampleBuilder.Config().build().rollout_to_training_samples
-)
+
+def rollout_to_training_samples(rollout: Rollout) -> list[TrainingSample]:
+    """Every training sample of a full rollout, as the batcher makes them: check its prompt
+    prefixes, plan its specs from its lengths, then build them from its arrays. The builder's
+    config only filters groups, so a default builder builds the same samples."""
+    builder = TrainingSampleBuilder.Config().build()
+    check_prompt_prefixes(rollout)
+    specs = builder.rollout_to_training_sample_specs(
+        rollout, rollout_turn_lengths(rollout), num_mtp_layers=0
+    )
+    return builder.rollout_to_training_samples(rollout, training_sample_specs=specs)
+
+
+def _decide_and_materialize(
+    builder: TrainingSampleBuilder, group: RolloutGroup
+) -> tuple[TrainingSampleSpecGroup, list[TrainingSample]]:
+    """The batcher's path: decide from the group's lengths, then materialize from its arrays."""
+    spec_group = builder.decide(
+        rollout_group=group,
+        turn_lengths=tuple(map(rollout_turn_lengths, group.rollouts)),
+        num_mtp_layers=0,
+    )
+    samples = builder.materialize(
+        training_sample_specs=spec_group.training_sample_specs, rollout_group=group
+    )
+    return spec_group, samples
 
 
 def _turn(
@@ -417,7 +451,7 @@ def test_empty_completion_on_a_later_turn_raises() -> None:
         rollout_to_training_samples(rollout)
 
 
-def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> None:
+def test_decide_drops_a_rollout_with_an_empty_later_completion() -> None:
     # e.g. turn 1 aborted before its first token: drop that rollout and count it, keep the others
     empty_later = _scored_rollout(
         [
@@ -434,15 +468,13 @@ def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> No
     )
     kept.rollout_id = 1
 
-    group = (
-        TrainingSampleBuilder.Config()
-        .build()
-        .build_from_group(
-            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty_later, kept])
-        )
+    group, samples = _decide_and_materialize(
+        TrainingSampleBuilder.Config().build(),
+        RolloutGroup(group_id=_GROUP_ID, rollouts=[empty_later, kept]),
     )
 
-    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1]
+    assert [spec.rollout_id.rollout_id for spec in group.training_sample_specs] == [1]
+    assert [sample.token_ids.tolist() for sample in samples] == [[1, 2, 5]]
     [dropped] = [
         metric
         for metric in group.metrics
@@ -464,9 +496,14 @@ def test_empty_completion_on_first_turn_is_skipped() -> None:
 def test_group_filters_preserve_group_id_for_commit() -> None:
     builder = TrainingSampleBuilder.Config().build()
 
-    failed = builder.build_from_group(
-        rollout_group=RolloutGroup(group_id=7, rollouts=[])
-    )
+    def decide(group: RolloutGroup) -> TrainingSampleSpecGroup:
+        return builder.decide(
+            rollout_group=group,
+            turn_lengths=tuple(map(rollout_turn_lengths, group.rollouts)),
+            num_mtp_layers=0,
+        )
+
+    failed = decide(RolloutGroup(group_id=7, rollouts=[]))
 
     empty_completion = _scored_rollout(
         [_turn(prompt_token_ids=[1], completion_token_ids=[], version=1)],
@@ -474,9 +511,7 @@ def test_group_filters_preserve_group_id_for_commit() -> None:
         advantage=0.0,
     )
     empty_completion.group_id = 8
-    untrainable = builder.build_from_group(
-        rollout_group=RolloutGroup(group_id=8, rollouts=[empty_completion])
-    )
+    untrainable = decide(RolloutGroup(group_id=8, rollouts=[empty_completion]))
 
     first = _scored_rollout(
         [_turn(prompt_token_ids=[1], completion_token_ids=[2], version=1)],
@@ -489,9 +524,7 @@ def test_group_filters_preserve_group_id_for_commit() -> None:
         advantage=0.0,
     )
     first.group_id = second.group_id = 9
-    zero_std = builder.build_from_group(
-        rollout_group=RolloutGroup(group_id=9, rollouts=[first, second])
-    )
+    zero_std = decide(RolloutGroup(group_id=9, rollouts=[first, second]))
 
     invalid_logprob = _scored_rollout(
         [_turn(prompt_token_ids=[1], completion_token_ids=[2], version=1)],
@@ -500,13 +533,11 @@ def test_group_filters_preserve_group_id_for_commit() -> None:
     )
     invalid_logprob.group_id = 10
     invalid_logprob.turns[0].completion_logprobs = np.array([np.nan], dtype=np.float32)
-    no_valid_tokens = builder.build_from_group(
-        rollout_group=RolloutGroup(group_id=10, rollouts=[invalid_logprob])
-    )
+    no_valid_tokens = decide(RolloutGroup(group_id=10, rollouts=[invalid_logprob]))
 
     filtered_groups = [failed, untrainable, zero_std, no_valid_tokens]
     assert [group.group_id for group in filtered_groups] == [7, 8, 9, 10]
-    assert all(not group.training_samples for group in filtered_groups)
+    assert all(not group.training_sample_specs for group in filtered_groups)
 
 
 def test_a_slim_group_builds_the_same_training_samples() -> None:
@@ -545,16 +576,15 @@ def test_a_slim_group_builds_the_same_training_samples() -> None:
     group = RolloutGroup(group_id=_GROUP_ID, rollouts=[first, second])
     builder = TrainingSampleBuilder.Config().build()
 
-    full = builder.build_from_group(rollout_group=group)
-    slim = builder.build_from_group(rollout_group=slim_rollout_group(group))
+    full, full_samples = _decide_and_materialize(builder, group)
+    slim, slim_samples = _decide_and_materialize(builder, slim_rollout_group(group))
 
-    assert len(full.training_samples) == 3
+    assert len(full_samples) == 3
+    assert slim.training_sample_specs == full.training_sample_specs
     assert m.MetricsProcessor._aggregate_metrics(
         slim.metrics
     ) == m.MetricsProcessor._aggregate_metrics(full.metrics)
-    for full_sample, slim_sample in zip(
-        full.training_samples, slim.training_samples, strict=True
-    ):
+    for full_sample, slim_sample in zip(full_samples, slim_samples, strict=True):
         for sample_field in dataclasses.fields(full_sample):
             full_value = getattr(full_sample, sample_field.name)
             slim_value = getattr(slim_sample, sample_field.name)

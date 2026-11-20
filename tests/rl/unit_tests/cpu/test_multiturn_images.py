@@ -39,7 +39,8 @@ from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvSt
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import Completion
-from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
+
+from tests.rl.unit_tests.cpu.test_rollout_utils import rollout_to_training_samples
 
 VISION_PROCESSOR = dataclasses.replace(
     VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS),
@@ -215,12 +216,8 @@ def test_rollout_keeps_each_image_on_its_placeholders(
     )
     assert list(full.token_ids) == second_ids
 
-    samples = (
-        TrainingSampleBuilder.Config()
-        .build()
-        .rollout_to_training_samples(
-            dataclasses.replace(rollout, reward=1.0, advantage=0.5)
-        )
+    samples = rollout_to_training_samples(
+        dataclasses.replace(rollout, reward=1.0, advantage=0.5)
     )
     # The builder rebuilds each sample's full images from the deltas.
     assert [[image.hash_value for image in sample.images] for sample in samples] == (

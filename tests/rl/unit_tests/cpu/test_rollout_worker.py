@@ -29,7 +29,8 @@ from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
-from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
+
+from tests.rl.unit_tests.cpu.test_rollout_utils import rollout_to_training_samples
 
 
 class _Config:
@@ -259,7 +260,6 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             rdma_min_image_bytes=None,
         )
     )
-    builder = TrainingSampleBuilder.Config().build()
 
     async def generate_fn(prompt, **kwargs) -> Completion:
         token_ids = [rng.randrange(100) for _ in range(rng.randint(1, 3))]
@@ -305,7 +305,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                     expected.append((turn_id, prompt + completion))
                 previous = prompt + completion
 
-            samples = builder.rollout_to_training_samples(rollout)
+            samples = rollout_to_training_samples(rollout)
             assert [
                 (s.rollout_id.turn_id, s.token_ids.tolist()) for s in samples
             ] == expected
