@@ -114,7 +114,9 @@ class GenerationServer(Configurable):
     async def start(self) -> None:
         if self.runner is not None:
             return
-        app = web.Application()
+        # aiohttp refuses a body over 1 MiB by default: a prompt past ~150K token ids. Verifiers'
+        # interception server, which forwards these calls, accepts 1 GiB.
+        app = web.Application(client_max_size=1024**3)
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
@@ -366,6 +368,8 @@ def _parse_sampling_config(value: object):
     supported = {
         "temperature",
         "top_p",
+        "top_k",
+        "min_p",
         "max_tokens",
         "seed",
         "stop_token_ids",
@@ -378,6 +382,14 @@ def _parse_sampling_config(value: object):
     unsupported = set(value) - supported - protocol_fields
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
+    # Verifiers sends top_k=-1 and min_p=0.0 on every call. Refuse values that filter: the trainer
+    # computes logprobs over the full vocabulary. TODO(mask-replay): allow them, as for top_p < 1.
+    top_k, min_p = value.get("top_k", -1), value.get("min_p", 0.0)
+    if top_k not in (-1, 0) or min_p != 0.0:
+        raise ValueError(
+            "sampling_params must not filter (top_k -1 or 0, min_p 0.0), "
+            f"got top_k={top_k!r}, min_p={min_p!r}"
+        )
 
     # The generator stops only on these ids; the renderer client always sends them.
     stop_token_ids = _validate_token_ids(
