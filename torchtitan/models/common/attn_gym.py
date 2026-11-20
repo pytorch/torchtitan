@@ -28,7 +28,7 @@ if TYPE_CHECKING:
         ContextParallelRouting,
     )
     from attn_gym.linear.gdn.context_parallel import context_parallel_gdn
-    from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
+    from attn_gym.linear.gdn.impl.warpdrive import ChunkGdnWarpdrivePacked
     from attn_gym.linear.gdn.ops import _ChunkGDN
     from attn_gym.linear.kda import (
         bound_gate,
@@ -38,8 +38,8 @@ if TYPE_CHECKING:
     )
     from attn_gym.linear.kda.context_parallel import context_parallel_kda
     from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
-    from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
     from attn_gym.linear.kda.impl.fused import _ChunkKDA
+    from attn_gym.linear.kda.impl.warpdrive import ChunkKdaWarpdrive
     from attn_gym.linear.kda.masking import _MaskRows
     from attn_gym.linear.short_conv import (
         causal_conv1d,
@@ -64,8 +64,8 @@ __all__ = [
     "bound_gate",
     "causal_conv1d",
     "causal_conv1d_decode",
-    "ChunkGdnCudnnPacked",
-    "ChunkKdaCudnn",
+    "ChunkGdnWarpdrivePacked",
+    "ChunkKdaWarpdrive",
     "chunk_gdn",
     "chunk_kda",
     "context_parallel_conv_history",
@@ -101,8 +101,8 @@ _EXPORTS = {
     "bound_gate": "attn_gym.linear.kda",
     "causal_conv1d": "attn_gym.linear.short_conv",
     "causal_conv1d_decode": "attn_gym.linear.short_conv",
-    "ChunkGdnCudnnPacked": "attn_gym.linear.gdn.impl.cudnn",
-    "ChunkKdaCudnn": "attn_gym.linear.kda.impl.cudnn",
+    "ChunkGdnWarpdrivePacked": "attn_gym.linear.gdn.impl.warpdrive",
+    "ChunkKdaWarpdrive": "attn_gym.linear.kda.impl.warpdrive",
     "chunk_gdn": "attn_gym.linear",
     "chunk_kda": "attn_gym.linear.kda",
     "context_parallel_conv_history": "attn_gym.linear.context_parallel",
@@ -143,10 +143,10 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
         raise ModuleNotFoundError(
             str(error), name=error.name, path=error.path
         ) from error
-    # Keep the version in sync with the attn-gym pin in .ci/docker/requirements.txt.
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
-        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.20'.",
+        "Install TorchTitan's pinned dependencies with: "
+        "python -m pip install -r requirements.txt.",
         name="attn_gym",
     )
 
