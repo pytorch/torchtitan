@@ -48,6 +48,9 @@ def materialize_mla_kv(
     k_nope_THN, v_THV = torch.split(kv_THP, [nope_head_dim, value_head_dim], dim=-1)
     k_shared_THR = k_shared_TR.unsqueeze(1).expand(-1, k_nope_THN.shape[1], -1)
     k_THK = torch.cat((k_nope_THN, k_shared_THR), dim=-1)
+    # Attention saves v for backward; a v that views kv would keep all of kv alive.
+    if torch.is_grad_enabled():
+        v_THV = v_THV.contiguous()
     return k_THK, v_THV
 
 
