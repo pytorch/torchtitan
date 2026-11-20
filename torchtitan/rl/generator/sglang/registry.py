@@ -157,8 +157,9 @@ def _patch_page_major_attention_backend_allow_list() -> None:
     backend is SGLang's FlashAttention backend with PyTorch's varlen FlashAttention
     kernel, which reads that stride, so check it as ``fa3``.
 
-    TODO(https://github.com/sgl-project/sglang/issues/48475): SGLang has no public
-    way to declare a registered backend page-major capable.
+    TODO(https://github.com/sgl-project/sglang/pull/49681): register the backend
+    with ``page_major_kv_layout=True`` and drop this patch once the pinned SGLang
+    has that PR.
     """
     from sglang.srt.arg_groups import kv_cache_hook
 
