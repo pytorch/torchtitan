@@ -892,6 +892,10 @@ def _full_mode_graph_manager(monkeypatch) -> TorchTitanCudaGraphManager:
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
+    # CPU CI's vLLM platform has no CUDA graph pool, and these tests capture nothing.
+    monkeypatch.setattr(
+        cudagraph_utils.current_platform, "get_global_graph_pool", lambda: None
+    )
     # An explicit device: CPU CI has no platform for vLLM to infer one from.
     config = VllmConfig(device_config=DeviceConfig(device="cpu"))
     config.compilation_config = CompilationConfig(
