@@ -209,7 +209,7 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             and cu_seqlens is not None
             and has_initial_state is not None
         )
-        # Rows that `VLLMModelWrapper.forward` pads on have no attention metadata;
+        # Rows that `VLLMModelWrapper._pad_step_to_tp` adds have no attention metadata;
         # they get zeros below. FULL bucket padding does have metadata: its prepared
         # rows and captured slices stay fixed while the builder restages slots and
         # freshness, including null padding.
@@ -312,7 +312,7 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
                 # Adding keeps each row's one kernel result: both kernels give null slots
                 # zero output (Attention Gym's paged GDN contract).
                 output[:num_decode_rows].add_(decode_output)
-        # Zero the rows past the metadata (rows VLLMModelWrapper.forward padded on).
+        # Zero the rows past the metadata (rows `VLLMModelWrapper._pad_step_to_tp` added).
         if num_actual_tokens < num_tokens:
             padding = output.new_zeros(
                 num_tokens - num_actual_tokens, *output.shape[1:]
