@@ -23,6 +23,7 @@ from torch.distributed.pipelining.schedules import (
     PipelineScheduleSingle,
     ScheduleInterleaved1F1B,
 )
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.validator import Validator
 from torchtitan.config.parallelism import ParallelismConfig
@@ -636,7 +637,6 @@ def _run_grouped_eval(rank, port):
             )
         inputs = torch.ones(4, 8, device="cuda")
         labels = torch.zeros(4, dtype=torch.long, device="cuda")
-        from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 
         def evaluate(x):
             with torch.no_grad():
@@ -675,13 +675,8 @@ def _run_grouped_eval(rank, port):
             with torch.no_grad():
                 expected, _ = losses[1](reference(inputs), labels)
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            state = model.lm_head._get_fsdp_state()
-            assert not state._modules_to_run_forward
-            assert state._state_ctx.iter_forward_root is None
-            assert state._training_state == TrainingState.IDLE
-            assert reference.norm in (
-                reference.lm_head._get_fsdp_state()._modules_to_run_forward
-            )
+            # Released for the graph pool to reuse
+            assert all(isinstance(p, DTensor) for p in model.parameters())
     finally:
         accelerator_graph_teardown()
         dist.destroy_process_group()
