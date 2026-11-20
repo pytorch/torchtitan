@@ -234,8 +234,8 @@ Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
 `attn-gym[linear,cudnn]` dependency installs them.
 
 **NOTE:** The pinned vLLM release (`vllm_version` in `scripts/install_rl_env.sh`)
-is a CUDA 13 wheel. Its compiled kernels use only torch's stable ABI, so they
-load on the PyTorch nightly; RL CI checks the rest.
+is a CUDA 13 wheel. It pins an older PyTorch, but its compiled kernels use only
+torch's stable ABI, so they load on the PyTorch nightly.
 
 2. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
 ```bash
