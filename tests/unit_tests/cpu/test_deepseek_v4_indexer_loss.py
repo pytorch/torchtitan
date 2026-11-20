@@ -47,6 +47,17 @@ def dense_attention(q, local, compressed, indices, sink, scale, window, cu):
     return output, lse, teacher
 
 
+def _metadata(cu, seqlen):
+    """The sparse metadata for a packed or single-document layout."""
+    if cu is None:
+        positions = torch.arange(seqlen)
+    else:
+        positions = torch.cat([torch.arange(n) for n in torch.diff(cu).tolist()])
+    return CompressedSparseAttention.Config(
+        window_size=4, compress_ratio=4, softmax_scale=0.1, index_topk=2
+    ).build_attention_metadata(positions)
+
+
 class TestSparseIndexerLoss(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
@@ -110,7 +121,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
                 torch.testing.assert_close(out, expected_out)
                 torch.testing.assert_close(lse, expected_lse)
                 teacher = self.loss()._teacher(
-                    self.q, self.compressed, indices, lse, cu
+                    self.q, self.compressed, indices, lse, _metadata(cu, 12)
                 )
                 torch.testing.assert_close(teacher, expected_teacher)
 
@@ -139,7 +150,7 @@ class TestSparseIndexerLoss(unittest.TestCase):
                     indices,
                     scores.masked_fill(indices < 0, -torch.inf),
                     lse,
-                    cu,
+                    _metadata(cu, 12),
                     carrier=carrier,
                     denominator=torch.tensor(10.0),
                     padding_mask_T=~valid_tokens,
@@ -168,9 +179,9 @@ class TestSparseIndexerLoss(unittest.TestCase):
         indices, cu = self.case(True)
         _, lse = self.kernel(indices, cu)
         loss = self.loss()
-        small = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        small = loss._teacher(self.q, self.compressed, indices, lse, _metadata(cu, 12))
         loss.chunk_size = 128
-        large = loss._teacher(self.q, self.compressed, indices, lse, cu)
+        large = loss._teacher(self.q, self.compressed, indices, lse, _metadata(cu, 12))
         torch.testing.assert_close(small, large)
 
     def test_bfloat16_teacher_dot_products_accumulate_in_float32(self):
@@ -188,7 +199,9 @@ class TestSparseIndexerLoss(unittest.TestCase):
             cu,
         )
         with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-            actual = self.loss()._teacher(q, compressed, indices, lse, cu)
+            actual = self.loss()._teacher(
+                q, compressed, indices, lse, _metadata(cu, 12)
+            )
         torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
 
     def test_configuration_defaults_to_unweighted_kl(self):
@@ -238,7 +251,13 @@ class TestIndexerSelect(unittest.TestCase):
         w = torch.randn(12, 3, requires_grad=True)
         for cu in (None, torch.tensor([0, 4, 12], dtype=torch.int32)):
             indices, scores = Indexer.select(
-                q, k, w, max_seqlen=12, ratio=4, topk=2, cu_seqlens=cu
+                q,
+                k,
+                w,
+                max_seqlen=12,
+                ratio=4,
+                topk=2,
+                attention_metadata=_metadata(cu, 12),
             )
             index_only, no_scores = Indexer.select(
                 q,
@@ -247,7 +266,7 @@ class TestIndexerSelect(unittest.TestCase):
                 max_seqlen=12,
                 ratio=4,
                 topk=2,
-                cu_seqlens=cu,
+                attention_metadata=_metadata(cu, 12),
                 return_scores=False,
             )
             torch.testing.assert_close(indices, index_only)
@@ -272,6 +291,7 @@ class TestIndexerSelect(unittest.TestCase):
                 else None,
             )
             module = cfg.build().train(training)
+            metadata = cfg.build_attention_metadata(torch.arange(8))
             with (
                 patch.object(Indexer, "select", wraps=Indexer.select) as select,
                 patch(
@@ -279,7 +299,16 @@ class TestIndexerSelect(unittest.TestCase):
                     wraps=gather_attn,
                 ) as attention,
             ):
-                module(q, kv, kv[:2], iq, ik, iw, torch.zeros(4))
+                module(
+                    q,
+                    kv,
+                    kv[:2],
+                    iq,
+                    ik,
+                    iw,
+                    torch.zeros(4),
+                    attention_metadata=metadata,
+                )
                 self.assertFalse(select.call_args.kwargs["return_scores"])
                 self.assertFalse(attention.call_args.kwargs["return_aux"].lse)
 

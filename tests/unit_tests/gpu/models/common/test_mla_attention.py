@@ -128,7 +128,7 @@ class TestMLAAttentionSharding(DTensorTestBase):
                                 strict=True,
                             ):
                                 spmd.assert_type(
-                                    value, config.sharding_config.in_src_shardings[name]
+                                    value, config.sharding_config.input_shardings[name]
                                 )
                         with patch.object(remat, "region", side_effect=record_region):
                             forward = (
@@ -143,7 +143,7 @@ class TestMLAAttentionSharding(DTensorTestBase):
                             if typechecking:
                                 spmd.assert_type(
                                     grad_output,
-                                    config.sharding_config.out_src_shardings,
+                                    config.sharding_config.output_shardings,
                                 )
                             output.backward(grad_output)
                     grads = [x.grad for x in (*local_inputs, *attention.parameters())]

@@ -30,13 +30,13 @@ from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import create_block_diagonal_mask
 from torchtitan.models.kimi_k2_7.model import KimiK25Model
 from torchtitan.models.kimi_k2_7.vision_encoder import (
-    _compute_2d_rope_cache as _compute_kimi_2d_rope_cache,
+    _compute_2d_positions as _compute_kimi_2d_positions,
     _compute_learned_pos_embeds as _compute_kimi_learned_pos_embeds,
     _tpool_patch_merger,
 )
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
 from torchtitan.models.qwen3_5.vision_encoder import (
-    _compute_2d_rope_cache,
+    _compute_2d_positions,
     _compute_learned_pos_embeds,
     PatchMerger,
 )
@@ -121,7 +121,7 @@ class TestPackedVision(unittest.TestCase):
                 self.num_calls += 1
                 return self.patch_embed(pixel_values)
 
-        for model_type in (KimiK25Model, KimiK3Model):
+        for model_type in (KimiK25Model, KimiK3MultimodalModel):
             with self.subTest(model_type=model_type.__name__):
                 model = model_type.__new__(model_type)
                 nn.Module.__init__(model)
@@ -264,15 +264,16 @@ class TestPackedVision(unittest.TestCase):
             spatial_merge_size=1,
             dim=4,
         )
-        rope_cache = _compute_2d_rope_cache(
-            torch.randn(2, 2),
+        positions = _compute_2d_positions(
             grids,
             spatial_merge_size=1,
-            head_dim=8,
+            device=torch.device("cpu"),
         )
 
         self.assertEqual(learned_pos.shape, (12, 4))
-        self.assertEqual(rope_cache.shape, (12, 1, 16))
+        torch.testing.assert_close(
+            positions, torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]]).repeat(3, 1)
+        )
 
     def test_qwen_patch_merger_keeps_packed_order(self) -> None:
         merger = PatchMerger(
@@ -299,10 +300,12 @@ class TestPackedVision(unittest.TestCase):
         learned_pos = _compute_kimi_learned_pos_embeds(
             torch.randn(2, 2, 4), grids, interpolation_mode="bicubic"
         )
-        rope_cache = _compute_kimi_2d_rope_cache(torch.randn(2, 2), grids, head_dim=8)
+        positions = _compute_kimi_2d_positions(grids, device=torch.device("cpu"))
 
         self.assertEqual(learned_pos.shape, (12, 4))
-        self.assertEqual(rope_cache.shape, (12, 1, 4))
+        torch.testing.assert_close(
+            positions, torch.tensor([[0, 0], [0, 1], [1, 0], [1, 1]]).repeat(3, 1)
+        )
 
     def test_kimi_temporal_pool_and_spatial_merge_are_packed(self) -> None:
         hidden_TD = torch.arange(12, dtype=torch.float32).view(12, 1)
@@ -329,6 +332,8 @@ class TestPackedVision(unittest.TestCase):
         torch.testing.assert_close(result_TD[:2], vision_TD[:2])
         torch.testing.assert_close(result_TD[3:], vision_TD[2:])
         torch.testing.assert_close(result_TD[2], torch.zeros(2))
+        # The input can alias a no-op TP gather's input, so it is not written.
+        torch.testing.assert_close(inputs_TD, torch.zeros(5, 2))
 
     def test_gather_vision_embeds_uses_packed_bank_indices(self) -> None:
         inputs_TD = torch.tensor(
