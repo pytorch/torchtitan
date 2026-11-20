@@ -570,8 +570,7 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
             "timing/step/blocking_trainer_push_model_state_dict",
             m.Mean.from_list([1.0]),
         ),
-        m.Metric("timing/step/optimizer", m.Mean.from_list([1.0])),
-        m.Metric("timing/step/save_checkpoint", m.Mean.from_list([2.0])),
+        m.Metric("timing/step/optimizer", m.Mean.from_list([3.0])),
         m.Metric(
             "timing/step/blocking_generator_pull_model_state_dict",
             m.Mean.from_list([1.0]),
@@ -593,8 +592,7 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
             "perf/trainer/step_time_ratio/wait_for_training_batch": 0.2,
             "perf/trainer/step_time_ratio/forward_backward": 0.4,
             "perf/trainer/step_time_ratio/blocking_trainer_push_model_state_dict": 0.05,
-            "perf/trainer/step_time_ratio/optimizer": 0.05,
-            "perf/trainer/step_time_ratio/save_checkpoint": 0.1,
+            "perf/trainer/step_time_ratio/optimizer": 0.15,
             "perf/trainer/step_time_ratio/blocking_generator_pull_model_state_dict": 0.05,
             "perf/trainer/step_time_ratio/unaccounted": 0.05,
         }

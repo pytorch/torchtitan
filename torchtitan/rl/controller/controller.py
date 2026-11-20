@@ -1271,8 +1271,7 @@ class Controller(Configurable):
         # The previous step's push and pull, each returning its wall time; None before the first.
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
-        step_timer = MetricsTimer()
-        step_start = time.perf_counter()
+        step_timer = MetricsTimer(total_key="timing/step/total")
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             with (
@@ -1359,6 +1358,7 @@ class Controller(Configurable):
                 ):
                     push_s = await push_task if push_task is not None else 0.0
 
+                # TODO: this timer counts the optimizer step plus the checkpoint save. Time them separately.
                 with (
                     sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
@@ -1371,19 +1371,11 @@ class Controller(Configurable):
                     self._rollouter.commit_training_sample_ids(packed.group_ids)
                     optimizer_result = self._get_rank_0_value(
                         await self.trainer.all_ranks.optim_step.call(
-                            resume_state=self._rollouter.state_dict()
+                            resume_state=self._rollouter.state_dict(),
+                            last_step=(step == num_training_steps),
                         )
                     )
                 self._trainer_policy_version = optimizer_result.policy_version
-
-                # Its own phase, so `timing/step/optimizer` excludes the save.
-                with (
-                    sl.log_trace_span("save_checkpoint"),
-                    step_timer.record("timing/step/save_checkpoint"),
-                ):
-                    await self.trainer.all_ranks.save_checkpoint.call(
-                        last_step=(step == num_training_steps)
-                    )
 
                 # Await the generator model state dict pull to finish before the trainer's next push.
                 with (
@@ -1404,15 +1396,8 @@ class Controller(Configurable):
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
-            # `timing/step/total` runs from the previous step's metrics log to here, so totals cover the loop.
-            step_end = time.perf_counter()
-            time_metrics = [
-                *step_timer.flush(),
-                m.Metric(
-                    "timing/step/total", m.Mean.from_list([step_end - step_start])
-                ),
-            ]
-            step_start = step_end
+            # `timing/step/total` runs from the previous flush to this one, so totals cover the loop.
+            time_metrics = step_timer.flush()
 
             # Recorded after the flush: this log's time is the next step's `timing/step/metrics_log`.
             with (

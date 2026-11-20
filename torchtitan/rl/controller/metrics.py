@@ -23,19 +23,24 @@ logger = logging.getLogger(__name__)
 class MetricsTimer:
     """Times named code spans; flush() drains them into Mean metrics, then resets.
 
+    With `total_key`, each flush also records the time since the previous flush (or since the
+    timer was built), so a loop that flushes once per iteration gets its whole period.
+
     Example:
-        metric_timer = MetricsTimer()
-        with metric_timer.record("timing/step/total"):
+        metric_timer = MetricsTimer(total_key="timing/step/total")
+        for step in range(num_steps):
             for _ in range(num_microbatches):
                 with metric_timer.record("timing/step/forward_backward"):
                     ...
-        time_metrics = metric_timer.flush()
-        # -> [Metric("timing/step/total", Mean(...)),
-        #     Metric("timing/step/forward_backward", Mean(...))]   # mean over num_microbatches
+            time_metrics = metric_timer.flush()
+            # -> [Metric("timing/step/forward_backward", Mean(...)),  # mean over num_microbatches
+            #     Metric("timing/step/total", Mean(...))]             # since the previous flush
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, total_key: str | None = None) -> None:
         self.durations: dict[str, list[float]] = defaultdict(list)
+        self.total_key = total_key
+        self.last_flush_time = time.perf_counter()
 
     @contextlib.contextmanager
     def record(self, key: str):
@@ -49,8 +54,12 @@ class MetricsTimer:
 
     def flush(self) -> list[m.Metric]:
         """Return one Mean metric per recorded span, then reset so the timer can be reused."""
+        now = time.perf_counter()
         durations = self.durations
         self.durations = defaultdict(list)
+        if self.total_key is not None:
+            durations[self.total_key].append(now - self.last_flush_time)
+        self.last_flush_time = now
         return [
             m.Metric(key, m.Mean.from_list(values)) for key, values in durations.items()
         ]
@@ -95,8 +104,7 @@ def compute_perf_ratio_metrics(
         wait_for_training_batch                    4         0.2
         forward_backward                           8         0.4
         blocking_trainer_push_model_state_dict     1         0.05
-        optimizer                                  1         0.05
-        save_checkpoint                            2         0.1
+        optimizer (includes the checkpoint save)   3         0.15
         blocking_generator_pull_model_state_dict   1         0.05
         (in no phase)                              1         unaccounted: 0.05
 
@@ -144,7 +152,6 @@ def compute_perf_ratio_metrics(
             "forward_backward",
             "blocking_trainer_push_model_state_dict",
             "optimizer",
-            "save_checkpoint",
             "blocking_generator_pull_model_state_dict",
         )
     }
