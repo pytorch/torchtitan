@@ -1484,8 +1484,6 @@ class Controller(Configurable):
 
             self._maybe_start_validation(step=step)
 
-        # TODO: if this loop raises (e.g. a failed forward/backward, optimizer step or validation), the pull
-        # still in flight keeps running while run() tears down. Cancel or await it in a `finally`.
         # Finish the last pull so generators hold the final weights for the validation after training
         # (`validate_after_training`).
         if pull_task is not None:
