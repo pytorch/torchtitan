@@ -17,11 +17,13 @@ tensors below, which localizes the bug immediately.
 
 import unittest
 
+import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
+from torch.testing._internal.common_utils import requires_cuda_p2p_access
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -34,9 +36,12 @@ from torchtitan.models.common.linear.async_linear import (
 )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(
     torch.cuda.device_count() >= 2, "symmetric memory requires two CUDA devices"
 )
+# Symmetric memory maps the peer GPU's memory, so it needs CUDA P2P access.
+@requires_cuda_p2p_access()
 class TestDistLinearPrimitives(DTensorTestBase):
     """Forward and backward parity against an unsharded reference."""
 

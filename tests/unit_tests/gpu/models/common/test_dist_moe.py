@@ -109,6 +109,7 @@ def _relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return ((actual.float() - expected.float()).norm() / expected.float().norm()).item()
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDistMoeNumerics(DTensorTestBase):
     """Compare the complete stock and Annex BF16 expert modules."""

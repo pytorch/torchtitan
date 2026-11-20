@@ -7,6 +7,7 @@
 import unittest
 from unittest.mock import patch
 
+import pytest
 import torch
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -93,6 +94,7 @@ class TestOffsetRMSNormCompile(unittest.TestCase):
         torch.testing.assert_close(grad_weight, reference_grad_weight)
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestOffsetRMSNormTensorParallel(DTensorTestBase):
     @property

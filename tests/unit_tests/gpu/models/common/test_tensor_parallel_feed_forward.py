@@ -8,6 +8,7 @@ import copy
 import unittest
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 from spmd_types.checker import typecheck
@@ -29,6 +30,7 @@ from torchtitan.models.common.decoder_sharding import (
 )
 
 
+@pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
     @property
