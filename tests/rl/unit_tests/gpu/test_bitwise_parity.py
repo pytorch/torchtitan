@@ -515,8 +515,7 @@ def vllm_prefill(engine, all_prompt_ids):
 
 def vllm_generate(engine, all_prompt_ids, max_tokens):
     """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
-    # TODO: add a temperature 0.8 arm: build the engine with
-    # logprobs_mode="processed_logprobs" and compare against compute_logprobs(..., temperature=).
+    # TODO(https://github.com/pytorch/torchtitan/pull/5928): add a temperature 0.8 arm.
     # Greedy skips vLLM's temperature kernel, so this GPU test never runs that patch.
     params = SamplingParams(
         temperature=0.0,
