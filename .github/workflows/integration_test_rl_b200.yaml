@@ -21,13 +21,13 @@ permissions:
 
 jobs:
   check-draft:
-    if: startsWith(github.ref, 'refs/tags/ciflow/')
     uses: ./.github/workflows/check-draft.yaml
 
   rl-b200:
     needs: check-draft
     if: >-
-      ${{ !cancelled() && needs.check-draft.result != 'failure' && needs.check-draft.outputs.is-draft != 'true'
+      ${{ !cancelled() && (needs.check-draft.result == 'success' || needs.check-draft.result == 'skipped')
+      && needs.check-draft.outputs.is-draft != 'true'
       && github.repository_owner == 'pytorch' }}
     runs-on: linux.dgx.b200.8
     timeout-minutes: 90
