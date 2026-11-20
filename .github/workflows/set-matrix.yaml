@@ -31,11 +31,16 @@ on:
 
 jobs:
   check-draft:
+    if: startsWith(github.ref, 'refs/tags/ciflow/')
     uses: ./.github/workflows/check-draft.yaml
 
   set:
     needs: check-draft
-    if: needs.check-draft.outputs.is-draft != 'true'
+    # Skip draft PRs: a pull_request event has the flag, a ciflow tag run asks check-draft.
+    if: >-
+      ${{ !cancelled() && needs.check-draft.result != 'failure'
+      && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+      && needs.check-draft.outputs.is-draft != 'true' }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}

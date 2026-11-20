@@ -30,12 +30,15 @@ permissions:
 
 jobs:
   check-draft:
+    if: startsWith(github.ref, 'refs/tags/ciflow/')
     uses: ./.github/workflows/check-draft.yaml
 
   docker-build:
     needs: check-draft
     # Skip draft PRs. Skip scheduled runs on forks, where they would only fail and email the fork owner.
-    if: needs.check-draft.outputs.is-draft != 'true' && (github.repository_owner == 'pytorch' || github.event_name != 'schedule')
+    if: >-
+      ${{ !cancelled() && needs.check-draft.result != 'failure' && needs.check-draft.outputs.is-draft != 'true'
+      && (github.repository_owner == 'pytorch' || github.event_name != 'schedule') }}
     strategy:
       fail-fast: false
       matrix:

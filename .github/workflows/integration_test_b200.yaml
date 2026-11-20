@@ -21,11 +21,14 @@ permissions:
 
 jobs:
   check-draft:
+    if: startsWith(github.ref, 'refs/tags/ciflow/')
     uses: ./.github/workflows/check-draft.yaml
 
   build-test:
     needs: check-draft
-    if: needs.check-draft.outputs.is-draft != 'true' && github.repository_owner == 'pytorch'
+    if: >-
+      ${{ !cancelled() && needs.check-draft.result != 'failure' && needs.check-draft.outputs.is-draft != 'true'
+      && github.repository_owner == 'pytorch' }}
     runs-on: linux.dgx.b200.8
     timeout-minutes: 60
     container:

@@ -1,12 +1,12 @@
 name: Check Draft
 
-# Tells the calling workflow whether this run is for a draft PR, so it can skip its tests.
-# A ciflow tag push (ciflow/<label>/<PR number>) has no PR in its event, so it asks the API.
+# For a ciflow tag run (tag ciflow/<label>/<PR number>), asks the API whether that PR is a draft.
+# A tag push has no PR in its event, so the caller can't read the draft flag itself.
 on:
   workflow_call:
     outputs:
       is-draft:
-        description: "'true' for a draft PR's run, else 'false'"
+        description: "'true' when the tag's PR is a draft, else 'false'"
         value: ${{ jobs.check.outputs.is-draft }}
 
 jobs:
@@ -18,16 +18,10 @@ jobs:
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -euo pipefail
-          is_draft=false
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            is_draft="$PR_IS_DRAFT"
-          elif [[ "$GITHUB_REF" == refs/tags/ciflow/* ]]; then
-            is_draft=$(gh api "repos/$GITHUB_REPOSITORY/pulls/${GITHUB_REF##*/}" --jq .draft)
-          fi
+          is_draft=$(gh api "repos/$GITHUB_REPOSITORY/pulls/${GITHUB_REF##*/}" --jq .draft)
           echo "is-draft=$is_draft" >> "$GITHUB_OUTPUT"
           if [[ "$is_draft" == true ]]; then
-            echo "::notice::Skipped: the PR is a draft. For a ciflow label run, push or re-add the label once the PR is ready."
+            echo "::notice::Skipped: the PR is a draft. Once it is ready, push or re-add the ciflow label to run this."
           fi

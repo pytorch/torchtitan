@@ -33,6 +33,7 @@ jobs:
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
+    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
     uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
