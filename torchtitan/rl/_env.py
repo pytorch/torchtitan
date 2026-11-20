@@ -39,8 +39,8 @@ def apply_env_defaults() -> None:
         )
     for key, value in RL_ENV_DEFAULTS.items():
         os.environ.setdefault(key, value)
-    # TODO: remove this mirror once vLLM reads PYTORCH_ALLOC_CONF wherever it now
-    # reads PYTORCH_CUDA_ALLOC_CONF (e.g. its expandable_segments check).
+    # TODO: remove this mirror once vLLM's KV-connector check reads expandable_segments
+    # from PYTORCH_ALLOC_CONF too: https://github.com/vllm-project/vllm/pull/54351
     os.environ.setdefault(
         "PYTORCH_CUDA_ALLOC_CONF",
         os.environ["PYTORCH_ALLOC_CONF"],

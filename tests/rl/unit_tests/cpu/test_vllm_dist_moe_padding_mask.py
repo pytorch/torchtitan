@@ -144,7 +144,7 @@ def test_forward_without_dist_moe_passes_no_padding_mask(forward_context):
 
 
 def test_dist_moe_needs_ep_when_tp_splits_tokens():
-    # Dist-MoE splits each step over TP, but forward pads to a multiple of TP only with EP.
+    # Dist-MoE splits each step over TP, but the wrapper pads to a multiple of TP only with EP.
     wrapper = cast(Any, object.__new__(VLLMModelWrapper))
     torch.nn.Module.__init__(wrapper)
     experts = cast(Any, object.__new__(DistMoeRoutedExperts))
