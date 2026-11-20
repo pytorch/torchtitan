@@ -193,6 +193,18 @@ class SGLangEngine(GenerationEngine):
                         "to a run) in hicache_storage_backend_extra_config (a JSON "
                         "string)"
                     )
+                if "master_server_address" in extra_config:
+                    raise ValueError(
+                        "Remove master_server_address from "
+                        "hicache_storage_backend_extra_config: the controller starts "
+                        "the job's Mooncake master on its host and sets this address "
+                        "for every generator (got "
+                        f"{extra_config['master_server_address']!r})"
+                    )
+
+        @property
+        def uses_mooncake_store(self) -> bool:
+            return self.extra_server_args.get("hicache_storage_backend") == "mooncake"
 
     def __init__(
         self,
@@ -211,6 +223,7 @@ class SGLangEngine(GenerationEngine):
         reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
         vision_processor: VisionProcessor.Config | None,
+        mooncake_master_address: str | None,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -320,6 +333,7 @@ class SGLangEngine(GenerationEngine):
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             debug=debug,
+            mooncake_master_address=mooncake_master_address,
         )
         publish(
             server_args,
@@ -399,6 +413,7 @@ class SGLangEngine(GenerationEngine):
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         debug: DebugConfig,
+        mooncake_master_address: str | None,
     ) -> ServerArgs:
         """Build SGLang's ``ServerArgs`` (see ``GenerationEngine`` for the arguments)."""
         server_kwargs: dict[str, Any] = dict(
@@ -473,6 +488,14 @@ class SGLangEngine(GenerationEngine):
             server_kwargs.keys() - _TORCHTITAN_SERVER_ARGS
         )
         server_kwargs.update(self.config.extra_server_args)
+        if mooncake_master_address is not None:
+            extra_config = json.loads(
+                server_kwargs["hicache_storage_backend_extra_config"]
+            )
+            extra_config["master_server_address"] = mooncake_master_address
+            server_kwargs["hicache_storage_backend_extra_config"] = json.dumps(
+                extra_config
+            )
         return ServerArgs(**server_kwargs)
 
     def _init_event_loop(self) -> None:
