@@ -1321,20 +1321,20 @@ class Controller(Configurable):
         # The previous step's push and pull, each returning its wall time; None before the first.
         push_task: asyncio.Task[float] | None = None
         pull_task: asyncio.Task[float] | None = None
+        step_timer = MetricsTimer(total_key="timing/step/total")
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
-            with sl.log_trace_span("sync_log_step"):
+            with (
+                sl.log_trace_span("sync_log_step"),
+                step_timer.record("timing/step/sync_log_step"),
+            ):
                 await self.trainer.all_ranks.sync_log_step.call(step)
                 await self.generator_router.sync_log_step.call_one(step)
                 # Not awaited: it would wait behind an in-flight add_group.
                 self.batcher.sync_log_step.broadcast(step)
                 await self._rollouter.sync_log_step(step)
-            step_timer = MetricsTimer()
 
-            with (
-                sl.log_trace_span("train_step"),
-                step_timer.record("timing/step/total"),
-            ):
+            with sl.log_trace_span("train_step"):
                 # Waits for a TrainerStepBatch to be ready (or None on shutdown).
                 with (
                     sl.log_trace_span("wait_for_training_batch"),
@@ -1408,6 +1408,7 @@ class Controller(Configurable):
                 ):
                     push_s = await push_task if push_task is not None else 0.0
 
+                # TODO: this timer counts the optimizer step plus the checkpoint save. Time them separately.
                 with (
                     sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
@@ -1445,8 +1446,14 @@ class Controller(Configurable):
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
+            # `timing/step/total` runs from the previous flush to this one, so totals cover the loop.
             time_metrics = step_timer.flush()
-            with sl.log_trace_span("metrics_log"):
+
+            # Recorded after the flush: this log's time is the next step's `timing/step/metrics_log`.
+            with (
+                sl.log_trace_span("metrics_log"),
+                step_timer.record("timing/step/metrics_log"),
+            ):
                 self.metrics_processor.log(
                     step=step,
                     is_validation=False,
@@ -1480,8 +1487,8 @@ class Controller(Configurable):
                         ),
                     ],
                 )
-
-            self._maybe_start_validation(step=step)
+                # In this span: it logs the validations that ended; starting a due one doesn't wait.
+                self._maybe_start_validation(step=step)
 
         # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
         # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
