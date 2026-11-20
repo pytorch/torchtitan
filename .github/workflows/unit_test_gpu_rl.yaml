@@ -63,6 +63,7 @@ jobs:
     if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
     uses: ./.github/workflows/set-matrix.yaml
     with:
+      runner-cuda: mt-l-x86aavx2-45-167-a10g-4
       gpu-arch: cuda
 
   rl-multi-gpu-unit-tests:

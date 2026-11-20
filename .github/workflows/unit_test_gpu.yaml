@@ -67,8 +67,11 @@ jobs:
   set-matrix-multi-gpu:
     uses: ./.github/workflows/set-matrix.yaml
     with:
+      runner-cuda: mt-l-x86aavx2-45-167-a10g-4
       gpu-arch: cuda
 
+  # TODO: run 2-GPU tests two at a time (pytest-xdist, one CUDA_VISIBLE_DEVICES pair per worker)
+  # once run time, not the runner queue, sets how fast PRs get results.
   multi-gpu-unit-tests:
     name: Multi-GPU Unit Tests
     needs: set-matrix-multi-gpu
@@ -86,7 +89,7 @@ jobs:
       timeout: 30
       hf-cache: false
       script: |
-        set -eux
+        set -euxo pipefail
 
         CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
         conda activate "${CONDA_ENV}"
@@ -102,4 +105,7 @@ jobs:
 
         # hf-cache is off: a test that reaches the Hugging Face hub fails instead of downloading.
         export HF_HUB_OFFLINE=1
-        pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv
+        pytest tests/unit_tests/gpu -m multi_gpu --strict-markers --durations=20 -vv | tee /tmp/pytest.log
+
+        # A test that needs more GPUs than this runner's 4 never runs in CI.
+        bash .github/scripts/check_gpu_count_skips.sh /tmp/pytest.log
