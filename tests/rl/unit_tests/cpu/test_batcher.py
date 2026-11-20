@@ -562,14 +562,17 @@ def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
     assignments = batcher._assign_training_samples_to_microbatches(samples)
     microbatch = batcher._pack_training_samples(samples)
     metadata = create_varlen_metadata_for_document(
-        microbatch.positions, padding_mask=microbatch.padding_mask
+        microbatch.positions,
+        padding_mask=microbatch.padding_mask,
+        max_num_documents=3,
+        max_context_length=10,
     )
 
     assert [len(rank_samples) for row in assignments for rank_samples in row] == [3]
     assert microbatch.input.shape == (25,)
     assert microbatch.positions.tolist()[20:] == [0, 1, 2, 3, 0]
     assert microbatch.padding_mask.tolist()[24] is True
-    assert metadata.cu_seq_q.tolist() == [0, 10, 20, 24, 25]
+    assert metadata.cu_seq_q.tolist() == [0, 10, 20, 24, 25, 25, 25]
 
 
 def test_token_budget_must_fit_a_full_context_sample() -> None:

@@ -424,7 +424,7 @@ class Batcher(Configurable):
             batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
             batcher.add_training_samples(training_sample_group=group1)  # -> (TrainerStepBatch, True)
         """
-        # Drop samples longer than seq_len: can't fill a row
+        # Drop samples longer than seq_len, the model's context length
         samples = training_sample_group.training_samples
         kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
         num_dropped = len(samples) - len(kept)
