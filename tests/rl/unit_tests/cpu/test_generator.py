@@ -202,7 +202,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
 
         get_state_dict = AsyncMock(side_effect=fill_state_dict)
         with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
-            await generator.prefetch_model_state_dict()
+            await generator.prefetch_model_state_dict(())
         weights = {"weight": torch.zeros(2)}
         assert generator._copy_prefetched_model_state_dict(weights) == weights.keys()
 

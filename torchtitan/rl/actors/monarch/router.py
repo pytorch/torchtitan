@@ -15,6 +15,7 @@ from typing import Any
 from monarch.actor import Actor, concurrent_endpoint, current_size
 
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.model_state_dict_transport import ModelStateDictTransferMetadata
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
 
@@ -60,8 +61,16 @@ class _InterGeneratorRouterActorEndpoints:
         await super().release_groups(group_ids)
 
     @concurrent_endpoint
-    async def pull_model_state_dict(self, policy_version: int) -> None:
-        await super().pull_model_state_dict(policy_version)
+    async def pull_model_state_dict(
+        self,
+        policy_version: int,
+        *,
+        metadata_by_trainer_rank: tuple[ModelStateDictTransferMetadata, ...],
+    ) -> None:
+        await super().pull_model_state_dict(
+            policy_version,
+            metadata_by_trainer_rank=metadata_by_trainer_rank,
+        )
 
     @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:
