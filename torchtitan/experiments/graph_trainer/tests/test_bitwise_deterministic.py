@@ -231,7 +231,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         global_loss_token_counts = torch.tensor(
             NUM_TOKENS, dtype=torch.float, device="cuda"
         )
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, foreach=True)
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
@@ -348,7 +348,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             )
 
         # Step 4: Run training steps using the loaded artifact
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, foreach=True)
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
             outputs = run_traced(loaded_result, module=model)(

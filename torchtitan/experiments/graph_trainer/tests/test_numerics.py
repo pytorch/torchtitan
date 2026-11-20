@@ -953,7 +953,7 @@ class TestSimpleFSDP(FSDPTest):
         self.assertTrue(bias.requires_grad)
         original_weight = weight.to_local().detach().clone()
         original_bias = bias.to_local().detach().clone()
-        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, foreach=True)
         model(torch.ones(2, 8, device=device)).sum().backward()
         self.assertIsNone(weight.grad)
         self.assertIsNotNone(bias.grad)

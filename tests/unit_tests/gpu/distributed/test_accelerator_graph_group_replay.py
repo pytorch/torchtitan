@@ -123,8 +123,12 @@ def _run_real_fsdp_group_graph_numerics(
         fully_shard(eager_model, mesh=mesh)
         graph_parameter = next(graph_model.parameters())
         eager_parameter = next(eager_model.parameters())
-        graph_optimizer = torch.optim.SGD(graph_model.parameters(), lr=0.25)
-        eager_optimizer = torch.optim.SGD(eager_model.parameters(), lr=0.25)
+        graph_optimizer = torch.optim.SGD(
+            graph_model.parameters(), lr=0.25, foreach=True
+        )
+        eager_optimizer = torch.optim.SGD(
+            eager_model.parameters(), lr=0.25, foreach=True
+        )
 
         def graph_forward_backward(group: torch.Tensor) -> torch.Tensor:
             loss = graph_model(group).sum()

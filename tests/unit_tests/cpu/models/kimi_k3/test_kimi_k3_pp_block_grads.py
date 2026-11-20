@@ -110,7 +110,7 @@ def _block_grads(modules) -> dict[int, torch.Tensor]:
 
 def _train(modules, step_fn, dtype: torch.dtype):
     params = [p for module in modules for p in module.parameters()]
-    optimizer = torch.optim.SGD(params, lr=1.0) if params else None
+    optimizer = torch.optim.SGD(params, lr=1.0, foreach=True) if params else None
     history = []
     for _ in range(STEPS):
         losses = step_fn(*_batch(dtype))

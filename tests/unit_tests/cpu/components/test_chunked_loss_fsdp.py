@@ -158,9 +158,11 @@ def _exercise_pipeline_accumulation(rank, world_size, device):
             stages=[stage],
             loss_fn=partial(loss_fn, global_loss_token_counts=count),
         )
-        optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+        optimizer = torch.optim.SGD(
+            model.parameters(), lr=0.01, momentum=0.9, foreach=True
+        )
         reference_optimizer = torch.optim.SGD(
-            reference.parameters(), lr=0.01, momentum=0.9
+            reference.parameters(), lr=0.01, momentum=0.9, foreach=True
         )
         label = f"{schedule_name}/{replicated=}/{deferred=}/{frozen=}/{tied=}"
         for step in range(3):
@@ -340,9 +342,11 @@ class TestChunkedLossFSDP(DTensorTestBase):
                 fully_shard(model, mesh=mesh)
                 loss_fn = ChunkedLossWrapper.Config(num_chunks=4).build()
                 loss_fn.set_lm_head(model.lm_head)
-                optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+                optimizer = torch.optim.SGD(
+                    model.parameters(), lr=0.01, momentum=0.9, foreach=True
+                )
                 reference_optimizer = torch.optim.SGD(
-                    reference.parameters(), lr=0.01, momentum=0.9
+                    reference.parameters(), lr=0.01, momentum=0.9, foreach=True
                 )
                 count = torch.tensor(24, device=device)
 
