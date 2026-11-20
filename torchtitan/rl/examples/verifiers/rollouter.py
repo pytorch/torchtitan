@@ -37,7 +37,6 @@ from torchtitan.rl.rollout.rubric import RewardFn
 from torchtitan.rl.rollout.types import (
     error_entry,
     GenerateFn,
-    Prompt,
     ReleaseSessionFn,
     Rollout,
     RolloutGroup,
@@ -393,7 +392,16 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                     for name, value in trace.metrics.items()
                     if value is not None
                 )
-            if turns and not status.is_error():
+            if status is RolloutStatus.DROPPED:
+                # Not a failure, so not logged as one. The recorder doesn't keep it either (see its
+                # TODO), so this line is where the reason shows.
+                logger.info(
+                    "rollout group=%d/rollout=%d dropped by the env's grader: %s",
+                    group_id,
+                    rollout_id,
+                    trace.dropped,
+                )
+            elif turns and not status.is_error():
                 # Rewards by the env, if any, are added to the last turn.
                 # The rollout will be scored later.
                 # TODO: provide better support to carry rewards per trace
@@ -427,6 +435,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
 
         status                     the trace ...
         COMPLETED                  finished, and so did its episode
+        DROPPED                    was dropped by the env's grader, e.g. a judge found the reference answer wrong
         ERROR                      failed on a HarnessError or TaskError, e.g. the agent's `pkill -f`
                                    killed its harness
         ERROR_INFRA                ended before the policy's first answer, failed on any other error
@@ -436,10 +445,14 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         ERROR_UNKNOWN              was truncated for a reason not mapped here, e.g. Verifiers' `compaction_failed`
         FIRST_PROMPT_TOO_LONG      got a 400 on its first model call (the prompt reached `max_rollout_tokens`)
         TRUNCATED_LENGTH           ended after a completion hit `max_tokens`, or used up a Verifiers token
-                                   budget (`max_input_tokens`, `max_output_tokens`, `max_total_tokens`)
+                                   budget (`max_input_tokens`, `max_output_tokens`, `max_total_tokens`,
+                                   `max_turn_tokens`)
         TRUNCATED_MAX_TURNS        hit max_turns
         TRUNCATED_PROMPT_TOO_LONG  ended on a 400 on a later model call (the prompt reached `max_rollout_tokens`)
         """
+        # `trace.dropped` holds the grader's reason; an empty reason is still a drop.
+        if trace.dropped is not None:
+            return RolloutStatus.DROPPED
         # TODO: an error type or a deadline says where a rollout broke, not who broke it.
         # We could add more granularity e.g. Harbor wraps a sandbox error in a TaskError.
         last_call_error = trace.calls[-1].error if trace.calls else None
@@ -480,6 +493,7 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
             "max_input_tokens",
             "max_output_tokens",
             "max_total_tokens",
+            "max_turn_tokens",
         ):
             return RolloutStatus.TRUNCATED_LENGTH
 
@@ -521,29 +535,49 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         last_turn_by_node: dict[int, RolloutTurn] = {}
         turns: list[RolloutTurn] = []
         # The last appended turn's prompt + completion; not reset between branches
-        previous_token_ids: list[int] = []
+        previous_token_ids = np.empty(0, dtype=np.int32)
 
         for branch in trace.branches:
+            # Verifiers marks a path that adds no training sample, e.g. a compaction attempt the
+            # harness rejected: skip it. Its nodes shared with other branches still train there.
+            if not branch.trainable:
+                continue
+            # int32 and float32 arrays; the turns below keep views of them.
             token_ids = branch.token_ids
             logprobs = branch.logprobs
             branch_offset = 0
             reply_to: RolloutTurn | None = None
             for node in branch.nodes:
                 index = node_index[id(node)]
-                mask = list(node.mask)
-                if node.sampled and any(mask):
+                mask = node.mask
+                # `branch.logprobs` pads a missing logprob with 0.0 and drops extras, so check
+                # the node itself: one mask entry per token, one logprob per sampled token.
+                num_sampled = int(np.count_nonzero(mask))
+                if (
+                    len(mask) != len(node.token_ids)
+                    or len(node.logprobs) != num_sampled
+                ):
+                    raise ValueError(
+                        f"Verifiers trace {trace.id} branch {branch.index} node {index}: "
+                        f"{len(node.token_ids)} tokens, {len(mask)} mask entries, "
+                        f"{num_sampled} sampled tokens, {len(node.logprobs)} logprobs"
+                    )
+                if node.sampled and num_sampled:
                     if index in trained_nodes:
-                        mask = [False] * len(mask)
+                        mask = np.zeros_like(mask)
                     else:
                         trained_nodes.add(index)
                 for start, end in _trainable_token_spans(mask):
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
                     prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-                        Prompt(token_ids=token_ids[:absolute_start]),
-                        previous=Prompt(token_ids=previous_token_ids),
+                        token_ids[:absolute_start], previous=previous_token_ids
                     )
                     previous_token_ids = token_ids[:absolute_end]
+                    # TODO: record each turn's prompt messages, the branch's messages before this
+                    #   node (`RolloutTurn.prompt_messages`). Today they stay empty, so a recorded
+                    #   rollout shows no task text. Turn 0's alone would show it; a full copy per
+                    #   turn grows with the turn count squared.
                     turns.append(
                         RolloutTurn(
                             rollout_id=RolloutTurnID(
@@ -553,12 +587,12 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
                             ),
                             prompt_prefix_len=prompt_prefix_len,
                             prompt_delta_token_ids=prompt_delta_token_ids,
-                            completion_token_ids=np.asarray(
-                                token_ids[absolute_start:absolute_end], dtype=np.int32
-                            ),
-                            completion_logprobs=np.asarray(
-                                logprobs[absolute_start:absolute_end], dtype=np.float32
-                            ),
+                            completion_token_ids=token_ids[
+                                absolute_start:absolute_end
+                            ].astype(np.int32, copy=False),
+                            completion_logprobs=logprobs[
+                                absolute_start:absolute_end
+                            ].astype(np.float32, copy=False),
                             min_policy_version=generation_metadata.min_policy_version,
                             max_policy_version=generation_metadata.max_policy_version,
                             completion_message=message_to_wire(node.message),
@@ -577,17 +611,17 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         return turns
 
 
-def _trainable_token_spans(mask: list[bool]) -> list[tuple[int, int]]:
-    """Return half-open token spans marked trainable by a Verifiers node mask."""
-    spans: list[tuple[int, int]] = []
-    start: int | None = None
-    for index, sampled in enumerate([*mask, False]):
-        if sampled and start is None:
-            start = index
-        elif not sampled and start is not None:
-            spans.append((start, index))
-            start = None
-    return spans
+def _trainable_token_spans(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Return half-open token spans marked trainable by a Verifiers node mask.
+
+    Example:
+        _trainable_token_spans(np.array([False, True, True, False, True]))  # -> [(1, 3), (4, 5)]
+    """
+    # Each span starts where the padded mask goes False -> True and ends where it goes back.
+    edges = np.flatnonzero(
+        np.diff(np.concatenate(([False], mask, [False])).astype(np.int8))
+    )
+    return list(zip(edges[0::2].tolist(), edges[1::2].tolist()))
 
 
 def _local_taskset_module(taskset: VerifiersTasksetConfig) -> str | None:
@@ -615,6 +649,7 @@ def verifiers_rollout_logs(
         "verifiers_trace_id": trace.id,
         "task": trace.task.key,
         "stop_condition": trace.stop_condition,
+        "dropped": trace.dropped,
         # Retried attempts' errors too, so one rollout can add several to `rollout/errors/<type>`.
         "errors": [
             error.model_dump(mode="json")
