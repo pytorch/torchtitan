@@ -101,6 +101,22 @@ def dist_sum(
     )
 
 
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
+    """Average a scalar over the mesh.
+
+    Divides by the number of values the all-reduce summed, not by the mesh size.
+    A fake process group's all-reduce changes nothing, so this returns the local
+    value.
+    """
+    total, count = _dist_reduce_tensor(
+        torch.stack((x, torch.ones_like(x))),
+        reduceOp=c10d.ReduceOp.SUM.name,
+        mesh=mesh,
+        extra_pg=None,
+    ).tolist()
+    return total / count
+
+
 def dist_sum_tensor(
     x: torch.Tensor,
     mesh: DeviceMesh | None = None,
@@ -412,8 +428,9 @@ def build_alternative_fsdp_mesh(
     new communicators rather than looking them up in a persistent cache.
 
     Requires NCCL on the FSDP shard axes; other backends raise ``ValueError``.
-    The fake backend preserves its groups with a warning. A mesh without FSDP
-    shard axes is returned unchanged with a warning that the cap is not applied.
+    The fake backend preserves its groups, with a warning unless a group has one
+    rank. A mesh without FSDP shard axes is returned unchanged with a warning
+    that the cap is not applied.
     """
     mesh_axis_names = storage_mesh.mesh_dim_names
     if mesh_axis_names is None:
@@ -439,11 +456,14 @@ def build_alternative_fsdp_mesh(
 
         backend = dist.get_backend(parent_group)
         if backend == "fake":
-            warnings.warn(
-                "Redistribution max_ctas is not modeled by the fake process "
-                "group; using the storage-mesh process group",
-                stacklevel=2,
-            )
+            # A one-rank group, such as a size-1 dp_shard or edp_shard, has
+            # nothing to cap.
+            if storage_mesh[axis_name].size() != 1:
+                warnings.warn(
+                    "Redistribution max_ctas is not modeled by the fake process "
+                    "group; using the storage-mesh process group",
+                    stacklevel=2,
+                )
             groups.append(parent_group)
             continue
         if backend != dist.Backend.NCCL:

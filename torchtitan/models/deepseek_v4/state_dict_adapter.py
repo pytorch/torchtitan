@@ -124,6 +124,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         ),
                     }
                 )
+            # pyrefly: ignore [missing-attribute]
             if layer_id < model_config.layers[0].feed_forward.router.n_hash_layers:
                 self.from_hf_map.update(
                     {

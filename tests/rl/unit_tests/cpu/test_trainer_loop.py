@@ -6,9 +6,9 @@
 
 """Unit tests for `Controller._trainer_loop`'s model state dict push and pull.
 
-The push and pull of each step's policy overlap the next step's forward/backward.
-These tests run the loop with fake actors (no GPU / Monarch / TorchStore) and check
-the ordering that makes the overlap safe.
+Each step's push finishes before the next step's forward/backward, and its pull
+overlaps that forward/backward. These tests run the loop with fake actors (no GPU /
+Monarch / TorchStore) and check that ordering.
 """
 
 import asyncio
@@ -17,7 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
+from torchtitan.rl.observability import metrics as m
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
 GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
@@ -84,10 +85,13 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             target_offpolicy_steps=1,
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
+            validation=ValidationConfig(),
         )
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
+    controller._validation_tasks = []
+    controller._has_pending_validation = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         forward_backward=_Endpoint(forward_backward),
@@ -143,6 +147,7 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
 
 
 def _run(controller: Controller, *, num_training_steps: int) -> None:
+    controller.config.async_loop.num_training_steps = num_training_steps
     asyncio.run(
         controller._trainer_loop(
             _batch_queue(num_training_steps), num_training_steps=num_training_steps
@@ -157,14 +162,13 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     assert events == [
         "fwd_bwd 1",
         "optim 1",
-        # Step 1's push -> pull -> release starts in the background. The per-DP-rank
-        # forward_backward calls run as tasks, so with these instant fakes it finishes first ...
         "push start",
         "push end",
+        # Step 1's pull -> release runs in the background. The per-DP-rank forward_backward
+        # calls run as tasks, so with these instant fakes the pull finishes first.
         "pull 1",
         "release 5 trained",
         "fwd_bwd 2",
-        # ... and lands before step 2's optimizer step.
         "optim 2",
         "push start",
         "push end",
@@ -173,7 +177,7 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
     ]
 
 
-def test_optimizer_step_waits_for_the_previous_push() -> None:
+def test_forward_backward_waits_for_the_previous_push() -> None:
     async def slow_push():
         for _ in range(5):
             await asyncio.sleep(0)
@@ -181,9 +185,8 @@ def test_optimizer_step_waits_for_the_previous_push() -> None:
     events: list[str] = []
     _run(_controller(events, on_push=slow_push), num_training_steps=2)
 
-    # Forward/backward 2 overlaps push 1; optimizer step 2 waits for it to finish.
-    assert events.index("fwd_bwd 2") < events.index("push end")
-    assert events.index("push end") < events.index("optim 2")
+    # Forward/backward 2 blocks the trainer's event loop, so push 1 must finish first.
+    assert events.index("push end") < events.index("fwd_bwd 2")
 
 
 def test_next_push_waits_for_the_previous_pull() -> None:
@@ -206,16 +209,15 @@ def test_last_push_and_pull_finish_before_the_loop_returns() -> None:
     assert events[-3:] == ["push end", "pull 1", "release 5 trained"]
 
 
-def test_push_and_pull_times_are_logged_one_step_late() -> None:
+def test_push_time_is_logged_at_its_step_and_pull_time_one_step_late() -> None:
     controller = _controller([])
     _run(controller, num_training_steps=2)
 
     first, second = controller.logged_metrics
-    # Step 1 has no previous push or pull.
-    assert first[TRAINER_PUSH_KEY].value.value == 0.0
+    # Step 1 logs its own push; it has no previous pull.
+    assert first[TRAINER_PUSH_KEY].value.value > 0.0
     assert first[GENERATOR_PULL_KEY].value.value == 0.0
-    # Step 2 logs step 1's push and pull, which have run by then.
-    assert second[TRAINER_PUSH_KEY].value.value > 0.0
+    # Step 2 logs step 1's pull, which has run by then.
     assert second[GENERATOR_PULL_KEY].value.value > 0.0
 
 
@@ -226,3 +228,16 @@ def test_push_failure_fails_the_loop() -> None:
     controller = _controller([], on_push=failing_push)
     with pytest.raises(RuntimeError, match="push failed"):
         _run(controller, num_training_steps=2)
+
+
+def test_failed_validation_fails_training() -> None:
+    """freq=1: the validation started at step 1 fails, and step 2's check raises its error."""
+
+    async def validate(*, step: int) -> list[m.Metric]:
+        raise RuntimeError("validation failed")
+
+    controller = _controller([])
+    controller.config.async_loop.validation = ValidationConfig(freq=1)
+    controller.validate = validate
+    with pytest.raises(RuntimeError, match="validation failed"):
+        _run(controller, num_training_steps=3)

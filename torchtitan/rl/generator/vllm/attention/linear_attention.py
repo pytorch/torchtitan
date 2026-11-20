@@ -161,8 +161,8 @@ class TorchTitanLinearAttentionMetadataBuilder(
                 raise ValueError(
                     "Linear attention (GDN/KDA) sequence length exceeds the state "
                     f"block-table capacity; got {m.max_seq_len} and "
-                    f"{max_state_seq_len}. CUDA graph capture sizes (bounded by "
-                    "max_num_batched_tokens) must not exceed max_model_len."
+                    f"{max_state_seq_len}. A request is at most max_model_len long, "
+                    "and TorchTitanGPUModelRunner._dummy_run caps capture requests there."
                 )
         # vLLM's `mamba_get_block_table_tensor`, one column: "align" keeps the
         # running state in the request's last block, "none" in its only one.

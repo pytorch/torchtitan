@@ -102,6 +102,7 @@ def test_pretrained(model_dir: str, device: torch.device, seed: int = 42) -> dic
 
     with torch.device("meta"):
         titan_moe = moe_config.build()
+    titan_moe.to(dtype=torch.bfloat16)
     titan_moe.to_empty(device=device)
     titan_moe.init_states(
         buffer_device=torch.device(device) if isinstance(device, str) else device
@@ -113,7 +114,7 @@ def test_pretrained(model_dir: str, device: torch.device, seed: int = 42) -> dic
     titan_sd = hf_to_titan_moe_state_dict(hf_sd_prefixed)
     titan_sd_stripped = {k.removeprefix("mlp."): v for k, v in titan_sd.items()}
     titan_moe.load_state_dict(titan_sd_stripped, strict=False)
-    titan_moe = titan_moe.to(dtype=torch.bfloat16).eval()
+    titan_moe.eval()
 
     # Forward through titan MoE
     tt_out = titan_moe(x)

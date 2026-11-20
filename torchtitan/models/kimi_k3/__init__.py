@@ -7,14 +7,18 @@
 from .flavors import (
     build_model_config,
     KIMI_K3_SPECIAL_TOKENS,
+    KIMI_K3_VISION_PROCESSOR_KWARGS,
     KimiK3Model,
+    KimiK3MultimodalModel,
     KimiK3VisionEncoder,
     MODEL_FLAVORS,
 )
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
+    "KIMI_K3_VISION_PROCESSOR_KWARGS",
     "KimiK3Model",
+    "KimiK3MultimodalModel",
     "KimiK3VisionEncoder",
     "MODEL_FLAVORS",
     "build_model_config",
