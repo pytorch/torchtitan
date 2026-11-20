@@ -86,6 +86,8 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
             {
                 "cmp_k": replicated_activation,
                 "topk_indices": replicated_activation,
+                # topk_scores is keyword-only: this placement only feeds the
+                # boundary assert; local_map's in_types covers positional args.
                 "topk_scores": replicated_activation,
                 "attn_sink": _attn_sink_placement,
                 "padding_mask_T": token_id_placement(),

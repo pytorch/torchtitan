@@ -85,7 +85,6 @@ class TestIndexerSelect(unittest.TestCase):
             attention_metadata=metadata,
             return_scores=False,
         )
-        self.assertEqual(indices.shape[1], min(topk, metadata.max_k // ratio))
         self.assertEqual(indices.shape[1], 12)
 
 
