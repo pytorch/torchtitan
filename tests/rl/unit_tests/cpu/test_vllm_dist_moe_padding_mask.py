@@ -204,7 +204,7 @@ def test_runner_publishes_the_unpadded_count_before_vllm_pads():
 
 
 def test_dist_moe_needs_ep_when_tp_splits_tokens():
-    # Dist-MoE splits each step over TP, but forward pads to a multiple of TP only with EP.
+    # Dist-MoE splits each step over TP, but the wrapper pads to a multiple of TP only with EP.
     wrapper = cast(Any, object.__new__(VLLMModelWrapper))
     torch.nn.Module.__init__(wrapper)
     experts = cast(Any, object.__new__(DistMoeRoutedExperts))
