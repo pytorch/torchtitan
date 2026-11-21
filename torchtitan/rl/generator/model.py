@@ -474,6 +474,7 @@ class ModelStateDictLoader:
                 model, checkpointer_config, hf_assets_path=hf_assets_path
             )
         self._model = model
+        self._frozen_param_keys = frozen_param_keys
         (
             self._fsdp_load_groups,
             self._persistent_param_keys,
@@ -513,6 +514,30 @@ class ModelStateDictLoader:
         for module in model.modules():
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
+        self._process_loaded_weights(skip_param_keys=frozenset())
+
+    def _process_loaded_weights(self, *, skip_param_keys: frozenset[str]) -> None:
+        """Call ``process_loaded_weights_(param_names)`` on every module that defines
+        it, with the names of that module's parameters this load filled.
+
+        The hook may modify those parameters in place. Frozen parameters are not
+        passed after the initial load and keep what the hook wrote, because
+        ``_restore_sharded_params`` refills their shards from the unsharded
+        storage, so a hook must only touch the names it is given.
+        """
+        for module_fqn, module in self._model.named_modules():
+            process_loaded_weights_ = getattr(module, "process_loaded_weights_", None)
+            if process_loaded_weights_ is None:
+                continue
+            prefix = f"{module_fqn}." if module_fqn else ""
+            with torch.inference_mode():
+                process_loaded_weights_(
+                    {
+                        name
+                        for name, _ in module.named_parameters()
+                        if canonical_fqn(prefix + name) not in skip_param_keys
+                    }
+                )
 
     def load(self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]) -> None:
         """Fetch new weights into the model, allocating one FSDP group's sharded buffers at a time.
@@ -591,6 +616,7 @@ class ModelStateDictLoader:
         # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
         if self._buffer_keys:
             fetch({key: self._model.get_buffer(key) for key in self._buffer_keys})
+        self._process_loaded_weights(skip_param_keys=self._frozen_param_keys)
 
 
 def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:

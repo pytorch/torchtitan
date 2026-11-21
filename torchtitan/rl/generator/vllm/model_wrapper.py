@@ -26,6 +26,7 @@ from vllm.utils import torch_utils as _torch_utils
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.config.transform.base import convert_config_type
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
@@ -39,8 +40,10 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.qwen3_8_flash_next.attention import QSAAttention, SplitLinear
 from torchtitan.models.qwen3_8_flash_next.embedding import PLELayer
+from torchtitan.models.qwen3_8_flash_next.gdn import SplitInProjGDN
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.local_compile import inference_regions
 from torchtitan.rl.generator.model import (
@@ -167,7 +170,10 @@ def _replace_vllm_layer_configs(model_config):
 
         elif isinstance(attention_cfg, GDN.Config):
             delta_net_cfg = attention_cfg
-            from torchtitan.rl.generator.vllm.attention.gdn import VLLMInnerGDN
+            from torchtitan.rl.generator.vllm.attention.gdn import (
+                VLLMInnerGDN,
+                VLLMSplitInProjGDN,
+            )
 
             vllm_inner_gdn_cfg = VLLMInnerGDN.Config(
                 layer_idx=layer_idx,
@@ -178,13 +184,18 @@ def _replace_vllm_layer_configs(model_config):
                 conv_kernel_size=delta_net_cfg.conv_kernel_size,
                 sharding_config=delta_net_cfg.inner_attention.sharding_config,
             )
-            new_layer_cfg = dataclasses.replace(
-                new_layer_cfg,
-                attention=dataclasses.replace(
-                    delta_net_cfg,
-                    inner_attention=vllm_inner_gdn_cfg,
-                ),
+            delta_net_cfg = dataclasses.replace(
+                delta_net_cfg, inner_attention=vllm_inner_gdn_cfg
             )
+            in_proj_cfg = delta_net_cfg.in_proj
+            if (
+                type(delta_net_cfg) is SplitInProjGDN.Config
+                and isinstance(in_proj_cfg, SplitLinear.Config)
+                and type(in_proj_cfg.projection) is Linear.Config
+                and type(in_proj_cfg.gates) is Linear.Config
+            ):
+                delta_net_cfg = convert_config_type(delta_net_cfg, VLLMSplitInProjGDN)
+            new_layer_cfg = dataclasses.replace(new_layer_cfg, attention=delta_net_cfg)
 
         elif isinstance(attention_cfg, KDA.Config):
             kda_cfg = attention_cfg
