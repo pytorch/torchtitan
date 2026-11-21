@@ -5,7 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
+from itertools import permutations
 
 from torchtitan.config import (
     apply_overrides,
@@ -303,6 +305,88 @@ class TestOverride(_IsolatedRegistryTestCase):
         root_cfg = Root.Config()
         with self.assertRaisesRegex(ValueError, "ancestor"):
             apply_overrides(self._imports(), root_cfg)
+
+    def test_composes_requires_config_classes(self):
+        with self.assertRaisesRegex(TypeError, "Config classes"):
+            @override(target=ParentComponent.Config, composes=["child"])
+            def parent(cfg):
+                return replace(cfg)
+
+    def test_composes_compressor_norm(self):
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.models.common.nn_modules import RMSNorm
+        from torchtitan.models.deepseek_v4 import build_model_config
+        from torchtitan.models.deepseek_v4.attention import DeepSeekV4Attention
+        from torchtitan.models.deepseek_v4.compressor import Compressor
+
+        @override(
+            target=DeepSeekV4Attention.Config,
+            fqns=["layers.3.attention"],
+            composes=[Compressor.Config, RMSNorm.Config],
+        )
+        def attention(cfg):
+            return replace(cfg)
+
+        @override(target=Compressor.Config, composes=[RMSNorm.Config])
+        def compressor(cfg):
+            return replace(cfg)
+
+        @override(target=RMSNorm.Config)
+        def norm(cfg):
+            return replace(cfg, eps=2 * cfg.eps)
+
+        baseline = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig(), seq_len=128
+        )
+        original = {f: c.eps for f, c, *_ in baseline.traverse(RMSNorm.Config)}
+        with self.assertRaisesRegex(ValueError, "ancestor"):
+            apply_overrides(
+                OverrideConfig(imports=[f"{__name__}.attention", f"{__name__}.norm"]),
+                baseline,
+            )
+        for order in permutations(self._imports().imports):
+            with self.subTest(order=order):
+                model = deepcopy(baseline)
+                parent = model.layers[3].attention
+                apply_overrides(OverrideConfig(imports=list(order)), model)
+                self.assertIsNot(model.layers[3].attention, parent)
+                self.assertIsNot(
+                    model.layers[3].attention.compressor_128, parent.compressor_128
+                )
+                self.assertEqual(
+                    {f: c.eps for f, c, *_ in model.traverse(RMSNorm.Config)},
+                    {f: 2 * eps for f, eps in original.items()},
+                )
+
+        @override(target=RMSNorm.Config, fqns=["layers.3.attention.q_norm"])
+        def query_norm(cfg):
+            return norm(cfg)
+
+        parent = baseline.layers[3].attention
+        apply_overrides(
+            OverrideConfig(
+                imports=[f"{__name__}.query_norm", f"{__name__}.attention"]
+            ),
+            baseline,
+        )
+        updated = baseline.layers[3].attention
+        self.assertEqual(updated.q_norm.eps, 2 * parent.q_norm.eps)
+        self.assertIs(updated.kv_norm, parent.kv_norm)
+
+    def test_composes_child_must_be_the_original(self):
+        @override(target=ParentComponent.Config, composes=[ComponentA.Config])
+        def parent(cfg):
+            return replace(cfg, child=replace(cfg.child))
+
+        @override(target=ComponentA.Config, fqns=["block.child"])
+        def child(cfg):
+            return _to_b(cfg)
+
+        root = Root.Config()
+        original = root.block
+        with self.assertRaisesRegex(ValueError, "must preserve 'block.child'"):
+            apply_overrides(self._imports(), root)
+        self.assertIs(root.block, original)
 
     def test_provenance_only_listed_modules_apply(self):
         @override(target=ComponentA.Config)

@@ -225,7 +225,9 @@ In `Trainer.__init__`, before any component is built:
 4. Collect claims: traverse the original tree and record every `(override,
    node)` pair, filtered by each override's `fqns` selector.
 5. Check for per-node conflicts (two overrides claiming the same node, or one
-   claiming an ancestor of another's node).
+   claiming an ancestor of another's node). A parent that declares a direct
+   child's Config class in `composes` and preserves it by identity can compose
+   with that child.
 6. Apply: build each replacement and swap it in. Because claims are gathered
    before any mutation, application is order-independent (replacements are never
    re-traversed). An override that changes a module's sharding contract must set
@@ -331,10 +333,11 @@ linears"), is listed under [Future work](#future-work).
 Conflicts are detected per *node*, not per *class*. Two overrides may target the
 same Config class freely as long as their claimed nodes are disjoint — so one
 norm kernel on `*.layers.0.*` and another on `*.layers.1.*` coexist, and A/B-ing
-a kernel across layers works. An error is raised only when two different overrides
-claim the **same node**, or when one claims an **ancestor** of another's node
-(nested replacement, which would be order-dependent). The fix in both cases is
-to narrow the `fqns` selectors so the claims are disjoint.
+a kernel across layers works. By default an error is raised when two different
+overrides claim the **same node**, or when one claims an **ancestor** of another's
+node (nested replacement, which would be order-dependent); the ancestor can opt
+in with `composes` and preserve the child by identity. The fix is to narrow the
+`fqns` selectors so the claims are disjoint, or to declare `composes`.
 
 Claims are gathered from the **original** tree before any mutation, and a
 replacement is never re-traversed, so application is order-independent — one
@@ -364,8 +367,10 @@ We error rather than pick one of the two plausible behaviors implicitly:
 
 Because claims are collected on the original tree, we can't even tell at
 check time which case a given pair would fall into — so instead of guessing, we
-ask the author to disambiguate: narrow `fqns` so the claims are disjoint, or drop
-one override (e.g. let the parent override subsume the child).
+ask the author to disambiguate: narrow `fqns` so the claims are disjoint, drop
+one override (e.g. let the parent override subsume the child), or opt in with
+`composes=[Child.Config]`. The child field is inferred from the child FQN, and
+the parent replacement must return the original child object.
 
 ## Scope: any `Configurable`
 
@@ -519,8 +524,9 @@ is the point of the design.
   `module=<json>` on the CLI) to configure the same module differently per
   config tree.
 - **Conflicts.** Per-node, not per-class: overrides may share a target class as
-  long as their claimed nodes are disjoint; same-node or ancestor/descendant
-  claims error.
+  long as their claimed nodes are disjoint. Same-node claims error; nested
+  claims error unless the parent declares `composes=[Child.Config]` and preserves
+  the child by identity.
 - **Per-instance targeting.** Via `fqns` (FQN globs) on `@override`; the factory
   is pure construction.
 - **Subclass matching.** Targets match subclasses by default; use `exact=True`

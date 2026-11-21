@@ -36,6 +36,7 @@ import json
 
 import logging
 from collections import defaultdict
+from copy import copy
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
@@ -143,6 +144,7 @@ class Override:
     description: str
     origin_module: str
     exact: bool = False
+    composes: tuple[type[Configurable.Config], ...] = ()
 
     @property
     def name(self) -> str:
@@ -170,6 +172,7 @@ def override(
     fqns: list[str] | None = None,
     description: str = "",
     exact: bool = False,
+    composes: Sequence[type[Configurable.Config]] = (),
 ) -> Callable:
     """Decorator to register an override factory.
 
@@ -189,6 +192,10 @@ def override(
         exact: If ``True``, claim only configs whose concrete type is exactly
             ``target``. The default ``False`` preserves subclass matching, useful
             when a replacement is valid for the full target contract.
+        composes: Config classes of direct child configs this factory's
+            replacement keeps by identity, allowing the recipe to select child
+            overrides of those types. The field name is inferred from the
+            selected child's FQN.
 
     The decorated function takes the matched config as its first positional
     argument and returns its replacement. It may also declare keyword parameters
@@ -215,6 +222,15 @@ def override(
             f"{target!r}. Plain classes are not "
             f"overridable; pick the component's `.Config`."
         )
+    child_types = tuple(composes)
+    if isinstance(composes, str) or not all(
+        isinstance(cls, type) and issubclass(cls, Configurable.Config)
+        for cls in child_types
+    ):
+        raise TypeError(
+            "override(composes=...) expects a sequence of child Config classes, "
+            "e.g. [RMSNorm.Config]."
+        )
 
     def decorator(fn: Callable) -> Callable:
         # Key by the factory's import path -- the same ``module.function`` a user
@@ -232,6 +248,7 @@ def override(
             description=description,
             origin_module=fn.__module__,
             exact=exact,
+            composes=child_types,
         )
         return fn
 
@@ -373,6 +390,7 @@ class _Claim:
     parent: object | None
     attr: str | int | None
     kwargs: dict[str, Any] = field(default_factory=dict)
+    replacement_cfg: Configurable.Config | None = None
 
 
 def _collect_claims(
@@ -404,12 +422,12 @@ def _collect_claims(
 
 
 def _check_node_conflicts(claims: list[_Claim]) -> None:
-    """Raise if two *different* overrides claim the same node or nested nodes.
+    """Check same-node and nested conflicts and bind declared child slots.
 
     Per-node, not per-class: two overrides of the same Config class on disjoint
     FQNs do not conflict. Conflicts are (a) the exact same node claimed twice, or
-    (b) one override claiming an ancestor of another override's node — both make
-    the outcome order-dependent.
+    (b) one override claiming an ancestor of another override's node without
+    a chain of selected direct children the parent composes with.
     """
     # (a) exact same node, identified by container + key.
     by_node: dict[tuple[int, str | int | None], str] = {}
@@ -425,15 +443,33 @@ def _check_node_conflicts(claims: list[_Claim]) -> None:
         by_node[key] = c.ov.name
 
     # (b) one node is an ancestor of another (nested replacement).
+    selected = {c.fqn: c.cfg for c in claims}
     for a in claims:
         for b in claims:
             if a.ov.name == b.ov.name:
                 continue
             if b.fqn.startswith(a.fqn + "."):
+                field_name, _, rest = b.fqn[len(a.fqn) + 1 :].partition(".")
+                child = selected.get(f"{a.fqn}.{field_name}")
+                if isinstance(child, a.ov.composes):
+                    if rest:
+                        continue  # The selected child checks the next edge.
+                    if a.replacement_cfg is None:
+                        # Own the slots we write even if a factory reuses a config.
+                        a.replacement_cfg = copy(a.ov.factory(a.cfg, **a.kwargs))
+                    if getattr(a.replacement_cfg, field_name, None) is not child:
+                        raise ValueError(
+                            f"Override '{a.ov.name}' must preserve '{b.fqn}' "
+                            f"to compose with '{b.ov.name}'."
+                        )
+                    b.parent = a.replacement_cfg
+                    continue
                 raise ValueError(
                     f"Override '{a.ov.name}' claims '{a.fqn}', an ancestor of "
                     f"'{b.fqn}' claimed by '{b.ov.name}'. Nested overrides are "
-                    f"order-dependent; narrow their `fqns` selectors."
+                    f"order-dependent; narrow their `fqns` selectors or compose "
+                    "through selected children whose Config classes are listed "
+                    "in `composes`."
                 )
 
 
@@ -471,7 +507,9 @@ def apply_overrides(
     for c in claims:
         # ``**{}`` for a bare (no-kwargs) entry is just ``factory(cfg)``; a kwarg
         # the factory does not accept raises TypeError here, naming the factory.
-        new_cfg = c.ov.factory(c.cfg, **c.kwargs)
+        new_cfg = c.replacement_cfg
+        if new_cfg is None:
+            new_cfg = c.ov.factory(c.cfg, **c.kwargs)
         if isinstance(c.parent, list) and isinstance(c.attr, int):
             c.parent[c.attr] = new_cfg
         elif isinstance(c.attr, str):
