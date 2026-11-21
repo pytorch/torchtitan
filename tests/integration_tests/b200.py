@@ -102,8 +102,8 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     return config
 
 
-def kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2() -> Trainer.Config:
-    """Exercise Kimi SiTU-GLU with MXFP8 Dist-MoE, FSDP, EP, and CP."""
+def kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2_pp2() -> Trainer.Config:
+    """Exercise Kimi MXFP8 Dist-MoE through interleaved PP stages with FSDP, EP, CP."""
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
     from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.common.attention.cp_mla import UlyssesMLAAttention
@@ -128,6 +128,9 @@ def kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     config.training.num_tokens_per_microbatch_per_dp_rank = 128
     config.training.steps = 4
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 4
     return apply_transforms(
         config,
         [
@@ -256,10 +259,10 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
         ),
         IntegrationTestDefinition(
-            configs=[kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2],
-            test_descr="Kimi K3 MXFP8 Dist-MoE with FSDP, EP, and CP",
-            test_name="kimi_k3_dist_moe_fsdp_ep_cp",
-            ngpu=4,
+            configs=[kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2_pp2],
+            test_descr="Kimi K3 MXFP8 Dist-MoE with FSDP, EP, CP, and interleaved PP",
+            test_name="kimi_k3_dist_moe_fsdp_ep_cp_pp",
+            ngpu=8,
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
