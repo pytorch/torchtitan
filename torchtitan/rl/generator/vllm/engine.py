@@ -154,8 +154,10 @@ class VLLMEngine(GenerationEngine):
         - Weights: the draft shares the target's embedding and lm_head storage, so it sees
           their updates. Its own layers (`mtp.*`) keep the checkpoint's weights, so
           acceptance can fall as the policy drifts.
+        - With `session_kv_holder`, prefix hits keep the last block that vLLM drops by
+          default for drafts (see `_build_engine_args`).
         - Not supported with `cuda_graph.mode="FULL"` (use FULL_DECODE_ONLY),
-          `session_kv_holder`, `debug.batch_invariant` or models with a vision encoder."""
+          `debug.batch_invariant` or models with a vision encoder."""
 
         def __post_init__(self) -> None:
             GenerationEngine.Config.__post_init__(self)
@@ -168,14 +170,6 @@ class VLLMEngine(GenerationEngine):
                     f"num_speculative_tokens={self.num_speculative_tokens} needs "
                     'cuda_graph.mode="FULL_DECODE_ONLY" or "NONE": with drafts, vLLM\'s GDN '
                     "metadata builder supports CUDA graphs for decode steps only"
-                )
-            if self.num_speculative_tokens > 0 and self.session_kv_holder is not None:
-                # TODO: support it, so sessions keep their KV between turns with MTP on. vLLM
-                # drops the last cached block for MTP drafts, which moves the holder's replay
-                # point; try SpeculativeConfig.disable_eagle_block_drop.
-                raise ValueError(
-                    f"num_speculative_tokens={self.num_speculative_tokens} does not support "
-                    "session_kv_holder yet"
                 )
 
     def __init__(
@@ -409,6 +403,18 @@ class VLLMEngine(GenerationEngine):
                 # 128-token pages (FA4 on SM100).
                 "attention_backend": attention_backend,
             }
+
+            if self.config.session_kv_holder is not None:
+                # The holder needs the next turn's hit to reach the blocks it holds, but with drafts
+                # vLLM drops each hit's last block: the draft's KV at a block's last token came from
+                # the next token, which another sequence may not share. Keeping the block can lower
+                # acceptance, never change the target's distribution.
+                # TODO: at the first vLLM pin past vllm-project/vllm#66234 (it removes the drop and this
+                # key), delete the key and the holder's check, re-run the held-hit GPU check, and build
+                # the holder test's manager with num_hash_lookahead_tokens=1. Not before: on vLLM
+                # 0.33/0.34 the key also keeps lookahead block hashes (vllm-project/vllm#61589) off, the
+                # mode tested here.
+                engine_kwargs["speculative_config"]["disable_eagle_block_drop"] = True
         vllm_compilation_config = self.config.cuda_graph.get_vllm_compilation_config(
             max_num_seqs=max_num_seqs,
             max_model_len=model.max_context_length,
