@@ -6,6 +6,7 @@
 
 """Cache addressing, causal tails and request isolation for Flash-Next generation."""
 
+from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
@@ -13,11 +14,15 @@ import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 pytest.importorskip(
-    "attn_gym.sparse.paged_decode",
-    reason="Paged QSA tests require Attention Gym paged sparse attention",
+    "attn_gym.sparse.indexer.paged",
+    reason="Paged QSA tests require the Attention Gym decode indexer",
 )
 
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.qwen3_8_flash_next import build_model_config
+from torchtitan.models.qwen3_8_flash_next.attention import QSAIndexMetadata
 from torchtitan.rl.generator.vllm.attention import qsa
+from torchtitan.rl.generator.vllm.attention.qsa import VLLMQSAIndexer
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Paged QSA requires a GPU"
@@ -141,6 +146,119 @@ def test_paged_qsa_mixed_queries_tail_and_padding(make_cache):
                 output[index].float(), expected, atol=1e-2, rtol=1e-2
             )
     assert torch.count_nonzero(output[11:]) == 0
+
+
+def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
+    """Chunked cache pooling and selected blocks must match the trainer."""
+    torch.manual_seed(42)
+    config = (
+        build_model_config("debugmodel", seq_len=64, parallelism=ParallelismConfig())
+        .layers[3]
+        .attention.indexer
+    )
+    config.token_budget = 8
+    indexer = (
+        VLLMQSAIndexer.Config(
+            **{field.name: getattr(config, field.name) for field in fields(config)},
+            layer_idx=3,
+        )
+        .build()
+        .cuda()
+    )
+    indexer.init_states()
+    trainer_indexer = config.build().cuda()
+    trainer_indexer.init_states()
+    for module in (indexer, trainer_indexer):
+        for parameter in module.parameters():
+            parameter.data = parameter.data.bfloat16()
+        module.requires_grad_(False)
+    trainer_indexer.load_state_dict(indexer.state_dict())
+    # Hybrid cache groups can pad the physical page stride without adding states.
+    indexer.cache.bind_kv_cache(
+        torch.zeros(3, 1, 8, config.head_dim, device="cuda", dtype=torch.bfloat16)[
+            :, :, :4
+        ]
+    )
+    indexer.raw_cache.bind_kv_cache(
+        torch.randn(2, 1, 16, config.head_dim, device="cuda", dtype=torch.bfloat16)[
+            :, :, :4
+        ]
+    )
+    context = qsa.get_forward_context().attn_metadata
+    candidate_builder = _metadata_builder(indexer.cache)
+    raw_builder = _metadata_builder(indexer.raw_cache)
+    raw_keys = []
+    inputs = []
+    offset = 0
+    block_table = torch.tensor([[2, 1]], device="cuda", dtype=torch.int32)
+    for length in (3, 1, 9, 6, 1):
+        positions = torch.cat(
+            (
+                torch.arange(offset, offset + length, device="cuda"),
+                torch.zeros(1, device="cuda", dtype=torch.int64),
+            )
+        )
+        x = torch.randn(
+            length + 1,
+            config.index_qk_proj.in_features,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        inputs.append(x[:length])
+        raw_keys.append(indexer.index_qk_proj(x)[:length, -config.head_dim :])
+        common = _common_metadata(
+            block_table=block_table,
+            slot_mapping=(
+                block_table[0, positions[:length] // 16].long() * 16
+                + positions[:length] % 16
+            ),
+            query_start_loc=torch.tensor([0, length], device="cuda", dtype=torch.int32),
+            seq_lens=torch.tensor([offset + length], device="cuda", dtype=torch.int32),
+            num_tokens=length,
+        )
+        metadata = candidate_builder.build(0, common)
+        context[indexer.cache.prefix] = metadata
+        common.block_table_tensor = torch.ones(1, 1, device="cuda", dtype=torch.int32)
+        context[indexer.raw_cache.prefix] = raw_builder.build(0, common)
+        selected, _ = indexer(x, positions=positions)
+        offset += length
+        count = offset // 4
+        if count:
+            pooled = (
+                torch.cat(raw_keys)[: count * 4]
+                .reshape(count, 4, -1)
+                .float()
+                .mean(1)
+                .bfloat16()
+            )
+            expected = indexer._rotate(
+                indexer.k_layernorm(pooled)[:, None],
+                torch.arange(count, device="cuda") * 4,
+            )[:, 0]
+            (cache,) = indexer.cache.views()
+            blocks = torch.arange(count, device="cuda")
+            actual = cache[block_table[0, blocks // 4].long(), blocks % 4, 0]
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        prefix_positions = torch.arange(offset, device="cuda")
+        token_indices, _ = trainer_indexer(
+            torch.cat(inputs),
+            positions=prefix_positions,
+            metadata=QSAIndexMetadata.from_inputs(
+                prefix_positions,
+                padding_mask_T=None,
+                compress_ratio=trainer_indexer.compress_ratio,
+            ),
+        )
+        expected_selection = torch.full_like(selected, -1)
+        num_selected = min(indexer.block_topk, count)
+        # The trainer expands selected blocks into tokens, followed by the tail.
+        expected_selection[:length, :num_selected] = (
+            token_indices[-length:, : num_selected * 4 : 4] // 4
+        )
+        torch.testing.assert_close(selected, expected_selection, atol=0, rtol=0)
+        assert (selected[length:] == -1).all()
+        for row, position in enumerate(positions.tolist()):
+            assert ((selected[row] < (position + 1) // 4) | (selected[row] == -1)).all()
 
 
 def test_decode_graph_refreshes_request_layout(make_cache):

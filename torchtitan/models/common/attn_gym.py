@@ -51,7 +51,12 @@ if TYPE_CHECKING:
     )
     from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
     from attn_gym.mla import paged_mla_decode
-    from attn_gym.sparse import lightning_indexer, paged_sparse_decode, PagedKV
+    from attn_gym.sparse import (
+        lightning_indexer,
+        paged_lightning_indexer,
+        paged_sparse_decode,
+        PagedKV,
+    )
     from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
 
 __all__ = [
@@ -82,6 +87,7 @@ __all__ = [
     "l2norm",
     "lightning_indexer",
     "PagedKV",
+    "paged_lightning_indexer",
     "paged_sparse_decode",
     "paged_causal_conv1d",
     "paged_chunk_gdn",
@@ -124,6 +130,7 @@ _EXPORTS = {
     "l2norm": "attn_gym.linear.kda.fwd.triton.l2norm_fwd",
     "lightning_indexer": "attn_gym.sparse",
     "PagedKV": "attn_gym.sparse",
+    "paged_lightning_indexer": "attn_gym.sparse",
     "paged_sparse_decode": "attn_gym.sparse",
     "paged_causal_conv1d": "attn_gym.linear.short_conv",
     "paged_chunk_gdn": "attn_gym.linear",
