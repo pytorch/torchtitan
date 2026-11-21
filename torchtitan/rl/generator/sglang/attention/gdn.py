@@ -146,7 +146,7 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
             )
         # SGLang's extra_buffer prefix cache: copy the states of the requests at a
         # tracked position into their track slots, once, after the last layer.
-        self._track_mamba_state_decode(
+        self.track_mamba_state_decode(
             forward_batch,
             layer_cache.conv[0],
             layer_cache.temporal,
