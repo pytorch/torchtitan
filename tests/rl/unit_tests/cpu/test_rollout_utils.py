@@ -398,80 +398,108 @@ def test_split_prompt_ends_the_prefix_at_a_changed_image(
     assert (prompt_prefix_len, prompt_delta_token_ids.tolist()) == expected
 
 
-def test_empty_completion_on_a_later_turn_raises() -> None:
-    # An empty completion is only expected on the first turn (initial prompt too long). On any later
-    # turn it is an anomaly, so building the training samples raises.
-    rollout = _scored_rollout(
+@pytest.mark.parametrize(
+    "completions",
+    [
+        [[4], []],  # turn 1's generate fn returned no tokens
+        [[], [4]],  # turn 0's did
+        [],  # no turn at all
+    ],
+)
+def test_build_from_group_drops_a_rollout_with_an_empty_completion(
+    completions: list[list[int]],
+) -> None:
+    # A rollout with an empty turn, or no turn, is a rollouter bug: drop that rollout and count it;
+    # keep the others.
+    prompts = [[1, 2], [1, 2, 4, 8]]
+    empty = _scored_rollout(
         [
-            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
-            _turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[], version=1),
-        ],
-        reward=0.0,
-        advantage=0.0,
-    )
-    with pytest.raises(ValueError, match="no completion"):
-        rollout_to_training_samples(rollout)
-
-
-def test_build_from_group_drops_a_rollout_with_an_empty_later_completion() -> None:
-    # e.g. turn 1 aborted before its first token: drop that rollout and count it, keep the others
-    empty_later = _scored_rollout(
-        [
-            _turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1),
-            _turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[], version=1),
+            _turn(prompt_token_ids=prompt, completion_token_ids=completion, version=1)
+            for prompt, completion in zip(prompts, completions)
         ],
         reward=0.0,
         advantage=1.0,
     )
-    kept = _scored_rollout(
-        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
-        reward=1.0,
-        advantage=1.0,
-    )
-    kept.rollout_id = 1
+    kept = []
+    for rollout_id, reward in [(1, 1.0), (2, 0.0)]:
+        rollout = _scored_rollout(
+            [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+            reward=reward,
+            advantage=1.0,
+        )
+        rollout.rollout_id = rollout_id
+        kept.append(rollout)
 
     group = (
         TrainingSampleBuilder.Config()
         .build()
         .build_from_group(
-            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty_later, kept])
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[empty, *kept])
         )
     )
 
-    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1]
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1, 2]
     [dropped] = [
         metric
         for metric in group.metrics
-        if metric.key == "training_sample_builder/num_rollouts_dropped_empty_completion"
+        if metric.key == "training_sample_builder/num_rollouts_dropped/empty_turn"
     ]
     assert dropped.value.value == 1.0
 
 
-def test_empty_completion_on_first_turn_is_skipped() -> None:
-    # First turn with no completion = initial prompt too long; expected, so the rollout yields no samples.
-    rollout = _scored_rollout(
-        [_turn(prompt_token_ids=[1, 2, 4, 8], completion_token_ids=[], version=1)],
-        reward=0.0,
-        advantage=0.0,
+def test_build_from_group_trains_a_zero_advantage_rollout_and_counts_it() -> None:
+    # Rewards [1, 0, 0.5]: the 0.5 rollout sits at the group's mean reward, so its advantage is 0.
+    rollouts = []
+    for rollout_id, (reward, advantage) in enumerate(
+        [(1.0, 0.5), (0.0, -0.5), (0.5, 0.0)]
+    ):
+        rollout = _scored_rollout(
+            [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+            reward=reward,
+            advantage=advantage,
+        )
+        rollout.rollout_id = rollout_id
+        rollouts.append(rollout)
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=rollouts)
+        )
     )
-    assert rollout_to_training_samples(rollout) == []
+
+    trained = [sample.rollout_id.rollout_id for sample in group.training_samples]
+    assert trained == [0, 1, 2]
+    [zero_advantage_frac] = [
+        metric
+        for metric in group.metrics
+        if metric.key == "training_sample_builder/zero_advantage_frac"
+    ]
+    # 1 of the 3 trained rollouts has advantage 0.
+    assert zero_advantage_frac.value.value == 1.0
+    assert zero_advantage_frac.value.count == 3
 
 
 @pytest.mark.parametrize(
-    "completions",
+    "status, completions, reason",
     [
-        [],  # its code raised before the first turn ended
-        [[5]],  # it raised after a turn
+        # its code raised before the first turn ended
+        (RolloutStatus.ERROR_INFRA, [], "untrainable"),
+        # it raised after a turn
+        (RolloutStatus.ERROR_INFRA, [[5]], "untrainable"),
+        # a rollouter bug: trainable, no advantage
+        (RolloutStatus.COMPLETED, [[5]], "no_advantage"),
     ],
 )
 def test_build_from_group_skips_an_unscored_rollout_but_trains_its_siblings(
-    completions: list[list[int]],
+    status: RolloutStatus, completions: list[list[int]], reason: str
 ) -> None:
-    # An ERROR_INFRA rollout has no reward or advantage. Its siblings still train.
+    # A rollout with no advantage isn't trained, and is counted by reason. Its siblings still train.
     failed = Rollout(
         group_id=_GROUP_ID,
         rollout_id=0,
-        status=RolloutStatus.ERROR_INFRA,
+        status=status,
         turns=[
             _turn(prompt_token_ids=[1, 2], completion_token_ids=completion, version=1)
             for completion in completions
@@ -496,6 +524,12 @@ def test_build_from_group_skips_an_unscored_rollout_but_trains_its_siblings(
     )
 
     assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1, 2]
+    [dropped] = [
+        metric
+        for metric in group.metrics
+        if metric.key == f"training_sample_builder/num_rollouts_dropped/{reason}"
+    ]
+    assert dropped.value.value == 1.0
 
 
 def test_build_from_group_drops_a_group_left_with_one_scored_rollout() -> None:
