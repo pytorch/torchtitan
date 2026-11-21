@@ -454,7 +454,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         with self.parallelism_context.activate_spmd():
             for model_part in self.model_parts:
                 model_part.to_empty(device=init_device)
-                with torch.no_grad():
+                with torch.no_grad(), dist_utils.dtensor_rng_off_for_cpu_shards(
+                    model_part
+                ):
                     model_part.init_weights(buffer_device=buffer_device)
                 model_part.train()
 
