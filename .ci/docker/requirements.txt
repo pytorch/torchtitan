@@ -8,6 +8,8 @@ tensorboard
 wandb
 tokenizers >= 0.15.0
 renderers == 0.1.12
+# TODO: renderers 0.1.12 imports httpx without declaring it
+httpx == 0.28.1
 safetensors
 einops
 pillow
