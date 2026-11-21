@@ -60,7 +60,7 @@ from .attention import (
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
-from .compressor import Compressor, Indexer, SparseIndexerLoss
+from .compressor import Compressor, Indexer, InnerIndexer, SparseIndexerLoss
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
@@ -75,6 +75,7 @@ from .sharding import (
     hc_post_sharding_config,
     hc_pre_sharding_config,
     indexer_sharding_config,
+    inner_indexer_sharding_config,
     mtp_block_sharding_config,
     mtp_hc_head_sharding_config,
     wo_a_sharding_config,
@@ -181,6 +182,9 @@ def _make_indexer_config(
 ) -> "Indexer.Config":
     coff = 2  # overlap always True for indexer
     return Indexer.Config(
+        inner_indexer=InnerIndexer.Config(
+            sharding_config=inner_indexer_sharding_config()
+        ),
         rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         num_index_heads=num_index_heads,
         index_head_dim=index_head_dim,

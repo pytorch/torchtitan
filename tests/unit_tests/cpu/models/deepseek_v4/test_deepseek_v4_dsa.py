@@ -18,7 +18,7 @@ from torchtitan.models.deepseek_v4.attention import (
     CompressedSparseAttention,
     DeepSeekV4CompressedSparseAttentionMetadata,
 )
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
@@ -36,14 +36,15 @@ class TestIndexerSelect(unittest.TestCase):
         metadata = CompressedSparseAttention.Config(
             window_size=1, compress_ratio=ratio, softmax_scale=0.1, index_topk=topk
         ).build_attention_metadata(torch.arange(seqlen))
-        selected, selected_scores = Indexer.select(
+        indexer = InnerIndexer.Config().build()
+        selected, selected_scores = indexer(
             idx_q,
             idx_k,
             idx_w,
-            max_seqlen=seqlen,
             ratio=ratio,
             topk=topk,
             attention_metadata=metadata,
+            return_scores=True,
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -66,6 +67,30 @@ class TestIndexerSelect(unittest.TestCase):
         expected_scores = scores.gather(1, selected.long().clamp_min(0))
         expected_scores = expected_scores.masked_fill(selected < 0, -torch.inf)
         torch.testing.assert_close(selected_scores, expected_scores)
+
+    def test_selection_width_for_packed_and_fixed_shape_metadata(self):
+        ratio, topk = 4, 16
+        cfg = CompressedSparseAttention.Config(
+            window_size=1, compress_ratio=ratio, softmax_scale=0.1, index_topk=topk
+        )
+        indexer = InnerIndexer.Config().build()
+        for lengths, metadata_kwargs, width in (
+            ([40, 40, 48], {}, 12),
+            ([3], {"max_num_documents": 1, "max_context_length": 48}, 0),
+        ):
+            positions = torch.cat([torch.arange(n) for n in lengths])
+            metadata = cfg.build_attention_metadata(positions, **metadata_kwargs)
+            indices, scores = indexer(
+                torch.randn(len(positions), 8, 32),
+                torch.randn(len(positions) // ratio, 32),
+                torch.randn(len(positions), 8),
+                ratio=ratio,
+                topk=topk,
+                attention_metadata=metadata,
+                return_scores=True,
+            )
+            self.assertEqual(indices.shape, (len(positions), width))
+            self.assertEqual(scores.shape, indices.shape)
 
 
 class TestDSVPackedDocuments(unittest.TestCase):

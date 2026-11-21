@@ -18,7 +18,7 @@ from torchtitan.models.deepseek_v4.attention import (
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
 
 SEQLEN, N_HEADS, HEAD_DIM, WINDOW, SCALE, TOPK = 32, 4, 8, 6, 0.1234, 5
 
@@ -112,12 +112,27 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 for shape in ((SEQLEN, 3, 6), (n_cmp, 6), (SEQLEN, 3))
             )
             idx = [t.to(device) for t in (idx_q, idx_k, idx_w)]
-            out = module(q, swa_k, cmp_k, *idx, attn_sink, attention_metadata=metadata)
-            cmp_topk, _ = Indexer.select(
+            indexer = InnerIndexer.Config().build()
+            topk_indices, topk_scores = indexer(
+                *idx,
+                ratio=ratio,
+                topk=TOPK,
+                attention_metadata=metadata,
+                return_scores=False,
+            )
+            out = module(
+                q,
+                swa_k,
+                cmp_k,
+                topk_indices,
+                attn_sink,
+                topk_scores=topk_scores,
+                attention_metadata=metadata,
+            )
+            cmp_topk, _ = indexer(
                 idx_q,
                 idx_k,
                 idx_w,
-                max_seqlen=SEQLEN,
                 ratio=ratio,
                 topk=TOPK,
                 attention_metadata=config.build_attention_metadata(
