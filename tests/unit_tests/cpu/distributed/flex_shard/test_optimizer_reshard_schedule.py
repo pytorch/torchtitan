@@ -163,5 +163,41 @@ class TestMuonPlanConstruction(unittest.TestCase):
             )
 
 
+    def test_unmatched_bucket_pattern_is_reported(self):
+        mesh, parameter = self._make_1d_parameter()
+
+        with self.assertLogs(
+            "torchtitan.distributed.flex_shard._optimizer_reshard_schedule",
+            level="WARNING",
+        ) as captured:
+            with patch.object(_BucketedRedistributionRuntime, "reserve_buffers"):
+                optimizer = DistMuon(
+                    [{"params": [parameter], "param_names": [self._FQN]}],
+                    compute_sharding_by_fqn={
+                        self._FQN: ComputeLayout(
+                            {
+                                "dp_shard": BlockShard(
+                                    dim=0,
+                                    block_sizes=(4,),
+                                )
+                            },
+                            compute_dtype=torch.bfloat16,
+                        )
+                    },
+                    bucket_configs=[
+                        BucketConfig(patterns=(self._FQN,), name="matched"),
+                        BucketConfig(patterns=("layers.9.*",), name="typo"),
+                    ],
+                )
+
+        self.assertEqual(len(captured.records), 1)
+        message = captured.output[0]
+        self.assertIn("'typo'", message)
+        self.assertIn("layers.9.*", message)
+        # The typo'd bucket is still dropped rather than rejected, so the
+        # parameter keeps matching exactly one bucket.
+        self.assertEqual(len(optimizer._bucket_plans), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -25,6 +26,9 @@ from .optimizer_reshard import _BucketSpec, BucketConfig
 
 
 __all__: list[str] = []
+
+
+logger = logging.getLogger(__name__)
 
 
 _ItemT = TypeVar("_ItemT")
@@ -59,6 +63,16 @@ def _bind_bucket_configs(
             item for item in matched_items if requires_redistribution(item)
         )
         if not matched_items:
+            # A bucket nobody matches is not an error -- a config may cover
+            # parameters that a particular model does not build -- but it must
+            # be reported, because a misspelled split pattern otherwise silently
+            # leaves the parameters in a different bucket than the author
+            # intended.
+            logger.warning(
+                "BucketConfig %r matches no optimizer parameter: patterns=%s",
+                config.name,
+                list(config.patterns),
+            )
             continue
         if not redistributed_items:
             specs.append(config._bind(None))
