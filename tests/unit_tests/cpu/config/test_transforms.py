@@ -799,6 +799,52 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         )
         self.assertTrue(transformed.layers[0].attention.wo.bias)
 
+    def test_replaces_mxfp8_parallel_linears_keeping_their_options(self):
+        from torchtitan.models.common.linear import (
+            ColumnParallelLinear,
+            RowParallelLinear,
+        )
+        from torchtitan.quantization.mxfp8 import MXFP8Linear
+        from torchtitan.quantization.utils import get_quantized_linear
+
+        if MXFP8Linear is None:
+            self.skipTest("requires the torchao MXFP8 kernels")
+        from torchtitan.quantization.mxfp8.async_linear import (
+            MXFP8AsyncColumnParallelLinear,
+            MXFP8AsyncRowParallelLinear,
+        )
+
+        config = copy.deepcopy(self._model_config().layers[0].feed_forward)
+        for name, parent_cls in (
+            ("w13", ColumnParallelLinear),
+            ("w2", RowParallelLinear),
+        ):
+            linear = getattr(config, name)
+            setattr(
+                config,
+                name,
+                get_quantized_linear(MXFP8Linear, parent_cls).Config(
+                    in_features=linear.in_features,
+                    out_features=linear.out_features,
+                    num_linears=linear.num_linears,
+                    param_init=linear.param_init,
+                    sharding_config=linear.sharding_config,
+                    input_activation_format_for_backward="mxfp8",
+                ),
+            )
+
+        # No disable_inplace_wgrad_accum: MXFP8 async TP computes WGRAD outside
+        # the fused collectives and keeps in-place accumulation.
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config)
+
+        self.assertIs(type(transformed.w13), MXFP8AsyncColumnParallelLinear.Config)
+        self.assertIs(type(transformed.w2), MXFP8AsyncRowParallelLinear.Config)
+        for linear in (transformed.w13, transformed.w2):
+            self.assertTrue(linear.inplace_wgrad_accum)
+            self.assertEqual(linear.input_activation_format_for_backward, "mxfp8")
+
     def test_async_transform_skips_projection_subclasses(self):
         config = copy.deepcopy(self._model_config().layers[0].feed_forward)
         config.w13 = _ConvertedLinear.Config(
