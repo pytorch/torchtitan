@@ -35,6 +35,7 @@ from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
 from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransferMetadata,
     ModelStateDictTransport,
     shard_layout,
     TensorShard,
@@ -307,6 +308,7 @@ class Generator(Configurable):
             )
 
         self._prefetched_model_state_dict = engine.prefetched_model_state_dict
+        self._model_state_dict_load_groups = engine.model_state_dict_load_groups
         # Set by `connect_model_state_dict_transport`; None reads from TorchStore.
         self._model_state_dict_transport: ModelStateDictTransport | None = None
         # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
@@ -486,6 +488,7 @@ class Generator(Configurable):
         self._model_state_dict_transport = config.build()
         self._model_state_dict_transport.connect_generator(
             self._prefetched_model_state_dict,
+            load_groups=self._model_state_dict_load_groups,
             sources=trainer_sources,
             rank=self._rank,
             generator_index=generator_index,
@@ -509,15 +512,22 @@ class Generator(Configurable):
         await self._engine_loop.load_model_state_dict(version, drain=drain)
 
     @sl.log_trace_span("prefetch_model_state_dict")
-    async def prefetch_model_state_dict(self) -> None:
+    async def prefetch_model_state_dict(
+        self,
+        metadata_by_trainer_rank: tuple[ModelStateDictTransferMetadata, ...],
+    ) -> None:
         """Fetch weights into pinned CPU memory without interrupting generation.
 
         A no-op with ``model_state_dict_load_mode="gpu_fetch"``: the load reads the weights.
+
+        Args:
+            metadata_by_trainer_rank: Opaque results from the current all-rank
+                trainer push, in trainer-rank order.
         """
         if self.config.model_state_dict_load_mode == "gpu_fetch":
             return
         if self._model_state_dict_transport is not None:
-            await self._model_state_dict_transport.read()
+            await self._model_state_dict_transport.read(metadata_by_trainer_rank)
             return
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.

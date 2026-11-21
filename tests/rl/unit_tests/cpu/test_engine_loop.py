@@ -943,7 +943,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         first = _generate(generator._engine_loop, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
 
-        await asyncio.wait_for(generator.prefetch_model_state_dict(), _TIMEOUT_S)
+        await asyncio.wait_for(generator.prefetch_model_state_dict(()), _TIMEOUT_S)
         actor_loop = (threading.current_thread(), asyncio.get_running_loop())
         assert reads == [actor_loop]
 
@@ -993,7 +993,7 @@ def test_gpu_fetch_reads_torchstore_on_the_actor_loop_during_the_load(
         )
         await generator.start_engine_loop()
 
-        await asyncio.wait_for(generator.prefetch_model_state_dict(), _TIMEOUT_S)
+        await asyncio.wait_for(generator.prefetch_model_state_dict(()), _TIMEOUT_S)
         assert reads == []
 
         await asyncio.wait_for(
