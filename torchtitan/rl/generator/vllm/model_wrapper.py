@@ -26,9 +26,11 @@ from vllm.utils import torch_utils as _torch_utils
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.config.transform.base import convert_config_type
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.activation import Softmax
 from torchtitan.models.common.attention import (
     Attention,
     FlexInnerAttention,
@@ -39,6 +41,7 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import (
     build_dist_moe_runtime,
@@ -173,6 +176,26 @@ def _replace_vllm_layer_configs(model_config):
                 attention=dataclasses.replace(
                     kda_cfg,
                     inner_attention=vllm_inner_kda_cfg,
+                ),
+            )
+
+        feed_forward_cfg = getattr(layer_cfg, "feed_forward", None)
+        if (
+            isinstance(feed_forward_cfg, MoE.Config)
+            and type(feed_forward_cfg.router) is TokenChoiceTopKRouter.Config
+            and type(feed_forward_cfg.router.score_func) is Softmax.Config
+            and not is_in_batch_invariant_mode()
+            and torch.version.hip is None
+        ):
+            from torchtitan.rl.generator.moe_router import FusedSoftmaxTopKRouter
+
+            new_layer_cfg = dataclasses.replace(
+                new_layer_cfg,
+                feed_forward=dataclasses.replace(
+                    feed_forward_cfg,
+                    router=convert_config_type(
+                        feed_forward_cfg.router, FusedSoftmaxTopKRouter
+                    ),
                 ),
             )
 
