@@ -6,7 +6,6 @@
 
 import bisect
 import unittest
-from dataclasses import replace
 from unittest.mock import patch
 
 import torch
@@ -245,7 +244,7 @@ class TestIndexerSelect(unittest.TestCase):
         self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
-    def test_selection_does_not_depend_on_rescoring(self):
+    def test_selected_scores_are_differentiable(self):
         torch.manual_seed(0)
         q = torch.randn(12, 3, 8, requires_grad=True)
         k = torch.randn(3, 8, requires_grad=True)
@@ -259,72 +258,45 @@ class TestIndexerSelect(unittest.TestCase):
                 ratio=4,
                 topk=2,
                 attention_metadata=_metadata(cu, 12),
-                return_scores=True,
             )
-            index_only, no_scores = indexer(
-                q,
-                k,
-                w,
-                ratio=4,
-                topk=2,
-                attention_metadata=_metadata(cu, 12),
-                return_scores=False,
-            )
-            torch.testing.assert_close(indices, index_only)
-            self.assertIsNone(no_scores)
             scores[indices >= 0].sum().backward()
             for tensor in (q, k, w):
                 self.assertTrue(torch.isfinite(tensor.grad).all())
 
-    def test_eval_and_disabled_loss_do_not_rescore(self):
-        model_config = build_model_config(
-            "debugmodel", seq_len=128, parallelism=ParallelismConfig()
-        )
-        layer = next(
-            layer
-            for layer in model_config.layers
-            if layer.attention.compress_ratio == 4
-        )
-        for training, enabled in ((False, True), (True, False)):
-            cfg = replace(
-                layer.attention,
-                inner_attention=replace(
-                    layer.attention.inner_attention,
-                    aux_loss=layer.attention.inner_attention.aux_loss
-                    if enabled
-                    else None,
-                ),
+    def test_eval_and_disabled_loss_return_scores_without_grad_or_lse(self):
+        for training, loss_coeff in ((False, 0.01), (True, 0.0)):
+            config = build_model_config(
+                "debugmodel",
+                seq_len=16,
+                parallelism=ParallelismConfig(),
+                indexer_loss_coeff=loss_coeff,
             )
-            with torch.device("meta"):
-                attention = cfg.build()
-            attention.to_empty(device="cpu")
+            cfg = next(
+                layer.attention
+                for layer in config.layers
+                if layer.attention.compress_ratio == 4
+            )
+            attention = cfg.build().train(training)
             attention.init_states(buffer_device=torch.device("cpu"))
-            attention.train(training)
-            x = torch.randn(16, cfg.dim)
             positions = torch.arange(16)
             metadata = cfg.inner_attention.build_attention_metadata(positions)
-            captured = {}
-            original_forward = InnerIndexer.forward
-
-            def spy(self, *args, **kwargs):
-                captured.update(kwargs)
-                return original_forward(self, *args, **kwargs)
-
             with (
-                patch.object(InnerIndexer, "forward", spy),
+                patch.object(
+                    attention.inner_attention,
+                    "forward",
+                    wraps=attention.inner_attention.forward,
+                ) as inner,
                 patch(
                     "torchtitan.models.deepseek_v4.attention.gather_attn",
                     wraps=gather_attn,
                 ) as kernel,
             ):
-                attention(
-                    x,
-                    attention_metadata=metadata,
-                    positions=positions,
-                    aux_loss_denominator=torch.tensor(16.0),
-                )
-                self.assertFalse(captured["return_scores"])
-                self.assertFalse(kernel.call_args.kwargs["return_aux"].lse)
+                attention(torch.randn(16, cfg.dim), metadata, positions)
+            indices = inner.call_args.args[3]
+            scores = inner.call_args.kwargs["topk_scores"]
+            self.assertTrue(torch.equal(scores.isfinite(), indices >= 0))
+            self.assertFalse(scores.requires_grad)
+            self.assertFalse(kernel.call_args.kwargs["return_aux"].lse)
 
 
 if __name__ == "__main__":

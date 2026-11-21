@@ -276,7 +276,7 @@ class CompressedSparseAttention(DSV4InnerAttention):
         topk_indices,
         attn_sink,
         *,
-        topk_scores=None,
+        topk_scores: torch.Tensor,
         attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         aux_loss_denominator=None,
         padding_mask_T=None,
@@ -454,15 +454,18 @@ class DeepSeekV4Attention(Attention):
 
         cmp_k = topk_indices = topk_scores = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            topk_indices, topk_scores = self.indexer(
-                x.detach(),
-                qr.detach(),
-                positions=positions,
-                attention_metadata=attention_metadata,
-                topk=self.inner_attention.index_topk,
-                return_scores=self.training
-                and self.inner_attention.aux_loss is not None,
-            )
+            with torch.set_grad_enabled(
+                torch.is_grad_enabled()
+                and self.training
+                and self.inner_attention.aux_loss is not None
+            ):
+                topk_indices, topk_scores = self.indexer(
+                    x.detach(),
+                    qr.detach(),
+                    positions=positions,
+                    attention_metadata=attention_metadata,
+                    topk=self.inner_attention.index_topk,
+                )
         if self.compress_ratio == 4:
             cmp_k = self.compressor(
                 x, positions=positions, attention_metadata=attention_metadata

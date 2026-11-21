@@ -11,7 +11,6 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 from spmd_types import SpmdType
-from spmd_types.checker import typecheck
 
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.base.module import Module, ModuleDict, ModuleList, Sequential
@@ -550,27 +549,6 @@ class TestBufferDtypeGuard(unittest.TestCase):
         spmd.assert_type(m.buf, SpmdType({}))
         m.to_empty(device="cpu")
         self.assertTrue(spmd.has_local_type(m.buf))
-
-
-class TestLocalRegionNoneOutput(unittest.TestCase):
-    def test_none_output_does_not_need_a_placeholder(self):
-        class M(Module):
-            @dataclass(kw_only=True, slots=True)
-            class Config(Module.Config):
-                pass
-
-            def __init__(self, config: Config):
-                super().__init__()
-
-        module = M(M.Config())
-        output_spec = SpmdType({}, partition_spec=spmd.PartitionSpec(None))
-        fn = module._spmd_apply_local_region(
-            lambda: (torch.ones(4, device="meta"), None), [], (output_spec, None)
-        )
-        with typecheck():
-            indices, scores = fn()
-        self.assertEqual(indices.shape, (4,))
-        self.assertIsNone(scores)
 
 
 if __name__ == "__main__":

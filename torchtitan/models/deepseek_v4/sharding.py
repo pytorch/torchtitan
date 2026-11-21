@@ -238,6 +238,6 @@ def inner_indexer_sharding_config() -> ShardingConfig:
     inputs = {"idx_q": query, "idx_k": replicated, "idx_w": replicated}
     return ShardingConfig(
         input_shardings=inputs,
-        output_shardings=(replicated, None),
+        output_shardings=(replicated, replicated),
         local_spmd=True,
     )

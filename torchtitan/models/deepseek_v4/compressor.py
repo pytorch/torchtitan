@@ -184,7 +184,7 @@ class Compressor(Module):
 
 
 class Indexer(Module):
-    """Produce low-dimensional query/key features for CSA top-k selection."""
+    """Project CSA indexer features and return selected positions and scores."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -232,8 +232,7 @@ class Indexer(Module):
         positions: torch.Tensor,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
         topk: int,
-        return_scores: bool,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project features and return document-local selections and scores."""
         seqlen = x.size(0)
         rd = self.rope_head_dim
@@ -253,16 +252,14 @@ class Indexer(Module):
         # The scale reads the weights_proj output with bare ops.
         remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
-        indices, scores = self.inner_indexer(
+        return self.inner_indexer(
             q,
             k,
             weights,
             ratio=self.compressor.compress_ratio,
             topk=topk,
             attention_metadata=attention_metadata,
-            return_scores=return_scores,
         )
-        return indices, scores
 
 
 class InnerIndexer(Module):
@@ -284,21 +281,20 @@ class InnerIndexer(Module):
         ratio: int,
         topk: int,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
-        return_scores: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions per folded query token.
 
         Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
-        recomputes the selected logits inside autograd for the distillation loss.
+        recomputes the selected logits for the distillation loss.
         With packed documents, returned indices are local to the query's
         document in the packed compressed-KV pool.
 
         Returns:
             ``(indices, scores)``. ``indices`` is int32
             ``[T, min(topk, attention_metadata.max_k // ratio)]`` with ``-1`` in unusable
-            slots. ``scores`` holds live indexer logits for those selected
-            entries and ``-inf`` in unusable slots, or an empty tensor when
-            return_scores is False (evaluation and disabled auxiliary loss).
+            slots. An empty key pool gives both outputs zero columns.
+            ``scores`` holds the logits for selected entries and ``-inf`` in
+            unusable slots.
         """
         with spmd.no_typecheck():
             # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
@@ -309,7 +305,8 @@ class InnerIndexer(Module):
                 and idx_q.dtype in (torch.float16, torch.bfloat16)
                 and has_cuda_capability(9, 0)
             )
-            k = min(topk, attention_metadata.max_k // ratio)
+            # Fixed-shape metadata can reserve slots even when the key pool is empty.
+            k = min(topk, attention_metadata.max_k // ratio) if idx_k.size(0) else 0
             cu_seqlens = attention_metadata.cu_seq_q
             cu_seqlens_k = attention_metadata.cu_seq_compressed
             with torch.no_grad():
@@ -325,8 +322,6 @@ class InnerIndexer(Module):
                     impl="fused" if fused else "reference",
                 ).squeeze(0)
 
-            if not return_scores:
-                return topk_indices, None
             valid_TK = topk_indices >= 0
             gather_indices_TK = compressed_gather_indices(
                 topk_indices, attention_metadata, ratio

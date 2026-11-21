@@ -66,7 +66,7 @@ class ShardingConfig:
 
     state_shardings: dict[str, SpmdType] = field(default_factory=dict)
     input_shardings: dict[str, SpmdType] | None = None
-    output_shardings: SpmdType | tuple[SpmdType | None, ...] | None = None
+    output_shardings: SpmdType | tuple[SpmdType, ...] | None = None
     local_spmd: bool = False
 
     def to_dict(self) -> dict:

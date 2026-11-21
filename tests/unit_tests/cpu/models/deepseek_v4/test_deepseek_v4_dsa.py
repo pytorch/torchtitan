@@ -44,7 +44,6 @@ class TestIndexerSelect(unittest.TestCase):
             ratio=ratio,
             topk=topk,
             attention_metadata=metadata,
-            return_scores=True,
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -68,24 +67,28 @@ class TestIndexerSelect(unittest.TestCase):
         expected_scores = expected_scores.masked_fill(selected < 0, -torch.inf)
         torch.testing.assert_close(selected_scores, expected_scores)
 
-    def test_packed_selection_is_bounded_by_the_longest_document(self):
+    def test_selection_width_for_packed_and_fixed_shape_metadata(self):
         ratio, topk = 4, 16
-        lengths = [40, 40, 48]
-        positions = torch.cat([torch.arange(n) for n in lengths])
-        metadata = CompressedSparseAttention.Config(
+        cfg = CompressedSparseAttention.Config(
             window_size=1, compress_ratio=ratio, softmax_scale=0.1, index_topk=topk
-        ).build_attention_metadata(positions)
-        indexer = InnerIndexer.Config().build()
-        indices, _ = indexer(
-            torch.randn(len(positions), 8, 32),
-            torch.randn(len(positions) // ratio, 32),
-            torch.randn(len(positions), 8),
-            ratio=ratio,
-            topk=topk,
-            attention_metadata=metadata,
-            return_scores=False,
         )
-        self.assertEqual(indices.shape[1], 12)
+        indexer = InnerIndexer.Config().build()
+        for lengths, metadata_kwargs, width in (
+            ([40, 40, 48], {}, 12),
+            ([3], {"max_num_documents": 1, "max_context_length": 48}, 0),
+        ):
+            positions = torch.cat([torch.arange(n) for n in lengths])
+            metadata = cfg.build_attention_metadata(positions, **metadata_kwargs)
+            indices, scores = indexer(
+                torch.randn(len(positions), 8, 32),
+                torch.randn(len(positions) // ratio, 32),
+                torch.randn(len(positions), 8),
+                ratio=ratio,
+                topk=topk,
+                attention_metadata=metadata,
+            )
+            self.assertEqual(indices.shape, (len(positions), width))
+            self.assertEqual(scores.shape, indices.shape)
 
 
 class TestDSVPackedDocuments(unittest.TestCase):

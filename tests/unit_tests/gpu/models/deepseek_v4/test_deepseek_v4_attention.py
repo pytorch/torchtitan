@@ -113,15 +113,20 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
             )
             idx = [t.to(device) for t in (idx_q, idx_k, idx_w)]
             indexer = InnerIndexer.Config().build()
-            topk_indices, _ = indexer(
+            topk_indices, topk_scores = indexer(
                 *idx,
                 ratio=ratio,
                 topk=TOPK,
                 attention_metadata=metadata,
-                return_scores=False,
             )
             out = module(
-                q, swa_k, cmp_k, topk_indices, attn_sink, attention_metadata=metadata
+                q,
+                swa_k,
+                cmp_k,
+                topk_indices,
+                attn_sink,
+                topk_scores=topk_scores,
+                attention_metadata=metadata,
             )
             cmp_topk, _ = indexer(
                 idx_q,
@@ -132,7 +137,6 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 attention_metadata=config.build_attention_metadata(
                     torch.arange(SEQLEN)
                 ),
-                return_scores=False,
             )
             cmp_topk = cmp_topk.long()
             cmp_allowed = torch.zeros(SEQLEN, n_cmp, dtype=torch.bool)
