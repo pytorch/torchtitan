@@ -26,6 +26,7 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
     rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
+    rl_grpo_qwen3_8_flash_next_debug,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -135,6 +136,15 @@ def build_h100_rl_test_list() -> list[IntegrationTestDefinition]:
 def build_b200_rl_test_list() -> list[IntegrationTestDefinition]:
     """Build the B200 RL integration tests: the H100 tests, plus Dist-MoE, which requires SM100+."""
     return build_h100_rl_test_list() + [
+        _rl_test(
+            configs=[rl_grpo_qwen3_8_flash_next_debug],
+            test_descr=(
+                "RL GRPO Flash-Next FSDP2 trainer + TP2/EP2 generator "
+                "with compressed QSA and cached PLE decode graphs"
+            ),
+            test_name="rl_grpo_qwen3_8_flash_next_debug",
+            ngpu=4,
+        ),
         _rl_test(
             configs=[rl_grpo_moe_debug_dist_moe_tp2_ep4],
             test_descr=(

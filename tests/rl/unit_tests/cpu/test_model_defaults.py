@@ -35,6 +35,7 @@ _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_qwen3_0_6b_varlen_mxfp8",
     "rl_grpo_qwen3_0_6b_varlen_sglang",
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
+    "rl_grpo_qwen3_8_flash_next_debug",
     "rl_dapo_qwen3_30b_a3b_math_8k_mxfp8",
 }
 # SoftCappedLinear head: LMHeadFP32OutputTransform can't convert it (see the recipe's TODO).

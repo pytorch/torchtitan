@@ -334,14 +334,24 @@ class Qwen38FlashNextModel(Qwen35Model):
         self,
         tokens: torch.Tensor,
         *,
-        document_positions: torch.Tensor,
-        ple_input_ids: torch.Tensor,
+        document_positions: torch.Tensor | None = None,
+        ple_input_ids: torch.Tensor | None = None,
         ple_routing: RowShardedEmbeddingMetadata | None = None,
         positions: torch.Tensor | None = None,
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if document_positions is None or ple_input_ids is None:
+            if self.tok_embeddings is None or positions is None:
+                raise ValueError(
+                    "Flash-Next needs document_positions and ple_input_ids unless it "
+                    "embeds the token IDs itself and gets text positions"
+                )
+            document_positions = (
+                positions if document_positions is None else document_positions
+            )
+            ple_input_ids = tokens if ple_input_ids is None else ple_input_ids
         if self.tok_embeddings is None:
             x_TC = tokens
         else:
