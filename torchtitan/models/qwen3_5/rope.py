@@ -46,6 +46,12 @@ class MRoPE(CosSinRoPE):
             )
         super().__init__(config)
 
+    def _precompute_cache(self) -> torch.Tensor:
+        # HF multiplies cos and sin by the YaRN attention factor. Qwen3.5 rotates
+        # only the first ``dim`` channels of each head, so the factor applies to
+        # them alone and cannot fold into the softmax scale.
+        return super()._precompute_cache() * self.config.attention_factor()
+
     def _reshape_cache(
         self,
         query: torch.Tensor,
