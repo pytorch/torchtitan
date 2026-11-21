@@ -136,8 +136,8 @@ capacity factor of `1.0` reserves the worst case, so no tokens are dropped, at
 the cost of memory. See [`models/common/moe/README.md`](../common/moe/README.md)
 for choosing a lower factor. HybridEP is verified with FSDP, with TP+EP, and
 with Ulysses CP+EP.
-HybridEP's combine rounds the routing scores to BF16 before weighting the
-expert outputs.
+HybridEP multiplies the postprocessed expert outputs by FP32 routing scores,
+then converts the products back to the activation dtype.
 
 DeepEP uses its compact, host-synced path in training, so CUDA graphs must be
 disabled. Its combine kernel requires the MoE compressed dimension to be a

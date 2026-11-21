@@ -1,7 +1,7 @@
 # Router-score absorption
 
-[`RoutedExperts`](moe.py) absorbs DeepEP router scores into W2's input when
-`output_postprocess` is absent. Local, AllToAll, and HybridEP keep post-expert
+[`RoutedExperts`](moe.py) absorbs DeepEP and HybridEP router scores into W2's
+input when `output_postprocess` is absent. Local and AllToAll keep post-expert
 scoring; Dist-MoE owns its compute and communication optimizations.
 
 `R` is the number of routed rows on this rank, `D` the model dimension, `F` the
@@ -16,7 +16,7 @@ Without absorption, each expert output is multiplied by its router score:
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
     A --> S["FP32 score multiply + cast back"]
-    S --> C["Unpermute + DeepEP combine"]
+    S --> C["Unpermute + EP combine"]
 ```
 
 For a linear W2, scores can instead multiply its input:
@@ -27,7 +27,7 @@ flowchart LR
     B["Expanded bias B [R,D]"] --> BS["FP32 score multiply + cast back"]
     W --> A["Add"]
     BS --> A
-    A --> C["Unpermute + DeepEP combine"]
+    A --> C["Unpermute + EP combine"]
 ```
 
 Each score multiplication broadcasts scores as `[R, 1]`. The bias branch is
@@ -52,13 +52,13 @@ Padding rows receive zero bias.
 ## Output postprocessing
 
 A postprocess such as expert-output normalization need not commute with score
-multiplication. DeepEP retains post-expert scoring when it is configured:
+multiplication. Both backends retain post-expert scoring when it is configured:
 
 ```mermaid
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
     A --> P["Output postprocess"] --> S["FP32 score multiply + cast back"]
-    S --> C["Unpermute + DeepEP combine"]
+    S --> C["Unpermute + EP combine"]
 ```
 
 Thus `s * output_postprocess(W2(h) + B)` keeps the original operation order.
@@ -91,12 +91,13 @@ it instead retains the routing indices needed by unpermute backward: `R`
 int64 indices occupy `8R` bytes, or 256 KiB at `R = 32768`. This counts index
 storage, not the opaque DeepEP handle or other retained tensors.
 
+HybridEP also saves its complete combine region; backward uses the forward
+dispatch handle instead of W2's output.
+
 Scores are supplied by replayed dispatch/permutation or retained dispatch
-outputs. The optimized combine does not consume scores. W2 follows its
-configured remat policy, and the GPT-OSS bias addition follows the same
-`grouped_mm` decision rather than an independent bias policy. Replaying even a
-cheap bias addition after a saved matmul would retain the matmul's full routed
-output; saving both avoids this dependency. Other replayed consumers, such as a
-dtype conversion, can still need W2's output, so saved combine alone does not
-guarantee its complete removal from retained memory. FullAC can still replay
-the W2 GEMM and its bias addition.
+outputs. Combine does not consume scores. For native BF16 experts without
+output postprocessing or an output dtype conversion, W2 and its GPT-OSS bias
+addition are saved even under FullAC. This skips forward replay without
+retaining W2's output; both gradient GEMMs still run. Quantized and LoRA
+projections, output postprocessing, and dtype conversions retain their
+configured remat policy.

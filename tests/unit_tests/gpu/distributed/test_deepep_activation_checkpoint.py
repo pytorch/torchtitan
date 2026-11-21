@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import itertools
+import os
 import unittest
 
 from unittest.mock import patch
@@ -213,6 +214,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
             # Filling empty outputs must stay off: it races with comm streams.
             with (
                 DeterministicGuard(True, fill_uninitialized_memory=False),
+                patch.dict(os.environ, {"CUBLAS_WORKSPACE_CONFIG": ":4096:8"}),
                 self.subTest(
                     ac=type(activation_remat).__qualname__,
                     linear=grouped_linear_cls.__name__,
@@ -266,7 +268,30 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         )
                     ).to(self.device_type, torch.bfloat16)
                     reference.load_state_dict(baseline.state_dict())
-                activation_remat.apply(ac_model)
+                check_w2_saved_bytes = (
+                    isinstance(activation_remat, FullActivationRematConfig)
+                    and output_postprocess is None
+                )
+                w2_saved_storages = {}
+
+                def pack(tensor):
+                    info = remat.current_saved_tensor_info()
+                    if (
+                        info.kind is remat.SavedTensorKind.BACKWARD
+                        and info.region is not None
+                        and ".w2." in info.region
+                    ):
+                        storage = tensor.untyped_storage()
+                        w2_saved_storages[storage.data_ptr()] = storage.nbytes()
+                    return tensor.detach()
+
+                if check_w2_saved_bytes:
+                    activation_remat.apply(
+                        ac_model,
+                        saved_tensors_hooks=lambda _, __: (pack, lambda tensor: tensor),
+                    )
+                else:
+                    activation_remat.apply(ac_model)
                 # As in training, the buffer is created after AC is applied. All
                 # models share it, so the baseline also runs deterministic when
                 # the AC model replays.
@@ -275,6 +300,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                 if reference is not None:
                     reference.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
+                w2 = ac_model.layers["0"].routed_experts.w2
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
                     "dispatch": getattr(buffer_type, dispatch_method),
@@ -315,6 +341,7 @@ class _EPActivationCheckpointing(DTensorTestBase):
                         autospec=True,
                         side_effect=counted("combine"),
                     ),
+                    patch.object(w2, "_grouped_mm", wraps=w2._grouped_mm) as w2_mm,
                 ):
                     expected = _run_forward_backward(baseline, x_TD)
                     baseline_calls = dict(num_calls)
@@ -358,6 +385,16 @@ class _EPActivationCheckpointing(DTensorTestBase):
                     },
                     msg=f"unexpected EP communication replays: {num_calls}",
                 )
+                self.assertEqual(
+                    w2_mm.call_count,
+                    1
+                    + int(
+                        output_postprocess is not None
+                        and w2.remat_should_recompute("grouped_mm")
+                    ),
+                )
+                if check_w2_saved_bytes:
+                    self.assertEqual(sum(w2_saved_storages.values()), 0)
                 if exact:
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
@@ -438,19 +475,27 @@ class TestHybridEPActivationCheckpointing(_EPActivationCheckpointing):
                 self._check_ep_activation_checkpointing(
                     ac_configs,
                     num_dispatch_replays=num_replays,
-                    num_combine_replays=num_replays,
+                    num_combine_replays=0,
                     dispatcher_config=HybridEPTokenDispatcher.Config(
                         num_experts=4 * self.world_size,
                         top_k=_TOP_K,
                         hidden_dim=_MODEL_DIM,
                         num_max_tokens_per_rank=_NUM_TOKENS,
                         non_blocking_capacity_factor=capacity_factor,
+                        # Pad blocking rows; leave unused capacity in nonblocking mode.
+                        pad_multiple=64 if capacity_factor is None else None,
                     ),
                     expert_configs=(
                         (GroupedLinear, SwiGLU.Config(), None),
+                        (GptOssGroupedLinear, ClampedSwiGLU.Config(), None),
                         (
                             GroupedLinear,
                             SwiGLU.Config(),
+                            RMSNorm.Config(normalized_shape=_MODEL_DIM),
+                        ),
+                        (
+                            GptOssGroupedLinear,
+                            ClampedSwiGLU.Config(),
                             RMSNorm.Config(normalized_shape=_MODEL_DIM),
                         ),
                     ),

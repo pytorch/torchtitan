@@ -43,7 +43,7 @@ from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
 from .token_dispatcher import (
-    DeepEPDispatchMetadata,
+    EPDispatchMetadata,
     HybridEPTokenDispatcher,
     LocalTokenDispatcher,
 )
@@ -170,11 +170,19 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(gate_up_R2F)
             hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             if (
-                isinstance(metadata, DeepEPDispatchMetadata)
+                isinstance(metadata, EPDispatchMetadata)
                 and self.output_postprocess is None
             ):
                 routed_output_RD = self.w2(
-                    hidden_RF, offsets_E, scores_R=metadata.scores_R
+                    hidden_RF,
+                    offsets_E,
+                    scores_R=metadata.scores_R,
+                    # remat rebuilds the scored input during replay rather than retaining it.
+                    # TODO(@anijain2305): Let remat skip unused W2: https://github.com/meta-pytorch/remat/issues/6
+                    recompute=False
+                    if routed_input_RD.dtype == torch.bfloat16
+                    and type(self.w2)._grouped_mm is GroupedLinear._grouped_mm
+                    else None,
                 )
             else:
                 routed_output_RD = self.w2(hidden_RF, offsets_E)
@@ -202,7 +210,7 @@ class RoutedExperts(Module):
                     )
                 else:
                     routed_output_RD = self.output_postprocess(routed_output_RD)
-                if isinstance(metadata, DeepEPDispatchMetadata):
+                if isinstance(metadata, EPDispatchMetadata):
                     # A nonlinear postprocess must run before score multiplication.
                     remat.recompute_needs_tensor(routed_output_RD, metadata.scores_R)
                     # Promote the product without saving a float32 output copy.
