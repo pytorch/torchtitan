@@ -4,18 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model-config converter for batch-invariant FlexAttention settings."""
+"""Model transform for batch-invariant FlexAttention settings."""
 
-from dataclasses import dataclass
-
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention
 
-from .converter import ModelConfigConverter
+from .base import ModelConfigTransform
 
-__all__ = ["BatchInvariantFlexConverter"]
+__all__ = ["BatchInvariantFlexTransform"]
 
 
-class BatchInvariantFlexConverter(ModelConfigConverter):
+class BatchInvariantFlexTransform(ModelConfigTransform):
     """Pin FlexAttention kernel options for batch-invariant mode.
 
     Sets fixed BLOCK_M/BLOCK_N=16 and BACKEND=TRITON on all
@@ -28,16 +27,9 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
     _BLOCK_M = 16
     _BLOCK_N = 16
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        pass
-
-    def convert(self, model_config):
-        for _, config, _, _ in model_config.traverse(FlexInnerAttention.Config):
+    def transform(self, model: Module.Config) -> Module.Config:
+        for _, config, _, _ in model.traverse(FlexInnerAttention.Config):
             config.kernel_options["BACKEND"] = "TRITON"
             config.kernel_options["BLOCK_M"] = self._BLOCK_M
             config.kernel_options["BLOCK_N"] = self._BLOCK_N
-        return model_config
+        return model

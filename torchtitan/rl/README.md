@@ -21,6 +21,9 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 | CPU | - | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
 | NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_h100.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
 
+See the [RL test cadence and manual-run instructions](../../tests/README.md#running-unit-tests)
+for the H100/B200 standalone checks and daily GRPO suites.
+
 ## Model support
 
 Supported entries completed a two-step end-to-end RL run with a representative
@@ -229,9 +232,9 @@ GPUs such as A100. Flags documented in the script header select another CUDA
 tag (`--cuda`), force Flash Attention versions (`--flash-attn`), or install
 `nvcc` for FlashInfer's JIT when no CUDA toolkit is present (`--nvcc`).
 
-Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
-(SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the
-`attn-gym[linear,cudnn]` dependency installs them.
+Gated DeltaNet (Qwen3.5) runs Attention Gym's warpdrive chunk kernels on Blackwell
+(SM100/SM103) and its fused kernels elsewhere. TorchTitan's pinned
+`attn-gym[linear]` dependency installs them.
 
 **NOTE:** The pre-built vLLM wheels are built for CUDA 13.2, though they should
 work with most older CUDA versions. A vLLM nightly must match the PyTorch
