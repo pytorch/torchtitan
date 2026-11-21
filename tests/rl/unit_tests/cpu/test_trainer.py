@@ -56,6 +56,7 @@ def test_push_model_state_dict_puts_on_push_stream_in_worker() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         trainer._model_state_dict_transport = None
+        trainer._quantized_operand_formats = {}
         # Model parts are torchtitan Modules (BaseModel in the engine).
         weight_part = Module()
         weight_part.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
@@ -121,6 +122,7 @@ def test_push_model_state_dict_carries_the_trainable_params_and_the_buffers() ->
         trainer._transfer_dtype = None
         trainer._push_model_state_dict_stream = None
         trainer._model_state_dict_transport = None
+        trainer._quantized_operand_formats = {}
         with patch(
             "torchtitan.rl.trainer.trainer.ts.put_state_dict", new_callable=AsyncMock
         ) as put:
@@ -149,6 +151,7 @@ def test_push_model_state_dict_stages_on_push_stream() -> None:
         weight_part = Module()
         weight_part.register_parameter("weight", torch.nn.Parameter(torch.ones(2, 2)))
         trainer.engine = SimpleNamespace(model_parts=[weight_part])
+        trainer._quantized_operand_formats = {}
         stream = MagicMock()
         trainer._push_model_state_dict_stream = stream
         main_thread_id = threading.get_ident()
