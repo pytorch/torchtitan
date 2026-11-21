@@ -66,8 +66,8 @@ back to the trainer's ops:
     kernel as the trainer. The shared `num_splits=1` fix above removes the only
     batch-dependent split-k, so the two match bitwise.
   - *Flex* (Qwen3 flex): the generator runs vLLM's `FLEX_ATTENTION` backend.
-    `BatchInvariantFlexConverter` (a `ModelConfigConverter` wired in via
-    `converters=[BatchInvariantFlexConverter.Config()]`) pins
+    `BatchInvariantFlexTransform` (a `ModelConfigTransform` the recipe applies
+    to both the trainer and generator model configs) pins
     `BLOCK_M = BLOCK_N = 16` and `BACKEND = "TRITON"` on every `FlexInnerAttention`
     layer, so both sides use the same Triton tile size and avoid the
     `flex_decode` kernel.
