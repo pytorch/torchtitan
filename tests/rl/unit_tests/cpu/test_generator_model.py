@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import dataclass
 from unittest import mock
 
 import pytest
@@ -19,6 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator import model as generator_model
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import ModelStateDictLoader
@@ -219,6 +221,46 @@ def test_load_model_state_dict_fetches_params_in_their_own_dtype(tmp_path) -> No
         assert fetched_dtypes["A_log"] == torch.float32
         assert model.A_log.equal(new_state_dict["A_log"].full_tensor())
         assert model.layer.weight.equal(new_state_dict["layer.weight"].full_tensor())
+    finally:
+        dist.destroy_process_group()
+
+
+@dataclass(frozen=True)
+class _Operands:
+    value: torch.Tensor
+
+
+class _CopyQuantizedTensor(_ShardedFSDPTensor):
+    def _build_operands(self, logical_tensor, out=None):
+        if out is None:
+            return _Operands(logical_tensor.clone())
+        out.value.copy_(logical_tensor)
+        return out
+
+
+def test_quantized_operands_need_their_own_param_group(tmp_path, monkeypatch) -> None:
+    """Quantized experts in an FSDP parameter group with other parameters (no expert
+    parallelism) cannot be received as operands: loads would reshard the group and
+    re-quantize them from an unfilled shard."""
+    dist.init_process_group(
+        "gloo", init_method=f"file://{tmp_path / 'store'}", rank=0, world_size=1
+    )
+    try:
+        model = nn.Linear(4, 4)
+        model.experts = nn.Parameter(_CopyQuantizedTensor(torch.randn(2, 4)))
+        fully_shard(model, mesh=init_device_mesh("cpu", (1,)))
+        model.set_keep_unsharded_storage(True)
+        # Pinned host memory needs a GPU; keep the receive buffers' state dict as is.
+        monkeypatch.setattr(
+            generator_model,
+            "_create_cpu_state_dict",
+            lambda state_dict, pin_memory: dict(state_dict),
+        )
+        loader = _build_loader(
+            model, loads_checkpoint=False, model_state_dict_load_mode="cpu_prefetch"
+        )
+        with pytest.raises(ValueError, match="not quantized"):
+            loader.receive_quantized_operands()
     finally:
         dist.destroy_process_group()
 

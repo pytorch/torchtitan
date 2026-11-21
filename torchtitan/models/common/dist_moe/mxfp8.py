@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 import spmd_types as spmd
@@ -162,6 +162,13 @@ class _DistMoeMXFP8ShardedTensorBase(_ShardedFSDPTensor):
         and the base version would reset ``mega_fused_inference``.
         """
         return type(self)(tensor, mega_fused_inference=self.mega_fused_inference)
+
+    def _packed_operands(self, operands: _DistMoeMXFP8Operands) -> dict:
+        # Experts quantize alone, and the blocked scales tile each expert's rows (a
+        # multiple of 128) separately. Inference operands have empty DGRAD scales.
+        tensors = {f.name: getattr(operands, f.name) for f in fields(operands)}
+        num_experts = operands.qdata.shape[0]
+        return {k: v.view(num_experts, -1) for k, v in tensors.items() if v.numel()}
 
 
 class _DistMoeW13ShardedTensor(_DistMoeMXFP8ShardedTensorBase):

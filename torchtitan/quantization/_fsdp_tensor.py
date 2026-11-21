@@ -350,6 +350,12 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         """Quantize ``logical_tensor``, into ``out``'s tensors when refilling."""
         raise NotImplementedError
 
+    def _packed_operands(self, operands: Any) -> dict[str, torch.Tensor]:
+        """Optional: views of ``operands`` with a row per row of the logical tensor's
+        dim 0, where quantizing rows ``a:b`` alone gives rows ``a:b`` (see
+        ``torchtitan/rl/quantized_operands.py``)."""
+        raise NotImplementedError(type(self).__name__)
+
     def fsdp_should_release_all_gather_outputs_after_post_all_gather(self) -> bool:
         """Release the high-precision all-gather output after state construction."""
         return True
