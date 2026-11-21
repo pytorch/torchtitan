@@ -102,8 +102,13 @@ class TorchTitanMLAMetadataBuilder(MLACommonMetadataBuilder[TorchTitanMLAMetadat
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
+        max_query_len: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> TorchTitanMLADecodeMetadata:
+        # vLLM passes min(the batch's longest query, reorder_batch_threshold). The
+        # decode rows' own longest query below is tighter (1 for plain decode) and
+        # picks the 1-token MLA decode kernel.
+        del max_query_len
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         return TorchTitanMLADecodeMetadata(
             block_table=block_table_tensor,

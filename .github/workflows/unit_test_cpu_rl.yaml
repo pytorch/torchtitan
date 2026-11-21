@@ -49,7 +49,8 @@ jobs:
         # The DAPO math example's rubric needs math-verify.
         uv pip install -r torchtitan/rl/examples/dapo_math/requirements.txt
 
-        # Install matching CUDA nightlies, constrained to keep math-verify's pins.
+        # Install the torch nightlies and the vLLM release, constrained to keep
+        # math-verify's pins.
         bash scripts/install_rl_env.sh --skip-base --flash-attn none \
           --constraint torchtitan/rl/examples/dapo_math/requirements.txt
 
@@ -76,14 +77,14 @@ jobs:
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
 
         # Cover the optional Verifiers examples last, without installing them for all
-        # RL jobs. Keep the nightlies installed above and let Verifiers move only its
-        # own pinned dependencies (e.g. mcp, openai) for these tests.
+        # RL jobs. Keep torch, torchvision and vLLM as installed above and let Verifiers
+        # move only its own pinned dependencies (e.g. mcp, openai) for these tests.
         python -c '
         from importlib.metadata import version
         for name in ("torch", "torchvision", "vllm"):
             print(f"{name}=={version(name)}")
-        ' > "${RUNNER_TEMP}/nightly-constraints.txt"
+        ' > "${RUNNER_TEMP}/rl-constraints.txt"
         uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt \
           -r torchtitan/rl/examples/verifiers/terminal_bench/requirements.txt \
-          --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
+          --constraint "${RUNNER_TEMP}/rl-constraints.txt"
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv

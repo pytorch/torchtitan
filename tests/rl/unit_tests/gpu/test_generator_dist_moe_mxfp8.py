@@ -48,6 +48,7 @@ from tests.rl.unit_tests.gpu.test_bitwise_parity import (
     _run_engine,
     _sync_trainer_weights_to_vllm,
     build_inference_engine,
+    clear_dtensor_sharding_caches,
     make_prompt_tokens,
 )
 
@@ -268,6 +269,8 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
             dist_moe_runtime=config.generator.dist_moe_runtime,
             model_state_dict_load_mode="cpu_prefetch",
         )
+        # An earlier test in this process may have left its meshes in DTensor's caches.
+        clear_dtensor_sharding_caches()
         engine = build_inference_engine(config)
         _check_inference_operands(engine)
     finally:
