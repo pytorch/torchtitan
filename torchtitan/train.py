@@ -12,6 +12,7 @@ import torch
 from torchtitan.config import ConfigLoader
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
+from torchtitan.observability.profiler import record_cuda_memory
 from torchtitan.trainer import Trainer
 
 
@@ -39,6 +40,12 @@ def main() -> None:
     )
     sl.log_trace_instant("structured_logger_started")
 
+    # Communicator creation precedes the scheduled training profiler.
+    with record_cuda_memory(config.profiler, base_folder=config.dump_folder):
+        _run_training(config)
+
+
+def _run_training(config: Trainer.Config) -> None:
     trainer: Trainer | None = None
 
     try:
