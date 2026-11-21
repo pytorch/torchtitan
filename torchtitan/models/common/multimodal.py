@@ -303,6 +303,36 @@ def scatter_vision_embeds(
         vision_embeds: Packed vision features ``(total_tokens, dim)``.
         vision_positions: from ``get_vision_positions``.
     """
+    # One indexed write avoids a full text-gradient copy per placeholder run
+    # in CopySlices backward. Tensor subclasses keep their native slice
+    # assignment: a local row index cannot be mixed with a DTensor input.
+    if (
+        len(vision_positions) > 1
+        and type(inputs_embeds) is torch.Tensor
+        and type(vision_embeds) is torch.Tensor
+        and vision_embeds.device == inputs_embeds.device
+    ):
+        rows = []
+        previous_end = 0
+        for _, start, count in vision_positions:
+            end = start + count
+            if not (previous_end <= start < end <= inputs_embeds.shape[0]):
+                break
+            rows.extend(range(start, end))
+            previous_end = end
+        else:
+            if len(rows) == vision_embeds.shape[0]:
+                row_indices = torch.tensor(
+                    rows, dtype=torch.long, device=inputs_embeds.device
+                )
+                with spmd.local():
+                    result = inputs_embeds.index_put(
+                        (row_indices,), vision_embeds.to(inputs_embeds.dtype)
+                    )
+                if spmd.is_type_checking():
+                    spmd.assert_type_like(result, inputs_embeds)
+                return result
+
     inputs_embeds = inputs_embeds.clone()
     vision_offset = 0
     for _, vision_start, num_tokens in vision_positions:
