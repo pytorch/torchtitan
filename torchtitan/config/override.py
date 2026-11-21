@@ -40,6 +40,8 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
 
+from torchtitan.config.format import fold_indexed_paths
+
 logger = logging.getLogger(__name__)
 
 
@@ -448,7 +450,7 @@ def apply_overrides(
         config_root: The config tree to traverse and mutate in place. The
             trainer passes the top-level ``Trainer.Config``.
 
-    Logs equivalent replacements together, listing all matched FQNs. Returns
+    Logs equivalent replacements together, folding indexed FQN ranges. Returns
     a list of human-readable log lines describing each individual replacement.
     """
     # Each entry is a bare target string or a (target, kwargs) tuple; a target is
@@ -499,7 +501,7 @@ def apply_overrides(
                 factory,
                 transition,
                 len(fqns),
-                fqns,
+                fold_indexed_paths(fqns),
             )
         logger.info("Applied %d override(s)", len(replacements))
     elif override_config.imports:

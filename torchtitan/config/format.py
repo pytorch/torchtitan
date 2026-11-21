@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import fields, is_dataclass
 from typing import Any
 
@@ -187,6 +188,11 @@ def _fold_indexed_dict(mapping: dict[str, Any]) -> dict[str, Any]:
         if not merged:
             break
     return {".".join(segs): val for segs, val, _ in items}
+
+
+def fold_indexed_paths(paths: Iterable[str]) -> list[str]:
+    """Fold unique dotted paths that differ only in numeric index segments."""
+    return list(_fold_indexed_dict(dict.fromkeys(paths)).keys())
 
 
 def format_config(config: Configurable.Config) -> str:
