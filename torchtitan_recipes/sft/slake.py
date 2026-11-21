@@ -33,6 +33,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers, RendererConfig
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.components.validator import Validator
+from torchtitan.config import CallableFunction
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, LoRATransform
 from torchtitan.models.muse_glimmer import (
@@ -317,10 +318,13 @@ def _muse_spark_816b_a42b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
     checkpointer = config.checkpointer
     assert isinstance(checkpointer, TorchCheckpointingManager.Config)
     checkpointer.folder = f"muse_spark_slake_{variant}"
-    return apply_gb300_lora_dist_moe(
-        config,
-        _slake_lora_transform(variant, decoder_targets=MUSE_SPARK_LORA_DECODER_TARGETS),
+    lora = _slake_lora_transform(
+        variant, decoder_targets=MUSE_SPARK_LORA_DECODER_TARGETS
     )
+    checkpointer.model_key_location = CallableFunction.Config(
+        fn=lora.model_key_location
+    )
+    return apply_gb300_lora_dist_moe(config, lora)
 
 
 def muse_spark_816b_a42b_slake_lora_decoder_sft() -> Trainer.Config:
@@ -415,6 +419,9 @@ def _muse_glimmer_30b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
     )
     transform = _slake_lora_transform(
         variant, decoder_targets=_MUSE_GLIMMER_LORA_DECODER_TARGETS
+    )
+    config.checkpointer.model_key_location = CallableFunction.Config(
+        fn=transform.model_key_location
     )
     return apply_transforms(config, [transform])
 

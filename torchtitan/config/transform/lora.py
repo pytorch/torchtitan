@@ -335,6 +335,20 @@ class LoRATransform(ModelConfigTransform):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
+    def model_key_location(self, key: str) -> Literal["base", "checkpoint", "new"]:
+        """For ``checkpointer.model_key_location``: adapters are "new",
+        ``trainable_modules`` are "checkpoint", and the rest is "base".
+
+        A ``trainable_modules`` path that differs from the module FQN puts its
+        parameters in "base"; the checkpointer then raises.
+        """
+        parts = key.split(".")
+        if "lora_a" in parts or "lora_b" in parts:
+            return "new"
+        if any(_in_subtree(key, root) for root in self.trainable_modules):
+            return "checkpoint"
+        return "base"
+
     def transform(self, model: Module.Config) -> Module.Config:
         """Apply LoRA while walking the config tree from leaves to root.
 
