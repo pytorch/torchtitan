@@ -74,7 +74,7 @@ def _relative_error(value, golden):
     "the fused gather_attn with grouped KV heads and separate values requires SM100",
 )
 class TestFlashNextQSATeacherOverride(unittest.TestCase):
-    def test_teacher_matches_golden(self) -> None:
+    def test_teacher_matches_golden_with_and_without_tp_split(self) -> None:
         generator = torch.Generator().manual_seed(0)
         torch.manual_seed(0)
         query = torch.randn(
@@ -98,16 +98,32 @@ class TestFlashNextQSATeacherOverride(unittest.TestCase):
             return_aux=AuxRequest(lse=True),
         )
         lse = aux.lse.squeeze(0)
-        fused = qsa_teacher(
-            query,
-            key,
-            selected,
-            lse,
+        common = dict(
             num_blocks=_NUM_BLOCKS,
             compress_ratio=_RATIO,
             scale=scale,
             max_context_length=_DOC_LEN,
+            num_global_heads=_NUM_HEADS,
         )
+
+        def pool(probs_TJ):
+            return probs_TJ.unflatten(-1, (_NUM_BLOCKS, _RATIO)).amax(-1)
+
+        fused = pool(qsa_teacher(query, key, selected, lse, **common))
+        # TP2: each rank holds one KV head, its query heads and their LSE; the
+        # unpooled sums are reduced before max-pooling.
+        group = _NUM_HEADS // _NUM_KV_HEADS
+        shard_sums = sum(
+            qsa_teacher(
+                query[:, g * group : (g + 1) * group],
+                key[:, g : g + 1],
+                selected,
+                lse[g * group : (g + 1) * group],
+                **common,
+            )
+            for g in range(_NUM_KV_HEADS)
+        )
+        tp_split = pool(shard_sums)
         reference = (
             QSAInnerAttention.Config(compress_ratio=_RATIO)
             .build()
@@ -118,7 +134,8 @@ class TestFlashNextQSATeacherOverride(unittest.TestCase):
         floor = _relative_error(golden.float(), golden)
         bound = _FUDGE_FACTOR * _relative_error(reference, golden) + floor
         self.assertLessEqual(_relative_error(fused, golden), bound)
-        self.assertTrue((fused[-7:] == 0).all())
+        self.assertLessEqual(_relative_error(tp_split, golden), bound)
+        self.assertTrue((fused[-7:] == 0).all() and (tp_split[-7:] == 0).all())
 
 
 if __name__ == "__main__":
