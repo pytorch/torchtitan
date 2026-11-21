@@ -32,7 +32,7 @@ def _sum_dim_batch_invariant(
     """Implement ``sum.dim_IntList`` using fixed-schedule reductions."""
     from batch_invariant_ops import mean_dim
 
-    dims = tuple(range(input.ndim)) if not dim else tuple(dim)
+    dims = tuple(range(input.ndim)) if dim is None else tuple(dim)
     dims = tuple(axis if axis >= 0 else axis + input.ndim for axis in dims)
     if len(set(dims)) != len(dims) or any(
         axis < 0 or axis >= input.ndim for axis in dims
