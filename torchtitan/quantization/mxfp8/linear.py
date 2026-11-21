@@ -158,7 +158,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         #     torchao's CuTeDSL kernels outright.
         # Their availability check also raises from inside the kernel, so a
         # missing package would surface on the first forward. Gate it in
-        # MXFP8LinearConverter.__init__ instead, beside the torchao check.
+        # MXFP8LinearTransform.transform instead, beside the torchao check.
         x_qdata_row_MK, x_qdata_col_MK, x_scale_row, x_scale_col = mxfp8_quantize_cuda(
             x_MK,
             rowwise=True,
