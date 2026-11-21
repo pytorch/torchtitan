@@ -112,6 +112,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     sync_weights_from_trainer = False
     # CUDA graphs SGLang captures (SGLangEngine.Config.cuda_graph).
     cuda_graph = "full"
+    # SGLangEngine.Config.extra_server_args.
+    extra_server_args = {}
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -123,10 +125,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     policy_version = 0
     # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
-    # Whether a request reuses the prompt KV of an earlier request with the same
-    # prompt admitted in the same call. Linear attention models don't (see
-    # SGLangEngine._hold_shared_prompts).
-    reuses_shared_prompt = True
+    # SGLang's chunked prefill budget (Engine max_num_batched_tokens); None: its default.
+    max_num_batched_tokens = None
 
     @classmethod
     def setUpClass(cls):
@@ -153,7 +153,9 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         torch._C._clear_DTensor_sharding_propagator_cache()
         DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
 
-        cls.engine = SGLangEngine.Config(cuda_graph=cls.cuda_graph).build(
+        cls.engine = SGLangEngine.Config(
+            cuda_graph=cls.cuda_graph, extra_server_args=cls.extra_server_args
+        ).build(
             model=config.generator.model,
             parallelism=config.generator.parallelism,
             model_path=config.hf_assets_path,
@@ -161,7 +163,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             precision=config.precision,
             # Leave room for the trainer model in this process.
             gpu_memory_limit=0.5,
-            max_num_batched_tokens=None,
+            max_num_batched_tokens=cls.max_num_batched_tokens,
             checkpointer=(
                 None
                 if cls.sync_weights_from_trainer
@@ -274,7 +276,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         shared_prompt = self.prompt_ids[0][::-1]
         prompt_ids = self.prompt_ids[:-2] + [shared_prompt, shared_prompt]
         results = self._check_trainer_vs_sglang_decode(prompt_ids)
-        if dist.get_rank() == 0 and self.reuses_shared_prompt:
+        if dist.get_rank() == 0:
             self.assertGreater(results[-1].metrics_inputs.num_cached_tokens, 0)
 
     def test_sglang_decode_batch_invariance(self):
@@ -486,10 +488,60 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
-    # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
-    # SGLang's normal event loop.
+    # Tests 4 and 5 then cover the reset path (retract, flush, continue).
     reset_kv_cache_on_model_state_dict_load = True
-    reuses_shared_prompt = False
+
+    def test_runs_on_unified_memory(self):
+        """The engine runs GDN models on SGLang's unified pool, not on separate KV
+        and state pools."""
+        from sglang.srt.mem_cache.kv.alloc.chain import ChainAllocator
+
+        self.assertIsInstance(
+            self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
+        )
+
+
+class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
+    """``TestSGLangBitwiseParityGDN`` with HiCache backing KV and GDN states up to
+    host memory."""
+
+    extra_server_args = {"enable_hierarchical_cache": True, "hicache_size": 8}
+
+    def test_trainer_vs_sglang_decode_after_host_load_back(self):
+        """Test 3 with the previous turns evicted from GPU memory, so the next turns
+        load their KV and GDN states back from host memory into the unified pool."""
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+
+        results = self._generate(self.prompt_ids)
+        scheduler = self.engine._scheduler
+        tree_cache = scheduler.tree_cache
+        with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+            # Wait for the host backups, then drop every GPU copy.
+            tree_cache.writing_check(write_back=True)
+            tree_cache.evict(EvictParams(num_tokens=10**9, mamba_num=10**9))
+        self.assertEqual(tree_cache.total_size(), (0, 0))
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(self.prompt_ids, results, strict=True)
+        ]
+        # SGLang's request objects, for how many cached tokens came from the host.
+        admitted = []
+        admit = self.engine._output_collector.admit
+
+        def record_admit(req, arrival_time):
+            admitted.append(req)
+            admit(req, arrival_time)
+
+        self.engine._output_collector.admit = record_admit
+        try:
+            next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
+        finally:
+            self.engine._output_collector.admit = admit
+        if dist.get_rank() == 0:
+            for prompt, req, result in zip(self.prompt_ids, admitted, next_results):
+                num_cached_tokens = result.metrics_inputs.num_cached_tokens
+                self.assertGreater(num_cached_tokens, len(prompt))
+                self.assertEqual(req.cached_tokens_host, num_cached_tokens)
 
 
 def _debug_model_config(
@@ -578,7 +630,9 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
-    reuses_shared_prompt = False
+    # Chunked prefill off the 64-token grid: SGLang's prefix cache then snapshots KDA
+    # states mid-chunk, with replay state (TorchTitanKDAAttnBackend).
+    max_num_batched_tokens = 100
 
     @classmethod
     def setUpClass(cls):

@@ -12,7 +12,7 @@ import torch
 
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform.batch_invariance import BatchInvariantFlexConverter
+from torchtitan.config.transform.batch_invariance import BatchInvariantFlexTransform
 from torchtitan.models.common.attention import (
     LinearAttention,
     SlidingWindowVarlenInnerAttention,
@@ -267,5 +267,5 @@ def test_vllm_block_size_matches_pinned_flex_block_n(monkeypatch, build_config):
     )
     assert registry.vllm_block_size(config) is None
     # Batch-invariant mode pins flex's BLOCK_N, nested in MLA too.
-    BatchInvariantFlexConverter(BatchInvariantFlexConverter.Config()).convert(config)
+    BatchInvariantFlexTransform().transform(config)
     assert registry.vllm_block_size(config) == 16
