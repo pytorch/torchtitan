@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "build_decoder_stage_io",
+    "DecoderStageIO",
     "get_module_fqns_per_model_part",
     "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
@@ -87,7 +89,15 @@ def pipeline_llm(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
+    stage_io: "DecoderStageIO | None" = None,
 ) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
+    """Split ``model`` into pipeline stages and build their schedule.
+
+    ``stage_io`` declares the tensors crossing stage boundaries, so PyTorch
+    skips its dynamic metadata inference (one forward and backward through
+    every stage on uninitialized inputs before step 1). Without it, a fake
+    process group uses core's decoder boundaries and a real one infers them.
+    """
     pp_mesh = parallelism_context.get_mesh("pp")
 
     (
@@ -105,21 +115,22 @@ def pipeline_llm(
     for i, stage_ms in enumerate(module_names_per_stage):
         logger.debug(f"Stage {i}: {stage_ms}")
 
-    stage_io = None
-    if torch.distributed.get_backend(pp_mesh.get_group("pp")) == "fake":
+    is_fake = torch.distributed.get_backend(pp_mesh.get_group("pp")) == "fake"
+    if stage_io is not None or is_fake:
+        unsupported = _unsupported_static_split(module_names_per_stage)
+        if unsupported is not None:
+            raise ValueError(
+                "Static pipeline stage metadata (always used on a fake process "
+                f"group) cannot describe this split: {unsupported}. Split stage "
+                "boundaries between decoder blocks."
+            )
+    if stage_io is None and is_fake:
         if not isinstance(model_config, Decoder.Config):
             raise ValueError(
                 "Pipeline Parallel on a fake process group requires a Decoder "
                 f"model config, got {type(model_config).__qualname__}."
             )
-        unsupported = _unsupported_static_split(module_names_per_stage)
-        if unsupported is not None:
-            raise ValueError(
-                "Pipeline Parallel on a fake process group requires static stage "
-                f"metadata, but {unsupported}. Split stage boundaries between "
-                "decoder blocks or use a real pipeline process group."
-            )
-        stage_io = _build_decoder_stage_io(
+        stage_io = build_decoder_stage_io(
             parallelism_context=parallelism_context,
             parallelism=parallelism,
             training=training,
@@ -746,7 +757,7 @@ def _get_pp_rank_to_stage_indices_mapping(
 
 
 @dataclasses.dataclass(frozen=True)
-class _DecoderStageIO:
+class DecoderStageIO:
     """Example tensors describing decoder pipeline boundaries."""
 
     decoder_input: torch.Tensor
@@ -775,7 +786,7 @@ def _unsupported_static_split(
     return None
 
 
-def _build_decoder_stage_io(
+def build_decoder_stage_io(
     *,
     parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
@@ -783,7 +794,7 @@ def _build_decoder_stage_io(
     precision: PrecisionConfig,
     model_config: Decoder.Config,
     lm_head_in_loss: bool,
-) -> _DecoderStageIO:
+) -> DecoderStageIO:
     """Build static metadata for tensors crossing decoder stage boundaries."""
     cp_shards = parallelism_context.cp
     num_tokens, cp_remainder = divmod(
@@ -822,7 +833,7 @@ def _build_decoder_stage_io(
             local_vocab_size += tp_rank < remainder
         decoder_output = example(num_tokens, local_vocab_size)
 
-    return _DecoderStageIO(
+    return DecoderStageIO(
         decoder_input=example(num_tokens, dtype=torch.int64),
         hidden=hidden,
         decoder_output=decoder_output.requires_grad_(),
@@ -830,7 +841,7 @@ def _build_decoder_stage_io(
 
 
 def _static_stage_metadata(
-    stage_io: _DecoderStageIO,
+    stage_io: DecoderStageIO,
     stage_idx: int,
     num_stages: int,
 ) -> dict[str, Any]:
@@ -855,7 +866,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-    stage_io: _DecoderStageIO | None = None,
+    stage_io: DecoderStageIO | None = None,
 ) -> tuple[list[PipelineStage], list[BaseModel]]:
     """Create pipeline stages based on specified module names for each stage.
 
