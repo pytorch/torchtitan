@@ -457,6 +457,71 @@ def test_empty_completion_on_first_turn_is_skipped() -> None:
     assert rollout_to_training_samples(rollout) == []
 
 
+@pytest.mark.parametrize(
+    "completions",
+    [
+        [],  # its code raised before the first turn ended
+        [[5]],  # it raised after a turn
+    ],
+)
+def test_build_from_group_skips_an_unscored_rollout_but_trains_its_siblings(
+    completions: list[list[int]],
+) -> None:
+    # An ERROR_INFRA rollout has no reward or advantage. Its siblings still train.
+    failed = Rollout(
+        group_id=_GROUP_ID,
+        rollout_id=0,
+        status=RolloutStatus.ERROR_INFRA,
+        turns=[
+            _turn(prompt_token_ids=[1, 2], completion_token_ids=completion, version=1)
+            for completion in completions
+        ],
+    )
+    siblings = []
+    for rollout_id, reward in [(1, 0.0), (2, 1.0)]:
+        sibling = _scored_rollout(
+            [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+            reward=reward,
+            advantage=reward - 0.5,
+        )
+        sibling.rollout_id = rollout_id
+        siblings.append(sibling)
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[failed, *siblings])
+        )
+    )
+
+    assert [sample.rollout_id.rollout_id for sample in group.training_samples] == [1, 2]
+
+
+def test_build_from_group_drops_a_group_left_with_one_scored_rollout() -> None:
+    # 1 of 2 siblings raised: the one left has advantage 0, so the group teaches nothing.
+    failed = Rollout(group_id=_GROUP_ID, rollout_id=0, status=RolloutStatus.ERROR_INFRA)
+    left = _scored_rollout(
+        [_turn(prompt_token_ids=[1, 2], completion_token_ids=[5], version=1)],
+        reward=1.0,
+        advantage=0.0,
+    )
+    left.rollout_id = 1
+
+    group = (
+        TrainingSampleBuilder.Config()
+        .build()
+        .build_from_group(
+            rollout_group=RolloutGroup(group_id=_GROUP_ID, rollouts=[failed, left])
+        )
+    )
+
+    assert group.training_samples == []
+    assert "training_sample_builder/num_groups_dropped_zero_std" in [
+        metric.key for metric in group.metrics
+    ]
+
+
 def test_group_filters_preserve_group_id_for_commit() -> None:
     builder = TrainingSampleBuilder.Config().build()
 
