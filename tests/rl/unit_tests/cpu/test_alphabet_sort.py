@@ -415,7 +415,7 @@ def test_rollouter_builds_one_env_per_group_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    config = _alphabet_sort_rollouter_config()
+    config = _alphabet_sort_rollouter_config(max_rollout_tokens=2048)
     rollouter = config.build()
     worker = config.worker.build()
     asyncio.run(
@@ -431,7 +431,7 @@ def test_rollouter_builds_one_env_per_group_member(
 
 
 def test_rollouter_config_wires_alphabet_sort() -> None:
-    config = _alphabet_sort_rollouter_config()
+    config = _alphabet_sort_rollouter_config(max_rollout_tokens=2048)
     assert isinstance(config.training_dataloader, IterableRolloutDataLoader.Config)
     assert isinstance(config.training_dataloader.dataset, AlphabetSortDataset.Config)
     assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
