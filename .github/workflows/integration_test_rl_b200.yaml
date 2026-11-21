@@ -6,6 +6,7 @@ on:
       - ciflow/b200/*
   schedule:
     - cron: '0 0 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -90,7 +91,7 @@ jobs:
 
       # Runs even if the unit tests failed, so one failure does not hide the other.
       - name: RL integration tests
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && github.event_name != 'push' }}
         run: |
           set -eux
           source .venv/bin/activate
@@ -120,7 +121,7 @@ jobs:
           HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
             tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v \
             || failed_classes+=(Varlen)
-          for test_class in MoEEP GDN SlidingWindow MLA DistMoE; do
+          for test_class in MoEEP GDN GDNHiCache SlidingWindow MLA DistMoE; do
             torchrun --nproc-per-node=2 -m pytest \
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")
