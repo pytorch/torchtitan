@@ -86,14 +86,13 @@ class MultimodalModel(Decoder):
                 estimate(input_dict) for estimate in encoder_estimates
             )
 
-    def remat_block_container_fqns(self) -> list[str]:
-        # The encoders run before the decoder blocks.
+    def _remat_block_container_fqns(self) -> list[str]:
         encoder_containers = [
             f"{encoder_fqn}.layers"
             for encoder_fqn in self.multimodal_encoder_fqns
             if getattr(self, encoder_fqn) is not None
         ]
-        return [*encoder_containers, *super().remat_block_container_fqns()]
+        return [*encoder_containers, *super()._remat_block_container_fqns()]
 
     def _apply_fsdp(
         self,

@@ -98,7 +98,7 @@ Block names are exact FQNs in the original model,
 `<container fqn>.<id>`: `layers.<id>` for decoder blocks, `mtp_layers.<id>`
 for multi-token prediction blocks and `<encoder>.layers.<id>` (e.g.
 `vision_encoder.layers.3`) for encoder blocks. Each model lists its block
-containers in `BaseModel.remat_block_container_fqns`, and `parallelize` passes
+containers in `BaseModel._remat_block_container_fqns`, and `parallelize` passes
 them to `apply(model, block_container_fqns=...)`. Pipeline splitting keeps
 original layer ids, so an override follows its block to whichever stage
 holds it. Malformed names, empty overrides and a

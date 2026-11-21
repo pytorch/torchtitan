@@ -247,9 +247,9 @@ class MTPDecoder(Decoder):
                 )
             self.mtp_layers.append(layer_config.build())
 
-    def remat_block_container_fqns(self) -> list[str]:
+    def _remat_block_container_fqns(self) -> list[str]:
         return [
-            *super().remat_block_container_fqns(),
+            *super()._remat_block_container_fqns(),
             *([] if self.mtp_layers is None else ["mtp_layers"]),
         ]
 

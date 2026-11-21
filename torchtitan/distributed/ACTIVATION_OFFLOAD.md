@@ -78,7 +78,7 @@ config.activation_remat = DefaultActivationRematConfig(
 recipe.
 
 **Encoders and MTP.** `apply` runs once per model part and checkpoints the
-blocks of every container the model lists in `remat_block_container_fqns`
+blocks of every container the model lists in `_remat_block_container_fqns`
 (e.g. `vision_encoder.layers`, `layers`, `mtp_layers`). It records the full
 FQN of every block (e.g. `vision_encoder.layers.0`), and at the model part's
 first forward the one offloader hooks every recorded block under it; block

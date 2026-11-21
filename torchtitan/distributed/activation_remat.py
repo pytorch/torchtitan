@@ -45,7 +45,7 @@ class BlockRematOverride:
     decoder blocks, ``mtp_layers.<id>`` for multi-token prediction blocks and
     ``<encoder>.layers.<id>`` for encoder blocks, e.g.
     ``vision_encoder.layers.3``; each model lists its block containers in
-    ``BaseModel.remat_block_container_fqns``. Pipeline splitting keeps
+    ``BaseModel._remat_block_container_fqns``. Pipeline splitting keeps
     original layer ids, so a name follows its block to whichever stage holds
     it. Names are not checked against the model, since each pipeline stage
     holds only some blocks.
@@ -277,7 +277,7 @@ class ActivationRematConfig:
         Args:
             model_part: Root module of the model part.
             block_container_fqns: FQNs within ``model_part`` of the submodules
-                whose children are the transformer blocks, in run order, e.g.
+                whose children are the transformer blocks, e.g.
                 ``("vision_encoder.layers", "layers", "mtp_layers")``. A
                 block's FQN, which ``block_overrides`` match against, is
                 ``<container fqn>.<child name>``.
