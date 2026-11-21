@@ -136,9 +136,14 @@ class Generator(Configurable):
 
         gpu_memory_limit: float = 0.9
         """Fraction of GPU memory to use for the engine (0.0 to 1.0). The rest must hold
-        what weight sync allocates after the engine starts: one FSDP group's sharded
-        weights at a time, through torch. vLLM caps torch at about its memory after
-        warmup plus this rest."""
+        what weight sync allocates through torch after the engine starts, one FSDP group
+        at a time:
+
+            FSDP degree 1:  the group's weights
+            FSDP degree D:  the group's shards (1/D of it) + FSDP's all-gather buffer (all of it)
+
+        After warmup, vLLM caps torch's allocator at what torch then holds, plus about
+        this rest (vLLM's ``set_torch_memory_limit``)."""
 
         max_num_batched_tokens: int | None = None
         """The engine's chunked-prefill chunk size: max tokens scheduled per engine step

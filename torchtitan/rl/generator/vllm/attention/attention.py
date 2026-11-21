@@ -56,8 +56,7 @@ class _FlashAttentionPageSize:
     per sequence, and an explicit ``block_size`` that is not a multiple of 128 now
     fails.
     Why 16 if batch-invariant: with larger pages, decode and prefill can sum keys in
-    different tiles, so they would not match bitwise. Cost: neither FA4 nor FA3 uses TMA
-    on 16-token pages, so batch-invariant prefill can be slower.
+    different tiles, so they would not match bitwise.
     - FA4 runs its SwapAB decode kernel on any page that is a multiple of 128
       (``SwapABPolicy.page_multiple`` in ``flash_attn/cute/config.py``). SwapAB reads
       256 keys per tile and prefill reads 128.
@@ -66,6 +65,8 @@ class _FlashAttentionPageSize:
       ``hopper/flash_api.cpp``). So a step with a long prefill uses TMA for all its
       rows, and a decode-only step never does. At head dim 192, a TMA key tile holds
       128 keys and a non-TMA tile 96 (``hopper/tile_size.h``).
+    Cost: on 16-token pages neither FA4 nor FA3 uses TMA, and FA4 decode skips SwapAB,
+    so batch-invariant runs can be slower than with larger pages.
     ``MultipleOf(16)`` is not enough: it keeps a hybrid model's whole KV block (e.g.
     Kimi K3's 256 tokens) as one page.
     TODO: batch-invariant runs can keep vLLM's pages once torch's varlen attention can
