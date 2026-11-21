@@ -380,7 +380,11 @@ _VarlenSDPBackendName: TypeAlias = Literal["CUDNN_ATTENTION", "FLASH_ATTENTION"]
 
 
 def _default_varlen_sdpa_backends() -> list[_VarlenSDPBackendName]:
-    return ["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+    # Flash only: once compiled, a cuDNN listed second still runs (see the TODO at the `sdpa_kernel` call).
+    # TODO: cuDNN's no-grad forward at head dim 256 (cuDNN 9.27, GB300) gave one token of a 78k-token sequence a wrong
+    # logprob; no issue filed yet. Once fixed, list cuDNN again where a timing shows it faster: on muse_spark's 128k
+    # global layers it measured ~13% slower than FA4 on GB300; Hopper and other shapes are unmeasured.
+    return ["FLASH_ATTENTION"]
 
 
 class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
@@ -394,7 +398,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             Names keep the config plain data for ``to_dict()`` and JSON
             serialization, since ``SDPBackend`` is a pybind11 enum.
             Deterministic mode skips cuDNN, whose backward is not
-            deterministic.
+            deterministic. Under torch.compile the order is ignored; see
+            the TODO at the ``sdpa_kernel`` call in ``_forward_varlen``.
         """
 
         @property
@@ -524,6 +529,9 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
                     'Add "FLASH_ATTENTION" to sdpa_backends.'
                 )
 
+        # TODO: once compiled, varlen_attn ignores this order and runs cuDNN whenever it is listed and accepts the
+        # call: Dynamo's `sdpa_kernel` sets the priority but not the flag varlen's `_get_sdp_priority_order` reads.
+        # Fix upstream; no PyTorch issue filed yet.
         with sdpa_kernel(sdpa_backends, set_priority=True):
             result = varlen_attn_fn(
                 q_THK.to(attn_dtype),
