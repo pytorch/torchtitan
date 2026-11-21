@@ -105,12 +105,13 @@ config.activation_remat = ActivationRematConfig(
 )
 ```
 
-DeepEP and HybridEP use `ep_communication` to control dispatch replay and always
-save the complete combine region, including unpermute. Full remat replays
-DeepEP dispatch with deterministic receive ordering, adding a sort; HybridEP
-derives token positions from prefix scans. The all-to-all dispatcher has
-independent `dispatch` and `combine` regions that include local reordering and
-collectives.
+For DeepEP and HybridEP, `ep_communication` controls dispatch replay only. The
+combine region, including local unpermutation, is always saved; its backward
+needs only the dispatch handle. A replay must receive tokens in the forward's
+order, so DeepEP uses a deterministic buffer, which adds a sort to every
+dispatch. HybridEP derives token positions from prefix scans. The all-to-all
+dispatcher has independent `dispatch` and `combine` regions that include local
+reordering and collectives.
 
 Dist-MoE always retains its outer region and owns its internal activation
 save/recompute decisions. See [ACTIVATION_REMAT.md](../../../distributed/ACTIVATION_REMAT.md) for

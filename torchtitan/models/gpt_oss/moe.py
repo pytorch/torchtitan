@@ -38,14 +38,14 @@ class GptOssGroupedLinear(GroupedLinear):
         scores_R: torch.Tensor | None = None,
         recompute: bool | None = None,
     ) -> torch.Tensor:
-        if recompute is None or type(self)._grouped_mm is not GroupedLinear._grouped_mm:
-            recompute = self.remat_should_recompute("grouped_mm")
         output_RO = super().forward(
             input_RI,
             offsets_E,
             scores_R=scores_R,
             recompute=recompute,
         )
+        if recompute is None:
+            recompute = self.remat_should_recompute("grouped_mm")
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         )
@@ -53,7 +53,7 @@ class GptOssGroupedLinear(GroupedLinear):
             bias_RO = (bias_RO * scores_R.reshape(-1, 1).to(torch.float32)).to(
                 output_RO.dtype
             )
-        # Keep bias addition on W2's rematerialization setting.
+        # Replaying bias addition after saved W2 would retain W2's output.
         return remat.region(
             self._add_grouped_bias,
             self.remat_region_name("bias_add"),

@@ -177,9 +177,11 @@ class RoutedExperts(Module):
                     hidden_RF,
                     offsets_E,
                     scores_R=metadata.scores_R,
-                    # TODO: Let remat skip unused W2: https://github.com/meta-pytorch/remat/issues/6
+                    # remat rebuilds the scored input during replay rather than retaining it.
+                    # TODO(@anijain2305): Let remat skip unused W2: https://github.com/meta-pytorch/remat/issues/6
                     recompute=False
                     if routed_input_RD.dtype == torch.bfloat16
+                    and type(self.w2)._grouped_mm is GroupedLinear._grouped_mm
                     else None,
                 )
             else:

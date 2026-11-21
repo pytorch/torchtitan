@@ -328,10 +328,11 @@ communication regions:
   and the expert-major permute; `combine` covers the unpermute, the combine
   all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
   dispatchers instead declare `ep_communication.dispatch` and
-  `ep_communication.combine`. Dispatch follows `ep_communication`; combine,
-  including local unpermutation, is always saved. Full remat replays dispatch
-  for both backends. DeepEP uses deterministic receive ordering, adding a sort;
-  HybridEP derives token positions from prefix scans. See
+  `ep_communication.combine`. `ep_communication` controls dispatch replay only.
+  The combine region, including local unpermutation, is always saved; its
+  backward needs only the dispatch handle. A replay must receive tokens in the
+  forward's order, so DeepEP uses a deterministic buffer, which adds a sort to
+  every dispatch. HybridEP derives token positions from prefix scans. See
   [router-score absorption](../models/common/moe/ROUTER_SCORE_ABSORPTION.md)
   for W2 replay conditions.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
@@ -340,6 +341,10 @@ communication regions:
 - `tp_output_reduction`, which controls the final TP all-reduce when sequence
   parallelism is disabled. In batch-invariant mode with shared experts, the routed
   output has its own TP all-reduce, `tp_routed_reduction`.
+
+Absorbed native BF16 W2 without output postprocessing or a dtype conversion is
+a model-declared SAVE exception, even if `recompute_regions` matches W2. Its
+scored input is rebuilt during replay rather than retained from forward.
 
 For a common MoE module named `moe`, the corresponding policy is:
 

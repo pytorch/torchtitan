@@ -441,8 +441,7 @@ class GroupedLinear(Module):
             scores_R: Optional per-row scores absorbed into the input before
                 projection. MoE typically uses this on W2 to reduce activation
                 retention by scoring the input instead of the routed output.
-            recompute: Optional override for the native projection. None and
-                specialized kernels use the configured remat policy.
+            recompute: Optional remat override. None uses the configured policy.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
@@ -459,7 +458,10 @@ class GroupedLinear(Module):
             )
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
-        if recompute is None or type(self)._grouped_mm is not GroupedLinear._grouped_mm:
+        if recompute is False and type(self)._grouped_mm is GroupedLinear._grouped_mm:
+            # Keep the cast outside SAVE so remat rebuilds it instead of retaining it.
+            weight_EOI = weight_EOI.bfloat16()
+        if recompute is None:
             recompute = self.remat_should_recompute("grouped_mm")
         output_RO = remat.region(
             self._grouped_mm,
