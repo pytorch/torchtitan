@@ -81,6 +81,7 @@ def _forward_with_routed_mask(
     """Run ``moe_cls.forward`` on stubs; return the mask the routed branch sees."""
     routed_mask_T = padding_mask_T.clone()  # stands for the TP-sharded mask
     moe = SimpleNamespace(
+        overlap_shared_experts=False,
         _maybe_shard_routed_branch_inputs_across_tp=lambda x, mask: (x, routed_mask_T),
         router=lambda x, bias, padding_mask_T=None, **kwargs: (
             torch.zeros(x.shape[0], 2),
