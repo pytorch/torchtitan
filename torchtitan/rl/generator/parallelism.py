@@ -24,9 +24,6 @@ class InferenceParallelismConfig:
     expert_parallel_degree: int = 1
     """Expert parallelism degree for MoE layers. One disables EP."""
 
-    enable_sequence_parallel: bool = False
-    """Enable dense sequence parallelism across the tensor-parallel axis."""
-
     @property
     def expert_sequence_parallel_size(self) -> int:
         if self.expert_parallel_degree <= 1:
@@ -43,7 +40,7 @@ class InferenceParallelismConfig:
             data_parallel_replicate_degree=1,
             context_parallel_degree=1,
             pipeline_parallel_degree=1,
-            enable_sequence_parallel=self.enable_sequence_parallel,
+            enable_sequence_parallel=False,
             # Reuse the unsharded compute representation until the model state dict load.
             fsdp_reshard_after_forward="never",
         )

@@ -11,7 +11,6 @@ from contextlib import nullcontext
 
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor
-from vllm.utils.math_utils import round_up
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -102,7 +101,7 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
 
 
 class TorchTitanGPUModelRunner(GPUModelRunner):
-    """V1 runner with sequence-parallel padding and FULL-graph decode specialization."""
+    """V1 runner with FULL-graph decode specialization."""
 
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
@@ -166,11 +165,11 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         real step, and from ``_dummy_run`` for profiling, warm-up, CUDA-graph
         capture and an idle DP rank's dummy batch (whose rows all count as
         real). ``num_tokens`` is the unpadded count; vLLM applies every padding
-        source inside this call (TP rounding, CUDA-graph capture size, DP
-        equalization). The model turns the count into a padding mask, which keeps
-        those rows off Dist-MoE's network; graph replay reads the value published
-        for the real step. Linear attention (GDN/KDA) builders then learn whether
-        the step replays a packed FULL graph.
+        source inside this call (CUDA-graph capture size, DP equalization). The
+        model turns the count into a padding mask, which keeps those rows off
+        Dist-MoE's network; graph replay reads the value published for the real
+        step. Linear attention (GDN/KDA) builders then learn whether the step
+        replays a packed FULL graph.
         """
         self.get_model().set_num_valid_tokens(num_tokens)
         result = super()._determine_batch_execution_and_padding(
@@ -187,16 +186,6 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
                 for builder in group.metadata_builders:
                     builder.replays_packed_graph = replays_packed_graph
         return result
-
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        enable_dense_sp = self.compilation_config.pass_config.enable_sp and tp_size > 1
-        enable_expert_sp = (
-            self.vllm_config.parallel_config.enable_expert_parallel and tp_size > 1
-        )
-        if enable_dense_sp or enable_expert_sp:
-            return round_up(num_scheduled_tokens, tp_size)
-        return num_scheduled_tokens
 
 
 class TorchTitanGPUWorker(GPUWorker):

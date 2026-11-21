@@ -234,8 +234,6 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine serves text prompts only; image prompts "
                 "(Controller.Config.vision_processor) need VLLMEngine."
             )
-        if parallelism.enable_sequence_parallel:
-            raise ValueError("SGLangEngine does not support sequence parallelism")
         # Reset mode clears KV at each weight load instead of salting requests by
         # policy version, but SGLang's KV reset (flush_cache) clears GPU and host
         # memory, not the storage backend: unsalted requests would read KV that

@@ -37,9 +37,10 @@ from torchtitan.rl.generator.vllm.multimodal_wrapper import (
 )
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 from torchtitan.rl.rollout.types import Prompt, PromptImage
+from transformers import PretrainedConfig
 from vllm import SamplingParams
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.transformers_utils.config import PretrainedConfig, uses_mrope
+from vllm.transformers_utils.config import uses_mrope
 from vllm.v1.core.sched import output as vllm_scheduler_output
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.request import Request
@@ -86,6 +87,33 @@ def test_embed_input_ids_writes_image_embeddings_over_placeholders() -> None:
     expected[[1, 2]] = 10.0
     expected[4] = 20.0
     assert torch.equal(embeds, expected)
+
+
+def test_forward_pads_the_step_to_a_multiple_of_tp() -> None:
+    # EP over TP 4: 3 real tokens run the layers as 4 rows; the extra row is dropped after.
+    wrapper = object.__new__(VLLMMultimodalModelWrapper)
+    layer_input_shapes = []
+
+    def forward_embeddings(h, positions):
+        layer_input_shapes.append((tuple(h.shape), tuple(positions.shape)))
+        return h
+
+    object.__setattr__(
+        wrapper, "model", SimpleNamespace(forward_embeddings=forward_embeddings)
+    )
+    object.__setattr__(
+        wrapper,
+        "parallelism_context",
+        SimpleNamespace(activate_spmd=contextlib.nullcontext),
+    )
+    object.__setattr__(wrapper, "_expert_sequence_parallel_size", 4)
+    object.__setattr__(wrapper, "_dist_moe_runtime", None)
+
+    hidden_states = wrapper.forward(
+        positions=torch.zeros(3, 3, dtype=torch.long), inputs_embeds=torch.ones(3, 8)
+    )
+    assert layer_input_shapes == [((4, 8), (4, 3))]
+    assert torch.equal(hidden_states, torch.ones(3, 8))
 
 
 def _image_prompt(image_paths) -> Prompt:

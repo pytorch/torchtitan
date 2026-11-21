@@ -12,6 +12,7 @@ import torch
 
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform.batch_invariance import BatchInvariantFlexConverter
 from torchtitan.models.common.attention import (
     LinearAttention,
     SlidingWindowVarlenInnerAttention,
@@ -20,6 +21,7 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.deepseek_v3 import build_model_config as build_dsv3_config
 from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
+from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm import registry
@@ -49,8 +51,6 @@ def test_hf_config_adds_no_stop_token():
 
 
 def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
-    from torchtitan.models.llama3 import build_model_config as build_llama3_config
-
     config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
     config.layers[
         0
@@ -255,3 +255,17 @@ def test_compressed_mla_configures_vllm_native_mla(monkeypatch, build_config):
     assert MODEL_ARCH_CONFIG_CONVERTORS[hf_config.model_type](
         hf_config, hf_config
     ).is_deepseek_mla()
+
+
+@pytest.mark.parametrize(
+    "build_config", [build_llama3_config, build_dsv3_config], ids=["flex", "mla_flex"]
+)
+def test_vllm_block_size_matches_pinned_flex_block_n(monkeypatch, build_config):
+    monkeypatch.setattr(registry, "has_cuda_capability", lambda *_: True)
+    config = build_config(
+        "debugmodel", parallelism=ParallelismConfig(), attn_backend="flex"
+    )
+    assert registry.vllm_block_size(config) is None
+    # Batch-invariant mode pins flex's BLOCK_N, nested in MLA too.
+    BatchInvariantFlexConverter(BatchInvariantFlexConverter.Config()).convert(config)
+    assert registry.vllm_block_size(config) == 16
