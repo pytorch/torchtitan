@@ -11,7 +11,7 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, Literal, overload
+from typing import Any, Literal, cast, overload
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,12 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
+)
+from torchtitan.distributed.flex_shard import (
     DistMuon as FlexShardDistMuon,
+)
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
+    _warn_unmatched_bucket_configs,
 )
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
@@ -377,6 +382,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         all_params: list[nn.Parameter] = []
         self.optimizers = []
         self.model_parts = model_parts
+        all_param_names: list[str] = []
 
         for part_idx, model in enumerate(self.model_parts):
             claimed: set[str] = set()
@@ -386,6 +392,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     optimizer_config,
                     claimed,
                 )
+                all_param_names.extend(param_group.get("param_names", ()))
                 optimizer = optimizer_config.build(params=[param_group])
                 if enable_accelerator_graph:
                     if any(
@@ -420,6 +427,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     optimizer_config.pattern,
                 )
                 all_params.extend(param_group["params"])
+
+        bucket_configs = getattr(config, "bucket_configs", ()) or ()
+        if bucket_configs and all_param_names:
+            _warn_unmatched_bucket_configs(bucket_configs, all_param_names)
 
         self._validate_params(all_params)
         self._post_init(all_params)

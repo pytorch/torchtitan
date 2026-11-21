@@ -15,15 +15,14 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, cast, Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar, cast
 
 import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
-from .optimizer_reshard import _BucketSpec, BucketConfig
-
+from .optimizer_reshard import BucketConfig, _BucketSpec
 
 __all__: list[str] = []
 
@@ -32,6 +31,32 @@ logger = logging.getLogger(__name__)
 
 
 _ItemT = TypeVar("_ItemT")
+
+
+def _warn_unmatched_bucket_configs(
+    configs: Sequence[BucketConfig], param_names: Sequence[str]
+) -> None:
+    """Report configs that match no parameter of the model.
+
+    A config may legitimately cover parameters a particular model does not build,
+    but a misspelled pattern silently leaves parameters in a different bucket than
+    the author intended. This has to be checked once, where every model part's
+    parameters are visible: doing it per part reports the same config for every
+    part that does not own the matching layers, which under pipeline parallelism
+    is nearly all of them.
+    """
+    for config in configs:
+        if any(
+            fnmatch.fnmatchcase(name, pattern)
+            for name in param_names
+            for pattern in config.patterns
+        ):
+            continue
+        logger.warning(
+            "BucketConfig %r matches no optimizer parameter: patterns=%s",
+            config.name,
+            list(config.patterns),
+        )
 
 
 def _bind_bucket_configs(
@@ -63,16 +88,12 @@ def _bind_bucket_configs(
             item for item in matched_items if requires_redistribution(item)
         )
         if not matched_items:
-            # A bucket nobody matches is not an error -- a config may cover
-            # parameters that a particular model does not build -- but it must
-            # be reported, because a misspelled split pattern otherwise silently
-            # leaves the parameters in a different bucket than the author
-            # intended.
-            logger.warning(
-                "BucketConfig %r matches no optimizer parameter: patterns=%s",
-                config.name,
-                list(config.patterns),
-            )
+            # A bucket that matches nothing here is not an error: under pipeline
+            # parallelism each part only owns a slice of the model, so most
+            # configs match nothing in most parts. Reporting it per part would
+            # warn dozens of times per launch for a valid config. The container
+            # that sees every part checks the whole list once instead
+            # (`_warn_unmatched_bucket_configs`).
             continue
         if not redistributed_items:
             specs.append(config._bind(None))

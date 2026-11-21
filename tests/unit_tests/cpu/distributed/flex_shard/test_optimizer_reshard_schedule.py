@@ -23,6 +23,9 @@ from torchtitan.distributed.flex_shard import (
 from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
 )
+from torchtitan.distributed.flex_shard._optimizer_reshard_schedule import (
+    _warn_unmatched_bucket_configs,
+)
 
 
 class TestMuonPlanConstruction(unittest.TestCase):
@@ -163,40 +166,35 @@ class TestMuonPlanConstruction(unittest.TestCase):
             )
 
 
-    def test_unmatched_bucket_pattern_is_reported(self):
-        mesh, parameter = self._make_1d_parameter()
-
+    def test_unmatched_bucket_pattern_is_reported_once(self):
+        # Checked where every model part is visible; a config that matches no
+        # parameter at all is the typo case, not the pipeline-parallel case.
         with self.assertLogs(
             "torchtitan.distributed.flex_shard._optimizer_reshard_schedule",
             level="WARNING",
         ) as captured:
-            with patch.object(_BucketedRedistributionRuntime, "reserve_buffers"):
-                optimizer = DistMuon(
-                    [{"params": [parameter], "param_names": [self._FQN]}],
-                    compute_sharding_by_fqn={
-                        self._FQN: ComputeLayout(
-                            {
-                                "dp_shard": BlockShard(
-                                    dim=0,
-                                    block_sizes=(4,),
-                                )
-                            },
-                            compute_dtype=torch.bfloat16,
-                        )
-                    },
-                    bucket_configs=[
-                        BucketConfig(patterns=(self._FQN,), name="matched"),
-                        BucketConfig(patterns=("layers.9.*",), name="typo"),
-                    ],
-                )
+            _warn_unmatched_bucket_configs(
+                (
+                    BucketConfig(patterns=("layers.0.*",), name="matched"),
+                    BucketConfig(patterns=("layers.9.*",), name="typo"),
+                ),
+                ["layers.0.attention.wq.weight", "layers.0.mlp.w1.weight"],
+            )
 
         self.assertEqual(len(captured.records), 1)
         message = captured.output[0]
         self.assertIn("'typo'", message)
         self.assertIn("layers.9.*", message)
-        # The typo'd bucket is still dropped rather than rejected, so the
-        # parameter keeps matching exactly one bucket.
-        self.assertEqual(len(optimizer._bucket_plans), 1)
+
+    def test_matched_bucket_patterns_are_not_reported(self):
+        with self.assertNoLogs(
+            "torchtitan.distributed.flex_shard._optimizer_reshard_schedule",
+            level="WARNING",
+        ):
+            _warn_unmatched_bucket_configs(
+                (BucketConfig(patterns=("layers.0.*",), name="matched"),),
+                ["layers.0.attention.wq.weight"],
+            )
 
 
 if __name__ == "__main__":
