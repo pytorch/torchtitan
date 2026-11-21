@@ -244,26 +244,42 @@ class TestIndexerSelect(unittest.TestCase):
         self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
         self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
 
-    def test_selected_scores_are_differentiable(self):
+    def test_selection_does_not_depend_on_rescoring(self):
         torch.manual_seed(0)
         q = torch.randn(12, 3, 8, requires_grad=True)
         k = torch.randn(3, 8, requires_grad=True)
         w = torch.randn(12, 3, requires_grad=True)
         indexer = InnerIndexer.Config().build()
         for cu in (None, torch.tensor([0, 4, 12], dtype=torch.int32)):
+            metadata = _metadata(cu, 12)
             indices, scores = indexer(
                 q,
                 k,
                 w,
                 ratio=4,
                 topk=2,
-                attention_metadata=_metadata(cu, 12),
+                attention_metadata=metadata,
+                return_scores=True,
             )
+            with patch(
+                "torchtitan.models.deepseek_v4.compressor.compressed_gather_indices"
+            ) as score_gather:
+                index_only, _ = indexer(
+                    q,
+                    k,
+                    w,
+                    ratio=4,
+                    topk=2,
+                    attention_metadata=metadata,
+                    return_scores=False,
+                )
+            score_gather.assert_not_called()
+            torch.testing.assert_close(index_only, indices)
             scores[indices >= 0].sum().backward()
             for tensor in (q, k, w):
                 self.assertTrue(torch.isfinite(tensor.grad).all())
 
-    def test_eval_and_disabled_loss_return_scores_without_grad_or_lse(self):
+    def test_eval_and_disabled_loss_do_not_rescore(self):
         for training, loss_coeff in ((False, 0.01), (True, 0.0)):
             config = build_model_config(
                 "debugmodel",
@@ -292,10 +308,7 @@ class TestIndexerSelect(unittest.TestCase):
                 ) as kernel,
             ):
                 attention(torch.randn(16, cfg.dim), metadata, positions)
-            indices = inner.call_args.args[3]
-            scores = inner.call_args.kwargs["topk_scores"]
-            self.assertTrue(torch.equal(scores.isfinite(), indices >= 0))
-            self.assertFalse(scores.requires_grad)
+            self.assertEqual(inner.call_args.kwargs["topk_scores"].shape, (16, 0))
             self.assertFalse(kernel.call_args.kwargs["return_aux"].lse)
 
 

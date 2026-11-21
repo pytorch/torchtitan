@@ -232,8 +232,9 @@ class Indexer(Module):
         positions: torch.Tensor,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
         topk: int,
+        return_scores: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Project features and return document-local selections and scores."""
+        """Project features and return document-local selections and requested scores."""
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -259,6 +260,7 @@ class Indexer(Module):
             ratio=self.compressor.compress_ratio,
             topk=topk,
             attention_metadata=attention_metadata,
+            return_scores=return_scores,
         )
 
 
@@ -281,11 +283,12 @@ class InnerIndexer(Module):
         ratio: int,
         topk: int,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+        return_scores: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions per folded query token.
 
-        Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
-        recomputes the selected logits for the distillation loss.
+        Uses Attention Gym's ``lightning_indexer`` for discrete selection and
+        recomputes the selected logits when the distillation loss needs them.
         With packed documents, returned indices are local to the query's
         document in the packed compressed-KV pool.
 
@@ -293,8 +296,8 @@ class InnerIndexer(Module):
             ``(indices, scores)``. ``indices`` is int32
             ``[T, min(topk, attention_metadata.max_k // ratio)]`` with ``-1`` in unusable
             slots. An empty key pool gives both outputs zero columns.
-            ``scores`` holds the logits for selected entries and ``-inf`` in
-            unusable slots.
+            When requested, ``scores`` holds the selected logits with ``-inf``
+            in unusable slots. Otherwise it has shape ``[T, 0]``.
         """
         with spmd.no_typecheck():
             # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
@@ -321,6 +324,9 @@ class InnerIndexer(Module):
                     cu_seqlens_k=cu_seqlens_k,
                     impl="fused" if fused else "reference",
                 ).squeeze(0)
+
+            if not return_scores:
+                return topk_indices, idx_q.new_empty((idx_q.size(0), 0))
 
             valid_TK = topk_indices >= 0
             gather_indices_TK = compressed_gather_indices(

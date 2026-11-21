@@ -454,17 +454,18 @@ class DeepSeekV4Attention(Attention):
 
         cmp_k = topk_indices = topk_scores = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            with torch.set_grad_enabled(
-                torch.is_grad_enabled()
-                and self.training
+            return_scores = (
+                self.inner_attention.training
                 and self.inner_attention.aux_loss is not None
-            ):
+            )
+            with torch.set_grad_enabled(torch.is_grad_enabled() and return_scores):
                 topk_indices, topk_scores = self.indexer(
                     x.detach(),
                     qr.detach(),
                     positions=positions,
                     attention_metadata=attention_metadata,
                     topk=self.inner_attention.index_topk,
+                    return_scores=return_scores,
                 )
         if self.compress_ratio == 4:
             cmp_k = self.compressor(

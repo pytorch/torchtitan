@@ -44,6 +44,7 @@ class TestIndexerSelect(unittest.TestCase):
             ratio=ratio,
             topk=topk,
             attention_metadata=metadata,
+            return_scores=True,
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -86,6 +87,7 @@ class TestIndexerSelect(unittest.TestCase):
                 ratio=ratio,
                 topk=topk,
                 attention_metadata=metadata,
+                return_scores=True,
             )
             self.assertEqual(indices.shape, (len(positions), width))
             self.assertEqual(scores.shape, indices.shape)

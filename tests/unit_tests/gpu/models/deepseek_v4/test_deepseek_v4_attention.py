@@ -118,6 +118,7 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 ratio=ratio,
                 topk=TOPK,
                 attention_metadata=metadata,
+                return_scores=False,
             )
             out = module(
                 q,
@@ -137,6 +138,7 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
                 attention_metadata=config.build_attention_metadata(
                     torch.arange(SEQLEN)
                 ),
+                return_scores=False,
             )
             cmp_topk = cmp_topk.long()
             cmp_allowed = torch.zeros(SEQLEN, n_cmp, dtype=torch.bool)
