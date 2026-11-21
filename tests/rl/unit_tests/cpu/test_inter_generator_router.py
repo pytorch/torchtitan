@@ -9,12 +9,15 @@ import asyncio
 import pytest
 
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.model_state_dict_transport import ModelStateDictTransferMetadata
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     RoundRobinRoutingStrategy,
     StickySessionRoutingStrategy,
 )
+
+_TRANSFER_METADATA = (ModelStateDictTransferMetadata(()),)
 
 
 class _Endpoint:
@@ -264,7 +267,9 @@ def test_drain_marks_generator_draining_for_its_load():
         actors = [_Actor("gen0", wait_pull=True), _Actor("gen1")]
         router = _router(actors)
 
-        pull_task = asyncio.create_task(router.pull_model_state_dict(1))
+        pull_task = asyncio.create_task(
+            router.pull_model_state_dict(1, metadata_by_trainer_rank=_TRANSFER_METADATA)
+        )
         await asyncio.wait_for(
             actors[0].load_model_state_dict.started.wait(), timeout=1.0
         )
@@ -289,7 +294,9 @@ def test_hot_swap_keeps_generators_serving_during_pull():
         actor = _Actor("gen0", wait_pull=True)
         router = _router([actor], hot_swap=True)
 
-        pull_task = asyncio.create_task(router.pull_model_state_dict(3))
+        pull_task = asyncio.create_task(
+            router.pull_model_state_dict(3, metadata_by_trainer_rank=_TRANSFER_METADATA)
+        )
         await actor.load_model_state_dict.started.wait()
 
         # Hot swap does not drain the generator, so it keeps serving.
@@ -307,7 +314,9 @@ def test_prefetch_keeps_generator_serving_before_drain():
         actor = _Actor("gen0", wait_prefetch=True)
         router = _router([actor])
 
-        pull_task = asyncio.create_task(router.pull_model_state_dict(3))
+        pull_task = asyncio.create_task(
+            router.pull_model_state_dict(3, metadata_by_trainer_rank=_TRANSFER_METADATA)
+        )
         await actor.prefetch_model_state_dict.started.wait()
 
         assert not router._generators[0].draining
@@ -315,7 +324,7 @@ def test_prefetch_keeps_generator_serving_before_drain():
 
         actor.prefetch_model_state_dict.release.set()
         await pull_task
-        assert actor.prefetch_model_state_dict.calls == [((), {})]
+        assert actor.prefetch_model_state_dict.calls == [((_TRANSFER_METADATA,), {})]
 
     asyncio.run(_run())
 
@@ -326,7 +335,9 @@ def test_drain_clears_draining_on_pull_failure():
         router = _router([actor])
 
         with pytest.raises(RuntimeError, match="endpoint failed"):
-            await router.pull_model_state_dict(1)
+            await router.pull_model_state_dict(
+                1, metadata_by_trainer_rank=_TRANSFER_METADATA
+            )
 
         assert not router._generators[0].draining
 
@@ -338,7 +349,9 @@ def test_pull_model_state_dict_pulls_every_generator():
         actors = [_Actor("gen0"), _Actor("gen1")]
         router = _router(actors)
 
-        await router.pull_model_state_dict(7)
+        await router.pull_model_state_dict(
+            7, metadata_by_trainer_rank=_TRANSFER_METADATA
+        )
 
         assert all(len(actor.prefetch_model_state_dict.calls) == 1 for actor in actors)
         assert [actor.load_model_state_dict.calls for actor in actors] == [

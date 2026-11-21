@@ -171,6 +171,12 @@ def test_receive_buffers_skip_frozen_params(
         assert set(loader.prefetched_model_state_dict) == (
             {"base.weight", "base.bias", "lora_a.weight", "scale"} - frozen
         )
+        # The load groups are the subsets loads fetch: the FSDP group, then the
+        # buffers. Delta sync relies on them covering every prefetched key.
+        assert [set(keys) for keys in loader.model_state_dict_load_groups] == [
+            {"base.weight", "base.bias", "lora_a.weight"} - frozen,
+            {"scale"},
+        ]
     finally:
         dist.destroy_process_group()
 

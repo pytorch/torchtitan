@@ -127,7 +127,10 @@ from torchtitan.rl.controller.work_buffer import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransferMetadata,
+    ModelStateDictTransport,
+)
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -854,9 +857,12 @@ class Controller(Configurable):
         # start_step; they load the frozen ones (e.g. a LoRA base) from
         # `generator.checkpointer`.
         with sl.log_trace_span("trainer_push_model_state_dict"):
-            await self.trainer.all_ranks.push_model_state_dict.call()
+            trainer_results = await self.trainer.all_ranks.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict.call_one(self.start_step)
+            await self.generator_router.pull_model_state_dict.call_one(
+                self.start_step,
+                metadata_by_trainer_rank=tuple(trainer_results.values()),
+            )
 
     @sl.log_trace_span("_collect_validation_rollouts")
     async def _collect_validation_rollouts(
@@ -1310,8 +1316,10 @@ class Controller(Configurable):
             waits for:    a TrainerStepBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
-        # The previous step's push and pull, each returning its wall time; None before the first.
-        push_task: asyncio.Task[float] | None = None
+        # The previous step's push result and pull wall time; None before the first.
+        push_task: asyncio.Task[
+            tuple[float, tuple[ModelStateDictTransferMetadata, ...]]
+        ] | None = None
         pull_task: asyncio.Task[float] | None = None
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
@@ -1398,7 +1406,7 @@ class Controller(Configurable):
                         "timing/step/blocking_trainer_push_model_state_dict"
                     ),
                 ):
-                    push_s = await push_task if push_task is not None else 0.0
+                    push_s = (await push_task)[0] if push_task is not None else 0.0
 
                 with (
                     sl.log_trace_span("optim_step"),
@@ -1485,28 +1493,40 @@ class Controller(Configurable):
             await push_task
             await pull_task
 
-    def _start_push_model_state_dict(self) -> asyncio.Task[float]:
+    def _start_push_model_state_dict(
+        self,
+    ) -> asyncio.Task[tuple[float, tuple[ModelStateDictTransferMetadata, ...]]]:
         """Send the trainer's model state dict push now, so each trainer rank starts it before the next
-        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
+        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time and
+        opaque per-rank transfer metadata."""
         start = time.perf_counter()
         push = self.trainer.all_ranks.push_model_state_dict.call()
 
-        async def wait() -> float:
+        async def wait() -> tuple[float, tuple[ModelStateDictTransferMetadata, ...]]:
             with sl.log_trace_span("trainer_push_model_state_dict"):
-                await push
-            return time.perf_counter() - start
+                trainer_results = await push
+            return (
+                time.perf_counter() - start,
+                tuple(trainer_results.values()),
+            )
 
         return asyncio.create_task(wait())
 
     async def _pull_model_state_dict_and_release_groups(
-        self, version: int, *, after: asyncio.Task[float]
+        self,
+        version: int,
+        *,
+        after: asyncio.Task[tuple[float, tuple[ModelStateDictTransferMetadata, ...]]],
     ) -> float:
         """Once the push ``after`` lands, load policy ``version`` into every generator, then admit
         the next rollout groups; returns the pull's wall time in seconds."""
-        await after
+        _, metadata_by_trainer_rank = await after
         with sl.log_trace_span("generator_pull_model_state_dict"):
             start = time.perf_counter()
-            await self.generator_router.pull_model_state_dict.call_one(version)
+            await self.generator_router.pull_model_state_dict.call_one(
+                version,
+                metadata_by_trainer_rank=metadata_by_trainer_rank,
+            )
             pull_s = time.perf_counter() - start
         # TODO(perf): pull_model_state_dict awaits ALL generators before we release any buffer slots,
         #   so a generator that finishes its pull early idles until the slowest one. Investigate

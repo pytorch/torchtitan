@@ -18,6 +18,7 @@ import pytest
 
 from torchtitan.rl.actors.system import TrainerHandle
 from torchtitan.rl.controller.controller import Controller, ValidationConfig
+from torchtitan.rl.model_state_dict_transport import ModelStateDictTransferMetadata
 from torchtitan.rl.observability import metrics as m
 
 TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
@@ -70,8 +71,10 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         if on_push is not None:
             await on_push()
         events.append("push end")
+        return _RankValues(ModelStateDictTransferMetadata(()))
 
-    async def pull(policy_version):
+    async def pull(policy_version, *, metadata_by_trainer_rank):
+        assert metadata_by_trainer_rank == (ModelStateDictTransferMetadata(()),)
         events.append(f"pull {policy_version}")
         if on_pull is not None:
             await on_pull()
