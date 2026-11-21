@@ -346,7 +346,6 @@ def test_update_block_table_matches_build(step, mode):
 def test_runner_tells_builders_the_selected_graph(mode, uniform, replays_packed_graph):
     builder, other_builder = SimpleNamespace(), SimpleNamespace()
     runner = cast(Any, object.__new__(TorchTitanGPUModelRunner))
-    runner.get_model = lambda: SimpleNamespace(set_num_valid_tokens=lambda n: None)
     runner.attn_groups = [
         [
             SimpleNamespace(
