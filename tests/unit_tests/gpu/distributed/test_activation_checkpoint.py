@@ -17,7 +17,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
-from torchtitan.models.base.module import Module, ModuleDict
+from torchtitan.models.base.module import Module, ModuleDict, ModuleList
 from torchtitan.models.common.linear import Linear
 
 
@@ -274,6 +274,7 @@ class TestActivationCheckpointing(unittest.TestCase):
 
     def test_block_overrides_name_encoder_blocks_by_encoder_fqn(self):
         encoder = ToyModel(("82",))
+        model = ModuleDict({"vision_encoder": encoder})
         ActivationRematConfig(
             save_regions=["*"],
             block_overrides=[
@@ -283,20 +284,38 @@ class TestActivationCheckpointing(unittest.TestCase):
                     recompute_regions=["inner_compute"],
                 ),
             ],
-        ).apply(encoder, module_fqn="vision_encoder")
+        ).apply(model, block_container_fqns=["vision_encoder.layers"])
         _run_forward_backward(encoder, torch.randn(8, 32))
         self.assertEqual(_forward_counts(encoder), {"82": (1, 2, 1)})
 
-    def test_apply_marks_checkpointed_blocks(self):
-        # The offloader hooks the blocks apply marked, encoders included.
-        config = ActivationRematConfig(save_regions=["*"], offload_block_input=True)
-        model, encoder = ToyModel(("82",)), ToyModel(("7",))
-        config.apply(encoder, module_fqn="vision_encoder")
+    def test_apply_marks_blocks_of_every_container_and_installs_one_offloader(
+        self,
+    ):
+        # The offloader hooks the blocks apply marked, in every container; a
+        # second offloader on the same model part would hook them all twice.
+        model = ToyModel(("82",))
+        model.vision_encoder = ToyModel(("7",))
+        model.mtp_layers = ModuleList([TransformerBlock()])
+        with unittest.mock.patch(
+            "torchtitan.distributed.activation_remat.ActivationOffloader"
+        ) as offloader:
+            ActivationRematConfig(save_regions=["*"], offload_block_input=True).apply(
+                model,
+                block_container_fqns=["vision_encoder.layers", "layers", "mtp_layers"],
+            )
+        offloader.assert_called_once()
+        self.assertIs(offloader.call_args.args[0], model)
         self.assertEqual(
-            encoder.layers["7"]._remat_block_fqn, "vision_encoder.layers.7"
+            [
+                block._remat_block_fqn
+                for block in (
+                    model.vision_encoder.layers["7"],
+                    model.layers["82"],
+                    model.mtp_layers[0],
+                )
+            ],
+            ["vision_encoder.layers.7", "layers.82", "mtp_layers.0"],
         )
-        config.apply(model.cuda())
-        self.assertEqual(model.layers["82"]._remat_block_fqn, "layers.82")
 
     def test_offloading_requires_cuda(self):
         with unittest.mock.patch.object(
@@ -311,7 +330,7 @@ class TestActivationCheckpointing(unittest.TestCase):
             (
                 "malformed name",
                 lambda: BlockRematOverride(blocks=["layer.91"], save_regions=[]),
-                "layers.<id>",
+                "<container>.<id>",
             ),
             (
                 "no blocks",
