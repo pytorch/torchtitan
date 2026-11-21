@@ -38,7 +38,6 @@ from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
-from torchtitan.tools.rng import preserved_rng
 from torchtitan.training_engine import TrainingEngine
 
 
@@ -547,10 +546,9 @@ class Trainer(Configurable):
                     if config.validator is not None and self.validator.should_validate(
                         engine.num_completed_steps
                     ):
-                        with preserved_rng():
-                            self.validator.validate(
-                                engine.model_parts, engine.num_completed_steps
-                            )
+                        self.validator.validate(
+                            engine.model_parts, engine.num_completed_steps
+                        )
 
                     engine.step_profiler()
 

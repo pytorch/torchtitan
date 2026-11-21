@@ -5,8 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import random
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,49 +19,43 @@ class RngSnapshot:
     python: tuple[Any, ...]
     numpy: tuple[Any, ...]
     cpu: torch.Tensor
-    devices: dict[str, list[torch.Tensor]]
+    accelerator: str | None
+    accelerator_state: torch.Tensor | None
 
     @staticmethod
-    def device_layout() -> dict[str, int]:
-        # Do not initialize an accelerator just to inspect or save RNG state.
-        return {
-            name: module.device_count()
-            for name in ("cuda", "xpu")
-            if (module := getattr(torch, name)).is_initialized()
-        }
+    def initialized_accelerator() -> str | None:
+        device = torch.accelerator.current_accelerator()
+        if device is None:
+            return None
+        module = torch.get_device_module(device)
+        # Do not initialize a device merely to checkpoint the CPU streams.
+        if not getattr(module, "is_initialized", lambda: False)():
+            return None
+        return device.type
 
     @classmethod
     def capture(cls) -> "RngSnapshot":
+        accelerator = cls.initialized_accelerator()
         return cls(
             random.getstate(),
             np.random.get_state(),
             torch.get_rng_state(),
-            {
-                name: getattr(torch, name).get_rng_state_all()
-                for name in cls.device_layout()
-            },
+            accelerator,
+            torch.get_device_module(accelerator).get_rng_state()
+            if accelerator is not None
+            else None,
         )
 
     def compatible(self) -> bool:
-        return {
-            name: len(states) for name, states in self.devices.items()
-        } == self.device_layout()
+        return self.accelerator == self.initialized_accelerator()
 
     def restore(self) -> None:
         if not self.compatible():
-            raise ValueError("RNG accelerator layout changed since capture")
+            raise ValueError("RNG accelerator backend changed since capture")
         random.setstate(self.python)
         np.random.set_state(self.numpy)
         torch.set_rng_state(self.cpu)
-        for name, states in self.devices.items():
-            getattr(torch, name).set_rng_state_all(states)
-
-
-@contextmanager
-def preserved_rng() -> Iterator[None]:
-    """Keep validation from advancing the training process's global streams."""
-    snapshot = RngSnapshot.capture()
-    try:
-        yield
-    finally:
-        snapshot.restore()
+        if self.accelerator is not None:
+            torch.get_device_module(self.accelerator).set_rng_state(
+                self.accelerator_state
+            )

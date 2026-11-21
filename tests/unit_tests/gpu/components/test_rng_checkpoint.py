@@ -14,10 +14,9 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils._pytree import tree_map
 from torchtitan.components.checkpointer.rng import RNG_STATE
-from torchtitan.tools.rng import preserved_rng
+from torchtitan.tools.rng import RngSnapshot
 
 from tests.unit_tests.cpu.components.checkpointer.test_rng_checkpoint import (
-    draw,
     manager,
     seed,
     step,
@@ -47,8 +46,6 @@ def _cuda_restart_worker(rank, folder, rendezvous, mode, async_mode):
                 step(model, optimizer, scheduler, loader)
             checkpoint.save(2)
             checkpoint.maybe_wait_for_staging()
-            with preserved_rng():
-                draw(f"cuda:{rank}")
         else:
             step(model, optimizer, scheduler, loader)
             if mode == "negative":
@@ -84,3 +81,20 @@ def test_cuda_distributed_restart(tmp_path, async_mode):
         }
         torch.testing.assert_close(results["save"], results["resume"], rtol=0, atol=0)
         assert results["save"][0]["draw"][0] != results["negative"][0]["draw"][0]
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_rng_restore_leaves_other_visible_device_unchanged():
+    with torch.cuda.device(0), torch.random.fork_rng(devices=[0, 1]):
+        snapshot = RngSnapshot.capture()
+        expected = torch.rand(3, device="cuda:0")
+        torch.rand(3, device="cuda:1")
+        other_state = torch.cuda.get_rng_state(1).clone()
+        snapshot.restore()
+        torch.testing.assert_close(
+            torch.rand(3, device="cuda:0"), expected, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            torch.cuda.get_rng_state(1), other_state, rtol=0, atol=0
+        )

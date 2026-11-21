@@ -19,7 +19,7 @@ import torch.multiprocessing as mp
 from torchtitan.components.checkpointer.base import DATALOADER, OPTIMIZER
 from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.checkpointer.rng import RNG_STATE, RngState
-from torchtitan.tools.rng import preserved_rng, RngSnapshot
+from torchtitan.tools.rng import RngSnapshot
 
 
 class Loader:
@@ -117,17 +117,6 @@ def test_capture_is_immutable_and_restore_is_explicit():
     assert_draw_equal(draw(), expected)
 
 
-def test_validation_preserves_rng_on_exception():
-    seed(1)
-    snapshot = RngSnapshot.capture()
-    expected = draw()
-    snapshot.restore()
-    with pytest.raises(RuntimeError), preserved_rng():
-        draw()
-        raise RuntimeError("validation failed")
-    assert_draw_equal(draw(), expected)
-
-
 def test_legacy_and_evaluation_loads(tmp_path, caplog):
     checkpoint, *objects = manager(tmp_path, enabled=False)
     checkpoint.save(1)
@@ -188,9 +177,6 @@ def restart_worker(rank, folder, rendezvous, mode, asynchronous):
             for _ in range(2):
                 step(model, optimizer, scheduler, loader)
             checkpoint.save(2)
-            # Validation after save must not alter the continuation.
-            with preserved_rng():
-                draw()
         else:
             # Allocate optimizer state so the ordinary optimizer Stateful template
             # requests its tensors from DCP. Production containers do this too.

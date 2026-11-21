@@ -84,11 +84,12 @@ def generate_image(
     tokenizer: FluxTokenizerContainer,
     t5_encoder: FluxEmbedder,
     clip_encoder: FluxEmbedder,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Sampling and save a single images from noise using a given prompt.
-    For randomized noise generation, the random seend should already be set at the beginning of training.
-    Since we will always use the local random seed on this rank, we don't need to pass in the seed again.
+    An explicit generator keeps sampling independent of the training RNG.
+    Without one, sampling uses the global random stream.
     """
 
     if isinstance(prompt, str):
@@ -151,6 +152,7 @@ def generate_image(
             empty_batch["clip_encodings"] if empty_batch is not None else None
         ),
         classifier_free_guidance_scale=classifier_free_guidance_scale,
+        generator=generator,
     )
 
     img = autoencoder.decode(img)
@@ -170,13 +172,16 @@ def denoise(
     empty_t5_encodings: torch.Tensor | None = None,
     empty_clip_encodings: torch.Tensor | None = None,
     classifier_free_guidance_scale: float | None = None,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """
     Sampling images from noise using a given prompt, by running inference with trained Flux model.
     Save the generated images to the given output path.
     """
     bsz = clip_encodings.shape[0]
-    latents = generate_noise_latent(bsz, img_height, img_width, device, dtype)
+    latents = generate_noise_latent(
+        bsz, img_height, img_width, device, dtype, generator=generator
+    )
     _, latent_channels, latent_height, latent_width = latents.shape
 
     if enable_classifier_free_guidance:

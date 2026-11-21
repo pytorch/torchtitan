@@ -25,6 +25,7 @@ def preprocess_data(
     clip_encoder: FluxEmbedder,
     t5_encoder: FluxEmbedder,
     batch: dict[str, Tensor],
+    generator: torch.Generator | None = None,
 ) -> dict[str, Tensor]:
     """
     Take a batch of inputs and encoder as input and return a batch of preprocessed data.
@@ -49,7 +50,7 @@ def preprocess_data(
 
     if autoencoder is not None:
         images = batch["image"].to(device=device, dtype=dtype)
-        img_encodings = autoencoder.encode(images)
+        img_encodings = autoencoder.encode(images, generator=generator)
         batch["img_encodings"] = img_encodings.to(device=device, dtype=dtype)
 
     batch["clip_encodings"] = clip_text_encodings.to(dtype)
@@ -65,6 +66,7 @@ def generate_noise_latent(
     device: str | torch.device,
     dtype: torch.dtype,
     seed: int | None = None,
+    generator: torch.Generator | None = None,
 ) -> Tensor:
     """Generate noise latents for the Flux flow model. The random seed will be set at the beginning of training.
 
@@ -86,6 +88,8 @@ def generate_noise_latent(
         height // IMAGE_LATENT_SIZE_RATIO,
         width // IMAGE_LATENT_SIZE_RATIO,
         dtype=dtype,
+        device=generator.device if generator is not None else None,
+        generator=generator,
     ).to(device)
 
 
