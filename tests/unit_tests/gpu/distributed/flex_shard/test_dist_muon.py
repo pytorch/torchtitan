@@ -183,6 +183,8 @@ class TestDistMuon(DTensorTestBase):
                 momentum=0.8,
                 nesterov=True,
                 ns_steps=ns_steps,
+                # torch.optim.Muon, the reference, runs Newton-Schulz in BF16.
+                ns_dtype=torch.bfloat16,
             )
 
         redistributed_value = (
@@ -387,6 +389,8 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             nesterov=True,
             ns_steps=2,
             adjust_lr_fn="match_rms_adamw",
+            # torch.optim.Muon, the reference, runs Newton-Schulz in BF16.
+            ns_dtype=torch.bfloat16,
         )
         reference_parameters = [torch.nn.Parameter(matrix.clone()) for matrix in value]
         reference_optimizer = torch.optim.Muon(
