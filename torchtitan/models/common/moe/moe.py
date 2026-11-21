@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import cast, Protocol
+from typing import cast, Literal, Protocol
 
 import spmd_types as spmd
 
@@ -782,9 +782,33 @@ class MoE(FeedForward):
         freeze_expert_bias: bool = False
         """Route with ``expert_bias_E`` but never update it: no balancing hook is registered.
         ``load_balance_coeff=None`` instead removes the bias from routing."""
+        bias_update_rule: Literal["sign", "linear"] = "sign"
+        """How the per-expert token counts ``n_E`` of each global batch update
+        ``expert_bias_E`` once per optimizer step. Both updates are shifted to
+        zero mean.
+
+        - ``"sign"``: ``load_balance_coeff * sign(mean(n_E) - n_E)``, the same step
+          for every expert however far its load is off
+          (https://arxiv.org/abs/2408.15664). The default.
+        - ``"linear"``: ``load_balance_coeff * (mean(n_E) - n_E) / mean(n_E)``, a step
+          proportional to each expert's relative load error, so badly overloaded
+          experts are corrected faster and nearly balanced ones barely move.
+
+        ``load_balance_coeff`` multiplies a unit step under ``"sign"`` but a relative
+        error under ``"linear"``, so the two rules need separately tuned values."""
         shared_experts: DenseFeedForward.Config | None = None
 
         def __post_init__(self) -> None:
+            if self.bias_update_rule not in ("sign", "linear"):
+                raise ValueError(
+                    "MoE bias_update_rule must be 'sign' or 'linear', got "
+                    f"{self.bias_update_rule!r}."
+                )
+            if self.bias_update_rule == "linear" and self.load_balance_coeff is None:
+                raise ValueError(
+                    "MoE bias_update_rule='linear' needs an expert bias; "
+                    "set load_balance_coeff."
+                )
             expert_counts = {
                 "moe": self.num_experts,
                 "router": self.router.num_experts,
@@ -814,6 +838,7 @@ class MoE(FeedForward):
         #       to work with gradient accumulation.
         self.load_balance_coeff = config.load_balance_coeff
         self.freeze_expert_bias = config.freeze_expert_bias
+        self.bias_update_rule = config.bias_update_rule
         if self.load_balance_coeff is not None:
             assert self.load_balance_coeff > 0.0
             self.register_buffer(
@@ -1016,6 +1041,28 @@ class MoE(FeedForward):
                 )
 
 
+def compute_expert_bias_delta(
+    tokens_per_expert_E: torch.Tensor, *, rule: str, coeff: float
+) -> torch.Tensor:
+    """Return the zero-mean ``expert_bias_E`` update for one optimizer step.
+
+    See ``MoE.Config.bias_update_rule`` for the rules.
+    """
+    mean_load = tokens_per_expert_E.mean()
+    if rule == "sign":
+        delta_E = coeff * torch.sign(mean_load - tokens_per_expert_E)
+    elif rule == "linear":
+        # Relative load error; zero when no tokens were routed.
+        safe_mean_load = torch.where(
+            mean_load > 0, mean_load, torch.ones_like(mean_load)
+        )
+        delta_E = coeff * (mean_load - tokens_per_expert_E) / safe_mean_load
+    else:
+        raise ValueError(f"Unknown MoE bias_update_rule {rule!r}.")
+    # A shift shared by all experts changes no Top-K selection.
+    return delta_E - delta_E.mean()
+
+
 class _MoERouterLike(Protocol):
     tokens_per_expert_E: torch.Tensor  # noqa: N815
 
@@ -1023,6 +1070,7 @@ class _MoERouterLike(Protocol):
 class _MoELike(Protocol):
     load_balance_coeff: float | None
     freeze_expert_bias: bool
+    bias_update_rule: str
     expert_bias_E: torch.Tensor  # noqa: N815
     router: _MoERouterLike
 
@@ -1102,12 +1150,13 @@ def register_moe_load_balancing_hook(
                 ].float()
                 moe_layer_idx += 1
 
-                # update the expert bias
-                # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
-                expert_bias_delta_E = load_balance_coeff * torch.sign(
-                    tokens_per_expert_E.mean() - tokens_per_expert_E
+                # update the expert bias; "sign" is not exactly the same as
+                # https://arxiv.org/pdf/2408.15664 proposed (the update is centered)
+                expert_bias_delta_E = compute_expert_bias_delta(
+                    tokens_per_expert_E,
+                    rule=moe.bias_update_rule,
+                    coeff=load_balance_coeff,
                 )
-                expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
                 moe.expert_bias_E.add_(expert_bias_delta_E)
                 moe.router.tokens_per_expert_E.zero_()
 
