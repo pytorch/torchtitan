@@ -112,6 +112,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     sync_weights_from_trainer = False
     # CUDA graphs SGLang captures (SGLangEngine.Config.cuda_graph).
     cuda_graph = "full"
+    # SGLangEngine.Config.extra_server_args.
+    extra_server_args = {}
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -153,7 +155,9 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         torch._C._clear_DTensor_sharding_propagator_cache()
         DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
 
-        cls.engine = SGLangEngine.Config(cuda_graph=cls.cuda_graph).build(
+        cls.engine = SGLangEngine.Config(
+            cuda_graph=cls.cuda_graph, extra_server_args=cls.extra_server_args
+        ).build(
             model=config.generator.model,
             parallelism=config.generator.parallelism,
             model_path=config.hf_assets_path,
@@ -490,6 +494,58 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     # SGLang's normal event loop.
     reset_kv_cache_on_model_state_dict_load = True
     reuses_shared_prompt = False
+
+    def test_runs_on_unified_memory(self):
+        """The engine runs GDN models on SGLang's unified pool, not on separate KV
+        and state pools."""
+        from sglang.srt.mem_cache.kv.alloc.chain import ChainAllocator
+
+        self.assertIsInstance(
+            self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
+        )
+
+
+class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
+    """``TestSGLangBitwiseParityGDN`` with HiCache backing KV and GDN states up to
+    host memory."""
+
+    extra_server_args = {"enable_hierarchical_cache": True, "hicache_size": 8}
+
+    def test_trainer_vs_sglang_decode_after_host_load_back(self):
+        """Test 3 with the previous turns evicted from GPU memory, so the next turns
+        load their KV and GDN states back from host memory into the unified pool."""
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+
+        results = self._generate(self.prompt_ids)
+        scheduler = self.engine._scheduler
+        tree_cache = scheduler.tree_cache
+        with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+            # Wait for the host backups, then drop every GPU copy.
+            tree_cache.writing_check(write_back=True)
+            tree_cache.evict(EvictParams(num_tokens=10**9, mamba_num=10**9))
+        self.assertEqual(tree_cache.total_size(), (0, 0))
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(self.prompt_ids, results, strict=True)
+        ]
+        # SGLang's request objects, for how many cached tokens came from the host.
+        admitted = []
+        admit = self.engine._output_collector.admit
+
+        def record_admit(req, arrival_time):
+            admitted.append(req)
+            admit(req, arrival_time)
+
+        self.engine._output_collector.admit = record_admit
+        try:
+            next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
+        finally:
+            self.engine._output_collector.admit = admit
+        if dist.get_rank() == 0:
+            for prompt, req, result in zip(self.prompt_ids, admitted, next_results):
+                num_cached_tokens = result.metrics_inputs.num_cached_tokens
+                self.assertGreater(num_cached_tokens, len(prompt))
+                self.assertEqual(req.cached_tokens_host, num_cached_tokens)
 
 
 def _debug_model_config(

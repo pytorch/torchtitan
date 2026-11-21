@@ -106,6 +106,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         # not count the requests the engine holds back (see
         # SGLangEngine._awaiting_prefill).
         "max_queued_requests",
+        "enable_unified_memory",
     }
 )
 
@@ -459,6 +460,13 @@ class SGLangEngine(GenerationEngine):
             skip_server_warmup=True,
             log_level="warning",
         )
+        if any(
+            isinstance(layer.attention, LinearAttention.Config)
+            for layer in model.layers
+        ):
+            # KV and GDN / KDA states share one pool, so memory one does not use can
+            # hold the other (see the README). SGLang builds it for hybrid models only.
+            server_kwargs["enable_unified_memory"] = True
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
             # dominates small prefills. SGLang runs a prefill batch eagerly if it
