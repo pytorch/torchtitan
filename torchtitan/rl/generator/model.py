@@ -474,9 +474,11 @@ class ModelStateDictLoader:
                 model, checkpointer_config, hf_assets_path=hf_assets_path
             )
         self._model = model
-        self._fsdp_load_groups, self._buffer_keys = _fsdp_load_groups(
-            model, frozen_param_keys=frozen_param_keys
-        )
+        (
+            self._fsdp_load_groups,
+            self._persistent_param_keys,
+            self._buffer_keys,
+        ) = _fsdp_load_groups(model, frozen_param_keys=frozen_param_keys)
         if model_state_dict_load_mode == "gpu_fetch":
             # gpu_fetch writes into the sharded parameter itself, not a quantized
             # parameter's high-precision _tensor.
@@ -573,6 +575,18 @@ class ModelStateDictLoader:
             _unshard_and_free_sharded_params(module)
         if error is not None:
             raise error
+        # Parameters that no FSDP group manages already own persistent storage
+        # (e.g. a row-sharded embedding). Load their local shards without gathering.
+        if self._persistent_param_keys:
+            params = {
+                key: self._model.get_parameter(key)
+                for key in self._persistent_param_keys
+            }
+            missing = params.keys() - fetch(params)
+            if missing:
+                raise RuntimeError(
+                    f"fetch did not fill {len(missing)} weights, e.g. {sorted(missing)[:5]}"
+                )
         # Buffers load after every FSDP collective, so a failure here cannot hang
         # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
         if self._buffer_keys:
@@ -673,7 +687,9 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
 
 def _fsdp_load_groups(
     model: nn.Module, *, frozen_param_keys: frozenset[str] = frozenset()
-) -> tuple[list[tuple[FSDPModule, list[tuple[str, Any]], list[Any]]], list[str]]:
+) -> tuple[
+    list[tuple[FSDPModule, list[tuple[str, Any]], list[Any]]], list[str], list[str]
+]:
     """Group ``model.state_dict()`` keys by the FSDP group whose sharded parameters hold them.
 
     Must run while every group is sharded, so the state dict holds the sharded
@@ -684,11 +700,12 @@ def _fsdp_load_groups(
             out. `_restore_sharded_params` refills them.
 
     Returns:
-        ``(groups, buffer_keys)``: one ``(module, trainable_params, frozen_params)``
+        ``(groups, persistent_param_keys, buffer_keys)``: one ``(module, trainable_params, frozen_params)``
         per FSDP group that loads fill, in module order, where ``module`` is the
         group's first module, ``trainable_params`` the ``(key, fsdp_param)`` pairs
         loads fill, and ``frozen_params`` the FSDP parameters of ``frozen_param_keys``;
-        and the keys of the buffers. Groups of only frozen parameters are not listed:
+        the keys of the trainable parameters that no FSDP group manages, which loads
+        fill in place; and the keys of the buffers. Groups of only frozen parameters are not listed:
         no load reshards them, so they stay unsharded from setup on (nothing calls the
         model's ``state_dict()`` after setup, whose pre-hook would mark them sharded).
     """
@@ -715,13 +732,20 @@ def _fsdp_load_groups(
         module: {} for module in group_modules.values()
     }
     buffers = {id(buffer) for buffer in model.buffers()}
+    parameters = {id(parameter) for parameter in model.parameters()}
+    persistent_param_keys = []
     buffer_keys = []
     for key, value in model.state_dict(keep_vars=True).items():
         group = sharded_param_to_group.get(id(value))
         if group is None:
-            # A parameter here would be loaded outside the reshard/unshard sequence.
-            assert id(value) in buffers, f"{key} is neither FSDP-sharded nor a buffer"
-            buffer_keys.append(key)
+            if id(value) in parameters:
+                if canonical_fqn(key) not in frozen_param_keys:
+                    persistent_param_keys.append(key)
+            else:
+                assert (
+                    id(value) in buffers
+                ), f"{key} is neither a parameter nor a buffer"
+                buffer_keys.append(key)
             continue
         module, fsdp_param = group
         if canonical_fqn(key) not in frozen_param_keys:
@@ -740,4 +764,4 @@ def _fsdp_load_groups(
                     "its quantized unsharded weight."
                 )
         groups.append((module, trainable, list(frozen_by_module[module])))
-    return groups, buffer_keys
+    return groups, persistent_param_keys, buffer_keys
