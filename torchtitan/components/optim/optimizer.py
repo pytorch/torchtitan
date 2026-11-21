@@ -9,15 +9,17 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
-from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -26,8 +28,9 @@ from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
+    redistribution_mesh_axes,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
+from torchtitan.distributed.utils import build_transport_meshes
 
 from .utils import (
     get_flat_optim_state_dict,
@@ -192,10 +195,15 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
     Note:
         The CTA cap is disabled by default because it is a workload-dependent
         memory/performance tradeoff. Enabling it builds explicit redistribution
-        meshes backed by resource-independent NCCL child communicators and
+        meshes backed by separate, resource-independent NCCL communicators and
         passes them through ``BucketConfig``. Each communicator adds fixed
         memory and may reduce throughput; the cap benefits workloads only when
         the reduction in all-peer connection state outweighs that overhead.
+        Recipes leave ``BucketConfig.mesh`` unset: process groups do not exist
+        when a recipe is written. This wrapper builds each bucket's transport
+        mesh from the storage layout (see ``build_transport_meshes``), which
+        requires every rank to construct the same sequence of DistMuon
+        optimizers.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -225,14 +233,13 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 
         All-to-all opens connection buffers for every peer and channel. A lower
-        CTA cap reduces this connection state on dedicated child communicators
-        of the ``dp_shard``/``edp_shard`` groups, while FSDP keeps its original
-        communicators. Each child adds fixed workspace memory, and fewer CTAs
-        may reduce all-to-all bandwidth.
+        CTA cap reduces this connection state on dedicated transport communicators,
+        including combined DP/TP groups, while FSDP keeps its original
+        communicators. Each capped communicator adds fixed workspace memory, and
+        fewer CTAs may reduce all-to-all bandwidth.
 
-        A positive value requires NCCL on the FSDP shard axes. Other backends
-        raise ``ValueError``; fake warns and keeps the storage groups without
-        modeling the cap.
+        A positive value requires NCCL. Other backends raise ``ValueError``;
+        fake warns and builds the transport meshes without the cap.
 
         TODO: Replace this temporary all-to-all connection-memory workaround
         with lower-memory redistribution, such as a pull-based symmetric-memory
@@ -246,53 +253,49 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
     ) -> None:
         param_groups = tuple(cast(Iterable[dict[str, Any]], params))
-        bucket_configs = config.bucket_configs
-        if config.max_nccl_ctas_for_comms > 0:
-            if len(param_groups) != 1:
-                raise ValueError("DistMuon requires exactly one parameter group")
-            param_group = param_groups[0]
-            group_names = param_group.get("param_names")
-            if group_names is None:
-                raise ValueError("DistMuon requires param_names")
-            named_parameters = tuple(
-                zip(group_names, param_group["params"], strict=True)
+        named_parameters = [
+            (fqn, param)
+            for group in param_groups
+            for fqn, param in zip(group["param_names"], group["params"], strict=True)
+            if isinstance(param, DTensor)
+        ]
+        max_ctas = (
+            config.max_nccl_ctas_for_comms
+            if config.max_nccl_ctas_for_comms > 0
+            else None
+        )
+        if max_ctas is not None and dist.get_backend() == "fake":
+            warnings.warn(
+                "Redistribution max_ctas is not modeled by the fake process "
+                "group; building transport meshes without the cap",
+                stacklevel=2,
             )
-
-            resolved_bucket_configs = []
-            # OptimizersContainer builds this instance for one local model part;
-            # reuse meshes across its buckets without keeping a run-wide cache.
-            redistribution_mesh_by_storage_mesh: dict[DeviceMesh, DeviceMesh] = {}
-            for bucket_config in bucket_configs:
-                matched_parameter = next(
-                    (
-                        parameter
-                        for fqn, parameter in named_parameters
-                        if any(
-                            fnmatch.fnmatchcase(fqn, pattern)
-                            for pattern in bucket_config.patterns
-                        )
-                    ),
-                    None,
+            max_ctas = None
+        # Storage mesh and transport axes of each bucket's first parameter
+        # that needs redistribution; FlexShard rejects mixed transports.
+        transports = []
+        for bucket in config.bucket_configs:
+            if bucket.mesh is not None:
+                raise ValueError(
+                    f"BucketConfig {bucket.patterns} sets mesh; the TorchTitan "
+                    "DistMuon wrapper builds every bucket's transport mesh"
                 )
-                if matched_parameter is None:
-                    resolved_bucket_configs.append(bucket_config)
+            transport = None
+            for fqn, param in named_parameters:
+                layout = config.compute_sharding_by_fqn.get(fqn)
+                if layout is None or not any(
+                    fnmatch.fnmatchcase(fqn, pattern) for pattern in bucket.patterns
+                ):
                     continue
-                storage_mesh = cast(Any, matched_parameter).device_mesh
-                if storage_mesh not in redistribution_mesh_by_storage_mesh:
-                    redistribution_mesh_by_storage_mesh[
-                        storage_mesh
-                    ] = build_alternative_fsdp_mesh(
-                        storage_mesh,
-                        max_ctas=config.max_nccl_ctas_for_comms,
-                    )
-                resolved_bucket_configs.append(
-                    replace(
-                        bucket_config,
-                        mesh=redistribution_mesh_by_storage_mesh[storage_mesh],
-                    )
-                )
-            bucket_configs = resolved_bucket_configs
-
+                if axes := redistribution_mesh_axes(fqn, param, layout):
+                    transport = (param.device_mesh, axes)
+                    break
+            transports.append(transport)
+        meshes = build_transport_meshes(transports, max_ctas=max_ctas)
+        bucket_configs = tuple(
+            bucket if mesh is None else replace(bucket, mesh=mesh)
+            for bucket, mesh in zip(config.bucket_configs, meshes, strict=True)
+        )
         super().__init__(
             param_groups,
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,

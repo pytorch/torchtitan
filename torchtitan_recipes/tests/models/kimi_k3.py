@@ -144,12 +144,14 @@ def _dist_muon_optimizer(
         for layer in model_config.layers
         if isinstance(layer.attention, KDA.Config)
     )
-    # FSDP flattens dp_shard and cp into one storage axis under CP.
+    # Dense storage axes: FSDP flattens dp_shard and cp into one storage axis
+    # under CP, and tp is declared only when TP is enabled.
+    dense_axes = (
+        MeshAxisName.DP_SHARD.value,
+        f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}",
+    ) + ((MeshAxisName.TP.value,) if parallelism.tensor_parallel_degree > 1 else ())
     owned = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: Owned(),
-            f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
-        },
+        shardings_by_mesh_axis={axis: Owned() for axis in dense_axes},
         compute_dtype=torch.bfloat16,
     )
 
@@ -157,10 +159,7 @@ def _dist_muon_optimizer(
         """A repeating BlockShard pattern with one Muon matrix per entry."""
         return ComputeLayout(
             shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_sizes=num_rows),
-                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": BlockShard(
-                    dim=0, block_sizes=num_rows
-                ),
+                axis: BlockShard(dim=0, block_sizes=num_rows) for axis in dense_axes
             },
             compute_dtype=torch.bfloat16,
         )
@@ -195,10 +194,7 @@ def _dist_muon_optimizer(
     per_expert = _per_expert_compute_layout(parallelism)
     feed_forward_shardings = {
         "w13": ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
-            },
+            shardings_by_mesh_axis={axis: Shard(0) for axis in dense_axes},
             compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
@@ -340,16 +336,3 @@ class _KimiK3TrainerConfig(Trainer.Config):
             self.optim.optimizer,
             parallelism=self.parallelism,
         )
-        # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
-        uses_dist_muon = any(
-            isinstance(config, DistMuon.Config)
-            for config in self.optim.optimizer.optimizers
-        )
-        if uses_dist_muon and self.parallelism.tensor_parallel_degree > 1:
-            # Fail during config parsing, before TP/FSDP creates _StridedShard
-            # storage. Recipes that need TP replace the optimizer.
-            raise ValueError(
-                "Kimi K3 DistMuon currently requires tensor_parallel_degree=1: "
-                "tensor parallelism can produce unsupported _StridedShard "
-                "parameter layouts."
-            )

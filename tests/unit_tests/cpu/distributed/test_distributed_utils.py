@@ -19,11 +19,7 @@ from torchtitan.config import CommConfig
 from torchtitan.distributed import DistributedTopology, utils as dist_utils
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
-from torchtitan.distributed.utils import (
-    build_alternative_fsdp_mesh,
-    get_local_tensor,
-    init_distributed,
-)
+from torchtitan.distributed.utils import get_local_tensor, init_distributed
 
 
 def test_get_local_tensor_uses_dtensor_local_shard_without_to_local() -> None:
@@ -33,46 +29,6 @@ def test_get_local_tensor_uses_dtensor_local_shard_without_to_local() -> None:
 
     assert get_local_tensor(tensor) is local_tensor
     tensor.to_local.assert_not_called()
-
-
-def test_alternative_fsdp_mesh_requires_named_axes() -> None:
-    storage_mesh = MagicMock(spec=DeviceMesh, mesh_dim_names=None)
-
-    with pytest.raises(ValueError, match="must have named axes"):
-        build_alternative_fsdp_mesh(storage_mesh, max_ctas=8)
-
-
-@pytest.mark.parametrize("axis_name", ["dp_shard", "edp_shard"])
-def test_alternative_fsdp_mesh_rejects_non_nccl(axis_name: str) -> None:
-    storage_mesh = MagicMock(spec=DeviceMesh, mesh_dim_names=(axis_name,))
-
-    with (
-        patch.object(dist_utils.dist, "get_backend", return_value="gloo"),
-        pytest.raises(ValueError, match="requires an NCCL process group"),
-    ):
-        build_alternative_fsdp_mesh(storage_mesh, max_ctas=8)
-
-
-@pytest.mark.parametrize("axis_name", ["dp_shard", "edp_shard"])
-def test_alternative_fsdp_mesh_warns_for_fake_backend(axis_name: str) -> None:
-    storage_mesh = MagicMock(spec=DeviceMesh, mesh_dim_names=(axis_name,))
-
-    with (
-        patch.object(dist_utils.dist, "get_backend", return_value="fake"),
-        pytest.warns(UserWarning, match="not modeled by the fake process group"),
-    ):
-        result = build_alternative_fsdp_mesh(storage_mesh, max_ctas=8)
-
-    assert result is storage_mesh
-
-
-def test_alternative_fsdp_mesh_warns_without_fsdp_shard_axes() -> None:
-    storage_mesh = MagicMock(spec=DeviceMesh, mesh_dim_names=("dp_replicate", "tp"))
-
-    with pytest.warns(UserWarning, match="no FSDP shard axes"):
-        result = build_alternative_fsdp_mesh(storage_mesh, max_ctas=8)
-
-    assert result is storage_mesh
 
 
 @pytest.mark.parametrize(
@@ -411,5 +367,29 @@ def test_clip_grad_norm_combines_gradients_on_different_meshes(
             torch.testing.assert_close(
                 cast(DTensor, param.grad).to_local(), grad * clip_coef
             )
+    finally:
+        dist.destroy_process_group()
+
+
+def test_build_transport_meshes_reuses_single_axis_and_groups_once() -> None:
+    import torch.distributed as dist
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.testing._internal.distributed.fake_pg import FakeStore
+
+    dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=4)
+    try:
+        mesh = init_device_mesh("cpu", (2, 2), mesh_dim_names=("dp_shard", "tp"))
+        both_axes = (mesh, ("dp_shard", "tp"))
+        transports = [None, (mesh, ("tp",)), both_axes, both_axes]
+
+        meshes = dist_utils.build_transport_meshes(transports, max_ctas=None)
+
+        assert meshes[0] is None
+        assert meshes[1].get_group() is mesh.get_group("tp")
+        assert meshes[2] is meshes[3]
+        assert meshes[2].mesh_dim_names == ("dp_shard_tp",)
+        assert meshes[2].mesh.tolist() == mesh.mesh.flatten().tolist()
+        with pytest.raises(ValueError, match="max_ctas requires NCCL"):
+            dist_utils.build_transport_meshes(transports, max_ctas=4)
     finally:
         dist.destroy_process_group()
