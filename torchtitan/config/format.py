@@ -17,7 +17,6 @@ index segments whenever the remaining path and value match identically.
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections import defaultdict
 from dataclasses import fields, is_dataclass
@@ -103,7 +102,7 @@ def _flatten(val: Any, prefix: str, out: dict[str, Any]) -> None:
     ):
         raw = val.to_dict()
         if isinstance(raw, dict) and set(raw.keys()) == {"repr"}:
-            out[prefix or "repr"] = _normalize_addrs(str(raw["repr"]))
+            out[prefix] = _normalize_addrs(str(raw["repr"]))
             return
         if is_dataclass(val):
             out[_join(prefix, "__class__")] = type(val).__qualname__
@@ -125,8 +124,6 @@ def _value_key(val: Any) -> Any:
         return ("list", tuple(_value_key(v) for v in val))
     if isinstance(val, dict):
         return ("dict", tuple((k, _value_key(v)) for k, v in val.items()))
-    if isinstance(val, float) and math.isnan(val):
-        return ("float", "nan")
     return (type(val).__name__, val)
 
 
@@ -192,10 +189,8 @@ def _fold_indexed_dict(mapping: dict[str, Any]) -> dict[str, Any]:
     return {".".join(segs): val for segs, val, _ in items}
 
 
-def format_config(config: Any) -> str:
+def format_config(config: Configurable.Config) -> str:
     """Format a config tree as a compact, lossless flat JSON mapping."""
     flat: dict[str, Any] = {}
     _flatten(config, "", flat)
-    if len(flat) == 1 and "" in flat:
-        return json.dumps(flat[""], indent=2, ensure_ascii=False)
     return json.dumps(_fold_indexed_dict(flat), indent=2, ensure_ascii=False)
