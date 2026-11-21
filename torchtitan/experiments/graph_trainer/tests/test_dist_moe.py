@@ -81,6 +81,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
 
     engine = cast(Any, object.__new__(GraphTrainingEngine))
     engine.config = SimpleNamespace(
+        use_flex_shard_instead_simple_fsdp=False,
         dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(

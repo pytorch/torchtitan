@@ -8,7 +8,7 @@ import logging
 import sys
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
@@ -38,6 +38,9 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import LossAndMetrics, TrainingEngine
+
+if TYPE_CHECKING:
+    from flex_shard import PlacementFn
 
 
 logger = logging.getLogger(__name__)
@@ -100,6 +103,9 @@ class GraphTrainingEngine(TrainingEngine):
         # GraphTrainer to stop reading its compile config there first (apply_compile,
         # EP-overlap chunking, enable_autoparallel, GraphPP runtime).
         kwargs: dict[str, Any] = {"compile_config": self.config.compile}
+        if self.config.use_flex_shard_instead_simple_fsdp:
+            kwargs["use_flex_shard_instead_simple_fsdp"] = True
+            kwargs["flex_shard_placement_fn"] = self.config.flex_shard_placement_fn
         # The PP path already receives ``training`` from the core pipeline call.
         if not self.parallelism_context.pp_enabled:
             kwargs["training"] = self.config.training
@@ -109,6 +115,13 @@ class GraphTrainingEngine(TrainingEngine):
         if self.config.parallelism.fsdp_defer_gradient_reduction:
             raise ValueError(
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
+            )
+
+        if self.config.use_flex_shard_instead_simple_fsdp:
+            from .flex_shard import FlexShardGradientClipper
+
+            self.optim.gradient_clipper = FlexShardGradientClipper(
+                self.config.optim.gradient_clipper,
             )
 
         if self.config.dist_moe_runtime is not None:
@@ -425,8 +438,26 @@ class GraphTrainer(Trainer):
         GraphTrainer requires ``model.local_compile.regions`` to be empty.
         """
 
+        use_flex_shard_instead_simple_fsdp: bool = False
+        """Use FlexShard instead of simple_fsdp for model parameter sharding."""
+
+        flex_shard_placement_fn: "PlacementFn | None" = None
+
         def __post_init__(self) -> None:
             Trainer.Config.__post_init__(self)
+            if (
+                self.flex_shard_placement_fn is not None
+                and not self.use_flex_shard_instead_simple_fsdp
+            ):
+                raise ValueError("flex_shard_placement_fn requires FlexShard.")
+            if (
+                self.use_flex_shard_instead_simple_fsdp
+                and self.parallelism.data_parallel_replicate_degree > 1
+            ):
+                raise ValueError(
+                    "FlexShard tracing does not reduce gradients across dp_replicate; "
+                    "parallelism.data_parallel_replicate_degree must be 1."
+                )
             if self.training.accelerator_graph_per_microbatch_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."

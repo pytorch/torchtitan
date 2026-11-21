@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
@@ -20,6 +20,9 @@ from .compile import apply_compile
 from .configs import GraphTrainerCompileConfig
 from .ep_eager_chunk import maybe_apply_ep_overlap_eager_chunking
 from .simple_fsdp import disable_active_parametrization
+
+if TYPE_CHECKING:
+    from flex_shard import PlacementFn
 
 
 class GraphTrainerModel:
@@ -39,6 +42,8 @@ class GraphTrainerModel:
         compile_config: GraphTrainerCompileConfig,
         activation_remat: ActivationRematConfig | None,
         dump_folder: str,
+        use_flex_shard_instead_simple_fsdp: bool = False,
+        flex_shard_placement_fn: PlacementFn | None = None,
     ):
         del activation_remat
         # TODO: pass preserve_dtype_params to SimpleFSDP's mixed precision.
@@ -61,11 +66,21 @@ class GraphTrainerModel:
 
         annotate_graph_trainer_model(self)
         self._parallelize(parallelism_context)
-        model = apply_simple_fsdp(
-            self,
-            parallelism_context=parallelism_context,
-            precision=precision,
-        )
+        if use_flex_shard_instead_simple_fsdp:
+            from .flex_shard import apply_flex_shard
+
+            model = apply_flex_shard(
+                self,
+                parallelism_context=parallelism_context,
+                precision=precision,
+                placement_fn=flex_shard_placement_fn,
+            )
+        else:
+            model = apply_simple_fsdp(
+                self,
+                parallelism_context=parallelism_context,
+                precision=precision,
+            )
         maybe_apply_ep_overlap_eager_chunking(model, compile_config)
         return apply_compile(
             model,

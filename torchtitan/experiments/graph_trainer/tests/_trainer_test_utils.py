@@ -119,6 +119,7 @@ def build_minimal_trainer(
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
+            use_flex_shard_instead_simple_fsdp=False,
             compile=GraphTrainerCompileConfig(
                 enable_passes=compile_enable_passes,
                 extra_passes=[]

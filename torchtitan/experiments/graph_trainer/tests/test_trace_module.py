@@ -187,6 +187,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(memory_policy="none"),
+            use_flex_shard_instead_simple_fsdp=False,
             dist_moe_runtime=None,
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             profiler=Profiler.Config(),
@@ -443,6 +444,16 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         accumulate_param_grads_([param], [graph_grad.view_as(graph_grad)])
         self.assertTrue(torch.equal(param.grad, torch.tensor([1.0, 2.0])))
+
+        # Tied parameter slots share a gradient view; accumulate it only once.
+        other_param = nn.Parameter(torch.zeros(2))
+        next_grad = torch.tensor([3.0, 4.0])
+        accumulate_param_grads_(
+            [param, param, other_param],
+            [next_grad, next_grad.view_as(next_grad), next_grad],
+        )
+        self.assertTrue(torch.equal(param.grad, torch.tensor([4.0, 6.0])))
+        self.assertTrue(torch.equal(other_param.grad, next_grad))
 
 
 class TestMinimalFXTracerDynamicShapes(unittest.TestCase):
@@ -1596,16 +1607,36 @@ class TestMetadataPropagation(unittest.TestCase):
         graph = torch.fx.Graph()
         fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(1, 2))
         fwd.meta["seq_nr"] = 7
-        fwd.meta["custom"] = {"test_key": "test_value"}
+        fwd.meta["custom"] = {
+            "test_key": "test_value",
+            "flex_shard_action": "unshard",
+            "flex_shard_phase": "prepare",
+            "autograd_backward_custom": {
+                "flex_shard_action": "reduce_grad",
+                "flex_shard_phase": "finish",
+            },
+        }
+        cast = graph.call_function(torch.ops.aten._to_copy.default, (fwd,))
+        cast.meta.update(seq_nr=7, autograd_backward=True)
         bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 3))
         bwd.meta["seq_nr"] = 7
         bwd.meta["autograd_backward"] = True
+        fwd.meta["custom"]["flex_shard_action"] = "unshard"
+        bwd.meta["custom"] = {
+            "flex_shard_action": "reduce_grad",
+            "flex_shard_phase": "execute",
+        }
         graph.output(bwd)
         gm = torch.fx.GraphModule(torch.nn.Module(), graph)
 
         _copy_fwd_metadata_to_bw_nodes(gm)
 
         self.assertEqual(bwd.meta["custom"].get("test_key"), "test_value")
+        self.assertEqual(bwd.meta["custom"]["flex_shard_action"], "reduce_grad")
+        self.assertEqual(bwd.meta["custom"]["flex_shard_phase"], "execute")
+        self.assertEqual(cast.meta["custom"]["flex_shard_action"], "reduce_grad")
+        self.assertEqual(cast.meta["custom"]["flex_shard_phase"], "finish")
+        self.assertEqual(fwd.meta["custom"]["flex_shard_action"], "unshard")
 
     def test_backward_nodes_have_stack_trace(self):
         """Verify that backward nodes get stack_trace from their forward counterpart."""

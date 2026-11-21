@@ -95,8 +95,14 @@ def _chain_nodes_to_placeholder(
 def deduplicate_fsdp_unshard_chains_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
+    *,
+    use_flex_shard: bool = False,
 ) -> torch.fx.GraphModule:
-    """Canonicalize duplicate SimpleFSDP unshard chains per flat parameter.
+    """Canonicalize duplicate unshards using the configured FSDP backend.
+
+    FlexShard reuses equivalent annotated bucket programs, including packing
+    and unpacking, while preserving storage mutations. SimpleFSDP identifies
+    individual parameter chains as described below.
 
     A traced parametrized module can read the same FSDP parameter more than
     once. Each read materializes an equivalent all-gather/wait reconstruction
@@ -112,6 +118,12 @@ def deduplicate_fsdp_unshard_chains_pass(
     Prefer an output with consumers because dead-code elimination intentionally
     retains effectful collectives after removing their unused preparation tail.
     """
+    if use_flex_shard:
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            deduplicate_flex_shard_unshard_pass,
+        )
+
+        return deduplicate_flex_shard_unshard_pass(gm, example_inputs)
     del example_inputs
 
     removable_nodes: set[fx.Node] = set()

@@ -70,9 +70,11 @@ def is_reduce_grad_collective(node: fx.Node) -> bool:
     return is_reduce_scatter_tensor(node) or is_all_reduce(node)
 
 
-def fsdp_param_fqns(node: fx.Node) -> tuple[str, ...]:
-    """Return the SimpleFSDP parameter provenance attached to a graph node."""
-    return node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META, ())
+def fsdp_param_fqns(
+    node: fx.Node, *, meta_key: str = FSDP_PARAM_FQNS_META
+) -> tuple[str, ...]:
+    """Return parameter provenance using the backend's FSDP metadata key."""
+    return node.meta.get("custom", {}).get(meta_key, ())
 
 
 def _find_last_all_gather_in_chain(start_node: fx.Node) -> fx.Node | None:
