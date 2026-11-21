@@ -77,6 +77,14 @@ class TorchFTCheckpointManager(CheckpointManager):
         which can result in overfitting.
         """
 
+        def __post_init__(self) -> None:
+            CheckpointManager.Config.__post_init__(self)
+            if self.enable_rng_state:
+                raise ValueError(
+                    "enable_rng_state is not supported with TorchFT's "
+                    "per-replica checkpoint participation."
+                )
+
     def __init__(
         self,
         config: Config,

@@ -19,10 +19,15 @@ from typing import Any, cast, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
+from torch.distributed.checkpoint import (
+    FileSystemReader,
+    HuggingFaceStorageWriter,
+    Metadata,
+)
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
+from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
@@ -43,6 +48,8 @@ from .base import (
     OPTIMIZER,
     purge_thread,
 )
+
+from .rng import RNG_STATE, RngState
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +143,8 @@ class CheckpointManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        pass
+        enable_rng_state: bool = False
+        """Save global rank-local RNG streams for fixed-topology training resumes."""
 
     def __init__(
         self,
@@ -157,6 +165,12 @@ class CheckpointManager(BaseCheckpointManager):
 
         self._validate_extra_state_keys(extra_states)
         self.states = dict(extra_states)
+        self._rng_state: RngState | None = None
+        if config.enable_rng_state:
+            if RNG_STATE in extra_states:
+                raise ValueError(f"{RNG_STATE} is a checkpoint-manager-owned key")
+            self._rng_state = RngState()
+            self.states[RNG_STATE] = self._rng_state
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),
@@ -374,6 +388,24 @@ class CheckpointManager(BaseCheckpointManager):
         Raises:
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
+        states = dict(states)
+        rng = self._rng_state if RNG_STATE in states else None
+        reader = None
+        if rng is not None:
+            # Weights-only/evaluation loads do not restore training streams.
+            if from_hf or OPTIMIZER not in states:
+                states.pop(RNG_STATE)
+                rng = None
+            else:
+                reader_cls = (
+                    FsspecReader
+                    if filesystem.is_remote(checkpoint_id)
+                    else FileSystemReader
+                )
+                reader = reader_cls(checkpoint_id)
+                if not rng.can_load(set(reader.read_metadata().state_dict_metadata)):
+                    states.pop(RNG_STATE)
+                    rng = None
         state_dict = self._flattened_model_states_sd(states)
 
         if from_hf:
@@ -396,12 +428,19 @@ class CheckpointManager(BaseCheckpointManager):
             )
             states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            if reader is None:
+                dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            else:
+                dcp.load(state_dict, checkpoint_id=checkpoint_id, storage_reader=reader)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
+            if rng is not None:
+                # Grain restores its existing iterator in load_state_dict().
+                # Restore only after loaders, optimizers and model weights are ready.
+                rng.restore()
 
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
@@ -598,6 +637,8 @@ class CheckpointManager(BaseCheckpointManager):
         """
         states = state_dict if state_dict is not None else self.states
         sd = {k: v for k, v in states.items() if k != MODEL}
+        if state_dict is None and self._rng_state is not None:
+            sd[RNG_STATE] = self._rng_state.state_dict()
         if MODEL in states:
             sd.update(states[MODEL].state_dict())
         return sd

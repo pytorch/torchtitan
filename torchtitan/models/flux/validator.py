@@ -168,6 +168,8 @@ class FluxValidator(Validator):
         self.t5_encoder = t5_encoder
         self.clip_encoder = clip_encoder
         self.dump_folder = dump_folder
+        # Follow the trainer's parallel-rank seed mapping without consuming RNG.
+        self._noise_seed = torch.initial_seed()
 
     @torch.no_grad()
     def validate(
@@ -175,6 +177,8 @@ class FluxValidator(Validator):
         model_parts: list[BaseModel],
         step: int,
     ) -> None:
+        # Restart private validation noise so validation never advances training RNG.
+        generator = torch.Generator(device=self.device).manual_seed(self._noise_seed)
         # Set model to eval mode
         # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
@@ -231,6 +235,7 @@ class FluxValidator(Validator):
                         tokenizer=self.tokenizer,
                         t5_encoder=self.t5_encoder,
                         clip_encoder=self.clip_encoder,
+                        generator=generator,
                     )
 
                 save_image(
@@ -257,6 +262,7 @@ class FluxValidator(Validator):
                 clip_encoder=self.clip_encoder,
                 t5_encoder=self.t5_encoder,
                 batch=input_dict,
+                generator=generator,
             )
             labels = input_dict["img_encodings"].to(device_type)
             clip_encodings = input_dict["clip_encodings"]
@@ -285,7 +291,12 @@ class FluxValidator(Validator):
 
             # Apply timesteps here and update our bsz to efficiently compute all timesteps and samples in a single forward pass
             with torch.no_grad(), torch.device(self.device):
-                noise = torch.randn_like(labels)
+                noise = torch.randn(
+                    labels.shape,
+                    device=labels.device,
+                    dtype=labels.dtype,
+                    generator=generator,
+                )
                 timesteps = stratified_timesteps.to(labels)
                 sigmas = timesteps.view(-1, 1, 1, 1)
                 latents = (1 - sigmas) * labels + sigmas * noise
