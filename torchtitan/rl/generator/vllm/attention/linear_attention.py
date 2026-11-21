@@ -210,7 +210,7 @@ class TorchTitanLinearAttentionMetadataBuilder(
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            # The linear attention (GDN/KDA) layer constructors reject speculative decoding.
+            # With speculative decoding, GDN layers use vLLM's own builder; KDA rejects it.
             num_spec_decodes=0,
             num_spec_decode_tokens=0,
             num_actual_tokens=m.num_actual_tokens,

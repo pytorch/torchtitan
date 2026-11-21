@@ -107,6 +107,13 @@ def generate() -> None:
             "generate.py runs vLLM; set generator.engine to VLLMEngine.Config, "
             f"got {type(engine_config).__qualname__}"
         )
+    if engine_config.num_speculative_tokens > 0:
+        # TODO: set EngineArgs.speculative_config as VLLMEngine._build_engine_args does, for
+        # faster offline generation. Not done: MTP is tested only through VLLMEngine.
+        raise ValueError(
+            "generate.py does not support num_speculative_tokens yet, got "
+            f"{engine_config.num_speculative_tokens}"
+        )
     model_config = gen_config.model
     model_path = config.hf_assets_path
     # Recipes name local assets relative to the repo root, while
@@ -178,6 +185,7 @@ def generate() -> None:
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
+        num_speculative_tokens=engine_config.num_speculative_tokens,
     )
     if vllm_compilation_config is not None:
         engine_kwargs["compilation_config"] = vllm_compilation_config

@@ -30,6 +30,11 @@ BLOCK = 16
 
 @pytest.fixture
 def manager() -> KVCacheManager:
+    return _make_manager()
+
+
+def _make_manager(num_speculative_blocks: int = 0) -> KVCacheManager:
+    """`num_speculative_blocks`: extra GDN state blocks per request, one per draft token."""
     init_none_hash(sha256)
     attention = FullAttentionSpec(
         block_size=BLOCK, num_kv_heads=1, head_size=8, dtype=torch.float16
@@ -40,6 +45,7 @@ def manager() -> KVCacheManager:
         dtypes=(torch.float16,),
         page_size_padded=attention.page_size_bytes,
         mamba_cache_mode="align",
+        num_speculative_blocks=num_speculative_blocks,
     )
     groups = [KVCacheGroupSpec(["attn"], attention)] + [
         KVCacheGroupSpec([f"gdn{i}"], gdn) for i in range(3)
@@ -104,21 +110,31 @@ def _churn(manager, tag: str) -> None:
         manager.free(request)
 
 
-def _scheduler(manager, max_num_scheduled_tokens=0, **attrs) -> SimpleNamespace:
+def _scheduler(
+    manager, max_num_scheduled_tokens=0, speculative_config=None, **attrs
+) -> SimpleNamespace:
     """The vLLM scheduler attributes the holder reads."""
     return SimpleNamespace(
         kv_cache_manager=manager,
-        vllm_config=SimpleNamespace(speculative_config=None),
+        vllm_config=SimpleNamespace(speculative_config=speculative_config),
+        use_eagle_block_drop=False,
         max_num_scheduled_tokens=max_num_scheduled_tokens,
         **attrs,
     )
 
 
 def _holder(
-    manager, requests, floor=0, running=(), waiting=(), skipped_waiting=()
+    manager,
+    requests,
+    floor=0,
+    running=(),
+    waiting=(),
+    skipped_waiting=(),
+    speculative_config=None,
 ) -> VLLMSessionKVHolder:
     scheduler = _scheduler(
         manager,
+        speculative_config=speculative_config,
         requests=requests,
         running=running,
         waiting=waiting,
@@ -129,9 +145,17 @@ def _holder(
     return holder
 
 
-def test_held_prefix_survives_churn_and_the_next_turn_hits_it(manager):
+@pytest.mark.parametrize(
+    "num_draft_tokens", [0, 3], ids=["no_drafts", "mtp3_without_block_drop"]
+)
+def test_held_prefix_survives_churn_and_the_next_turn_hits_it(num_draft_tokens):
+    # Drafts with the block drop off, as the engine sets them for the holder: vLLM's scheduler
+    # then builds this manager with use_eagle=False, and each request gets k more GDN state blocks.
+    manager = _make_manager(num_speculative_blocks=num_draft_tokens)
     requests = {}
-    holder = _holder(manager, requests)
+    holder = _holder(
+        manager, requests, speculative_config=object() if num_draft_tokens else None
+    )
     turn1 = _request("t1", list(range(50)))
     requests["t1"] = turn1
     holder.track("t1", session_id="s", group_id=0)
@@ -299,14 +323,14 @@ def test_free_floor_is_the_watermark_plus_one_prefill_chunk(manager):
     assert holder.free_floor_blocks == 8 + 4 * 7
 
 
-def test_holder_rejects_partial_block_hits_and_speculative_decoding(manager):
+def test_holder_rejects_partial_block_hits_and_the_eagle_block_drop(manager):
     manager.coordinator.enable_partial_hash_hits = True
     with pytest.raises(ValueError, match="does not support partial-block prefix hits"):
         VLLMSessionKVHolder.Config().build(scheduler=_scheduler(manager))
     manager.coordinator.enable_partial_hash_hits = False
-    scheduler = _scheduler(manager)
-    scheduler.vllm_config.speculative_config = object()
-    with pytest.raises(ValueError, match="does not support speculative decoding"):
+    scheduler = _scheduler(manager, speculative_config=object())
+    scheduler.use_eagle_block_drop = True
+    with pytest.raises(ValueError, match="EAGLE block drop off"):
         VLLMSessionKVHolder.Config().build(scheduler=scheduler)
 
 

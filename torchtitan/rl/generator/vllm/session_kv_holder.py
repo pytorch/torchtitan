@@ -68,14 +68,25 @@ class VLLMSessionKVHolder(Configurable):
 
     def __init__(self, config: Config, *, scheduler: Any) -> None:
         del config
-        # Partial-block prefix hits or speculative decoding move the replay point away from the
-        # prompt-end block this holds.
+        # Partial-block prefix hits move the replay point away from the prompt-end block this holds.
         if scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits:
             raise ValueError(
                 "session_kv_holder does not support partial-block prefix hits"
             )
-        if scheduler.vllm_config.speculative_config is not None:
-            raise ValueError("session_kv_holder does not support speculative decoding")
+
+        # vLLM's EAGLE/MTP block drop moves the replay point too: the next turn also needs the
+        # attention block past the held ones. Once that block is evicted, the hit falls to a block
+        # with no GDN state.
+        # TODO: delete with the engine's `disable_eagle_block_drop` key (`VLLMEngine._build_engine_args`).
+        if (
+            scheduler.vllm_config.speculative_config is not None
+            and scheduler.use_eagle_block_drop
+        ):
+            raise ValueError(
+                "session_kv_holder needs vLLM's EAGLE block drop off "
+                "(speculative_config.disable_eagle_block_drop=True)"
+            )
+
         self._scheduler = scheduler
         kv_cache_manager = scheduler.kv_cache_manager
         self._coordinator = kv_cache_manager.coordinator
