@@ -17,6 +17,7 @@ from typing import cast
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs
 from torch.distributed.tensor import DTensor
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -383,6 +384,12 @@ class VLLMModelWrapper(Module):
             device=device,
             max_num_tokens_per_step=max_num_batched_tokens,
         )
+        if self._dist_moe_runtime is not None and not envs.VLLM_MOE_SKIP_PADDING:
+            raise ValueError(
+                "Dist-MoE in the generator needs VLLM_MOE_SKIP_PADDING=1 (vLLM's "
+                "default); got 0. Only then does vLLM rewrite ForwardContext.is_padding "
+                "every step, and Dist-MoE uses it to skip padding rows."
+            )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:

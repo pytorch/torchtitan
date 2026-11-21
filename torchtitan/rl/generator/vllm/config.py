@@ -83,13 +83,16 @@ class VLLMCudaGraphConfig:
         ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it -- otherwise
         prefill chunks larger than the cap fall back to eager. A step holds at most
         ``max_num_seqs`` requests of at most ``max_model_len`` tokens, so ``FULL`` also
-        stops at ``max_num_seqs * max_model_len``. ``TorchTitanGPUModelRunner._dummy_run``
-        keeps each capture request within ``max_model_len``.
+        stops at ``max_num_seqs * max_model_len``. vLLM's capture splits a graph's
+        tokens evenly over its requests, so each request stays within ``max_model_len``.
 
             FULL, max_num_seqs=8, max_model_len=1000, auto sizes          -> [1, 2, ..., 1536, 2048]
             FULL, max_num_seqs=1, max_model_len=1000, auto sizes          -> [1, 2, ..., 992, 1000]
             FULL, max_num_seqs=1, max_model_len=1000, capture_sizes=[2048] -> ValueError
             FULL_DECODE_ONLY                                              -> unchanged
+
+        ``FULL`` captures mixed graphs at these token counts, and decode graphs at the
+        sizes up to ``max_num_seqs`` as request counts (``TorchTitanCudaGraphManager``).
 
         ``expert_sequence_parallel_size`` is the TP-axis shard count used by the
         internally sequence-sharded MoE path. A value greater than one removes
@@ -157,7 +160,10 @@ class VLLMCudaGraphConfig:
         return CompilationConfig(
             cudagraph_mode=self.mode,
             mode=CompilationMode.NONE,
-            cudagraph_capture_sizes=sizes,
+            prefill_cudagraph_capture_token_sizes=sizes,
+            decode_cudagraph_capture_request_sizes=[
+                size for size in sizes if size <= max_num_seqs
+            ],
         )
 
 

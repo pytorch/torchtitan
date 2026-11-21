@@ -23,7 +23,6 @@ from dataclasses import dataclass
 
 import torch
 from vllm.config import get_current_vllm_config
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
@@ -46,9 +45,9 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.generator.attention.gdn import paged_gdn
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     configure_hybrid_state,
+    get_linear_attention_metadata,
     LinearAttentionExecutionPath,
     TorchTitanLinearAttentionBackend,
-    TorchTitanLinearAttentionMetadata,
     unique_state_shape,
 )
 
@@ -187,13 +186,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         ), "Attention Gym convolution kernels do not support bias"
         num_tokens = mixed_qkv.shape[0]
         output_shape = (num_tokens, self.local_num_v_heads, self.head_v_dim)
-        attn_metadata = get_forward_context().attn_metadata
-        # vLLM's profiling/warmup runs have no attention metadata.
-        if attn_metadata is None:
+        gdn_metadata = get_linear_attention_metadata(self.prefix)
+        if gdn_metadata is None:
             return mixed_qkv.new_zeros(output_shape)
-        assert isinstance(attn_metadata, dict)
-        gdn_metadata = attn_metadata[self.prefix]
-        assert isinstance(gdn_metadata, TorchTitanLinearAttentionMetadata)
         assert (
             gdn_metadata.spec_sequence_masks is None
         ), "VLLMInnerGDN does not support speculative decoding"

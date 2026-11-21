@@ -89,45 +89,6 @@ _IMAGE_FIELDS = {
 }
 
 
-def keep_prefix_cached_image_data() -> None:
-    """Make vLLM's scheduler send every new request's image data to its worker. Idempotent.
-
-    Without it, vLLM's V1 model runner crashes when a request whose image was prefix-cached
-    is preempted:
-
-    1. GRPO samples of a group share a prompt, so every sample after the first hits the
-       prefix cache over its image. The scheduler sends such a request to the worker
-       without the image's data (`strip_covered_mm_data`): its KV is cached, so the image
-       needs no encoder run.
-    2. Under KV pressure the request is preempted, and its blocks can be evicted before it
-       resumes.
-    3. On resume the image is no longer cached, so the scheduler schedules its encoder
-       run. The V1 worker resumes the request from its own copy, which has no image data:
-       it skips the run, and ``_gather_mm_embeddings`` raises "Encoder cache miss", which
-       kills the engine loop.
-
-    The V2 model runner is not affected: it resends a resumed request as a new one, whose
-    data is stripped against the prefix-cache hit at resume.
-
-    The engine core and its worker run in this process, so the worker's features are the
-    scheduler's own objects: keeping the data costs no memory.
-
-    TODO: remove once the generator runs on the V2 model runner
-    (https://github.com/pytorch/torchtitan/pull/5956).
-    """
-    import vllm.v1.core.sched.output as vllm_scheduler_output
-
-    vllm_scheduler_output.strip_covered_mm_data = _keep_mm_features
-
-
-def _keep_mm_features(
-    mm_features: list[MultiModalFeatureSpec],
-    num_computed_tokens: int,
-    uses_mrope: bool = False,
-) -> list[MultiModalFeatureSpec]:
-    return mm_features
-
-
 def image_prompt_to_engine_input(
     prompt: Prompt,
     pixel_values: Sequence[torch.Tensor],
@@ -414,7 +375,7 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
         # vLLM orders the embeddings as the placeholder tokens appear in the batch, the
         # order masked_scatter_ fills them in. Unlike assigning through a boolean mask,
         # whose nonzero syncs the host when the mask is on the GPU, masked_scatter_
-        # never syncs (vLLM's V1 runner passes a pinned CPU mask).
+        # never syncs (vLLM's runner passes a pinned CPU mask).
         inputs_embeds.masked_scatter_(
             is_multimodal.to(inputs_embeds.device, non_blocking=True).unsqueeze(-1),
             torch.cat(list(multimodal_embeddings)).to(inputs_embeds.dtype),

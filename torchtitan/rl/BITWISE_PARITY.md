@@ -65,6 +65,9 @@ back to the trainer's ops:
     `VarlenInnerAttention` through vLLM's `CUSTOM` backend -- the same FA3 varlen
     kernel as the trainer. The shared `num_splits=1` fix above removes the only
     batch-dependent split-k, so the two match bitwise.
+    Not yet on H100 at head dim 192 (MLA models such as Kimi K3): FA3 gives the
+    trainer's unpaged call 128-key tiles and the generator's paged calls 96, which
+    likely explains why their logprobs differ there (TODO in `_FlashAttentionPageSize`).
   - *Flex* (Qwen3 flex): the generator runs vLLM's `FLEX_ATTENTION` backend.
     `BatchInvariantFlexConverter` (a `ModelConfigConverter` wired in via
     `converters=[BatchInvariantFlexConverter.Config()]`) pins

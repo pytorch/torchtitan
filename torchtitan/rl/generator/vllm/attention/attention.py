@@ -41,40 +41,60 @@ from torchtitan.tools.utils import (
 )
 
 
-class _FA4PageSize:
-    """Pick the KV kernel page size for FA4 on SM100/SM103: 128 tokens, or 16 if batch-invariant.
+class _FlashAttentionPageSize:
+    """Pick the KV kernel page size for FA4 and FA3.
 
-    There, FA4 loads prefill K/V with one bulk copy (TMA) only when a page holds
-    exactly one 128-key tile, and decodes one token per sequence on its SwapAB
+        FA4 on SM100/SM103:  128 tokens, or 16 if batch-invariant
+        FA3 (SM90):          vLLM's default (usually the whole KV block), or 16 if batch-invariant
+        other GPUs:          vLLM's default (e.g. SM120, which runs FA4's SM80 kernel)
+
+    On SM100/SM103, FA4 loads prefill K/V with one bulk copy (TMA) only when a page
+    holds exactly one 128-key tile, and decodes one token per sequence on its SwapAB
     kernel. 16-token pages get a slower gather. vLLM already picks 128 for head
-    dim 256. Other GPUs that run FA4 (e.g. SM120, whose FA4 forward is the SM80
-    kernel) keep vLLM's default.
+    dim 256.
     Costs: prefix-cache reuse in whole 128-token pages, up to 127 KV slots wasted
     per sequence, and an explicit ``block_size`` that is not a multiple of 128 now
     fails.
-    Batch-invariant runs get exactly 16-token pages. FA4 runs its SwapAB decode
-    kernel on any page that is a multiple of 128 (``SwapABPolicy.page_multiple`` in
-    ``flash_attn/cute/config.py``). SwapAB reads 256 keys per tile and prefill reads
-    128, so decode would not match prefill bitwise. ``MultipleOf(16)`` is not enough:
-    it keeps a hybrid model's 1152-token KV block as one page.
-    TODO: ask FA4 for its standard decode kernel per call once torch's varlen
-    attention can pass that choice; batch-invariant runs can then keep 128-token pages.
+    Why 16 if batch-invariant: with larger pages, decode and prefill can sum keys in
+    different tiles, so they would not match bitwise.
+    - FA4 runs its SwapAB decode kernel on any page that is a multiple of 128
+      (``SwapABPolicy.page_multiple`` in ``flash_attn/cute/config.py``). SwapAB reads
+      256 keys per tile and prefill reads 128.
+    - FA3 uses TMA for paged K/V only when a page is a multiple of its TMA key tile and
+      the call's longest query fills more than one query tile (``get_pagedkv_tma`` in
+      ``hopper/flash_api.cpp``). So a step with a long prefill uses TMA for all its
+      rows, and a decode-only step never does. At head dim 192, a TMA key tile holds
+      128 keys and a non-TMA tile 96 (``hopper/tile_size.h``).
+    Cost: on 16-token pages neither FA4 nor FA3 uses TMA, and FA4 decode skips SwapAB,
+    so batch-invariant runs can be slower than with larger pages.
+    ``MultipleOf(16)`` is not enough: it keeps a hybrid model's whole KV block (e.g.
+    Kimi K3's 256 tokens) as one page.
+    TODO: batch-invariant runs can keep vLLM's pages once torch's varlen attention can
+    ask FA4 for its standard decode kernel per call, and FA3 gets a switch for paged
+    TMA (its ``fwd`` op has none).
+    TODO: at head dim 192, the trainer's unpaged FA3 call gets 128-key tiles and paged
+    calls here get 96, which likely explains why batch-invariant trainer and generator
+    logprobs differ on H100 (Kimi K3: ``bit_wise/logprob_diff/max`` ~0.1). Needs one key
+    tile on both sides: FA3 can't pick it per call, and torch's ``varlen_attn`` rejects
+    ``block_table`` under autograd.
     """
 
     @classmethod
     def get_supported_kernel_block_sizes(
         cls, kv_cache_spec: KVCacheSpec | None = None
     ) -> list[int | MultipleOf]:
-        if (
-            get_cuda_flash_attention_impl() == "FA4"
-            and torch.cuda.get_device_capability()[0] == 10
-        ):
+        flash_impl = get_cuda_flash_attention_impl()
+        if flash_impl == "FA4" and torch.cuda.get_device_capability()[0] == 10:
             return [16] if is_in_batch_invariant_mode() else [128]
+        if flash_impl == "FA3" and is_in_batch_invariant_mode():
+            return [16]
         return super().get_supported_kernel_block_sizes(kv_cache_spec)
 
 
 @register_backend(AttentionBackendEnum.CUSTOM)
-class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend):
+class TorchTitanVarlenInnerAttentionBackend(
+    _FlashAttentionPageSize, FlashAttentionBackend
+):
     """Custom vLLM attention backend using PyTorch's native FlashAttention kernel.
 
     This class is not directly referenced in user code. It is registered into
@@ -110,7 +130,7 @@ class TorchTitanVarlenInnerAttentionBackend(_FA4PageSize, FlashAttentionBackend)
 
 
 class TorchTitanVarlenInnerAttentionDiffKVBackend(
-    _FA4PageSize, FlashAttentionDiffKVBackend
+    _FlashAttentionPageSize, FlashAttentionDiffKVBackend
 ):
     """PyTorch varlen backend using vLLM's unequal K/V cache support."""
 
@@ -122,7 +142,8 @@ class TorchTitanVarlenInnerAttentionDiffKVBackend(
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         # vLLM sizes a hybrid model's attention page from a spec without head_size_v,
         # so V gets K's head size and the page comes out larger than this layer's real
-        # page. vLLM then cannot split a block into smaller kernel blocks (FA4 on SM100).
+        # page. vLLM then cannot split a block into smaller kernel blocks (FA4 on SM100,
+        # batch-invariant FA3).
         # vLLM's DiffKV backends keep V's head size on the class (set_head_size_v), so
         # one V head size per process; Kimi K3 has one.
         # TODO: drop once vLLM's DiffKV backends set head_size_v in customize_spec.

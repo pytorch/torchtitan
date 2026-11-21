@@ -59,7 +59,6 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
         **os.environ,
         "PYTHONPATH": str(root),
         MODEL_ENV: str(Path(model).resolve()),
-        "VLLM_USE_V2_MODEL_RUNNER": "0",
         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_USE_BREAKABLE_CUDAGRAPH": "1",
@@ -68,7 +67,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
         "HF_HUB_OFFLINE": "1",
     }
     results = []
-    for mode in ("eager", "full"):
+    for mode in ("eager", "full", "decode_only"):
         output = tmp_path / f"{mode}.json"
         command = [sys.executable]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
@@ -95,7 +94,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
                 pytrace=False,
             )
         results.append(json.loads(output.read_text()))
-    eager, full = results
+    eager, full, decode_only = results
     # Real packed recurrence ran eagerly and was captured for FULL replay.
     assert [False, "PACKED"] in eager["recurrent_calls"]
     assert [True, "PACKED"] in full["recurrent_calls"]
@@ -128,10 +127,28 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     if mismatches:
         pytest.fail(f"eager/FULL completion mismatches: {mismatches}", pytrace=False)
     assert eager["states"] == full["states"]
+    # FULL_DECODE_ONLY replays decode graphs on the single-token path and runs every
+    # other step eagerly.
+    assert decode_only["outputs"] == eager["outputs"]
+    assert decode_only["states"] == eager["states"]
+    decode_replays = [
+        step for step in decode_only["dispatch"] if step["mode"] == "FULL"
+    ]
+    assert decode_replays
+    assert all(
+        step["uniform"] and step["path"] == "SINGLE_TOKEN" for step in decode_replays
+    )
+    assert any(
+        step["kind"] == "mixed" and step["mode"] == "NONE"
+        for step in decode_only["dispatch"]
+    )
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
     replayed = [step for step in full["dispatch"] if step["mode"] == "FULL"]
-    # The builder follows the graph the runner picked.
-    assert all((step["path"] == "PACKED") == (not step["uniform"]) for step in replayed)
+    # The builder follows the replayed graph: packed for a mixed graph wider than 1 token.
+    assert all(
+        (step["path"] == "PACKED") == (not step["uniform"] and step["num_tokens"] > 1)
+        for step in replayed
+    )
     kinds = {step["kind"] for step in replayed}
     if kinds != {"prefill", "mixed", "decode"}:
         dispatch_summary = [
@@ -149,8 +166,16 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     )
     assert len({tuple(step["slots"]) for step in replayed}) > 1
     single_token = [step for step in replayed if step["path"] == "SINGLE_TOKEN"]
+    # A fresh 1-token prompt alone replays the 1-token mixed graph.
     assert any(step["initial"] == [False] for step in single_token)
-    assert any(set(step["initial"]) == {False, True} for step in single_token)
+    # A fresh 1-token prompt beside a decode is no decode batch to vLLM: the 2-token
+    # mixed graph, packed path.
+    assert any(
+        step["kind"] == "decode"
+        and step["path"] == "PACKED"
+        and set(step["initial"]) == {False, True}
+        for step in replayed
+    )
 
 
 @pytest.mark.parametrize(
@@ -297,7 +322,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         metadata = next(
             metadata
             for metadata in get_forward_context().attn_metadata.values()
-            if isinstance(metadata, gdn.TorchTitanLinearAttentionMetadata)
+            if isinstance(metadata, TorchTitanLinearAttentionMetadata)
         )
         recurrent_calls.append(
             [torch.cuda.is_current_stream_capturing(), metadata.execution_path.name]
@@ -331,8 +356,13 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             attention_config={"backend": "CUSTOM"},
             compilation_config={
                 "mode": 0,
-                "cudagraph_mode": "FULL" if mode == "full" else "NONE",
-                "cudagraph_capture_sizes": [1, 2, 4, 64, 128],
+                "cudagraph_mode": {
+                    "eager": "NONE",
+                    "full": "FULL",
+                    "decode_only": "FULL_DECODE_ONLY",
+                }[mode],
+                "prefill_cudagraph_capture_token_sizes": [1, 2, 4, 64, 128],
+                "decode_cudagraph_capture_request_sizes": [1, 2, 4],
                 "cudagraph_num_of_warmups": 1,
             },
             max_model_len=256,
@@ -370,35 +400,50 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             for layer in layers.values():
                 for state in layer.kv_cache:
                     state.zero_()
-        replays = []
-        if mode == "full":
-            entries = runner.model.concrete_cudagraph_entries
-            for entry in entries.values():
-                assert entry.cudagraph is not None
+        # A step calls prepare_attn, then runs eagerly or replays one FULL graph.
+        step = {}
+        prepare_attn = runner.model_state.prepare_attn
 
-                def replay(original=entry.cudagraph.replay):
-                    replays.append(get_forward_context().batch_descriptor.uniform)
-                    return original()
+        def record_prepare_attn(input_batch, cudagraph_mode, *args, **kwargs):
+            metadata = prepare_attn(input_batch, cudagraph_mode, *args, **kwargs)
+            step.update(
+                requests=list(input_batch.req_ids),
+                mode=cudagraph_mode.name,
+                metadata=metadata,
+                num_tokens=input_batch.num_tokens_after_padding,
+                replays=[],
+            )
+            return metadata
 
-                entry.cudagraph.replay = replay
-        original_forward = runner._model_forward
+        runner.model_state.prepare_attn = record_prepare_attn
+        run_fullgraph = runner.cudagraph_manager.run_fullgraph
 
-        def forward(*args, **kwargs):
-            context = get_forward_context()
-            requests = list(runner.input_batch.req_ids)
-            metadata = context.attn_metadata
+        def record_replay(descriptor):
+            step["replays"].append(descriptor)
+            return run_fullgraph(descriptor)
+
+        runner.cudagraph_manager.run_fullgraph = record_replay
+        execute_model = runner.execute_model
+
+        def record_step(*args, **kwargs):
+            step.clear()
+            value = execute_model(*args, **kwargs)
+            if not step:
+                return value
+            requests, metadata = step["requests"], step["metadata"]
             first = metadata[next(iter(layers))]
             offsets = first.non_spec_query_start_loc.cpu().tolist()[: len(requests) + 1]
             prefills = [end - start > 1 for start, end in zip(offsets, offsets[1:])]
             kind = "prefill" if all(prefills) else "decode"
             if any(prefills) and not all(prefills):
                 kind = "mixed"
-            runtime = context.cudagraph_runtime_mode.name
-            assert runtime in ("NONE", "FULL")
-            replays.clear()
-            value = original_forward(*args, **kwargs)
-            uniform = context.batch_descriptor.uniform
-            assert replays == ([uniform] if runtime == "FULL" else [])
+            assert step["mode"] in ("NONE", "FULL")
+            assert len(step["replays"]) == int(step["mode"] == "FULL")
+            uniform, num_tokens = None, step["num_tokens"]
+            if step["replays"]:
+                (graph,) = step["replays"]
+                uniform = graph.uniform_token_count is not None
+                num_tokens = graph.num_tokens
             hashes = {}
             for name, layer in layers.items():
                 slots = (
@@ -412,20 +457,21 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
                     raw = state[slots].view(torch.uint8).cpu().numpy().tobytes()
                     hashes[name].append(hashlib.sha256(raw).hexdigest())
             result["states"].append([requests, offsets, hashes])
-            record = asdict(context.batch_descriptor)
-            assert record["num_tokens"] == kwargs["input_ids"].shape[0]
-            record.update(
-                mode=runtime,
-                slots=slots,
-                kind=kind,
-                actual=offsets[-1],
-                path=first.execution_path.name,
-                initial=first.has_initial_state.cpu().tolist()[: len(requests)],
+            result["dispatch"].append(
+                dict(
+                    num_tokens=num_tokens,
+                    uniform=uniform,
+                    mode=step["mode"],
+                    slots=slots,
+                    kind=kind,
+                    actual=offsets[-1],
+                    path=first.execution_path.name,
+                    initial=first.has_initial_state.cpu().tolist()[: len(requests)],
+                )
             )
-            result["dispatch"].append(record)
             return value
 
-        runner._model_forward = forward
+        runner.execute_model = record_step
 
     engine.collective_rpc(instrument)
     sampling = SamplingParams(

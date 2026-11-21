@@ -133,7 +133,6 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
     if gen_config.debug.batch_invariant:
         force_trainer_logprobs_for_batch_invariance()

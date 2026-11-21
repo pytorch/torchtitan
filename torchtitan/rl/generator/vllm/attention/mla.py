@@ -279,9 +279,9 @@ class _VLLMNativeMLAAttention(VLLMNativeMLAAttention, Module):
     sync's in-place copy updates them without re-deriving.
     """
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Derive the absorbed decode weights as non-persistent views of ``wkv_b``."""
-        super().process_weights_after_loading(act_dtype)
+        super().process_weights_after_loading()
         wkv_b_storage = self.kv_b_proj.weight.untyped_storage().data_ptr()
         for name in ("W_UK_T", "W_UV"):
             weight = self._parameters.pop(name)
