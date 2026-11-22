@@ -232,12 +232,13 @@ In `Trainer.__init__`, before any component is built:
    the replacement's `sharding_config`; `derive()` preserves it when the contract
    is unchanged.
 7. Log one line per distinct (override, source class -> replacement class,
-   kwargs) group, with the match count and every replaced FQN.
-   `apply_overrides()` returns one line per replaced node.
+   kwargs) group, with the match count and folded indexed FQN ranges
+   (matching `format_config()`). `apply_overrides()` returns one line per
+   replaced node.
 
 ```
-INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=2 fqns=['model.layers.0.feed_forward', 'model.layers.1.feed_forward']
-INFO: Applied 2 override(s)
+INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=32 fqns=['model.layers.{0..31}.feed_forward']
+INFO: Applied 32 override(s)
 ```
 
 The model config is a `Configurable.Config` nested directly at `model` in the

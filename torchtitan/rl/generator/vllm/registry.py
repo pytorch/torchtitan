@@ -47,7 +47,7 @@ from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.model import get_attention_dimensions
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import device_type, has_cuda_capability
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -68,7 +68,11 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 TORCHTITAN_MODEL_TYPE = "torchtitan"
 
 # Selects TorchTitan's worker, whose runner adds FULL decode graphs to FULL mode.
-TORCHTITAN_WORKER_CLS = "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
+TORCHTITAN_WORKER_CLS = (
+    "torchtitan.rl.generator.vllm.worker.TorchTitanXPUWorker"
+    if device_type == "xpu"
+    else "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
+)
 
 
 def uses_compressed_mla_cache(inner_attention: InnerAttention.Config) -> bool:
