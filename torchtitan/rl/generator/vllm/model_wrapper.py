@@ -54,6 +54,7 @@ from torchtitan.rl.generator.model import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
+from torchtitan.tools.utils import device_type
 
 
 logger = init_logger(__name__)
@@ -316,7 +317,7 @@ class VLLMModelWrapper(Module):
         self._initialize_dist_moe_runtime(
             dist_moe_runtime, max_num_batched_tokens, device
         )
-        maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        maybe_apply_numa_binding(torch.accelerator.current_device_index(), device_type)
         # Loads the initial weights, then unshards the model, so vLLM profiles GPU
         # memory with the model's representation during forward.
         self.model_state_dict_loader = ModelStateDictLoader(

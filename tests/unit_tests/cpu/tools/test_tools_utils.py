@@ -15,6 +15,7 @@ from torchtitan.tools.utils import (
     get_cuda_flash_attention_impl,
     get_local_device,
     get_peak_flops,
+    get_visible_devices_env_var,
 )
 
 
@@ -147,3 +148,11 @@ def test_get_peak_flops(monkeypatch, device_name, expected):
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=""),
     )
     assert get_peak_flops(device_name) == expected
+
+
+def test_get_visible_devices_env_var_rejects_unknown_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("torchtitan.tools.utils.device_type", "cpu")
+    with pytest.raises(ValueError, match="No visible-device mask env var"):
+        get_visible_devices_env_var()

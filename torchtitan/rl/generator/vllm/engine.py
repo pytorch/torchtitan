@@ -21,10 +21,13 @@ from vllm.inputs import EngineInput
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.cache import LRUCache
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention.gdn import GDN
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
@@ -53,6 +56,7 @@ from torchtitan.rl.generator.vllm.stat_logger import (
     StatLoggerContext,
     VllmOtelStatLogger,
 )
+from torchtitan.tools.utils import device_type
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +97,39 @@ def add_extra_vllm_engine_args(
             f"extra_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
         )
     engine_kwargs.update(extra_engine_args)
+
+
+def _validate_platform(
+    config: VLLMEngine.Config, model: Decoder.Config, *, batch_invariant: bool
+) -> None:
+    """Reject what TorchTitan's vLLM path supports only on CUDA (and ROCm)."""
+    if device_type == "cuda":
+        return
+    if config.cuda_graph.mode != "NONE":
+        raise ValueError(
+            f"vLLM CUDA graphs need CUDA; set cuda_graph.mode='NONE' on {device_type}."
+        )
+    # Off CUDA only flex attention runs: TorchTitan's CUSTOM backend and the
+    # compressed-MLA prefill call varlen_attn -> aten::_flash_attention_forward,
+    # which is CUDA-only (e.g. not implemented on XPU).
+    # TODO(vllm-project/vllm#69044): vLLM's XPU platform accepts FLEX_ATTENTION.
+    if vllm_attention_backend(model) is not AttentionBackendEnum.FLEX_ATTENTION:
+        raise ValueError(
+            f"Only flex attention (FlexInnerAttention) is supported on {device_type}; "
+            "varlen attention and MLA with a compressed cache need CUDA."
+        )
+    if batch_invariant:
+        raise ValueError(
+            f"debug.batch_invariant is only verified on CUDA, got {device_type}."
+        )
+    # TorchTitan's GDN/KDA backend runs Attention Gym's paged linear-attention
+    # kernels, which are only verified on CUDA.
+    if any(
+        isinstance(layer.attention, (GDN.Config, KDA.Config)) for layer in model.layers
+    ):
+        raise ValueError(
+            f"GDN/KDA linear attention is only verified on CUDA, got {device_type}."
+        )
 
 
 class VLLMEngine(GenerationEngine):
@@ -177,6 +214,7 @@ class VLLMEngine(GenerationEngine):
             cuda_graph=config.cuda_graph.mode != "NONE",
             deterministic=debug.deterministic,
         )
+        _validate_platform(config, model, batch_invariant=debug.batch_invariant)
         self.config = config
         self._reset_kv_cache_on_model_state_dict_load = (
             reset_kv_cache_on_model_state_dict_load
