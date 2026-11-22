@@ -30,7 +30,7 @@ class TestDeepSeekV3MTPRemat(unittest.TestCase):
             seq_len=seq_len,
             num_mtp_layers=2,
             parallelism=ParallelismConfig(),
-            attn_backend="varlen",
+            attn_backend="flex",
         )
         with torch.device("meta"):
             baseline = config.build()
