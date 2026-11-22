@@ -428,7 +428,7 @@ class CheckpointManager(BaseCheckpointManager):
         sl.add_step_tag("checkpoint_save")
 
         self.maybe_wait_for_saving()
-        self._purge_stale_checkpoints(saving_step=curr_step)
+        self._purge_stale_checkpoints(saving_step=curr_step, last_step=last_step)
 
         begin = time.monotonic()
         checkpoint_phase = (

@@ -807,6 +807,40 @@ class TestCheckpointManager(unittest.TestCase):
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
+    def test_final_model_only_export_keeps_latest_k_checkpoints(
+        self, mock_save, mock_rank
+    ):
+        # The export goes to exports/, so the purge before it must not reserve
+        # a slot in the checkpoint folder for it.
+        mock_save.side_effect = self.fake_save
+        cfg = self.trainer_config.checkpointer
+        cfg.interval = 1
+        cfg.keep_latest_k = 2
+        cfg.last_save_model_only = True
+        manager = CheckpointManager(
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            extra_states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=1)
+        manager.save(curr_step=2)
+        manager.save(curr_step=3, last_step=True)
+        manager.close()
+
+        self.assertEqual(
+            ["exports", "step-1", "step-2"], sorted(os.listdir(self.test_folder))
+        )
+        self.assertEqual(
+            ["step-3"], os.listdir(os.path.join(self.test_folder, "exports"))
+        )
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
     def test_seed_checkpoint_stays_at_step_zero(self, mock_save, mock_rank):
         # create_seed_checkpoint saves through the last-step path at step 0, and
         # load() restores step-0 as the model-only seed. Moving it under
@@ -1019,7 +1053,9 @@ class TestCheckpointManager(unittest.TestCase):
             mock.patch.object(
                 manager,
                 "_purge_stale_checkpoints",
-                side_effect=lambda *, saving_step: calls.append(("purge", saving_step)),
+                side_effect=lambda *, saving_step, last_step=False: calls.append(
+                    ("purge", saving_step)
+                ),
             ),
             mock.patch.object(
                 manager,

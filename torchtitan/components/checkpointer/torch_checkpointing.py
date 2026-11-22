@@ -447,6 +447,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # Always preserve the current step's published and staging directories.
         self._purge_stale_checkpoints(
             saving_step=curr_step,
+            last_step=last_step,
             staging_dir_prefix=(
                 self._manager_config.save.writer_config.temp_dir_prefix
             ),
