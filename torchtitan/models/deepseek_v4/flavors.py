@@ -76,6 +76,7 @@ from .sharding import (
     hc_pre_sharding_config,
     indexer_sharding_config,
     inner_indexer_sharding_config,
+    invariant_state_sharding_config,
     mtp_block_sharding_config,
     mtp_hc_head_sharding_config,
     wo_a_sharding_config,
@@ -132,7 +133,13 @@ def _make_compressor_config(
     norm_eps: float,
     coff: int,
     rope: RoPE.Config,
+    state_tp: spmd.PerMeshAxisSpmdType = spmd.R,
 ) -> "Compressor.Config":
+    state_sharding = (
+        invariant_state_sharding_config("weight")
+        if state_tp is spmd.I
+        else replicated_state_sharding_config("weight")
+    )
     return Compressor.Config(
         rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
         head_dim=head_dim,
@@ -146,7 +153,7 @@ def _make_compressor_config(
             bias=False,
             param_init=_LINEAR_INIT,
             inplace_wgrad_accum=False,
-            sharding_config=replicated_state_sharding_config("weight"),
+            sharding_config=state_sharding,
         ),
         wgate=Linear.Config(
             in_features=dim,
@@ -154,18 +161,18 @@ def _make_compressor_config(
             bias=False,
             param_init=_LINEAR_INIT,
             inplace_wgrad_accum=False,
-            sharding_config=replicated_state_sharding_config("weight"),
+            sharding_config=state_sharding,
         ),
         norm=RMSNorm.Config(
             normalized_shape=head_dim,
             eps=norm_eps,
             param_init=_NORM_INIT,
-            sharding_config=replicated_state_sharding_config("weight"),
+            sharding_config=state_sharding,
         ),
         param_init={
             "ape": partial(nn.init.trunc_normal_, std=0.02),
         },
-        sharding_config=compressor_sharding_config(),
+        sharding_config=compressor_sharding_config(tp=state_tp),
     )
 
 
@@ -197,14 +204,14 @@ def _make_indexer_config(
             out_features=num_index_heads * index_head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight"),
+            sharding_config=invariant_state_sharding_config("weight"),
         ),
         weights_proj=Linear.Config(
             in_features=dim,
             out_features=num_index_heads,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=replicated_state_sharding_config("weight"),
+            sharding_config=invariant_state_sharding_config("weight"),
         ),
         compressor=_make_compressor_config(
             dim=dim,
@@ -214,6 +221,7 @@ def _make_indexer_config(
             norm_eps=norm_eps,
             coff=coff,
             rope=rope,
+            state_tp=spmd.I,
         ),
         sharding_config=indexer_sharding_config(),
     )

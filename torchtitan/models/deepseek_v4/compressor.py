@@ -168,6 +168,14 @@ class Compressor(Module):
         # DeepSeek-V4 reference.
         start_G = attention_metadata.group_start
         first_G = attention_metadata.group_first
+        if spmd.is_type_checking():
+            # Geometry is token-indexed and identical on every TP rank.
+            metadata_layout = spmd.SpmdType(
+                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.I},
+                partition_spec=spmd.PartitionSpec(("dp", "cp")),
+            )
+            spmd.assert_type(start_G, metadata_layout)
+            spmd.assert_type(first_G, metadata_layout)
         token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
         kv, score = kv[token_GR], score[token_GR]
         comp_positions = positions[start_G]
@@ -234,6 +242,13 @@ class Indexer(Module):
         return_scores: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project features and return document-local selections and requested scores."""
+        tp_group = spmd_mesh_group("tp")
+        if tp_group is not None:
+            # The indexer is TP-invariant: its params only receive the aux-loss
+            # gradient, which is identical on every rank.
+            assert not x.requires_grad and not qr.requires_grad
+            x = spmd.reinterpret_no_grad(x, tp_group, dst=spmd.I)
+            qr = spmd.reinterpret_no_grad(qr, tp_group, dst=spmd.I)
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -321,7 +336,7 @@ class InnerIndexer(Module):
             ).squeeze(0)
 
         if not return_scores:
-            return topk_indices, idx_q.new_empty((idx_q.size(0), 0))
+            return topk_indices, torch.empty_like(idx_q[:, :0, 0])
 
         valid_TK = topk_indices >= 0
         gather_indices_TK = compressed_gather_indices(
@@ -461,8 +476,4 @@ class SparseIndexerLoss(AuxLoss):
         raw_sum = self._logged_kl(
             p_TK, t_TK, topk_scores_TK.float(), slot_valid_TK
         ).sum()
-        # TP-replicated students sum their gradients. Keep the globally correct
-        # metric, but contribute only 1/TP of its gradient on each rank.
-        tp_size = spmd_mesh_size("tp")
-        raw_sum = raw_sum.detach() + (raw_sum - raw_sum.detach()) / tp_size
         return self.inject(raw_sum, carrier=carrier, denominator=denominator)
