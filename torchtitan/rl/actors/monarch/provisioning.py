@@ -8,7 +8,8 @@
 CPU meshes on the controller host, and the Monarch client's shutdown."""
 
 import logging
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from monarch.actor import (
@@ -79,12 +80,25 @@ class PerHostProvisioner:
     The mask's variable comes from this (the controller's) device type, so the
     controller runs on a node with the same accelerator as the workers, as the
     Monarch launchers do.
+
+    Args:
+        total_gpus: Number of GPUs to hand out.
+        device_ids: The host's device ids to hand out, in order. ``None`` hands out
+            ``0 .. total_gpus - 1``.
     """
 
-    def __init__(self, total_gpus: int = 8):
+    def __init__(self, total_gpus: int = 8, *, device_ids: Sequence[str] | None = None):
+        self.env_var = get_visible_devices_env_var()
+        if device_ids is None:
+            device_ids = [str(index) for index in range(total_gpus)]
+        if len(device_ids) < total_gpus:
+            raise ValueError(
+                f"The run needs {total_gpus} GPUs, but {self.env_var} lists "
+                f"{len(device_ids)}: {','.join(device_ids)}"
+            )
+        self.device_ids = list(device_ids)
         self.total_gpus = total_gpus
         self.next_gpu = 0
-        self.env_var = get_visible_devices_env_var()
 
     @property
     def available(self) -> int:
@@ -96,10 +110,10 @@ class PerHostProvisioner:
                 f"Requested {num_gpus} GPUs but only {self.available} "
                 f"available (total={self.total_gpus}, allocated={self.next_gpu})"
             )
-        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
+        gpu_ids = self.device_ids[self.next_gpu : self.next_gpu + num_gpus]
         self.next_gpu += num_gpus
 
-        return {self.env_var: ",".join(str(g) for g in gpu_ids)}
+        return {self.env_var: ",".join(gpu_ids)}
 
 
 @dataclass
@@ -268,10 +282,16 @@ def spawn_proc_mesh(
             for gen_host_mesh in generator_host_meshes
         ]
     else:
-        # Single-node mode: partition GPUs on this_host() via
-        # the visible-devices mask
+        # Single-node mode: partition GPUs on this_host() via the visible-devices mask,
+        # handing out the GPUs this process may use in the order its own mask lists them:
+        # CUDA_VISIBLE_DEVICES=4,5,6,7 runs on GPUs 4-7, and
+        # CUDA_VISIBLE_DEVICES=0,1,4,5,2,3,6,7 gives the trainer GPUs 0,1,4,5.
         host_mesh = this_host()
-        provisioner = PerHostProvisioner(total_gpus=total_gpus)
+        visible_devices = os.environ.get(get_visible_devices_env_var())
+        provisioner = PerHostProvisioner(
+            total_gpus=total_gpus,
+            device_ids=visible_devices.split(",") if visible_devices else None,
+        )
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,

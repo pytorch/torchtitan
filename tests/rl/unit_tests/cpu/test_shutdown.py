@@ -448,6 +448,47 @@ def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
 
 
 @pytest.mark.parametrize(
+    "visible, expected",
+    [
+        (None, ["0,1", "2", "3"]),
+        ("4,5,6,7", ["4,5", "6", "7"]),
+        # A reordered mask places the trainer on GPUs 0,1,4,5.
+        ("0,1,4,5,2,3,6,7", ["0,1", "4", "5"]),
+    ],
+)
+def test_spawn_proc_mesh_on_this_host_follows_the_visible_devices_mask(
+    bootstrap_cmd_returns_env, monkeypatch, visible, expected
+):
+    """Single-node mode hands out the controller's visible devices in their listed order."""
+    host = _FakeHostMesh()
+    monkeypatch.setattr(provisioning, "this_host", lambda: host)
+    if visible is None:
+        monkeypatch.delenv(get_visible_devices_env_var(), raising=False)
+    else:
+        monkeypatch.setenv(get_visible_devices_env_var(), visible)
+
+    provisioning.spawn_proc_mesh(
+        trainer_world_size=2, per_generator_world_size=1, num_generators=2
+    )
+
+    assert host.visible_devices == expected
+
+
+def test_spawn_proc_mesh_on_this_host_needs_enough_visible_devices(
+    bootstrap_cmd_returns_env, monkeypatch
+):
+    host = _FakeHostMesh()
+    monkeypatch.setattr(provisioning, "this_host", lambda: host)
+    monkeypatch.setenv(get_visible_devices_env_var(), "4,5")
+
+    with pytest.raises(ValueError, match="needs 4 GPUs, but .* lists 2: 4,5"):
+        provisioning.spawn_proc_mesh(
+            trainer_world_size=2, per_generator_world_size=1, num_generators=2
+        )
+    assert host.visible_devices == []
+
+
+@pytest.mark.parametrize(
     "num_hosts, layout, match",
     [
         (1, "AAABBB", "need 5 GPUs per host, but gpus_per_node is 4"),
