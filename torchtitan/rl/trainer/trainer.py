@@ -33,6 +33,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.quantized_operands import OperandFormat, pack_quantized_operands
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -143,6 +144,8 @@ class Trainer(Configurable):
         )
         # Set by `register_model_state_dict_source`; None pushes through TorchStore.
         self._model_state_dict_transport: ModelStateDictTransport | None = None
+        # Set by `register_quantized_operand_formats`.
+        self._quantized_operand_formats: dict[str, OperandFormat] = {}
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -480,6 +483,7 @@ class Trainer(Configurable):
             # Generators read the staging buffer outside stream order.
             if stream is not None:
                 await asyncio.to_thread(stream.synchronize)
+            await transport.finish_stage()
             return
         model_state_dict = self._trainable_model_state_dict()
         await asyncio.to_thread(
@@ -535,6 +539,12 @@ class Trainer(Configurable):
             preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
         )
 
+    def register_quantized_operand_formats(
+        self, formats: dict[str, OperandFormat]
+    ) -> None:
+        """Send these parameters as the generators' quantized operands from now on."""
+        self._quantized_operand_formats = formats
+
     def _trainable_model_state_dict(self) -> dict[str, torch.Tensor]:
         """Merge the state dicts of this rank's model parts, leaving out the parameters
         that do not train.
@@ -548,12 +558,22 @@ class Trainer(Configurable):
             for name, param in model_part.named_parameters(remove_duplicate=False)
             if not param.requires_grad
         )
-        return {
+        model_state_dict = {
             name: tensor
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
             if canonical_fqn(name) not in frozen
         }
+        if not self._quantized_operand_formats:
+            return model_state_dict
+        # Quantizing reads the weights: on the push stream, after the optimizer step.
+        stream = self._push_model_state_dict_stream
+        with stream if stream is not None else nullcontext():
+            return pack_quantized_operands(
+                model_state_dict,
+                self._quantized_operand_formats,
+                dtype=self._transfer_dtype,
+            )
 
     def _preserve_dtype_keys(
         self, model_state_dict: dict[str, torch.Tensor]

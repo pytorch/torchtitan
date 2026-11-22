@@ -9,7 +9,7 @@ initial weights, and loads model state dicts into it. Shared by every engine's m
 wrapper; the wrappers replace the attention layers before the build."""
 
 import logging
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Container, Iterable, Iterator
 from typing import Any
 
 import spmd_types as spmd
@@ -40,6 +40,7 @@ from torchtitan.models.common.moe.token_dispatcher import (
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.generator.engine import ModelStateDictLoadMode
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.quantized_operands import OperandFormat, packed_operand_tensors
 from torchtitan.tools.utils import set_default_dtype
 
 logger = logging.getLogger(__name__)
@@ -488,6 +489,10 @@ class ModelStateDictLoader:
                             f"quantized parameters ({key})"
                         )
 
+        # Set by `receive_quantized_operands`.
+        self._operand_param_groups: set[Any] = set()
+        self._packed_operands: dict[str, torch.Tensor] = {}
+
         self.prefetched_model_state_dict: dict[str, torch.Tensor] | None = None
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from
         by ``load``. None with ``model_state_dict_load_mode="gpu_fetch"``."""
@@ -511,6 +516,58 @@ class ModelStateDictLoader:
         for module in model.modules():
             if isinstance(module, FSDPModule):
                 _unshard_and_free_sharded_params(module)
+
+    def receive_quantized_operands(self) -> dict[str, OperandFormat]:
+        """From now on, receive quantized parameters as their packed operands and copy
+        them into the operands, leaving their FSDP parameter groups unsharded. Returns
+        their formats, by key, for the trainer to quantize with.
+
+        Raises:
+            ValueError: if a parameter group also holds unquantized parameters (e.g.
+                experts without expert parallelism): loads would re-quantize it.
+        """
+        assert self.prefetched_model_state_dict is not None
+        formats = {}
+        for module, trainable_params, _ in self._fsdp_load_groups:
+            for param_group in module._get_fsdp_state()._fsdp_param_groups:
+                params = [
+                    (key, p)
+                    for key, p in trainable_params
+                    if p in param_group.fsdp_params
+                    and isinstance(p._sharded_param_data, _ShardedFSDPTensor)
+                ]
+                if not params:
+                    continue
+                if len({p for _, p in params}) != len(param_group.fsdp_params):
+                    raise ValueError(
+                        f"The FSDP parameter group of {params[0][0]} holds parameters "
+                        "that are not quantized; receive_quantized_operands needs "
+                        "groups of only quantized ones, e.g. experts under EP"
+                    )
+                self._operand_param_groups.add(param_group)
+                for key, fsdp_param in params:
+                    unsharded = fsdp_param._unsharded_param
+                    sharded = fsdp_param.sharded_param
+                    # The generator runs full EP: FSDP does not shard experts.
+                    assert sharded.to_local().shape == unsharded.shape, key
+                    quantizer = fsdp_param._sharded_param_data
+                    rows = quantizer._packed_operands(unsharded.operands)
+                    self._packed_operands.update(
+                        packed_operand_tensors(key, rows, like=sharded)
+                    )
+                    with torch.device("cpu"):
+                        buffers = _create_cpu_state_dict(rows, pin_memory=True)
+                    del self.prefetched_model_state_dict[key]
+                    self.prefetched_model_state_dict.update(
+                        packed_operand_tensors(key, buffers, like=sharded)
+                    )
+                    formats[key] = (type(quantizer), quantizer.__tensor_flatten__()[1])
+        self._fsdp_load_groups = [
+            (module, kept, frozen_params)
+            for module, trainable_params, frozen_params in self._fsdp_load_groups
+            if (kept := [(k, p) for k, p in trainable_params if k not in formats])
+        ]
+        return formats
 
     def load(self, fetch: Callable[[dict[str, torch.Tensor]], Iterable[str]]) -> None:
         """Fetch new weights into the model, allocating one FSDP group's sharded buffers at a time.
@@ -548,8 +605,12 @@ class ModelStateDictLoader:
         for module, trainable_params, frozen_params in self._fsdp_load_groups:
             # unshard() is a no-op while the group is unsharded. Resharding registers
             # the sharded parameters and keeps the unsharded storage CUDA graphs read.
-            _reshard(module)
-            _restore_sharded_params(module, frozen_params=frozen_params)
+            _reshard(module, self._operand_param_groups)
+            _restore_sharded_params(
+                module,
+                frozen_params=frozen_params,
+                skip_param_groups=self._operand_param_groups,
+            )
             # After a failed fetch, keep unsharding the remaining groups: unshard()
             # all-gathers across the FSDP group and the other ranks are still loading.
             if error is None:
@@ -573,15 +634,21 @@ class ModelStateDictLoader:
             _unshard_and_free_sharded_params(module)
         if error is not None:
             raise error
+        if self._packed_operands:
+            fetch(self._packed_operands)
         # Buffers load after every FSDP collective, so a failure here cannot hang
         # peers. A fetch that skips unpublished keys (gpu_fetch) leaves them as is.
         if self._buffer_keys:
             fetch({key: self._model.get_buffer(key) for key in self._buffer_keys})
 
 
-def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
+def _sharded_param_storages(
+    module: FSDPModule, skip_param_groups: Container[Any] = ()
+) -> Iterator[torch.Tensor]:
     """Yield the sharded parameter tensors of ``module``'s FSDP group."""
     for param_group in module._get_fsdp_state()._fsdp_param_groups:
+        if param_group in skip_param_groups:
+            continue
         for param in param_group.fsdp_params:
             sharded_data = param._sharded_param_data
             if isinstance(sharded_data, _ShardedFSDPTensor):
@@ -589,7 +656,7 @@ def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
             yield sharded_data
 
 
-def _reshard(module: FSDPModule) -> None:
+def _reshard(module: FSDPModule, skip_param_groups: Container[Any]) -> None:
     """Reshard ``module``'s FSDP group, first finishing a forward it was left in.
 
     The engine computes logits with lm_head alone, so the [norm, lm_head] group (or the
@@ -602,11 +669,17 @@ def _reshard(module: FSDPModule) -> None:
       current stream to fill the group's sharded buffers.
     """
     complete_fsdp_grouped_forward(module, None)
-    module.reshard()
+    # module.reshard(), leaving `skip_param_groups` unsharded.
+    for param_group in module._get_fsdp_state()._fsdp_param_groups:
+        if param_group not in skip_param_groups:
+            param_group.reshard()
 
 
 def _restore_sharded_params(
-    module: FSDPModule, *, frozen_params: Iterable[Any] = ()
+    module: FSDPModule,
+    *,
+    frozen_params: Iterable[Any] = (),
+    skip_param_groups: Container[Any] = (),
 ) -> None:
     """Re-allocate the sharded storage of `module`'s FSDP group before a load fills it.
 
@@ -633,7 +706,7 @@ def _restore_sharded_params(
     # TODO: replace this with FSDPModule._restore_sharded_params(), and the refill below
     # with an FSDP reshard that keeps the data (fills each shard from the unsharded
     # parameter); the refill reads private FSDPParam fields and repeats FSDP's chunking.
-    for sharded_data in _sharded_param_storages(module):
+    for sharded_data in _sharded_param_storages(module, skip_param_groups):
         alloc_storage(sharded_data)
     # TODO: each load still refills and all-gathers the frozen parameters of a group
     # that also has trainable ones (e.g. a decoder layer under LoRA). This rewrites

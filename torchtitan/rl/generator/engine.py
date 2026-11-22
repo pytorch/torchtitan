@@ -17,6 +17,7 @@ import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
+from torchtitan.rl.quantized_operands import OperandFormat
 
 
 ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
@@ -87,6 +88,10 @@ class GenerationEngine(Configurable, abc.ABC):
         """The pinned CPU buffers a model state dict is prefetched into, and loaded from by
         a model state dict load. Safe to fill from any thread while no load runs. None with
         ``model_state_dict_load_mode="gpu_fetch"``."""
+
+    @abc.abstractmethod
+    def receive_quantized_operands(self) -> dict[str, OperandFormat]:
+        """See ``ModelStateDictLoader.receive_quantized_operands``."""
 
     @abc.abstractmethod
     def add_requests(

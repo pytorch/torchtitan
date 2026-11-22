@@ -261,15 +261,18 @@ def test_overlapping_pieces(monkeypatch):
 
 def test_mixed_dtypes(monkeypatch):
     # An odd-sized bf16 key, then a key kept in fp32: the second piece starts at
-    # an aligned offset and keeps its dtype.
+    # an aligned offset and keeps its dtype. Bytes (quantized operands) keep theirs
+    # without being listed.
     a = torch.arange(2 * 3, dtype=torch.float32).reshape(2, 3)
     b = torch.arange(2 * 4, dtype=torch.float32).reshape(2, 4) / 3
+    c = torch.arange(2 * 5, dtype=torch.uint8).reshape(2, 5) + 250
     (out,) = _transfer(
         monkeypatch,
         [
             {
                 "a": (a[i : i + 1], ((i, 0), (1, 3))),
                 "b": (b[i : i + 1], ((i, 0), (1, 4))),
+                "c": (c[i : i + 1], ((i, 0), (1, 5))),
             }
             for i in range(2)
         ],
@@ -277,6 +280,7 @@ def test_mixed_dtypes(monkeypatch):
             {
                 "a": (((0, 0), (2, 3)), torch.bfloat16),
                 "b": (((0, 0), (2, 4)), torch.float32),
+                "c": (((0, 0), (2, 5)), torch.uint8),
             }
         ],
         transfer_dtype=torch.bfloat16,
@@ -284,6 +288,7 @@ def test_mixed_dtypes(monkeypatch):
     )
     torch.testing.assert_close(out["a"], a.to(torch.bfloat16), rtol=0, atol=0)
     torch.testing.assert_close(out["b"], b, rtol=0, atol=0)
+    assert out["c"].equal(c)
 
 
 def test_dtype_mismatch(monkeypatch):
