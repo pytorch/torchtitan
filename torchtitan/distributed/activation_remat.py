@@ -9,7 +9,6 @@
 # but distributed module is the best place to put it.
 
 import logging
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar
@@ -24,11 +23,6 @@ from torchtitan.models.base.module import Module
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
-
-
-# A block container is named "layers" or "<prefix>_layers" (e.g. "mtp_layers"),
-# optionally inside a submodule (e.g. "vision_encoder.layers").
-_BLOCK_FQN = re.compile(r"(?:[A-Za-z_]\w*\.)*(?:[A-Za-z_]\w*_)?layers\.\d+")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -81,15 +75,6 @@ class BlockRematOverride:
             and self.offload_regions is None
         ):
             raise ValueError(f"BlockRematOverride for {self.blocks} sets no field.")
-        for block_fqn in self.blocks:
-            if _BLOCK_FQN.fullmatch(block_fqn) is None:
-                raise ValueError(
-                    "BlockRematOverride.blocks must name transformer blocks "
-                    "as '<container>.<id>' with a container named "
-                    "'layers' or '<prefix>_layers', e.g. 'layers.3', "
-                    "'mtp_layers.0' or 'vision_encoder.layers.3'; got "
-                    f"{block_fqn!r}."
-                )
 
 
 @dataclass(frozen=True, slots=True)

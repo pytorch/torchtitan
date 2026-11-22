@@ -328,11 +328,6 @@ class TestActivationCheckpointing(unittest.TestCase):
     def test_block_overrides_are_validated(self):
         for name, override_factory, message in (
             (
-                "malformed name",
-                lambda: BlockRematOverride(blocks=["layer.91"], save_regions=[]),
-                "<container>.<id>",
-            ),
-            (
                 "no blocks",
                 lambda: BlockRematOverride(blocks=[], save_regions=[]),
                 "empty",

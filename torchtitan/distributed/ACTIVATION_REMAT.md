@@ -101,10 +101,9 @@ for encoder blocks. Each model lists its block containers in
 `BaseModel._remat_block_container_fqns`, and `parallelize` passes them to
 `apply(model, block_container_fqns=...)`. Pipeline splitting keeps original
 layer ids, so an override follows its block to whichever stage holds it.
-Malformed names, empty overrides and a
-block named by two overrides raise at config time; a name the model lacks is
-not detected, since each pipeline stage holds only some blocks. Within a
-block's result, `recompute_regions` still wins over `save_regions`, so an
+Empty overrides and a block named by two overrides raise at config time; a
+name the model lacks is not detected, since each pipeline stage holds only
+some blocks. Within a block's result, `recompute_regions` still wins over `save_regions`, so an
 override that sets only `save_regions` cannot retain a region the base
 recomputes; override `recompute_regions` too. The fixed presets accept
 overrides that set only the offload fields; use `ActivationRematConfig` to
