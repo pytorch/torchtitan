@@ -15,7 +15,7 @@ Without absorption, each expert output is multiplied by its router score:
 ```mermaid
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
-    A --> S["FP32 score multiply + cast back"]
+    A --> S["Multiply by router scores"]
     S --> C["Unpermute + EP combine"]
 ```
 
@@ -57,7 +57,7 @@ multiplication. Both backends retain post-expert scoring when it is configured:
 ```mermaid
 flowchart LR
     H["h [R,F]"] --> W["W2"] --> A["Add expanded bias B [R,D]"]
-    A --> P["Output postprocess"] --> S["FP32 score multiply + cast back"]
+    A --> P["Output postprocess"] --> S["Multiply by router scores"]
     S --> C["Unpermute + EP combine"]
 ```
 
@@ -66,7 +66,9 @@ The combine backend receives weighted outputs in both paths.
 
 ## Precision
 
-Score products compute in FP32 and then convert back to the activation dtype.
+Absorbed score products compute in FP32 and then convert back to the activation
+dtype. With a postprocess, DeepEP also uses an FP32 product, while HybridEP
+casts scores to the dispatched activation dtype before multiplying.
 For example, [`GroupedLinear`](../linear/linear.py) uses type promotion:
 
 ```python

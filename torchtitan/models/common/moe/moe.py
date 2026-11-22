@@ -198,11 +198,12 @@ class RoutedExperts(Module):
                 remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
+                is_hybridep = isinstance(self.token_dispatcher, HybridEPTokenDispatcher)
                 # Non-blocking HybridEP leaves rows past offsets_E[-1] unwritten.
                 # DeepEP needs no mask: training uses its compact layout, which
                 # has no such rows, and its expand layout runs only without grad.
                 if (
-                    isinstance(self.token_dispatcher, HybridEPTokenDispatcher)
+                    is_hybridep
                     and self.token_dispatcher.non_blocking_capacity_factor is not None
                 ):
                     routed_output_RD = _masked_output_postprocess(
@@ -213,11 +214,16 @@ class RoutedExperts(Module):
                 if isinstance(metadata, EPDispatchMetadata):
                     # A nonlinear postprocess must run before score multiplication.
                     remat.recompute_needs_tensor(routed_output_RD, metadata.scores_R)
-                    # Promote the product without saving a float32 output copy.
-                    routed_output_RD = (
-                        routed_output_RD
-                        * metadata.scores_R.reshape(-1, 1).to(torch.float32)
-                    ).to(routed_output_RD.dtype)
+                    scores_R1 = metadata.scores_R.reshape(-1, 1)
+                    if is_hybridep:
+                        # Preserve the score rounding formerly done by dispatch.
+                        routed_output_RD = routed_output_RD * scores_R1.to(
+                            routed_input_RD.dtype
+                        )
+                    else:
+                        routed_output_RD = (routed_output_RD * scores_R1.float()).to(
+                            routed_output_RD.dtype
+                        )
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
