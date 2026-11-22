@@ -56,7 +56,10 @@ def _hc_branch_placement(*, enable_sp: bool) -> SpmdType:
     """Placement of the ``(tokens, hc_mult, dim)`` hyper-connection branches."""
     if enable_sp:
         return hc_head_input_sequence_parallel_placement()
-    return dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+    return SpmdType(
+        {DP: spmd.V, CP: spmd.V, TP: spmd.I},
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
 
 
 def _hc_mix_placement(*, enable_sp: bool) -> SpmdType:
@@ -66,11 +69,13 @@ def _hc_mix_placement(*, enable_sp: bool) -> SpmdType:
     return dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
 
 
-def _hc_state_shardings() -> dict[str, SpmdType]:
+def _hc_state_shardings(
+    *, tp: spmd.PerMeshAxisSpmdType = spmd.R
+) -> dict[str, SpmdType]:
     return {
-        "hc_fn": _dense_param_rep,
-        "hc_base": _dense_param_rep,
-        "hc_scale": _dense_param_rep,
+        "hc_fn": dense_param_placement(tp=tp),
+        "hc_base": dense_param_placement(tp=tp),
+        "hc_scale": dense_param_placement(tp=tp),
     }
 
 
@@ -188,7 +193,7 @@ def hc_pre_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Hyper-connection pre-mix: branches in, ``(x, post, comb)`` out."""
     hc_branch_layout = _hc_branch_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        state_shardings=_hc_state_shardings(),
+        state_shardings=_hc_state_shardings(tp=spmd.R if enable_sp else spmd.I),
         input_shardings={"x": hc_branch_layout},
         output_shardings=(
             residual_activation_placement(enable_sp=enable_sp),
@@ -215,7 +220,7 @@ def hc_post_sharding_config(*, enable_sp: bool) -> ShardingConfig:
 def hc_head_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Root hyper-connection head: branches in, residual layout out."""
     return ShardingConfig(
-        state_shardings=_hc_state_shardings(),
+        state_shardings=_hc_state_shardings(tp=spmd.R if enable_sp else spmd.I),
         input_shardings={"x": _hc_branch_placement(enable_sp=enable_sp)},
         output_shardings=residual_activation_placement(enable_sp=enable_sp),
     )
