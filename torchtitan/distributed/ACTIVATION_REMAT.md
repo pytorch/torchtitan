@@ -103,11 +103,11 @@ for encoder blocks. Each model lists its block containers in
 layer ids, so an override follows its block to whichever stage holds it.
 Empty overrides and a block named by two overrides raise at config time; a
 name the model lacks is not detected, since each pipeline stage holds only
-some blocks. Within a block's result, `recompute_regions` still wins over `save_regions`, so an
-override that sets only `save_regions` cannot retain a region the base
-recomputes; override `recompute_regions` too. The fixed presets accept
-overrides that set only the offload fields; use `ActivationRematConfig` to
-change what they retain.
+some blocks. Within a block's result, `recompute_regions` still wins over
+`save_regions`, so an override that sets only `save_regions` cannot retain a
+region the base recomputes; override `recompute_regions` too. The fixed
+presets accept overrides that set only the offload fields; use
+`ActivationRematConfig` to change what they retain.
 
 ## Saved-tensor hooks
 
