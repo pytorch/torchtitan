@@ -22,8 +22,8 @@ Each rollout takes the path in the Verifiers README's
 - **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the container
   and reads the reward file it writes.
 
-Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task. A validation
-starts with training and runs beside it (`ValidationConfig`).
+Validation takes the same path on Terminal-Bench 2.1. A validation starts with training and
+runs beside it (`ValidationConfig`).
 
 | What | Where |
 | --- | --- |

@@ -111,6 +111,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config
 from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
@@ -165,6 +166,13 @@ class ValidationConfig:
     steps: int = 20
     """Maximum prompts per validation. -1 reads the finite source once; 0 disables."""
 
+    temperature: float = 1.0
+    """Sampling temperature of validation rollouts."""
+
+    num_samples_per_prompt: int = 1
+    """Rollouts per validation prompt. With n > 1, `validation_reward/best_of_{n}` logs the mean
+    of each prompt's best reward."""
+
     freq: int | None = None
     """A validation comes due at each multiple of `freq` after step 0; none starts at the last step. None:
     no periodic validations. A resumed run's start step follows the same rule: freq=25, resumed at 25 -> due at
@@ -188,6 +196,20 @@ class ValidationConfig:
             raise ValueError("validation steps must be -1 or non-negative")
         if self.freq is not None and self.freq < 1:
             raise ValueError(f"validation freq must be None or >= 1, got {self.freq}")
+        if self.temperature < 0:
+            raise ValueError(
+                f"validation temperature must be non-negative, got {self.temperature}"
+            )
+        if self.num_samples_per_prompt < 1:
+            raise ValueError(
+                "validation num_samples_per_prompt must be >= 1, got "
+                f"{self.num_samples_per_prompt}"
+            )
+        if self.temperature == 0 and self.num_samples_per_prompt > 1:
+            raise ValueError(
+                "greedy validation (temperature=0) repeats the same rollout; set "
+                f"num_samples_per_prompt=1, got {self.num_samples_per_prompt}"
+            )
 
 
 @dataclass(kw_only=True, slots=True)
@@ -398,17 +420,14 @@ class Controller(Configurable):
 
         def maybe_log(self) -> None:
             debug = self.trainer.debug
-            config_dict = self.to_dict()
             if debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(config_dict, indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config(self)}")
 
             if debug.save_config_file is not None:
                 config_file = os.path.join(self.dump_folder, debug.save_config_file)
                 os.makedirs(os.path.dirname(config_file), exist_ok=True)
                 with open(config_file, "w") as file:
-                    json.dump(config_dict, file, indent=2)
+                    json.dump(self.to_dict(), file, indent=2)
                 logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
@@ -497,15 +516,6 @@ class Controller(Configurable):
                         f"{self.async_loop.batcher.build_mrope_positions}, but the trainer "
                         f"model's image tokens take {'M-RoPE' if uses_mrope else '1D'} "
                         f"positions; set it to {uses_mrope}."
-                    )
-            if self.trainer.parallelism.enable_sequence_parallel:
-                sp_degree = self.trainer.parallelism.tensor_parallel_degree
-                max_context_length = self.trainer.model.max_context_length
-                if sp_degree > 1 and max_context_length % sp_degree != 0:
-                    raise ValueError(
-                        "trainer.model.max_context_length "
-                        f"({max_context_length}) must be divisible "
-                        f"by sequence parallel degree ({sp_degree})."
                     )
 
             # TODO: add a check so that all seq_len related variables make sense
@@ -868,10 +878,20 @@ class Controller(Configurable):
 
     @sl.log_trace_span("_collect_validation_rollouts")
     async def _collect_validation_rollouts(
-        self, *, samples: list[object], sampling: SamplingConfig, step: int
+        self,
+        *,
+        samples: list[object],
+        sampling: SamplingConfig,
+        num_samples_per_prompt: int,
+        step: int,
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
-        """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
-        # TODO: group_size=1 (best-of-1) only. Support best-of-N.
+        """Run each held-out prompt `num_samples_per_prompt` times concurrently and emit validation metrics.
+
+        Example: 2 prompts x 2 samples with rewards [[1, 0], [0, 0]]:
+
+            validation_reward/_mean           0.25   # mean over all 4 rollouts
+            validation_reward/best_of_2/mean  0.5    # best rollout per prompt, averaged (n > 1 only)
+        """
         generate = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
         # Each id is used once, so validations that run at the same time never share one.
@@ -884,7 +904,7 @@ class Controller(Configurable):
                     release_session_fn=release_session_fn,
                     sample=sample,
                     group_id=group_id,
-                    group_size=1,
+                    group_size=num_samples_per_prompt,
                     sampling=sampling,
                 )
                 for group_id, sample in zip(group_ids, samples, strict=True)
@@ -923,11 +943,28 @@ class Controller(Configurable):
         metrics.append(
             m.Metric("validation/group_failures", m.Sum(float(num_failed_groups)))
         )
+        if num_samples_per_prompt > 1:
+            # Equals pass@n when rewards are 0/1. A prompt with no scored rollout is left out.
+            best_rewards = []
+            for group in rollout_groups:
+                rewards = [
+                    rollout.reward
+                    for rollout in group.rollouts
+                    if rollout.reward is not None
+                ]
+                if rewards:
+                    best_rewards.append(max(rewards))
+            metrics.append(
+                m.Metric(
+                    f"validation_reward/best_of_{num_samples_per_prompt}",
+                    m.Mean.from_list(best_rewards),
+                )
+            )
         return rollout_groups, metrics
 
     @sl.log_trace_span("validate")
     async def validate(self, *, step: int) -> list[m.Metric]:
-        """Run greedy validation on held-out prompts.
+        """Run validation on held-out prompts.
 
         Args:
             step: Training step this validation starts at.
@@ -936,9 +973,9 @@ class Controller(Configurable):
             Validation rollout metrics, generation metrics, validation timing,
             and the step it started at.
         """
-        # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
-        steps = self.config.async_loop.validation.steps
+        validation = self.config.async_loop.validation
+        steps = validation.steps
         if steps == 0:  # skip validation (e.g. loss guard CI)
             return []
         logger.info(f"Validation started at step {step}")
@@ -947,10 +984,13 @@ class Controller(Configurable):
         # in a rollouter's own limit. Do it when validation moves out of the controller.
         # Off the event loop: training runs meanwhile, and building the dataset can take seconds.
         samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
-        greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
+        sampling = replace(self._sampling, temperature=validation.temperature)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
-            samples=samples, sampling=greedy, step=step
+            samples=samples,
+            sampling=sampling,
+            num_samples_per_prompt=validation.num_samples_per_prompt,
+            step=step,
         )
 
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
@@ -1296,20 +1336,17 @@ class Controller(Configurable):
         """Run num_training_steps optimizer steps: train one packed batch, push the trainer's model
         state dict, then pull it into the generators, log metrics.
 
-        The push and pull of policy N overlap forward/backward N+1:
+        The pull of policy N overlaps forward/backward N+1; the push before it does not:
 
-            Trainer:    forward/backward N
-            Controller: await push N-1     (optimizer N must not mutate weights push N-1 reads)
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite pushed weights mid-pull)
-            Controller: start push N -> pull N -> release groups, in the background
-                          |-> Trainer: ModelStateDictTransport stage (or TorchStore put_state_dict) of policy N
+            Controller: await push N       (forward/backward N+1 would hold back its reply; see the await)
+            Controller: start pull N -> release groups, in the background
                           |-> Generators: load policy N (cpu_prefetch: prefetch it into pinned CPU memory first)
                           |-> Group buffer: admit the next rollout groups
-            Trainer:    forward/backward N+1 (does not mutate persistent model state)
+            Trainer:    forward/backward N+1
 
-        See `Trainer.push_model_state_dict` for why the push can overlap forward/backward, and
-        `Generator.load_model_state_dict` for how a generator applies the load between steps.
+        See `Generator.load_model_state_dict` for how a generator applies the load between steps.
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
@@ -1318,8 +1355,7 @@ class Controller(Configurable):
             waits for:    a TrainerStepBatch in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
-        # The previous step's push and pull, each returning its wall time; None before the first.
-        push_task: asyncio.Task[float] | None = None
+        # The previous step's pull, returning its wall time; None before the first.
         pull_task: asyncio.Task[float] | None = None
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
@@ -1399,15 +1435,6 @@ class Controller(Configurable):
                         logger.error("Loss is NaN/Inf; training diverged")
                         break
 
-                # Await the trainer model state dict push before the optimizer mutates the weights.
-                with (
-                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
-                    step_timer.record(
-                        "timing/step/blocking_trainer_push_model_state_dict"
-                    ),
-                ):
-                    push_s = await push_task if push_task is not None else 0.0
-
                 with (
                     sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
@@ -1435,11 +1462,26 @@ class Controller(Configurable):
                 ):
                     pull_s = await pull_task if pull_task is not None else 0.0
 
-                # Overlap this step's push -> pull -> group release with the next step's fwd/bwd.
-                push_task = self._start_push_model_state_dict()
+                # Finish the push before forward/backward N+1: forward/backward blocks the trainer's event loop,
+                # so a push still running then would reply after it and start the pull late.
+                # TODO: to hide the push, reply from the push's worker thread (or run forward_backward on a thread),
+                # and order optimizer N+1 after the stage on the device, not with a host wait (TorchStore's put still
+                # needs one). Worth it once timing/step/blocking_trainer_push_model_state_dict grows: today 0.12 s
+                # vs a 45 s forward/backward (Qwen3.5-27B, 2 GB300 hosts).
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
+                ):
+                    push_start = time.perf_counter()
+                    await self.trainer.all_ranks.push_model_state_dict.call()
+                    push_s = time.perf_counter() - push_start
+
+                # Overlap this step's pull -> group release with the next step's fwd/bwd.
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
-                        optimizer_result.policy_version, after=push_task
+                        optimizer_result.policy_version
                     )
                 )
 
@@ -1463,7 +1505,7 @@ class Controller(Configurable):
                         *self._group_buffer.metrics(),
                         *time_metrics,
                         *policy_age_panel,
-                        # Background push/pull work time; the trainer's wait for it is timing/step/blocking_*.
+                        # This step's push and the previous step's pull.
                         m.Metric(
                             "timing/weight_sync/trainer_push_model_state_dict",
                             m.NoReduce(push_s),
@@ -1483,35 +1525,17 @@ class Controller(Configurable):
 
             self._maybe_start_validation(step=step)
 
-        # TODO: if this loop raises (e.g. a failed push, forward/backward, optimizer step or validation),
-        # the push and pull still in flight keep running while run() tears down, and nobody reads the copy of
-        # a failed push's error in the pull task ("Task exception was never retrieved"). Cancel or await both
-        # in a `finally`.
-        # Finish the last push and pull so generators hold the final weights for the validation after
-        # training (`validate_after_training`).
-        if push_task is not None:
-            await push_task
+        # TODO: if this loop raises (e.g. a failed forward/backward, optimizer step or validation), the pull
+        # still in flight keeps running while run() tears down, and nobody reads its error ("Task exception was
+        # never retrieved"). Cancel or await it in a `finally`.
+        # Finish the last pull so generators hold the final weights for the validation after training
+        # (`validate_after_training`).
+        if pull_task is not None:
             await pull_task
 
-    def _start_push_model_state_dict(self) -> asyncio.Task[float]:
-        """Send the trainer's model state dict push now, so each trainer rank starts it before the next
-        forward/backward (see `Trainer.push_model_state_dict`); the task returns its wall time in seconds."""
-        start = time.perf_counter()
-        push = self.trainer.all_ranks.push_model_state_dict.call()
-
-        async def wait() -> float:
-            with sl.log_trace_span("trainer_push_model_state_dict"):
-                await push
-            return time.perf_counter() - start
-
-        return asyncio.create_task(wait())
-
-    async def _pull_model_state_dict_and_release_groups(
-        self, version: int, *, after: asyncio.Task[float]
-    ) -> float:
-        """Once the push ``after`` lands, load policy ``version`` into every generator, then admit
-        the next rollout groups; returns the pull's wall time in seconds."""
-        await after
+    async def _pull_model_state_dict_and_release_groups(self, version: int) -> float:
+        """Load policy ``version`` into every generator, then admit the next rollout groups; returns
+        the pull's wall time in seconds."""
         with sl.log_trace_span("generator_pull_model_state_dict"):
             start = time.perf_counter()
             await self.generator_router.pull_model_state_dict.call_one(version)

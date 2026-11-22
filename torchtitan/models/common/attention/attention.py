@@ -391,8 +391,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
         )
         """ Backend priority order for varlen_attn, as ``SDPBackend`` member
             names, applied via ``sdpa_kernel(..., set_priority=True)``.
-            Names keep the config plain data: ``SDPBackend`` is a pybind11
-            enum, which ``pprint`` (``--print-config``) cannot format.
+            Names keep the config plain data for ``to_dict()`` and JSON
+            serialization, since ``SDPBackend`` is a pybind11 enum.
             Deterministic mode skips cuDNN, whose backward is not
             deterministic.
         """
