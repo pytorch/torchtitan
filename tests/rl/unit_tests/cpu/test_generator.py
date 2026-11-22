@@ -30,7 +30,8 @@ from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import DebugConfig, PrecisionConfig
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
-from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.rl.generator.dispatcher import (
     _prepare_generation_request_metrics,
     _RejectedRequests,
@@ -45,6 +46,7 @@ from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
     _extract_request_metrics_inputs,
     _finished_request,
+    _validate_platform,
     add_extra_vllm_engine_args,
     VLLMEngine,
 )
@@ -691,6 +693,20 @@ _MODEL_CONFIG = SimpleNamespace(
 )
 
 
+_FLEX_MODEL_CONFIG = SimpleNamespace(
+    first_full_attention=SimpleNamespace(inner_attention=FlexInnerAttention.Config()),
+    max_context_length=1024,
+)
+
+
+# A flex model with a GDN layer; the check reads only the layer's type.
+_GDN_MODEL_CONFIG = SimpleNamespace(
+    first_full_attention=_FLEX_MODEL_CONFIG.first_full_attention,
+    layers=[SimpleNamespace(attention=GDN.Config.__new__(GDN.Config))],
+    max_context_length=1024,
+)
+
+
 def test_generator_dp_requires_expert_parallelism():
     with pytest.raises(ValueError, match="Controller.Config.num_generators"):
         Generator.Config(
@@ -712,6 +728,43 @@ def test_generator_dp_can_supply_expert_parallelism():
             expert_parallel_degree=4,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    ("model", "engine_config", "batch_invariant", "match"),
+    [
+        (
+            _MODEL_CONFIG,
+            VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            False,
+            "Only flex attention",
+        ),
+        (
+            _FLEX_MODEL_CONFIG,
+            VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
+            False,
+            "cuda_graph.mode='NONE'",
+        ),
+        (
+            _FLEX_MODEL_CONFIG,
+            VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            True,
+            "batch_invariant",
+        ),
+        (
+            _GDN_MODEL_CONFIG,
+            VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
+            False,
+            "GDN/KDA",
+        ),
+    ],
+)
+def test_cuda_only_features_rejected_off_cuda(
+    monkeypatch, model, engine_config, batch_invariant, match
+):
+    monkeypatch.setattr("torchtitan.rl.generator.vllm.engine.device_type", "xpu")
+    with pytest.raises(ValueError, match=match):
+        _validate_platform(engine_config, model, batch_invariant=batch_invariant)
 
 
 def test_batch_invariant_requires_kv_cache_reset():
