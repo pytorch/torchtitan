@@ -20,6 +20,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
+from torchtitan.tools.utils import device_type
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
@@ -205,3 +206,28 @@ class TorchTitanGPUWorker(GPUWorker):
             super().init_device()
         finally:
             vllm_gpu_model_runner.GPUModelRunner = original_runner_cls
+
+
+if device_type == "xpu":
+    # vLLM's CUDA Worker rejects XPU devices; CUDA installs never import these.
+    import vllm.v1.worker.xpu_worker as vllm_xpu_worker
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+
+    class TorchTitanXPUModelRunner(TorchTitanGPUModelRunner, XPUModelRunner):
+        """:class:`TorchTitanGPUModelRunner`'s overrides on vLLM's XPU runner."""
+
+    class TorchTitanXPUWorker(vllm_xpu_worker.XPUWorker):
+        """V1 XPU worker that constructs :class:`TorchTitanXPUModelRunner`."""
+
+        def init_device(self):
+            if self.use_v2_model_runner:
+                raise ValueError(
+                    "TorchTitan's vLLM integration requires the V1 model runner"
+                )
+            # Same substitution as TorchTitanGPUWorker.init_device.
+            original_runner_cls = vllm_xpu_worker.XPUModelRunner
+            vllm_xpu_worker.XPUModelRunner = TorchTitanXPUModelRunner
+            try:
+                super().init_device()
+            finally:
+                vllm_xpu_worker.XPUModelRunner = original_runner_cls

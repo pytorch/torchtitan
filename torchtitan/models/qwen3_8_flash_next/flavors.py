@@ -16,10 +16,6 @@ import torch.nn as nn
 
 from torchtitan.config import derive
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     Conv1d,
@@ -560,7 +556,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     indexer_loss: QSAIndexerLoss.Config | None = None,
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen38FlashNextModel.Config:
     """Build Flash-Next; choose an optional indexer-training loss explicitly.
 
@@ -596,8 +591,4 @@ def build_model_config(
                 f"Flash-Next tensor parallel degree ({parallelism.tensor_parallel_degree}) "
                 f"must divide QSA KV heads ({attention.n_kv_heads})"
             )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter in converters:
-            config = converter.build().convert(config)
     return config

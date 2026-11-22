@@ -265,6 +265,17 @@ python -m torchtitan.rl.train \
 
 See [Launchers](./actors/monarch/README.md#launchers).
 
+## Run on Intel XPU
+
+The stock RL path runs on Intel GPUs (XPU) with flex attention models. Off CUDA,
+the generator rejects at startup what only CUDA supports: varlen attention, MLA
+with a compressed cache, GDN/KDA linear attention, vLLM CUDA graphs (set
+`cuda_graph.mode="NONE"`) and `debug.batch_invariant`. Flex attention on XPU
+also needs vLLM's XPU platform to accept `FLEX_ATTENTION`
+(vllm-project/vllm#69044). Set `PYTORCH_ALLOC_CONF=expandable_segments:False`
+and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` in the launch
+environment: expandable segments invalidate the memory oneCCL registers.
+
 ## Trainer/generator consistency
 
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./BITWISE_PARITY.md) for configuration, supported layouts, verification, and limitations.
