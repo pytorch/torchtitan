@@ -105,6 +105,8 @@ def _validate_platform(
     """Reject what TorchTitan's vLLM path supports only on CUDA (and ROCm)."""
     if device_type == "cuda":
         return
+    # XPU runs vLLM's own worker (`TORCHTITAN_WORKER_CLS`), which lacks TorchTitan's
+    # FULL decode graphs; lifting this check needs TorchTitan's worker there first.
     if config.cuda_graph.mode != "NONE":
         raise ValueError(
             f"vLLM CUDA graphs need CUDA; set cuda_graph.mode='NONE' on {device_type}."

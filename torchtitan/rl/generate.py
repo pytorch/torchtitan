@@ -145,6 +145,9 @@ def generate() -> None:
     )
     logger.debug(f"Expert Parallel Enabled: {enable_ep}")
 
+    # TODO: run VLLMEngine's platform checks (`_validate_platform` in
+    # generator/vllm/engine.py) here too; off CUDA this script skips them.
+
     # Create EngineArgs from config
     engine_kwargs = dict(
         # Model configuration
