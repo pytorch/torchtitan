@@ -21,6 +21,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.tools.utils import get_visible_devices_env_var
 
 
 class _FakeController:
@@ -402,7 +403,7 @@ def test_shutdown_continues_after_generator_close_failure(tmp_path):
 
 
 class _FakeHostMesh:
-    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it."""
+    """Records the visible devices of each proc mesh spawned on it."""
 
     def __init__(self, num_hosts=1):
         self.num_hosts = num_hosts
@@ -412,7 +413,7 @@ class _FakeHostMesh:
         return self.num_hosts
 
     def spawn_procs(self, *, per_host, bootstrap, bootstrap_command):
-        self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
+        self.visible_devices.append(bootstrap_command[get_visible_devices_env_var()])
 
 
 @pytest.fixture
