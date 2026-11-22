@@ -17,7 +17,7 @@ from vllm.config import CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.usage.usage_lib import UsageContext
 
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import device_type, has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +57,10 @@ def resolve_scheduler_limits(engine_kwargs: dict[str, Any]) -> tuple[int, int]:
             max_num_batched_tokens,
         )
 
-    if not has_cuda_capability(9, 0):
+    if device_type == "cuda" and not has_cuda_capability(9, 0):
         # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory profile splits
         # max_num_batched_tokens over max_num_seqs requests, the remainder on the last; FA2 writes out of bounds past 64.
+        # XPU is skipped: it runs only flex attention (_validate_platform in vllm/engine.py).
         max_num_seqs = max(max_num_seqs, max_num_batched_tokens // 64)
 
     # vLLM raises if max_num_seqs > max_num_batched_tokens.

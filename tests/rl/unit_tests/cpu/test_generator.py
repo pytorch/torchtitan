@@ -890,25 +890,29 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "sm90_or_newer, max_num_seqs, expected_max_num_batched_tokens, expected_max_num_seqs",
+    "device, sm90_or_newer, max_num_seqs, expected_max_num_batched_tokens, expected_max_num_seqs",
     [
-        (True, 8, 4096, 8),
+        ("cuda", True, 8, 4096, 8),
         # FlashAttention-2 GPUs: at least max_num_batched_tokens / 64
-        (False, 8, 4096, 64),
+        ("cuda", False, 8, 4096, 64),
+        # XPU runs no FlashAttention-2
+        ("xpu", False, 8, 4096, 8),
         # Clamped to max_num_batched_tokens
-        (True, 8192, 4096, 4096),
+        ("cuda", True, 8192, 4096, 4096),
         # At most max_num_seqs x max_model_len (1024)
-        (True, 2, 2048, 2),
+        ("cuda", True, 2, 2048, 2),
     ],
 )
 def test_unset_max_num_batched_tokens_uses_vllm_serve_default(
     monkeypatch,
     tmp_path,
+    device,
     sm90_or_newer,
     max_num_seqs,
     expected_max_num_batched_tokens,
     expected_max_num_seqs,
 ):
+    monkeypatch.setattr(vllm_config_module, "device_type", device)
     monkeypatch.setattr(
         vllm_config_module, "has_cuda_capability", lambda major, minor: sm90_or_newer
     )
