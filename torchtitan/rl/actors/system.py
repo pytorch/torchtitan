@@ -141,6 +141,10 @@ class ActorSystem(Configurable, abc.ABC):
         """
 
     @abc.abstractmethod
+    async def initialize_quantized_operands(self) -> None:
+        """Give the trainer the formats of the generators' quantized operands."""
+
+    @abc.abstractmethod
     async def initialize_model_state_dict_transport(
         self, config: ModelStateDictTransport.Config
     ) -> None:
