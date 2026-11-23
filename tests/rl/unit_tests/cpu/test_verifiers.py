@@ -247,6 +247,9 @@ def test_verifiers_worker_sends_muse_glimmer_renderer_config(monkeypatch) -> Non
         )
     )
 
+    # Raises AttributeError if setup didn't start the metrics.
+    worker.flush_process_metrics(group_id=0)
+
     sent = worker._verifiers_train_client_config
     # The worker's agents call its own generation server.
     assert sent.base_url == "http://127.0.0.1:2/v1"
@@ -287,7 +290,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     )
     rollouter = object.__new__(VerifiersRollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker, num_threads_per_worker=3, rollouts_per_worker=12
+        worker=worker, rollouts_per_worker=12, rollouts_per_thread=4
     )
     # 24 training rollouts in flight / 12 per worker -> 2 workers
     rollouter._max_rollouts_in_flight = 24

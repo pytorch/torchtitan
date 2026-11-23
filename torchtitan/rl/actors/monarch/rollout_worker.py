@@ -73,7 +73,7 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
     ) -> RolloutGroup:
-        return await self._worker.run_group(
+        group = await self._worker.run_group(
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             sample=sample,
@@ -81,6 +81,8 @@ class RolloutWorkerActor(Actor):
             group_size=group_size,
             sampling=sampling,
         )
+        group.metrics += self._worker.flush_process_metrics(group_id)
+        return group
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

@@ -7,6 +7,7 @@
 """Typed metrics for torchtitan RL. Check README.md for details."""
 
 from .console import log_to_console
+from .loop_lag import EventLoopLag, ThreadPoolLag
 from .processor import MetricBackend, MetricsProcessor
 from .types import (
     fold,
@@ -23,6 +24,7 @@ from .types import (
 
 
 __all__ = [
+    "EventLoopLag",
     "fold",
     "Max",
     "Mean",
@@ -35,5 +37,6 @@ __all__ = [
     "Std",
     "Sum",
     "SummaryStats",
+    "ThreadPoolLag",
     "log_to_console",
 ]
