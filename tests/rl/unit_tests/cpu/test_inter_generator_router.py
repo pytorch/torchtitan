@@ -422,7 +422,26 @@ def test_pull_logs_and_names_every_generator_whose_pull_fails(caplog):
 
     with caplog.at_level(logging.ERROR, logger="torchtitan.rl.routing.inter_generator"):
         asyncio.run(_run())
-    assert [record.getMessage() for record in caplog.records] == [
+    assert sorted(record.getMessage() for record in caplog.records) == [
         "Generator 0 failed to load policy version 4",
         "Generator 1 failed to load policy version 4",
     ]
+
+
+def test_pull_logs_a_failure_while_a_slow_generator_still_loads(caplog):
+    async def _run():
+        actors = [_Actor("gen0", raises_prefetch=True), _Actor("gen1", wait_pull=True)]
+        router = _router(actors)
+        pull = asyncio.create_task(router.pull_model_state_dict(4))
+        await actors[1].load_model_state_dict.started.wait()
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "Generator 0 failed to load policy version 4"
+        ]
+
+        actors[1].load_model_state_dict.release.set()
+        with pytest.raises(RuntimeError, match=r"Generators \[0\]"):
+            await asyncio.wait_for(pull, timeout=5.0)
+
+    with caplog.at_level(logging.ERROR, logger="torchtitan.rl.routing.inter_generator"):
+        asyncio.run(_run())

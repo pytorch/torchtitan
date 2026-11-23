@@ -208,18 +208,25 @@ class InterGeneratorRouter(Configurable):
             policy_version: Trainer policy version whose state dict to pull.
         """
 
-        async def _pull_one(h: _GeneratorHandle) -> None:
-            # Transfer over RDMA while the generator remains available. A no-op
-            # with model_state_dict_load_mode="gpu_fetch", where the load does it.
-            await h.actor.prefetch_model_state_dict.call()
-            drain = not self._config.hot_swap
-            h.draining = drain
+        async def _pull_one(index: int, h: _GeneratorHandle) -> None:
             try:
-                await h.rank0_actor.load_model_state_dict.call_one(
-                    policy_version, drain=drain
+                # Transfer over RDMA while the generator remains available. A no-op
+                # with model_state_dict_load_mode="gpu_fetch", where the load does it.
+                await h.actor.prefetch_model_state_dict.call()
+                drain = not self._config.hot_swap
+                h.draining = drain
+                try:
+                    await h.rank0_actor.load_model_state_dict.call_one(
+                        policy_version, drain=drain
+                    )
+                finally:
+                    h.draining = False
+            except Exception:
+                # Log now, so a slow or stuck generator can't delay or hide this failure.
+                logger.exception(
+                    f"Generator {index} failed to load policy version {policy_version}"
                 )
-            finally:
-                h.draining = False
+                raise
 
         # Start the pulls in parallel. Technically we could do rolling sync to
         # maintain availability during model state dict loads, but that's not a priority
@@ -228,18 +235,14 @@ class InterGeneratorRouter(Configurable):
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
         results = await asyncio.gather(
-            *[_pull_one(h) for h in self._generators], return_exceptions=True
+            *[_pull_one(index, h) for index, h in enumerate(self._generators)],
+            return_exceptions=True,
         )
         failed = [
             index
             for index, result in enumerate(results)
             if isinstance(result, BaseException)
         ]
-        for index in failed:
-            logger.error(
-                f"Generator {index} failed to load policy version {policy_version}",
-                exc_info=results[index],
-            )
         # TODO: once the router tracks generator health, report the failed generators there. A failed
         #   generator may still be reading the trainer's staging buffer, so stop it before the next push.
         if failed:
