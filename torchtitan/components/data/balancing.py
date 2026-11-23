@@ -156,14 +156,15 @@ class LocalBalancer(MicrobatchBalancer):
 
 
 def plan_window(costs: Sequence[Sequence[float]]) -> list[list[tuple[int, int]]]:
-    """Plan one window across ranks.
+    """Plan one window across ``N`` ranks.
 
     ``costs[s][i]`` is the cost of rank ``s``'s ``i``-th microbatch; every rank
-    holds the same number. All microbatches are sorted by cost (ties by rank,
-    then index), step ``k`` gets the ``k``-th group of ``N``, and within a step
-    each microbatch stays on its own rank when possible (at most one per rank),
-    so as few as possible move. Deterministic, so every rank computes the same
-    plan.
+    holds the same number, ``W``. All ``N * W`` microbatches are sorted by cost
+    (ties by rank, then index) and cut into ``W`` groups of ``N``: step ``k``
+    runs the ``k``-th group, so each step's microbatches cost about the same.
+    Within a step, each microbatch stays on the rank that holds it when it can
+    (at most one per rank); the rest go to the ranks left free. Deterministic,
+    so every rank computes the same plan from the same costs.
 
     Returns:
         ``plan[k][d] = (s, i)``: at step ``k``, rank ``d`` trains rank ``s``'s
@@ -193,12 +194,28 @@ def plan_window(costs: Sequence[Sequence[float]]) -> list[list[tuple[int, int]]]
 class GlobalBalancer(MicrobatchBalancer):
     """Plan each window across all data-parallel ranks and move microbatches.
 
-    Ranks that share a data-parallel rank (CP, TP) read the same microbatches
-    and compute the same plan, so each exchanges only with the ranks in the
-    same position of the other data-parallel ranks, over its own gloo group.
-    Assumes the data-parallel mesh dimensions come before CP and TP and there
-    is no pipeline parallelism (checked). Every rank must fill full windows,
-    which the loader guarantees by requiring ``repeat`` with DP > 1.
+    ``LocalBalancer`` can only reorder a rank's own window, so a rank that
+    holds several heavy microbatches stays the slowest for several steps.
+    ``GlobalBalancer`` also moves microbatches between ranks. Two ranks, a
+    window of 4, step time = slowest rank::
+
+        packed order         LocalBalancer        GlobalBalancer
+        step  r0  r1  time   step  r0  r1  time   step  r0  r1  time
+          0    9   3    9      0    9   4    9      0    9   8*   9
+          1    1   2    2      1    8   3    8      1    3*  4    4
+          2    8   1    8      2    2   2    2      2    2   2    2
+          3    2   4    4      3    1   1    1      3    1   1    1
+                 total 23             total 20             total 16
+
+        * moved between ranks
+
+    Every microbatch is still trained once per window. Ranks that share a
+    data-parallel rank (CP, TP) read the same microbatches and compute the same
+    plan, so each exchanges only with the ranks in the same position of the
+    other data-parallel ranks, over its own gloo group. Assumes the
+    data-parallel mesh dimensions come before CP and TP and there is no pipeline
+    parallelism (checked). Every rank must fill full windows, which the loader
+    guarantees by requiring ``repeat`` with DP > 1.
 
     Any picklable microbatch can move, including ``model_kwargs`` with image
     tensors. The gloo groups time out after 30 minutes, which also covers loader
@@ -233,17 +250,27 @@ class GlobalBalancer(MicrobatchBalancer):
         self._dp_gloo_group = group
 
     def balance(self, rows: list[Any]) -> list[Any]:
+        """Return the microbatches this rank trains in the next W steps.
+
+        All-gathers the costs, computes the shared plan, keeps the rows the plan
+        leaves here, and exchanges the rest point to point (pickled; one round
+        of sizes, one of payloads).
+        """
         group = self._dp_gloo_group
         me = group.rank()
         start = time.perf_counter()
         try:
+            # 1. Gather every rank's costs and compute the shared plan.
             costs = torch.tensor([self._cost_fn(r) for r in rows], dtype=torch.float64)
             gathered = [torch.empty_like(costs) for _ in range(group.size())]
             dist.all_gather(gathered, costs, group=group)
             plan = plan_window([g.tolist() for g in gathered])
 
-            # Moves in step order; both sides enumerate them identically, so the
-            # step index is a unique tag per (sender, receiver) pair.
+            # 2. List my moves: (step k, receiver d, my row i) for each row I
+            # send, and (step k, sender s) for each step I train another rank's
+            # row. Both sides enumerate moves in step order, and a rank trains
+            # one microbatch per step, so k is a unique tag per (sender,
+            # receiver) pair.
             sends = [
                 (k, d, i)
                 for k, step in enumerate(plan)
@@ -267,7 +294,8 @@ class GlobalBalancer(MicrobatchBalancer):
                 for work in dist.batch_isend_irecv(ops) if ops else []:
                     work.wait()
 
-            # Round 1: payload sizes. Round 2: pickled microbatches.
+            # 3. Pickle the rows I send, then exchange sizes (so receivers can
+            # allocate buffers) and payloads.
             payloads = [
                 torch.frombuffer(bytearray(pickle.dumps(rows[i])), dtype=torch.uint8)
                 for _, _, i in sends
@@ -291,6 +319,7 @@ class GlobalBalancer(MicrobatchBalancer):
             sum(t.numel() for t in received.values()),
             (time.perf_counter() - start) * 1e3,
         )
+        # 4. Assemble my window in step order: kept rows plus received ones.
         return [
             pickle.loads(received[k].numpy().tobytes()) if s != me else rows[i]
             for k, (s, i) in enumerate(step[me] for step in plan)
