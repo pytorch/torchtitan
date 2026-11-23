@@ -11,8 +11,11 @@ import logging
 import os
 import pickle
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 import torch
 
@@ -22,7 +25,15 @@ from torchtitan.distributed.accelerator_graph import (
     get_cuspy_cuda_graph_annotation_config,
 )
 from torchtitan.observability import structured_logger as sl
-from torchtitan.tools.utils import device_module, device_type
+from torchtitan.tools.utils import device_module, device_type, get_local_device
+
+if TYPE_CHECKING:
+    from torchtitan.observability.cuda_memory.session import CudaMemorySession
+
+
+_CUDA_MEMORY_SESSION: ContextVar["CudaMemorySession | None"] = ContextVar(
+    "cuda_memory_session", default=None
+)
 
 # torch's export_chrome_trace gained cuda_graph_annotations when the offline joiner
 # (torch.cuda._annotate_cuda_graph_trace) was removed. Older versions still export, just
@@ -50,6 +61,26 @@ MEMORY_EXIT_DIR = "step_{step:012d}_exit"  # OOM dump variant
 MEMORY_FILE = (
     "{rank:06d}_step_{step}.pickle"  # MEMORY_DIR/MEMORY_STEP_DIR/{MEMORY_FILE}
 )
+
+
+@dataclass(kw_only=True, slots=True)
+class CudaMemoryProfilerConfig:
+    """Capture CUDA allocation requests during startup and the first training steps."""
+
+    capture_steps: int = 3
+    """Completed iterations to capture, counted from this invocation's first step."""
+
+    stacks: bool = True
+    """Collect native allocation stacks for requesting-library attribution."""
+
+    max_records: int = 262144
+    """Capacity of the allocation callback buffer; overflow fails capture."""
+
+    def __post_init__(self) -> None:
+        if type(self.capture_steps) is not int or self.capture_steps < 1:
+            raise ValueError("cuda_memory.capture_steps must be a positive integer")
+        if type(self.max_records) is not int or not 1 <= self.max_records <= 1048576:
+            raise ValueError("cuda_memory.max_records must be between 1 and 1048576")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -335,6 +366,9 @@ class Profiler(Configurable):
         cuspy: CuspyProfilerConfig | None = None
         """Cuspy profiler settings; ``None`` profiles CUDA with Kineto."""
 
+        cuda_memory: CudaMemoryProfilerConfig | None = None
+        """Opt-in startup allocation capture; requires the early training scope."""
+
         def __post_init__(self) -> None:
             if self.enable_profiling and self.profile_freq < (
                 self.profiler_warmup + self.profiler_active
@@ -392,6 +426,19 @@ class Profiler(Configurable):
         return self
 
     def __enter__(self) -> "Profiler":
+        if self._config.cuda_memory is not None:
+            session = _CUDA_MEMORY_SESSION.get()
+            if session is None or session.config is not self._config.cuda_memory:
+                raise RuntimeError(
+                    "cuda_memory requires record_cuda_memory around trainer construction and training"
+                )
+            if self._config.enable_profiling and self._config.cuspy is None:
+                raise ValueError(
+                    "cuda_memory cannot share CUPTI with Kineto CUDA profiling. "
+                    "Set config.profiler.cuspy = CuspyProfilerConfig() for CUDA traces, "
+                    "or config.profiler.enable_profiling = False for allocation "
+                    "capture only."
+                )
         self.torch_profiler = self.build_torch_profiler(
             global_step=self._global_step,
             base_folder=self._base_folder,
@@ -431,6 +478,12 @@ class Profiler(Configurable):
     def step(self) -> None:
         """Advance all active profilers by one training step."""
 
+        memory_session = _CUDA_MEMORY_SESSION.get()
+        if (
+            memory_session is not None
+            and memory_session.config is self._config.cuda_memory
+        ):
+            memory_session.step()
         if self.torch_profiler is not None:
             with sl.log_trace_span("kineto_profiler_step_call"):
                 self.torch_profiler.step()
@@ -613,3 +666,47 @@ class Profiler(Configurable):
             rank,
             cfg.memory_snapshot_max_entries,
         )
+
+
+@contextmanager
+def record_cuda_memory(config: Profiler.Config, *, base_folder: str) -> Iterator[None]:
+    """Capture before NCCL initialization; normal Profiler.step bounds the window.
+
+    The standard training entry point owns this scope. Custom entry points can
+    wrap trainer construction and training with the same helper.
+    """
+    if config.cuda_memory is None:
+        yield
+        return
+    config.cuda_memory.__post_init__()
+    if config.enable_profiling and config.cuspy is None:
+        raise ValueError(
+            "cuda_memory cannot share CUPTI with Kineto CUDA profiling. "
+            "Set config.profiler.cuspy = CuspyProfilerConfig() for CUDA traces, "
+            "or config.profiler.enable_profiling = False for allocation "
+            "capture only."
+        )
+    if _CUDA_MEMORY_SESSION.get() is not None:
+        raise RuntimeError("nested CUDA memory capture scopes are not supported")
+
+    from torchtitan.observability.cuda_memory.session import CudaMemorySession
+
+    torch.cuda.set_device(get_local_device())
+    session = CudaMemorySession(
+        config.cuda_memory, os.path.join(base_folder, config.save_traces_folder)
+    )
+    session.start()
+    token = _CUDA_MEMORY_SESSION.set(session)
+    try:
+        try:
+            yield
+        except BaseException as error:
+            try:
+                session.close(export=False)
+            except BaseException as cleanup:
+                error.add_note(f"CUDA memory capture cleanup failed: {cleanup!r}")
+            raise
+        else:
+            session.close(export=True)
+    finally:
+        _CUDA_MEMORY_SESSION.reset(token)
