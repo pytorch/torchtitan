@@ -82,6 +82,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "model_config_parser",
         "skip_tokenizer_init",
         "dtype",
+        "mamba_track_interval",
         "tp_size",
         "attn_dp_size",
         "mem_fraction_static",
@@ -106,6 +107,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         # not count the requests the engine holds back (see
         # SGLangEngine._awaiting_prefill).
         "max_queued_requests",
+        "enable_unified_memory",
     }
 )
 
@@ -118,9 +120,7 @@ class SGLangEngine(GenerationEngine):
     identical decisions, as the engine loop's SPMD contract requires. ``step()`` runs one
     iteration of SGLang's overlap event loop, so the CPU schedules the next batch while
     the GPU runs the current one, and returns the requests whose results that iteration
-    processed. For linear attention (GDN, KDA) models, whose radix cache of recurrent
-    states disables overlap without SGLang's extra_buffer strategy (not registered,
-    see the README), it runs one iteration of SGLang's normal event loop instead.
+    processed.
 
     See ``GenerationEngine`` for the build arguments and the threading contract.
     """
@@ -385,15 +385,7 @@ class SGLangEngine(GenerationEngine):
         self._awaiting_prefill: dict[
             tuple[int, str | None, tuple[int, ...]], tuple[Req, list[Req]]
         ] = {}
-        # Linear attention models don't hold requests. Without SGLang's extra_buffer
-        # strategy, SGLang saves a linear attention state only at the end of a
-        # cached prefix. A request with the same prompt still computes the prompt's
-        # last token, which needs the state one token earlier, so it can reuse
-        # nothing, and holding it would only delay it.
-        self._hold_shared_prompts = not has_linear_attention
-        # SGLang turns overlap scheduling off only for linear attention models (see
-        # step()).
-        if not self._scheduler.enable_overlap and not has_linear_attention:
+        if not self._scheduler.enable_overlap:
             raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
         self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
@@ -454,11 +446,25 @@ class SGLangEngine(GenerationEngine):
             # session is released, so its next turn finds it: eviction takes
             # unreferenced KV first, and referenced KV only when nothing else is left.
             enable_session_radix_cache=True,
+            # Linear attention (GDN, KDA) models: while decoding, SGLang's extra_buffer
+            # prefix cache snapshots each request's state every 64 tokens. A session's
+            # next turn resumes from the previous turn's last snapshot, so it
+            # recomputes at most the previous turn's last 63 tokens (up to 255 with
+            # SGLang's default of 256). KDA needs a multiple of 64: its decode
+            # snapshots assume an empty replay state.
+            mamba_track_interval=64,
             disable_cuda_graph=self.config.cuda_graph == "none",
             # The wrapper loads its weights when SGLang builds it.
             skip_server_warmup=True,
             log_level="warning",
         )
+        if any(
+            isinstance(layer.attention, LinearAttention.Config)
+            for layer in model.layers
+        ):
+            # KV and GDN / KDA states share one pool, so memory one does not use can
+            # hold the other (see the README). SGLang builds it for hybrid models only.
+            server_kwargs["enable_unified_memory"] = True
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
             # dominates small prefills. SGLang runs a prefill batch eagerly if it
@@ -505,8 +511,6 @@ class SGLangEngine(GenerationEngine):
         # API to run its loop one iteration at a time.
         scheduler = self._scheduler
         scheduler._war_barrier_enabled = is_war_barrier_enabled()
-        if not scheduler.enable_overlap:
-            return
         scheduler.enable_skip_finishing_decode = True
         scheduler.result_queue = deque()
         # The schedule stream must differ from the forward stream to overlap them.
@@ -550,8 +554,7 @@ class SGLangEngine(GenerationEngine):
         holding, SGLang would prefill a rollout group's samples in one batch and
         each would compute the whole prompt, because SGLang caches a request's KV
         only after its prefill. SGLang's own parallel sampling (n > 1) prefills
-        the prompt once first for the same reason. Linear attention models do not
-        hold requests (see ``_hold_shared_prompts``).
+        the prompt once first for the same reason.
         """
         sglang_requests = []
         rejected: list[tuple[str, Exception]] = []
@@ -624,17 +627,16 @@ class SGLangEngine(GenerationEngine):
             if req.rid in admitted:
                 self._output_collector.admit(req, arrival_times[req.rid])
                 queued[req.rid] = req
-        if self._hold_shared_prompts:
-            held = set()
-            # In admission order, so every TP rank picks the same leaders.
-            for req in queued.values():
-                key = (req.priority, req.cache_salt, tuple(req.origin_input_ids))
-                if key in self._awaiting_prefill:
-                    self._awaiting_prefill[key][1].append(req)
-                    held.add(req.rid)
-                else:
-                    self._awaiting_prefill[key] = (req, [])
-            self._scheduler.waiting_queue.take(lambda req: req.rid in held)
+        held = set()
+        # In admission order, so every TP rank picks the same leaders.
+        for req in queued.values():
+            key = (req.priority, req.cache_salt, tuple(req.origin_input_ids))
+            if key in self._awaiting_prefill:
+                self._awaiting_prefill[key][1].append(req)
+                held.add(req.rid)
+            else:
+                self._awaiting_prefill[key] = (req, [])
+        self._scheduler.waiting_queue.take(lambda req: req.rid in held)
         for finished, abort_message in self._output_collector.take():
             if finished.request_id in admitted:
                 assert (
@@ -709,16 +711,7 @@ class SGLangEngine(GenerationEngine):
         with torch.no_grad(), scheduler.device_module.StreamContext(
             scheduler.schedule_stream
         ):
-            if scheduler.enable_overlap:
-                _overlap_event_loop_iteration(scheduler)
-            else:
-                # TODO(https://github.com/sgl-project/sglang/issues/48463): SGLang's
-                # radix cache keeps linear attention states with its no_buffer
-                # strategy, which runs only without overlap scheduling, so SGLang
-                # turns overlap off for these models. Its extra_buffer strategy keeps
-                # overlap, but needs the kernels to write state snapshots at
-                # intermediate positions (see register_to_sglang).
-                _normal_event_loop_iteration(scheduler)
+            _overlap_event_loop_iteration(scheduler)
             # When SGLang processes a prefill's results, it appends the request's
             # first output token and inserts the prompt's KV into its radix cache.
             # So once a leader has an output token (or has finished), queue its
@@ -932,29 +925,6 @@ def _metrics_inputs(
         num_generation_tokens=num_generation_tokens,
         num_preemptions=req.retraction_count,
     )
-
-
-def _normal_event_loop_iteration(scheduler: Scheduler) -> None:
-    """One iteration of ``Scheduler.event_loop_normal``, without receiving requests.
-
-    The engine loop admits requests through ``add_requests`` instead.
-    """
-    # TODO(https://github.com/sgl-project/sglang/issues/48472): SGLang has no public
-    # single-iteration API; this mirrors the loop body of the pinned SGLang version and
-    # must be kept in sync with it.
-    scheduler.increment_scheduler_iterations()
-    plan = scheduler.get_next_batch_to_run(
-        running_batch=scheduler.running_batch, last_batch=scheduler.last_batch
-    )
-    scheduler.running_batch = plan.running_batch
-    batch = plan.batch_to_run
-    scheduler.cur_batch_for_debug = batch
-    if batch:
-        scheduler.process_batch_result(batch, scheduler.run_batch(batch))
-    else:
-        scheduler._sched_idled = True
-        scheduler.on_idle()
-    scheduler.last_batch = batch
 
 
 def _overlap_event_loop_iteration(scheduler: Scheduler) -> None:

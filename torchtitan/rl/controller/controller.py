@@ -111,6 +111,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config
 from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.models.qwen3_5.rope import get_mrope_config
 from torchtitan.observability import structured_logger as sl
@@ -255,6 +256,10 @@ class AsyncLoopConfig(Configurable.Config):
                 "num_prompts_per_train_step must be >= 1, got "
                 f"{self.num_prompts_per_train_step}"
             )
+        if self.num_samples_per_prompt < 1:
+            raise ValueError(
+                f"num_samples_per_prompt must be >= 1, got {self.num_samples_per_prompt}"
+            )
         if self.target_offpolicy_steps < 0:
             raise ValueError(
                 f"target_offpolicy_steps must be >= 0, got {self.target_offpolicy_steps}"
@@ -267,6 +272,11 @@ class AsyncLoopConfig(Configurable.Config):
     @property
     def max_active_rollout_groups(self) -> int:
         return (self.target_offpolicy_steps + 1) * self.num_prompts_per_train_step
+
+    @property
+    def max_rollouts_in_flight(self) -> int:
+        """The most training rollouts in flight at once: groups in flight x group size."""
+        return self.max_active_rollout_groups * self.num_samples_per_prompt
 
     @property
     def window_size(self) -> int | None:
@@ -419,17 +429,14 @@ class Controller(Configurable):
 
         def maybe_log(self) -> None:
             debug = self.trainer.debug
-            config_dict = self.to_dict()
             if debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(config_dict, indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config(self)}")
 
             if debug.save_config_file is not None:
                 config_file = os.path.join(self.dump_folder, debug.save_config_file)
                 os.makedirs(os.path.dirname(config_file), exist_ok=True)
                 with open(config_file, "w") as file:
-                    json.dump(config_dict, file, indent=2)
+                    json.dump(self.to_dict(), file, indent=2)
                 logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
@@ -444,6 +451,17 @@ class Controller(Configurable):
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
+                )
+            group_size = self.async_loop.num_samples_per_prompt
+            rollouts_per_worker = self.rollouter.rollouts_per_worker
+            # TODO: place single rollouts on workers, instead of groups
+            # so we can have less idle time as rollouts finish. This would require
+            # rethinking where group-level postprocessing runs.
+            if group_size > rollouts_per_worker:
+                raise ValueError(
+                    f"async_loop.num_samples_per_prompt ({group_size}) is larger than "
+                    f"rollouter.rollouts_per_worker ({rollouts_per_worker}). Please raise "
+                    "rollouter.rollouts_per_worker or lower async_loop.num_samples_per_prompt."
                 )
             # TODO: support "gpu_fetch" by reading into generator GPU memory
             # (https://github.com/pytorch/torchtitan/issues/6070).
@@ -564,14 +582,12 @@ class Controller(Configurable):
                 16 rollouts in flight, 2 generator DP ranks   -> 2 x 8 = 16    -> 32
             """
             # TODO: add a generator.max_num_seqs override when a recipe needs a smaller value.
-            async_loop = self.async_loop
-            max_rollouts_in_flight = (
-                async_loop.max_active_rollout_groups * async_loop.num_samples_per_prompt
-            )
             num_generator_dp_ranks = (
                 self.num_generators * self.generator.parallelism.data_parallel_degree
             )
-            even_share = math.ceil(max_rollouts_in_flight / num_generator_dp_ranks)
+            even_share = math.ceil(
+                self.async_loop.max_rollouts_in_flight / num_generator_dp_ranks
+            )
             # 2x is headroom
             max_num_seqs = 2 * even_share
             max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
@@ -617,7 +633,9 @@ class Controller(Configurable):
             seed=config.generator.debug.seed,
             stop_token_ids=list(self.renderer.get_stop_token_ids()),
         )
-        self._rollouter: Rollouter = config.rollouter.build()
+        self._rollouter: Rollouter = config.rollouter.build(
+            max_rollouts_in_flight=config.async_loop.max_rollouts_in_flight
+        )
         self.rollout_recorder = config.rollout_recorder.build(
             dump_dir=config.dump_folder
         )
@@ -1059,8 +1077,8 @@ class Controller(Configurable):
         generate_fn = self._make_generate_fn()
         release_session_fn = self._make_release_session_fn()
 
-        # One rollout worker per active buffer slot: lets generation fill every active slot,
-        # including the cold start (step 0 fills every active slot, not just num_prompts_per_train_step per wave).
+        # One rollout loop per group that can be in flight at once (`max_active_rollout_groups`).
+        # A loop is an asyncio task: it rolls out one group at a time, on the worker the rollouter picks.
         # TODO: support warm start
         rollout_tasks = [
             asyncio.create_task(
@@ -1069,9 +1087,9 @@ class Controller(Configurable):
                     generate_fn=generate_fn,
                     release_session_fn=release_session_fn,
                 ),
-                name=f"rollout_worker_{group_worker_id}",
+                name=f"rollout_loop_{loop_index}",
             )
-            for group_worker_id in range(max_active_rollout_groups)
+            for loop_index in range(max_active_rollout_groups)
         ]
 
         # data_input_loop
@@ -1256,7 +1274,7 @@ class Controller(Configurable):
         while True:
             work = await group_buffer.claim_next()
             if work is None:  # group_buffer closed/shutdown signal
-                logger.info("Buffer closed; rollout worker stopping")
+                logger.info("Buffer closed; rollout loop stopping")
                 return
             try:
                 with sl.log_trace_span("rollout_group"):
