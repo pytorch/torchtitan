@@ -131,15 +131,19 @@ Without it, set `training.disable_accelerator_graphs`.
 
 ## Dist-MoE scale recipes
 
-These BF16 Dist-MoE recipes are in `torchtitan_recipes.models.muse_spark`. All
+These Dist-MoE recipes are in `torchtitan_recipes.models.muse_spark`. All
 use EP64 and K/V all-gather CP. Each has a `_fake` variant that runs with
 FakePG on one GPU.
 
 | recipe | GPUs | seq len | global batch | DP / TP / CP | attention | Adam moments |
 | --- | ---: | ---: | ---: | --- | --- | --- |
 | `muse_spark_816b_a42b_dist_moe_bf16_spmd_64` | 64 | 32K | 64 | 8 / 1 / 8 | FA4 varlen, 64 documents | pinned host |
+| `muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64` | 64 | 32K | 64 | 8 / 1 / 8 | FA4 varlen, 64 documents | pinned host |
 | `muse_spark_816b_a42b_dist_moe_bf16_spmd_256` | 256 | 96K | 128 | 16 / 4 / 4 | Flex-Flash | device |
 | `muse_spark_816b_a42b_dist_moe_bf16_spmd_512` | 512 | 192K | 128 | 16 / 4 / 8 | Flex-Flash | device |
+
+The `mxfp8` recipe runs the routed experts and the attention and compressed-MoE
+projections in MXFP8. Inner attention and the LM head stay BF16.
 
 Pinned-host Adam moments work best with NUMA binding, for example
 `torchrun --numa-binding=node`.
