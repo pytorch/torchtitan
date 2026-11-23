@@ -21,6 +21,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.rl.generator.vllm.attention.linear_attention import (
     TorchTitanLinearAttentionBackend,
 )
+from torchtitan.tools.utils import device_type
 
 
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
@@ -45,7 +46,7 @@ class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
     replay and graph ownership stay intact.
 
     This costs one additional graph capture per decode-specialized batch size
-    (11 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
+    (83 at max_num_seqs 1024); ``TorchTitanGPUModelRunner.initialize_kv_cache``
     keeps them out of vLLM's graph-memory estimate.
 
     TODO: drop this class once vLLM captures FULL decode graphs next to FULL mixed
@@ -109,13 +110,46 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         assert not self.cudagraph_dispatcher.keys_initialized
         self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
 
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        *args,
+        uniform_decode: bool = False,
+        profile_seq_lens: int | None = None,
+        **kwargs,
+    ):
+        """Keep each request of a mixed capture dummy within ``max_model_len``.
+
+        vLLM gives every request of a mixed dummy batch a sequence length equal to the
+        whole batch. A real step that size packs several requests, each at most
+        ``max_model_len`` long, so the captured graph replays them correctly.
+
+            max_model_len=1024, capture 2048 tokens as 8 requests of 256
+            vLLM: each seq_len 2048 -> reads 128 KV pages from a 64-page row
+            here: each seq_len 1024 -> reads its 64 pages
+        """
+        # TODO: drop once vLLM caps the dummy's seq_lens at max_model_len in _dummy_run.
+        if (
+            profile_seq_lens is None
+            and not uniform_decode
+            and num_tokens > self.max_model_len
+        ):
+            profile_seq_lens = self.max_model_len
+        return super()._dummy_run(
+            num_tokens,
+            *args,
+            uniform_decode=uniform_decode,
+            profile_seq_lens=profile_seq_lens,
+            **kwargs,
+        )
+
     def initialize_kv_cache(
         self, kv_cache_config, is_profiling: bool = False, **kwargs
     ):
         super().initialize_kv_cache(kv_cache_config, is_profiling, **kwargs)
         # vLLM's graph-memory estimate, taken out of the KV cache, charges every FULL graph
         # like the second largest (a mixed graph). Decode graphs take far less (Qwen3-8B TP2:
-        # 11 of them add 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
+        # 11 decode graphs added 0.03 GiB to 1.57), so profile the mixed graphs only. vLLM drops
         # these profiling keys afterwards; the real call rebuilds them, decode keys included
         # (test_generator_dp_cudagraph.py checks a decode graph still replays).
         # TODO: drop once vLLM's estimate charges decode graphs at their own size.
@@ -193,3 +227,28 @@ class TorchTitanGPUWorker(GPUWorker):
             super().init_device()
         finally:
             vllm_gpu_model_runner.GPUModelRunner = original_runner_cls
+
+
+if device_type == "xpu":
+    # vLLM's CUDA Worker rejects XPU devices; CUDA installs never import these.
+    import vllm.v1.worker.xpu_worker as vllm_xpu_worker
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+
+    class TorchTitanXPUModelRunner(TorchTitanGPUModelRunner, XPUModelRunner):
+        """:class:`TorchTitanGPUModelRunner`'s overrides on vLLM's XPU runner."""
+
+    class TorchTitanXPUWorker(vllm_xpu_worker.XPUWorker):
+        """V1 XPU worker that constructs :class:`TorchTitanXPUModelRunner`."""
+
+        def init_device(self):
+            if self.use_v2_model_runner:
+                raise ValueError(
+                    "TorchTitan's vLLM integration requires the V1 model runner"
+                )
+            # Same substitution as TorchTitanGPUWorker.init_device.
+            original_runner_cls = vllm_xpu_worker.XPUModelRunner
+            vllm_xpu_worker.XPUModelRunner = TorchTitanXPUModelRunner
+            try:
+                super().init_device()
+            finally:
+                vllm_xpu_worker.XPUModelRunner = original_runner_cls

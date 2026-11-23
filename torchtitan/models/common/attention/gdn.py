@@ -7,7 +7,7 @@
 """Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels,
+# B = batch, T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # S = state slots, W = convolution kernel width, G = key-head groups.
 
@@ -27,7 +27,7 @@ from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
     causal_conv1d,
     chunk_gdn,
-    ChunkGdnCudnnPacked,
+    ChunkGdnWarpdrivePacked,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -47,7 +47,7 @@ from .linear_attention import (
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
+for _kernel_function in (_ChunkGDN, ChunkGdnWarpdrivePacked):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -81,9 +81,11 @@ def _causal_conv1d_varlen(
 
 
 @torch.library.custom_op(
-    "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
+    "torchtitan::batch_invariant_recurrent_gdn_fwd",
+    mutates_args=(),
+    device_types="cuda",
 )
-def _recurrent_gdn_fwd(
+def _batch_invariant_recurrent_gdn_fwd(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -132,13 +134,14 @@ def _recurrent_gdn_fwd(
         scale=q_BTHK.shape[-1] ** -0.5,
         state_indices=state_indices,
         has_initial_state=has_initial_state,
-        autotune=False,
+        # The scan otherwise picks its arithmetic from the batch shape.
+        kernel_options={"batch_invariant": True, "autotune": False},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
 
-@_recurrent_gdn_fwd.register_fake
-def _recurrent_gdn_fwd_fake(
+@_batch_invariant_recurrent_gdn_fwd.register_fake
+def _batch_invariant_recurrent_gdn_fwd_fake(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -163,11 +166,11 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             inputs[2],
             inputs[3],
             inputs[4],
@@ -176,16 +179,16 @@ def _chunk_gdn_gradients(
             impl="fused",
         )
         grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
-            output, inputs, grad_output
+            output_BTHV, inputs, grad_output
         )
         return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
-def _recurrent_gdn_setup_context(ctx, inputs, output) -> None:
+def _batch_invariant_recurrent_gdn_setup_context(ctx, inputs, output) -> None:
     ctx.save_for_backward(*inputs)
 
 
-def _recurrent_gdn_backward(ctx, grad_output):
+def _batch_invariant_recurrent_gdn_backward(ctx, grad_output):
     q, k, v, g, beta, cu_seqlens = ctx.saved_tensors
     grads = _chunk_gdn_gradients(
         grad_output,
@@ -199,8 +202,9 @@ def _recurrent_gdn_backward(ctx, grad_output):
     return (*grads, None)
 
 
-_recurrent_gdn_fwd.register_autograd(
-    _recurrent_gdn_backward, setup_context=_recurrent_gdn_setup_context
+_batch_invariant_recurrent_gdn_fwd.register_autograd(
+    _batch_invariant_recurrent_gdn_backward,
+    setup_context=_batch_invariant_recurrent_gdn_setup_context,
 )
 
 
@@ -324,7 +328,7 @@ class GDNKernel(Module):
         beta_BTH = beta_TH.unsqueeze(0)
 
         if is_in_batch_invariant_mode() and cu_seqlens is not None:
-            return _recurrent_gdn_fwd(
+            return _batch_invariant_recurrent_gdn_fwd(
                 xq_BTHK,
                 xk_BTHK,
                 xv_BTHV,
@@ -333,11 +337,11 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        normalized_q = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             xv_BTHV,
             g_BTH,
             beta_BTH,
@@ -346,7 +350,7 @@ class GDNKernel(Module):
             impl="fused",
             kernel_options=chunk_kernel_options(xq_BTHK),
         )
-        return output.squeeze(0)
+        return output_BTHV.squeeze(0)
 
 
 class InnerGDN(InnerAttention):
@@ -599,6 +603,11 @@ class GDN(LinearAttention):
 
         def __post_init__(self):
             LinearAttention.Config.__post_init__(self)
+            # Before the modulo: 0 raises ZeroDivisionError, and 4 % -2 == 0.
+            if self.n_key_heads < 1:
+                raise ValueError(
+                    f"n_key_heads must be positive, got {self.n_key_heads}"
+                )
             if self.n_heads % self.n_key_heads != 0:
                 raise ValueError(
                     f"n_heads ({self.n_heads}) must be divisible by "

@@ -57,7 +57,7 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.losses import DAPOLoss
@@ -80,10 +80,9 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
             data_source="nq",
             shuffle=False,
         ),
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardExactMatch.Config(weight=1.0)],
-                truncation_reward=0.0,
             ),
             message_env=SearchR1Env.Config(),
             token_env=TokenEnv.Config(
@@ -125,7 +124,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
+            validation=ValidationConfig(steps=500, freq=50),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -268,7 +267,10 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
-            validation=ValidationConfig(steps=500),
+            # Validation beside training would change the step times this recipe measures: validate at the end.
+            validation=ValidationConfig(
+                steps=500, validate_at_step_0=False, validate_after_training=True
+            ),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -386,7 +388,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
-        # TODO: bf16 logits. LMHeadFP32OutputConverter can't convert Muse Glimmer's
+        # TODO: bf16 logits. LMHeadFP32OutputTransform can't convert Muse Glimmer's
         # SoftCappedLinear head; it needs a HiMidLoLinear-based variant with the soft cap.
         fp32_lm_head=False,
     )
@@ -396,7 +398,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
+            validation=ValidationConfig(steps=500, freq=50),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(

@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
@@ -33,11 +34,13 @@ from torchtitan.config import (
 )
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
-    BatchInvariantFlexConverter,
-    ModelConfigConverter,
-    MXFP8LinearConverter,
+    apply_transforms,
+    BatchInvariantFlexTransform,
+    ModelConfigTransform,
+    MXFP8LinearTransform,
 )
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
@@ -60,7 +63,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -82,7 +85,7 @@ def _alphabet_sort_rollouter_config() -> Rollouter.Config:
             dataset=AlphabetSortDataset.Config(seed=42)
         ),
         validation_dataset=AlphabetSortDataset.Config(seed=99),
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardAlphabetSort.Config(weight=1.0)]),
             message_env=AlphabetSortEnv.Config(),
         ),
@@ -96,7 +99,7 @@ def _qwen3_rl_model_configs(
     attn_backend: str,
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
+    transforms: Sequence[ModelConfigTransform] = (),
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -104,9 +107,9 @@ def _qwen3_rl_model_configs(
         flavor,
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        transforms=transforms,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
 
 
@@ -183,6 +186,16 @@ def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.C
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
+    return config
+
+
+def rl_grpo_qwen3_0_6b_varlen_sglang(*, seq_len: int = 2048) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with the SGLang engine (6 GPUs: 4 gen + 2 train)."""
+    # Imported here so the other recipes do not depend on SGLang.
+    from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.generator.engine = SGLangEngine.Config()
     return config
 
 
@@ -294,11 +307,11 @@ def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchControllerWithLauncher.Config":
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
     """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
     config = rl_grpo_qwen3_0_6b_varlen()
-    # TODO: Allow LMHeadCastConverter and QuantizationConverter to
-    # co-exist, since they target different layers
-    converter = MXFP8LinearConverter.Config(fqns=["layers."]).build()
-    config.trainer.model = converter.convert(config.trainer.model)
-    config.generator.model = converter.convert(config.generator.model)
+    # Quantize only the decoder layers: the lm_head keeps the fp32-output
+    # HiMidLoLinear that the base recipe set.
+    transforms: list[ModelConfigTransform] = [MXFP8LinearTransform(fqns=["layers."])]
+    config.trainer = apply_transforms(config.trainer, transforms)
+    config.generator = apply_transforms(config.generator, transforms)
     return config
 
 
@@ -335,12 +348,14 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
-        converters=[BatchInvariantFlexConverter.Config()],
+        transforms=[BatchInvariantFlexTransform()],
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
-    block_size = config.trainer.model.layers[0].attention.inner_attention.block_size
+    inner_attention = config.trainer.model.layers[0].attention.inner_attention
+    assert isinstance(inner_attention, FlexInnerAttention.Config)
+    block_size = inner_attention.block_size
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
     )
@@ -666,6 +681,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     config.override = OverrideConfig(
         imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config
 
 
@@ -769,7 +787,6 @@ def _qwen3_5_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -779,7 +796,6 @@ def _qwen3_5_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
 
 
@@ -947,4 +963,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
+    # Validation beside training would change the step times this recipe measures: validate at the end.
+    config.async_loop.validation.validate_at_step_0 = False
+    config.async_loop.validation.validate_after_training = True
     return config

@@ -113,3 +113,6 @@ jobs:
           tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
         torchrun --nproc-per-node=4 -m pytest \
           tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v
+        # Launches its own two-GPU torchrun per parallel layout.
+        TORCHTITAN_QWEN3_5_0_8B_HF_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3.5-0.8B'))") \
+          pytest tests/rl/unit_tests/gpu/test_cp_images.py -v

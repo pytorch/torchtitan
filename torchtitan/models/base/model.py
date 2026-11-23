@@ -125,15 +125,9 @@ class BaseModel(Module, ABC):
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
-    supports_pipeline_parallel: ClassVar[bool] = True
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
         """Partition the model and build its pipeline schedule."""
-        if not self.supports_pipeline_parallel:
-            raise RuntimeError(
-                f"{type(self).__name__} does not support pipeline parallelism."
-            )
-
         from torchtitan.distributed.pipeline_parallel import (
             pipeline_llm,
             pipeline_with_first_last_stage_modules,
@@ -168,13 +162,20 @@ class BaseModel(Module, ABC):
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if activation_remat is not None:
-                activation_remat.apply(self)
+                activation_remat.apply(
+                    self, block_container_fqns=self._remat_block_container_fqns()
+                )
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 precision=precision,
                 parallelism=parallelism,
             )
         return self
+
+    def _remat_block_container_fqns(self) -> list[str]:
+        """FQNs of the submodules whose children are the transformer blocks
+        that activation remat checkpoints."""
+        return ["layers"]
 
     @abstractmethod
     def _apply_fsdp(

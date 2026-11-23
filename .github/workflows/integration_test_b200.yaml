@@ -62,7 +62,7 @@ jobs:
 
           # torchao is not a torchtitan dependency, so the quantization
           # recipes need it installed explicitly, as the other lanes do.
-          USE_CPP=0 uv pip install --pre --upgrade torchao \
+          USE_CPP=0 uv pip install --pre -r .github/requirements-torchao.txt \
             --index-url https://download.pytorch.org/whl/nightly/cu130
           uv pip install "flash-attn-4[cu13]>=4.0.0b31"
 
@@ -85,6 +85,8 @@ jobs:
             tests/unit_tests/gpu/models/common/test_dist_moe.py \
             tests/unit_tests/gpu/quantization/test_mxfp8_fsdp.py \
             tests/unit_tests/gpu/models/kimi_k3/test_kimi_k3.py::TestKimiK3::test_attention_gym_kda_kernel_matches_recurrent_reference \
+            tests/unit_tests/gpu/models/qwen3_8_flash_next/test_qsa_graph.py \
+            tests/unit_tests/gpu/recipes/test_flash_next_qsa_teacher_override.py \
             -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

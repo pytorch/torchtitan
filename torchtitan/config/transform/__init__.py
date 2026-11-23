@@ -9,40 +9,37 @@
 from .apply import apply_transforms, transform_model_config_
 from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import convert_config_type, ModelConfigTransform
-from .batch_invariance import BatchInvariantFlexConverter
+from .batch_invariance import BatchInvariantFlexTransform
 from .context_parallel import ContextParallelTransform
-from .converter import ModelConfigConverter, validate_converter_compatibility
-from .freeze_moe_routing import FreezeMoERoutingTransform
-from .lm_head_fp32 import LMHeadFP32OutputConverter
+from .disable_moe_load_balancing import DisableMoELoadBalancingTransform
+from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
 from .quantization import (
-    MXFP8GroupedLinearConverter,
-    MXFP8LinearConverter,
-    NVFP4GroupedLinearConverter,
-    NVFP4LinearConverter,
-    QuantizationConverter,
+    MXFP8GroupedLinearTransform,
+    MXFP8LinearTransform,
+    NVFP4GroupedLinearTransform,
+    NVFP4LinearTransform,
+    QuantizationTransform,
 )
 from .relations import TransformRelations
 from .token_dispatcher import TokenDispatcherTransform
 
 __all__ = [
     "ModelConfigTransform",
-    "ModelConfigConverter",
     "AsyncTensorParallelTransform",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
     "TokenDispatcherTransform",
-    "BatchInvariantFlexConverter",
-    "FreezeMoERoutingTransform",
-    "LMHeadFP32OutputConverter",
+    "BatchInvariantFlexTransform",
+    "DisableMoELoadBalancingTransform",
+    "LMHeadFP32OutputTransform",
     "LoRATransform",
-    "MXFP8GroupedLinearConverter",
-    "MXFP8LinearConverter",
-    "NVFP4GroupedLinearConverter",
-    "NVFP4LinearConverter",
-    "QuantizationConverter",
+    "MXFP8GroupedLinearTransform",
+    "MXFP8LinearTransform",
+    "NVFP4GroupedLinearTransform",
+    "NVFP4LinearTransform",
+    "QuantizationTransform",
     "TransformRelations",
-    "validate_converter_compatibility",
 ]

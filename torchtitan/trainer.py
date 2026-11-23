@@ -5,21 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
-import dataclasses
 import json
 import logging
 import os
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
+
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import combine_loss_metrics
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -30,6 +30,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -73,6 +74,11 @@ class Trainer(Configurable):
         tokenizer: BaseTokenizer.Config = field(
             default_factory=HuggingFaceTokenizer.Config
         )
+        vision_processor: VisionProcessor.Config | None = None
+        """The model's image and video preprocessing, e.g.
+        ``VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)`` with the
+        settings next to the model's special tokens. Built once and handed to
+        the dataloader, like the tokenizer. None: no image or video inputs."""
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
@@ -113,23 +119,9 @@ class Trainer(Configurable):
                     "load_only=False."
                 )
 
-        def to_dict(self) -> dict[str, Any]:
-            d = {}
-            for f in dataclasses.fields(self):
-                val = getattr(self, f.name)
-                if hasattr(val, "to_dict"):
-                    d[f.name] = val.to_dict()
-                elif dataclasses.is_dataclass(val):
-                    d[f.name] = asdict(val)
-                else:
-                    d[f.name] = val
-            return d
-
         def maybe_log(self) -> None:
             if self.debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config(self)}")
 
             if self.debug.save_config_file is not None:
                 config_file = os.path.join(
@@ -151,6 +143,7 @@ class Trainer(Configurable):
     engine_cls: type[TrainingEngine] = TrainingEngine
 
     tokenizer: BaseTokenizer
+    vision_processor: VisionProcessor | None
     dataloader: BaseDataLoader
     validator: BaseValidator
     metrics_processor: MetricsProcessor
@@ -221,6 +214,11 @@ class Trainer(Configurable):
         )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
+        self.vision_processor = (
+            config.vision_processor.build()
+            if config.vision_processor is not None
+            else None
+        )
         num_tokens_per_microbatch = (
             config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -230,6 +228,7 @@ class Trainer(Configurable):
             tokenizer=self.tokenizer,
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
+            vision_processor=self.vision_processor,
         )
 
         try:
@@ -253,10 +252,11 @@ class Trainer(Configurable):
         self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
-        logger.info(
-            "Peak FLOPS used for computing MFU: "
-            f"{self.metrics_processor.gpu_peak_flops:.3e}"
-        )
+        if self.metrics_processor.gpu_peak_flops is not None:
+            logger.info(
+                "Peak FLOPS used for computing MFU: "
+                f"{self.metrics_processor.gpu_peak_flops:.3e}"
+            )
         logger.info(
             f"{engine.device.type.upper()} memory usage for model: "
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
@@ -282,6 +282,7 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
+                vision_processor=self.vision_processor,
                 parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
@@ -469,17 +470,11 @@ class Trainer(Configurable):
                     ),
                 )
                 if parallelism_context.dp_enabled:
-                    dp_mesh = parallelism_context.get_mesh("dp")
-                    mean_num_flops = (
-                        dist_utils.dist_sum(
-                            torch.tensor(
-                                mean_num_flops,
-                                dtype=torch.float64,
-                                device=engine.device,
-                            ),
-                            dp_mesh,
-                        )
-                        / dp_mesh.size()
+                    mean_num_flops = dist_utils.dist_mean(
+                        torch.tensor(
+                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        ),
+                        parallelism_context.get_mesh("dp"),
                     )
             else:
                 global_avg_loss = global_max_loss = float(accumulated_loss.item())
@@ -552,10 +547,14 @@ class Trainer(Configurable):
                             ),
                             parallelism_context=engine.parallelism_context,
                         )
-        finally:
-            # The entry point also calls close() for checkpoint and graph
-            # cleanup; close the profiler here so direct train() callers get
-            # balanced lifecycle handling.
+        except BaseException as e:
+            # Pass the failure so an OOM writes the exit memory snapshot. The
+            # entry point also calls close() for checkpoint and graph cleanup;
+            # close the profiler here so direct train() callers get balanced
+            # lifecycle handling.
+            engine.close_profiler(e)
+            raise
+        else:
             engine.close_profiler()
 
         if torch.distributed.get_rank() == 0:

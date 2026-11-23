@@ -37,19 +37,18 @@ import torch
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from torchtitan.components.data.multimodal.utils.image import (
-    process_image,
-    resize_to_navit_patch_grid,
-    vision_to_patches,
-)
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.attention.kda import InnerKDA, KDA
 from torchtitan.models.common.feed_forward import DenseFeedForward
-from torchtitan.models.kimi_k3 import build_model_config
+from torchtitan.models.kimi_k3 import (
+    build_model_config,
+    KIMI_K3_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
-from torchtitan.models.kimi_k3.model import KimiK3Model
+from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
@@ -60,10 +59,6 @@ _HF_REVISION = "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
 _DTYPE = torch.bfloat16
 _HF_ATTN_BACKEND = "eager"
 _MEDIA_TOKEN_ID = 163605
-_PATCH_SIZE = 14
-_MERGE_SIZE = 2
-_MAX_PATCHES = 65536
-_MAX_PATCHES_PER_SIDE = 512
 _PROMPT = (
     "<|kimi_image_placeholder|>\n" "What is shown in this image? Describe it briefly."
 )
@@ -151,7 +146,6 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
         setattr(text_config, name, value)
 
     vision = tt_config.vision_encoder
-    assert vision is not None
     vision_overrides = {
         "patch_size": vision.patch_size,
         "init_pos_emb_height": vision.init_pos_emb_height,
@@ -177,19 +171,19 @@ def _reduce_hf_config(hf_config, tt_config, hf_model_path: str) -> None:
     hf_config._name_or_path = hf_model_path
 
 
-def _build_tt_model(tt_config, dtype: torch.dtype) -> KimiK3Model:
+def _build_tt_model(tt_config, dtype: torch.dtype) -> KimiK3MultimodalModel:
     with torch.device("meta"):
         model = tt_config.build()
-    model.to_empty(device="cpu")
     model.to(dtype=dtype)
+    model.to_empty(device="cpu")
     model.init_states(buffer_device=torch.device("cpu"))
     return model.eval()
 
 
 def _use_released_vocab(
-    tt_config: KimiK3Model.Config,
+    tt_config: KimiK3MultimodalModel.Config,
     hf_model_path: str,
-) -> KimiK3Model.Config:
+) -> KimiK3MultimodalModel.Config:
     """Keep released tokenizer IDs valid in the reduced TorchTitan model."""
     hf_config = AutoConfig.from_pretrained(
         hf_model_path,
@@ -395,7 +389,7 @@ def _force_hf_routing(model, expert_indices, device) -> None:
 
 @torch.no_grad()
 def run_tt(
-    model: KimiK3Model,
+    model: KimiK3MultimodalModel,
     ref: dict[str, Any],
     vision_dtype: torch.dtype,
     device: torch.device,
@@ -404,7 +398,6 @@ def run_tt(
     """Run TorchTitan preprocessing and the reduced TorchTitan model."""
     print(f"Loading TorchTitan Kimi K3 (debugmodel) on {device} ...")
     model.to(device)
-    assert model.vision_encoder is not None
 
     if force_hf_routing:
         print("Using HF expert selections with TorchTitan router scores")
@@ -422,32 +415,18 @@ def run_tt(
                 )
             )
 
-    image = process_image(
-        Image.fromarray(ref["raw_image"].numpy()),
-        patch_size=_PATCH_SIZE,
-        merge_size=_MERGE_SIZE,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=_MAX_PATCHES,
-        max_patches_per_side=_MAX_PATCHES_PER_SIDE,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
+    vision_processor = VisionProcessor.Config(**KIMI_K3_VISION_PROCESSOR_KWARGS).build()
+    pixels, _ = vision_processor.resize_and_normalize(
+        Image.fromarray(ref["raw_image"].numpy())
     )
-    if image is None:
-        raise ValueError("TorchTitan failed to process the numerical test image.")
-    patches, grid = vision_to_patches(
-        image,
-        patch_size=_PATCH_SIZE,
-        temporal_patch_size=1,
-        merge_size=_MERGE_SIZE,
-        patch_order="raster",
-    )
+    patches, grid_thw = vision_processor.patchify(pixels)
+    num_vision_tokens = vision_processor.num_placeholder_tokens(grid_thw)
     pixel_values = patches.to(device=device, dtype=vision_dtype)
-    grid_thw = grid.unsqueeze(0).to(device)
-    num_vision_tokens = (grid[1] // _MERGE_SIZE) * (grid[2] // _MERGE_SIZE)
+    grid_thw = grid_thw.unsqueeze(0).to(device)
     tokens = _expand_image_placeholder(
         ref["input_ids"],
         _MEDIA_TOKEN_ID,
-        int(num_vision_tokens.item()),
+        num_vision_tokens,
     ).to(device)
     positions = torch.arange(
         tokens.shape[0],
@@ -458,7 +437,7 @@ def run_tt(
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
-        f"grid_thw={grid_thw.tolist()} vision_tokens={num_vision_tokens.item()}"
+        f"grid_thw={grid_thw.tolist()} vision_tokens={num_vision_tokens}"
     )
 
     hf_pixels = ref["pixel_values"].flatten(1)
@@ -519,7 +498,7 @@ def compare(
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_flavor", default="debugmodel")
+    parser.add_argument("--model_flavor", default="debugmodel_mm")
     parser.add_argument("--image_size", type=int, default=336)
     parser.add_argument(
         "--force-hf-routing",
@@ -545,10 +524,13 @@ def main() -> None:
         f"hf_attn={_HF_ATTN_BACKEND}"
     )
 
-    tt_config = _use_released_vocab(
-        build_model_config(args.model_flavor, parallelism=ParallelismConfig()),
-        hf_model_path,
-    )
+    tt_config = build_model_config(args.model_flavor, parallelism=ParallelismConfig())
+    if not isinstance(tt_config, KimiK3MultimodalModel.Config):
+        raise ValueError(
+            f"--model_flavor {args.model_flavor!r} has no vision encoder; the parity "
+            "check compares multimodal inputs, so use a '_mm' flavor."
+        )
+    tt_config = _use_released_vocab(tt_config, hf_model_path)
     torch.manual_seed(args.seed)
     tt_model = _build_tt_model(tt_config, dtype)
     hf_state_dict = KimiK3StateDictAdapter(tt_config, hf_assets_path=None).to_hf(

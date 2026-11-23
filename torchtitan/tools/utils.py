@@ -14,6 +14,12 @@ from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
+from torch.nn.attention import (
+    activate_flash_attention_impl,
+    current_flash_attention_impl,
+)
+
+from torchtitan.observability.logging import warn_once
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +69,28 @@ def get_cuda_flash_attention_impl() -> str | None:
     return impl
 
 
+def activate_cuda_flash_attention_impl() -> None:
+    """Route torch's varlen attention to the FlashAttention build for this GPU."""
+    flash_attention_impl = get_cuda_flash_attention_impl()
+    if flash_attention_impl is not None:
+        # activate_flash_attention_impl() will restore internal global state
+        # and re-run register function, so we want to only call it once.
+        if current_flash_attention_impl() != flash_attention_impl:
+            try:
+                activate_flash_attention_impl(flash_attention_impl)
+            except (ImportError, RuntimeError, ValueError) as error:
+                capability = torch.cuda.get_device_capability()
+                raise RuntimeError(
+                    f"{flash_attention_impl} is required on detected SM "
+                    f"{capability[0]}.{capability[1]}, but activation failed."
+                ) from error
+    else:
+        warn_once(
+            logger,
+            "FA3/FA4 not available on this CUDA architecture, falling back to FA2.",
+        )
+
+
 def has_rocm_capability(major: int, minor: int) -> bool:
     is_rocm = torch.cuda.is_available() and torch.version.hip is not None
     return is_rocm and torch.cuda.get_device_capability() >= (
@@ -78,6 +106,25 @@ def get_device_info() -> tuple[str, ModuleType]:
 
 
 device_type, device_module = get_device_info()
+
+
+# Env var each accelerator runtime reads to restrict which devices a process
+# sees. CUDA and ROCm read CUDA_VISIBLE_DEVICES; Level Zero (XPU) reads
+# ZE_AFFINITY_MASK.
+_VISIBLE_DEVICES_ENV_VARS = {
+    "cuda": "CUDA_VISIBLE_DEVICES",
+    "xpu": "ZE_AFFINITY_MASK",
+}
+
+
+def get_visible_devices_env_var() -> str:
+    """Return the env var that masks the accelerators a launched process sees."""
+    if device_type not in _VISIBLE_DEVICES_ENV_VARS:
+        raise ValueError(
+            f"No visible-device mask env var is known for device type "
+            f"{device_type!r}. Supported: {sorted(_VISIBLE_DEVICES_ENV_VARS)}."
+        )
+    return _VISIBLE_DEVICES_ENV_VARS[device_type]
 
 
 def get_local_device() -> torch.device:
@@ -119,7 +166,8 @@ def get_local_device() -> torch.device:
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
 # AMD MI250, MI300X, MI325X, MI350X, MI355X, Intel PVC, and AWS Trainium/Inferentia
-def get_peak_flops(device_name: str) -> float:
+def get_peak_flops(device_name: str) -> float | None:
+    """Return the dense BF16 peak FLOPS per device, or None if it is unknown."""
     try:
         # Run the lspci command and capture the output
         result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
@@ -234,13 +282,13 @@ def get_peak_flops(device_name: str) -> float:
             return 2307e12 / 2
         else:
             logger.warning(
-                f"Peak flops undefined for TPU: {device_name}, fallback to A100"
+                f"Peak FLOPS unknown for {device_name}. MFU is not reported."
             )
-            return 312e12
+            return None
 
-    else:  # for other GPU types, assume A100
-        logger.warning(f"Peak flops undefined for: {device_name}, fallback to A100")
-        return 312e12
+    else:
+        logger.warning(f"Peak FLOPS unknown for {device_name}. MFU is not reported.")
+        return None
 
 
 @contextlib.contextmanager

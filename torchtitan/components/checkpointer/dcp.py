@@ -14,8 +14,9 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
+import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
@@ -135,19 +136,7 @@ class CheckpointManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
-        """DCP save mode: synchronous, threaded async, or pinned-memory async."""
-
-        def __post_init__(self) -> None:
-            BaseCheckpointManager.Config.__post_init__(self)
-            async_lowered = self.async_mode.lower()
-            if async_lowered not in (
-                "disabled",
-                "async",
-                "async_with_pinned_mem",
-            ):
-                raise ValueError(f"Invalid async_mode: {async_lowered}")
-            self.async_mode = async_lowered
+        pass
 
     def __init__(
         self,
@@ -196,6 +185,7 @@ class CheckpointManager(BaseCheckpointManager):
             raise ValueError(
                 "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
+        self._validate_hf_export(model_parts, last_save_in_hf=self.last_save_in_hf)
 
         # Async & Distributed Infrastructure
         try:
@@ -468,6 +458,12 @@ class CheckpointManager(BaseCheckpointManager):
                         use_non_blocking_copy=True,
                     )
                 )
+            # DefaultStager copies on its own stream, which does not wait for the
+            # current stream. Without this wait, it can copy weights and optimizer
+            # state before the optimizer step finishes writing them.
+            staging_stream = self.stager._staging_stream
+            assert staging_stream is not None
+            staging_stream.wait_stream(torch.accelerator.current_stream())
 
             async_save_started_at = time.monotonic()
             result = self.dcp_save(
