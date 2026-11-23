@@ -10,21 +10,61 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
+from vllm import EngineArgs
 from vllm.config import CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
+from vllm.usage.usage_lib import UsageContext
+
+from torchtitan.tools.utils import device_type, has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
 
-# vLLM's default max_num_batched_tokens (vllm's per-step budget:
-# prefill + decode tokens summed over the batch). Used as the CUDA graph capture
-# cap for "FULL" (which graphs prefill / mixed batches, so capture sizes must
-# reach the per-step budget or those batches fall back to eager) when
-# ``Config.max_num_batched_tokens`` is unset; when that field is set, its value
-# is used instead (and also drives the vLLM engine).
-_DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
+def resolve_scheduler_limits(engine_kwargs: dict[str, Any]) -> tuple[int, int]:
+    """Return ``(max_num_batched_tokens, max_num_seqs)`` for ``engine_kwargs``, in the range vLLM can run.
+
+    An unset ``max_num_batched_tokens`` becomes what ``vllm serve`` picks for this GPU. As of vLLM 0.32:
+
+        >= 160 GiB (B200, GB300, MI300X)      -> 16384
+        >= 70 GiB, not an A100 (H100, H200)   -> 8192
+        anything else (A100, A10G)            -> 2048
+
+    Example (``max_num_batched_tokens`` unset, ``max_model_len`` 1024):
+        max_num_seqs 512, GB300    -> (16384, 512)
+        max_num_seqs 4096, A100    -> (2048, 2048)   vLLM needs max_num_seqs <= max_num_batched_tokens
+        max_num_seqs 4, GB300      -> (4096, 4)      a step holds at most 4 x 1024 tokens
+        max_num_seqs 16, A100      -> (2048, 32)     FlashAttention-2, see the TODO
+    """
+    max_num_batched_tokens = engine_kwargs.get("max_num_batched_tokens")
+    max_num_seqs = engine_kwargs["max_num_seqs"]
+
+    if max_num_batched_tokens is None:
+        # LLMEngine.from_engine_args falls back to 2048 on every GPU, so ask what vllm serve picks on this one.
+        # Without max_num_seqs: vLLM raises when it is above that pick, and it is clamped below instead.
+        vllm_config = EngineArgs(
+            **{**engine_kwargs, "max_num_seqs": None}
+        ).create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+        # A step holds at most max_num_seqs requests of max_model_len tokens.
+        max_num_batched_tokens = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            max_num_seqs * engine_kwargs["max_model_len"],
+        )
+        logger.info(
+            "max_num_batched_tokens is unset: using vllm serve's pick for this GPU, %d",
+            max_num_batched_tokens,
+        )
+
+    if device_type == "cuda" and not has_cuda_capability(9, 0):
+        # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory profile splits
+        # max_num_batched_tokens over max_num_seqs requests, the remainder on the last; FA2 writes out of bounds past 64.
+        # XPU is skipped: it runs only flex attention (_validate_platform in vllm/engine.py).
+        max_num_seqs = max(max_num_seqs, max_num_batched_tokens // 64)
+
+    # vLLM raises if max_num_seqs > max_num_batched_tokens.
+    return max_num_batched_tokens, min(max_num_seqs, max_num_batched_tokens)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -46,7 +86,8 @@ class VLLMCudaGraphConfig:
     - ``"FULL_DECODE_ONLY"``: graph pure-decode batches; prefill / mixed
       batches run eager. Cheap (no inductor compile).
     - ``"FULL"`` (default): graph the whole forward, prefill included, attention
-      captured too.
+      captured too. vLLM switches to ``FULL_DECODE_ONLY``, with a warning, when an
+      attention backend graphs only uniform decode batches (the MLA backend does).
     """
 
     capture_sizes: list[int] | None = None
@@ -70,9 +111,9 @@ class VLLMCudaGraphConfig:
         *,
         max_num_seqs: int,
         max_model_len: int,
+        max_num_batched_tokens: int,
         expert_sequence_parallel_size: int,
         enable_sequence_parallel: bool,
-        max_num_batched_tokens: int | None = None,
     ) -> CompilationConfig:
         """Build a vLLM ``CompilationConfig`` for the generator.
 
@@ -80,12 +121,13 @@ class VLLMCudaGraphConfig:
         sizes come from ``_default_capture_sizes``, whose largest size is the cap.
         The cap is ``max_num_seqs`` for ``FULL_DECODE_ONLY`` (decode batch ==
         num_seqs). ``FULL`` also graphs prefill, whose per-step token count is
-        bounded by ``max_num_batched_tokens`` (the configured value, else
-        ``_DEFAULT_MAX_NUM_BATCHED_TOKENS``), so the cap extends to it -- otherwise
+        bounded by ``max_num_batched_tokens``, so the cap extends to it -- otherwise
         prefill chunks larger than the cap fall back to eager. A step holds at most
         ``max_num_seqs`` requests of at most ``max_model_len`` tokens, so ``FULL`` also
         stops at ``max_num_seqs * max_model_len``. ``TorchTitanGPUModelRunner._dummy_run``
         keeps each capture request within ``max_model_len``.
+
+        With ``max_num_batched_tokens=2048``:
 
             FULL, max_num_seqs=8, max_model_len=1000, auto sizes          -> [1, 2, ..., 1536, 2048]
             FULL, max_num_seqs=1, max_model_len=1000, auto sizes          -> [1, 2, ..., 992, 1000]
@@ -119,14 +161,10 @@ class VLLMCudaGraphConfig:
                 "expert_sequence_parallel_size must be positive, got "
                 f"{expert_sequence_parallel_size}"
             )
-        if max_num_batched_tokens is not None:
-            _max_cuda_graph_capture_size = max_num_batched_tokens
-        else:
-            _max_cuda_graph_capture_size = _DEFAULT_MAX_NUM_BATCHED_TOKENS
         cap = max_num_seqs
         max_step_tokens = max_num_seqs * max_model_len
         if self.mode == "FULL":
-            cap = min(max(cap, _max_cuda_graph_capture_size), max_step_tokens)
+            cap = min(max(cap, max_num_batched_tokens), max_step_tokens)
         if self.capture_sizes is not None:
             if not self.capture_sizes or any(s <= 0 for s in self.capture_sizes):
                 raise ValueError(
