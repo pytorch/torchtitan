@@ -27,98 +27,12 @@ PROBLEM_SET = "qwen3_30b_a3b_distmoe_mxfp8_fsdp8_ep8_sm103"
 def configure_schedule(plan: SchedulePlan) -> None:
     fwd, bwd = plan.indexed_graph.fwd, plan.indexed_graph.bwd
     num_layers = len(fwd.layers)
-
-    for backward_layer, i in enumerate(reversed(range(num_layers))):
-        add_offset = 10 * backward_layer
-        wqkv = bwd.layers[i].attention.qkv_linear.wqkv
-        qkv_linear = bwd.layers[i].attention.qkv_linear
-        k_norm = bwd.layers[i].attention.k_norm
-        q_norm = bwd.layers[i].attention.q_norm
-        rope = bwd.layers[i].attention.rope
-        plan.fuse(
-            "r000_qk_rope_backward",
-            [
-                *bwd.add[add_offset + 5 : add_offset + 9],
-                k_norm._fused_rms_norm_backward,
-                k_norm.alias,
-                q_norm._fused_rms_norm_backward,
-                q_norm.alias,
-                qkv_linear.cat,
-                qkv_linear.reshape[0],
-                wqkv.mxfp8_quantize[0],
-                wqkv.t,
-                wqkv.triton_mx_block_rearrange[0],
-                wqkv.triton_mx_block_rearrange[2],
-                rope._to_copy,
-                rope.mul,
-                rope.neg,
-                rope.slice,
-                rope.slice_backward,
-            ],
-        )
-
     for i in range(num_layers):
-        qkv_linear = fwd.layers[i].attention.qkv_linear
-        k_norm = fwd.layers[i].attention.k_norm
-        q_norm = fwd.layers[i].attention.q_norm
-        rope = fwd.layers[i].attention.rope
-        plan.fuse(
-            "r001_qk_norm_rope",
-            [
-                k_norm._fused_rms_norm,
-                k_norm.alias,
-                q_norm._fused_rms_norm,
-                q_norm.alias,
-                qkv_linear.clone,
-                qkv_linear.reshape[0],
-                qkv_linear.split_with_sizes,
-                rope._to_copy,
-                rope.add,
-                rope.cat,
-                rope.index,
-                rope.mul,
-                rope.neg,
-                rope.slice,
-            ],
-        )
-
-    for backward_layer, i in enumerate(reversed(range(num_layers))):
-        add_offset = 10 * backward_layer
-        aux_loss = bwd.layers[i].feed_forward.router.aux_loss
-        gate = bwd.layers[i].feed_forward.router.gate
-        router = bwd.layers[i].feed_forward.router
-        plan.fuse(
-            "r002_router_backward",
-            [
-                *bwd.add[add_offset : add_offset + 3],
-                bwd.layers[i].feed_forward.routed_experts.masked_fill,
-                router._softmax_backward_data,
-                router.alias,
-                aux_loss.div,
-                aux_loss.gt,
-                aux_loss.mul,
-                aux_loss.neg,
-                aux_loss.ones_like,
-                aux_loss.scalar_tensor,
-                aux_loss.sgn,
-                aux_loss.sum,
-                aux_loss.where,
-                router.div,
-                gate.__lshift__,
-                *gate._to_copy[0:5],
-                gate.cat[0],
-                gate.permute,
-                gate.split,
-                gate.sub,
-                router.mul,
-                router.neg,
-                router.new_zeros,
-                router.scatter_add,
-                router.sum,
-            ],
-        )
+        _forward_layer(plan, i, num_layers)
+        _backward_layer(plan, i, num_layers)
 
     loss = bwd.loss
+
     plan.fuse(
         "r003_loss_backward",
         [
@@ -130,8 +44,8 @@ def configure_schedule(plan: SchedulePlan) -> None:
             loss.nll_loss_backward[0],
         ],
     )
+
     for chunk in range(1, 8):
-        loss = bwd.loss
         plan.fuse(
             "r003_loss_backward",
             [
@@ -144,40 +58,8 @@ def configure_schedule(plan: SchedulePlan) -> None:
             ],
         )
 
-    for i in range(num_layers):
-        aux_loss = fwd.layers[i].feed_forward.router.aux_loss
-        router = fwd.layers[i].feed_forward.router
-        plan.fuse(
-            "r004_router_forward",
-            [
-                fwd.layers[i].feed_forward.routed_experts.masked_fill,
-                router._softmax,
-                router.add,
-                router.add_,
-                router.alias,
-                router.arange,
-                aux_loss._to_copy,
-                aux_loss.bitwise_not,
-                aux_loss.clamp_min[1],
-                aux_loss.div[1],
-                aux_loss.linalg_vector_norm[1],
-                aux_loss.mul[1],
-                aux_loss.sum[0],
-                aux_loss.sum[1],
-                aux_loss.view[0],
-                router.bitwise_and,
-                router.bitwise_not,
-                router.div,
-                router.gather,
-                router.mul,
-                router.remainder,
-                router.scatter_,
-                router.sum,
-                router.zeros_like,
-            ],
-        )
-
     loss = fwd.loss
+
     plan.fuse(
         "r005_final_loss_chunk",
         [
@@ -193,7 +75,6 @@ def configure_schedule(plan: SchedulePlan) -> None:
     )
 
     for chunk in range(7):
-        loss = fwd.loss
         plan.fuse(
             "r006_loss_chunk",
             [
@@ -207,63 +88,245 @@ def configure_schedule(plan: SchedulePlan) -> None:
             ],
         )
 
-    for backward_layer, i in enumerate(reversed(range(num_layers))):
-        add_offset = 10 * backward_layer
-        wo = bwd.layers[i].attention.wo
-        ffn_norm = bwd.layers[i].ffn_norm
-        plan.fuse(
-            "r007_ffn_norm_backward",
-            [
-                bwd.add[add_offset + 3],
-                bwd.add[add_offset + 4],
-                wo.mxfp8_quantize[0],
-                wo.t,
-                wo.triton_mx_block_rearrange[0],
-                wo.triton_mx_block_rearrange[2],
-                ffn_norm._fused_rms_norm_backward,
-                ffn_norm.alias,
-            ],
-        )
 
-    for i in range(num_layers - 1):
-        wqkv = fwd.layers[i + 1].attention.qkv_linear.wqkv
-        attention_norm = fwd.layers[i + 1].attention_norm
+def _forward_layer(plan: SchedulePlan, i: int, num_layers: int) -> None:
+    fwd = plan.indexed_graph.fwd
+    layer = fwd.layers[i]
+    attention = layer.attention
+    rope = attention.rope
+    router = layer.feed_forward.router
+    aux_loss = router.aux_loss
+    routed_experts = layer.feed_forward.routed_experts
+    ffn_norm = layer.ffn_norm
+
+    plan.fuse(
+        "r001_qk_norm_rope",
+        [
+            attention.k_norm._fused_rms_norm,
+            attention.k_norm.alias,
+            attention.q_norm._fused_rms_norm,
+            attention.q_norm.alias,
+            attention.qkv_linear.clone,
+            attention.qkv_linear.reshape[0],
+            attention.qkv_linear.split_with_sizes,
+            rope._to_copy,
+            rope.add,
+            rope.cat,
+            rope.index,
+            rope.mul,
+            rope.neg,
+            rope.slice,
+        ],
+    )
+
+    plan.fuse(
+        "r004_router_forward",
+        [
+            routed_experts.masked_fill,
+            router._softmax,
+            router.add,
+            router.add_,
+            router.alias,
+            router.arange,
+            aux_loss._to_copy,
+            aux_loss.bitwise_not,
+            aux_loss.clamp_min[1],
+            aux_loss.div[1],
+            aux_loss.linalg_vector_norm[1],
+            aux_loss.mul[1],
+            aux_loss.sum[0],
+            aux_loss.sum[1],
+            aux_loss.view[0],
+            router.bitwise_and,
+            router.bitwise_not,
+            router.div,
+            router.gather,
+            router.mul,
+            router.remainder,
+            router.scatter_,
+            router.sum,
+            router.zeros_like,
+        ],
+    )
+
+    if i < num_layers - 1:
+        next_layer = fwd.layers[i + 1]
+        wqkv = next_layer.attention.qkv_linear.wqkv
+
         plan.fuse(
             "r008_residual_norm_quant",
             [
                 wqkv.mxfp8_quantize,
                 wqkv.triton_mx_block_rearrange,
-                attention_norm._fused_rms_norm,
-                attention_norm.alias,
-                fwd.layers[i].add[1],
+                next_layer.attention_norm._fused_rms_norm,
+                next_layer.attention_norm.alias,
+                layer.add[1],
             ],
         )
 
-    for i in range(num_layers):
-        routed_experts = fwd.layers[i].feed_forward.routed_experts
-        plan.fuse(
-            "r009_expert_w13_quant",
-            [
-                routed_experts._to_copy[0],
-                routed_experts.new_empty[0],
-                routed_experts.prepare_mxfp8_weight[0],
-            ],
-        )
-
-    attention_norm = bwd.layers[0].attention_norm
     plan.fuse(
-        "r010_embedding_backward",
+        "r009_expert_w13_quant",
         [
-            bwd.add[479],
-            attention_norm._fused_rms_norm_backward,
-            attention_norm.alias,
-            bwd.tok_embeddings.embedding_dense_backward,
+            routed_experts._to_copy[0],
+            routed_experts.new_empty[0],
+            routed_experts.prepare_mxfp8_weight[0],
         ],
     )
 
-    for backward_layer, i in enumerate(reversed(range(1, num_layers))):
-        add_offset = 10 * backward_layer
-        attention_norm = bwd.layers[i].attention_norm
+    plan.fuse(
+        "r012_router_aux_loss",
+        [
+            aux_loss.add_,
+            aux_loss.clamp_min[0],
+            aux_loss.clamp_min[2],
+            aux_loss.clone,
+            aux_loss.div[0],
+            aux_loss.linalg_vector_norm[0],
+            aux_loss.mul[0],
+            aux_loss.mul[2],
+            aux_loss.mul[3],
+            aux_loss.mul[4],
+            aux_loss.mul[5],
+            aux_loss.mul[6],
+            aux_loss.reciprocal,
+            aux_loss.split_with_sizes,
+            aux_loss.sum[2],
+        ],
+    )
+
+    plan.fuse(
+        "r013_expert_w2_quant",
+        [
+            routed_experts._to_copy[1],
+            routed_experts.new_empty[1],
+            routed_experts.prepare_mxfp8_weight[1],
+        ],
+    )
+
+    plan.fuse(
+        "r015_residual_norm",
+        [
+            layer.add[0],
+            ffn_norm._fused_rms_norm,
+            ffn_norm.alias,
+        ],
+    )
+
+    if i == num_layers - 1:
+        plan.fuse(
+            "r015_residual_norm",
+            [
+                layer.add[1],
+                fwd.norm._fused_rms_norm,
+                fwd.norm.alias[2],
+            ],
+        )
+
+    plan.fuse(
+        "r018_wo_input_quant",
+        [
+            attention.inner_attention.alias,
+            attention.reshape,
+            attention.wo.mxfp8_quantize,
+            attention.wo.triton_mx_block_rearrange,
+        ],
+    )
+
+
+def _backward_layer(plan: SchedulePlan, i: int, num_layers: int) -> None:
+    bwd = plan.indexed_graph.bwd
+    layer = bwd.layers[i]
+    backward_layer = num_layers - 1 - i
+    add_offset = 10 * backward_layer
+    attention = layer.attention
+    rope = attention.rope
+    qkv_linear = attention.qkv_linear
+    wqkv = qkv_linear.wqkv
+    wo = attention.wo
+    routed_experts = layer.feed_forward.routed_experts
+    router = layer.feed_forward.router
+    gate = router.gate
+    ffn_norm = layer.ffn_norm
+    attention_norm = layer.attention_norm
+
+    plan.fuse(
+        "r000_qk_rope_backward",
+        [
+            *bwd.add[add_offset + 5 : add_offset + 9],
+            attention.k_norm._fused_rms_norm_backward,
+            attention.k_norm.alias,
+            attention.q_norm._fused_rms_norm_backward,
+            attention.q_norm.alias,
+            qkv_linear.cat,
+            qkv_linear.reshape[0],
+            wqkv.mxfp8_quantize[0],
+            wqkv.t,
+            wqkv.triton_mx_block_rearrange[0],
+            wqkv.triton_mx_block_rearrange[2],
+            rope._to_copy,
+            rope.mul,
+            rope.neg,
+            rope.slice,
+            rope.slice_backward,
+        ],
+    )
+
+    plan.fuse(
+        "r002_router_backward",
+        [
+            *bwd.add[add_offset : add_offset + 3],
+            routed_experts.masked_fill,
+            router._softmax_backward_data,
+            router.alias,
+            router.aux_loss.div,
+            router.aux_loss.gt,
+            router.aux_loss.mul,
+            router.aux_loss.neg,
+            router.aux_loss.ones_like,
+            router.aux_loss.scalar_tensor,
+            router.aux_loss.sgn,
+            router.aux_loss.sum,
+            router.aux_loss.where,
+            router.div,
+            gate.__lshift__,
+            *gate._to_copy[0:5],
+            gate.cat[0],
+            gate.permute,
+            gate.split,
+            gate.sub,
+            router.mul,
+            router.neg,
+            router.new_zeros,
+            router.scatter_add,
+            router.sum,
+        ],
+    )
+
+    plan.fuse(
+        "r007_ffn_norm_backward",
+        [
+            bwd.add[add_offset + 3],
+            bwd.add[add_offset + 4],
+            wo.mxfp8_quantize[0],
+            wo.t,
+            wo.triton_mx_block_rearrange[0],
+            wo.triton_mx_block_rearrange[2],
+            ffn_norm._fused_rms_norm_backward,
+            ffn_norm.alias,
+        ],
+    )
+
+    if i == 0:
+        plan.fuse(
+            "r010_embedding_backward",
+            [
+                bwd.add[add_offset + 9],
+                attention_norm._fused_rms_norm_backward,
+                attention_norm.alias,
+                bwd.tok_embeddings.embedding_dense_backward,
+            ],
+        )
+    else:
         plan.fuse(
             "r011_attention_norm_backward",
             [
@@ -273,107 +336,24 @@ def configure_schedule(plan: SchedulePlan) -> None:
             ],
         )
 
-    for i in range(num_layers):
-        aux_loss = fwd.layers[i].feed_forward.router.aux_loss
-        plan.fuse(
-            "r012_router_aux_loss",
-            [
-                aux_loss.add_,
-                aux_loss.clamp_min[0],
-                aux_loss.clamp_min[2],
-                aux_loss.clone,
-                aux_loss.div[0],
-                aux_loss.linalg_vector_norm[0],
-                aux_loss.mul[0],
-                aux_loss.mul[2],
-                aux_loss.mul[3],
-                aux_loss.mul[4],
-                aux_loss.mul[5],
-                aux_loss.mul[6],
-                aux_loss.reciprocal,
-                aux_loss.split_with_sizes,
-                aux_loss.sum[2],
-            ],
-        )
-
-    for i in range(num_layers):
-        routed_experts = fwd.layers[i].feed_forward.routed_experts
-        plan.fuse(
-            "r013_expert_w2_quant",
-            [
-                routed_experts._to_copy[1],
-                routed_experts.new_empty[1],
-                routed_experts.prepare_mxfp8_weight[1],
-            ],
-        )
-
-    for i in range(num_layers):
-        ffn_norm = fwd.layers[i].ffn_norm
-        plan.fuse(
-            "r015_residual_norm",
-            [
-                fwd.layers[i].add[0],
-                ffn_norm._fused_rms_norm,
-                ffn_norm.alias,
-            ],
-        )
-    norm = fwd.norm
-    plan.fuse(
-        "r015_residual_norm",
-        [
-            fwd.layers[47].add[1],
-            norm._fused_rms_norm,
-            norm.alias[2],
-        ],
-    )
-
-    for i in reversed(range(num_layers)):
-        wo = bwd.layers[i].attention.wo
+    for projection in (wo, wqkv):
         plan.fuse(
             "r016_projection_grad_quant",
             [
-                wo.mxfp8_quantize[1],
-                wo.triton_mx_block_rearrange[1],
-            ],
-        )
-    for i in reversed(range(num_layers)):
-        wqkv = bwd.layers[i].attention.qkv_linear.wqkv
-        plan.fuse(
-            "r016_projection_grad_quant",
-            [
-                wqkv.mxfp8_quantize[1],
-                wqkv.triton_mx_block_rearrange[1],
+                projection.mxfp8_quantize[1],
+                projection.triton_mx_block_rearrange[1],
             ],
         )
 
-    for backward_layer, i in enumerate(reversed(range(1, num_layers))):
-        _to_copy_offset = 9 * backward_layer
-        plan.fuse(
-            "r017_qkv_grad_cast",
-            [
-                *bwd._to_copy[_to_copy_offset + 5 : _to_copy_offset + 12],
-                bwd.layers[i].attention.qkv_linear.wqkv.split_with_sizes,
-            ],
-        )
+    cast_start = 9 * backward_layer + (3 if i == 0 else 5)
+
     plan.fuse(
         "r017_qkv_grad_cast",
         [
-            *bwd._to_copy[426:433],
-            bwd.layers[0].attention.qkv_linear.wqkv.split_with_sizes,
+            *bwd._to_copy[cast_start : cast_start + 7],
+            wqkv.split_with_sizes,
         ],
     )
-
-    for i in range(num_layers):
-        wo = fwd.layers[i].attention.wo
-        plan.fuse(
-            "r018_wo_input_quant",
-            [
-                fwd.layers[i].attention.inner_attention.alias,
-                fwd.layers[i].attention.reshape,
-                wo.mxfp8_quantize,
-                wo.triton_mx_block_rearrange,
-            ],
-        )
 
 
 def reference() -> GraphTrainer.Config:
