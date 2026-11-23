@@ -15,7 +15,7 @@ import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 from torchtitan.components.data.balancing import (
-    MicrobatchBalancingConfig,
+    MicrobatchBalancer,
     MicrobatchBalancingIterDataset,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
@@ -91,10 +91,10 @@ class GrainDataLoader(BaseDataLoader):
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
-        balancing: MicrobatchBalancingConfig | None = None
-        """Plan each window of collated microbatches so that data-parallel ranks
-        run similar-cost microbatches in the same step. None keeps the packed
-        order."""
+        balancer: MicrobatchBalancer.Config | None = None
+        """Reorder each window of collated microbatches so that data-parallel
+        ranks run similar-cost microbatches in the same step, e.g.
+        ``LocalBalancer.Config()``. None keeps the packed order."""
 
         def __post_init__(self) -> None:
             BaseDataLoader.Config.__post_init__(self)
@@ -184,13 +184,13 @@ class GrainDataLoader(BaseDataLoader):
             batch_fn=collator,
         )
 
-        if config.balancing is not None:
-            dataset = MicrobatchBalancingIterDataset(
-                dataset,
-                config=config.balancing,
-                dp_rank=dp_rank,
-                dp_world_size=dp_world_size,
+        if config.balancer is not None:
+            # Built on every rank's main thread: balancers that communicate
+            # create their process groups here.
+            balancer = config.balancer.build(
+                dp_rank=dp_rank, dp_world_size=dp_world_size
             )
+            dataset = MicrobatchBalancingIterDataset(dataset, balancer=balancer)
 
         # Queue completed microbatches while the trainer consumes the previous one.
         dataset = grain_experimental.ThreadPrefetchIterDataset(

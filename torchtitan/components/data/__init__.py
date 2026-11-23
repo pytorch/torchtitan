@@ -6,8 +6,8 @@
 
 from torchtitan.components.data.balancing import (
     document_attention_cost,
-    MicrobatchBalancingConfig,
-    plan_window,
+    LocalBalancer,
+    MicrobatchBalancer,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
@@ -49,11 +49,11 @@ __all__ = [
     "document_attention_cost",
     "FirstFitPackingConfig",
     "GrainDataLoader",
-    "MicrobatchBalancingConfig",
-    "plan_window",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
+    "LocalBalancer",
+    "MicrobatchBalancer",
     "RandomAccessDataSource",
     "SampleProcessor",
     "SingleDatasetConfig",

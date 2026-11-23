@@ -487,19 +487,16 @@ background thread prepares batches 11 and 12
 
 ### Balancing microbatches across data-parallel ranks
 
-Data-parallel ranks synchronize every microbatch, so a step runs at the speed of its slowest rank. With document masking, attention cost grows with the sum of squared document lengths, and packers emit rows in arbitrary order, so one rank's full-length document often shares a step with other ranks' short documents. `balancing` buffers each window of `window_size` collated microbatches and plans which microbatch each rank trains at each step. With `group_size=1` (the default), each rank yields its own window heaviest first. All ranks open a window at the same step, so each step pairs microbatches of similar cost, without communication:
+Data-parallel ranks synchronize every microbatch, so a step runs at the speed of its slowest rank. With document masking, attention cost grows with the sum of squared document lengths, and packers emit rows in arbitrary order, so one rank's full-length document often shares a step with other ranks' short documents. `balancer` buffers each window of `window_size` collated microbatches and decides which microbatch each rank trains at each step. `LocalBalancer` yields each rank's own window heaviest first. All ranks open a window at the same step, so each step pairs microbatches of similar cost, without communication:
 
 ```python
 import functools
 
-from torchtitan.components.data import (
-    document_attention_cost,
-    MicrobatchBalancingConfig,
-)
+from torchtitan.components.data import document_attention_cost, LocalBalancer
 
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_pretraining_ds,
-    balancing=MicrobatchBalancingConfig(
+    balancer=LocalBalancer.Config(
         window_size=8,
         # sum(document_length ** 2) + token_weight * non-padding tokens
         cost_fn=functools.partial(document_attention_cost, token_weight=57_220),
@@ -507,11 +504,11 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. With `group_size=1`, balancing works the same for `dp_replicate`, `dp_shard`, CP, gradient accumulation, and pipeline microbatches. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
+Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, gradient accumulation, and pipeline microbatches. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
 
 Measured on GB300 with one microbatch per rank per step (OBELICS on Qwen3.5-9B, 32K rows; ProLong 512K on Llama-3-8B with head-tail CP):
 
-| Data, layout | Step time, packed order | Step time, balanced (`group_size=1`) | Speedup |
+| Data, layout | Step time, packed order | Step time, `LocalBalancer` | Speedup |
 |---|---|---|---|
 | OBELICS, FSDP 8 | 10.94 s | 7.71 s | 1.42x |
 | OBELICS, FSDP 16 | 14.77 s | 9.51 s | 1.55x |
