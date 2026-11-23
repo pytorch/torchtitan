@@ -73,7 +73,7 @@ jobs:
         eval "${TOKENIZER_EXPORTS}"
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
-        pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
+        pytest tests/rl/test_rollout_retry.py tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
 
         # Cover the optional Verifiers examples last, without installing them for all
         # RL jobs. Keep the nightlies installed above and let Verifiers move only its
