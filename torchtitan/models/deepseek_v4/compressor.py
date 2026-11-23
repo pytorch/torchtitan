@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
@@ -183,7 +184,7 @@ class Compressor(Module):
 
 
 class Indexer(Module):
-    """Produce low-dimensional query/key features for CSA top-k selection."""
+    """Project CSA indexer features and return selected positions and scores."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -191,6 +192,7 @@ class Indexer(Module):
         wq_b: Linear.Config
         weights_proj: Linear.Config
         compressor: "Compressor.Config"
+        inner_indexer: "InnerIndexer.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
         rope_head_dim: int = 64
@@ -207,6 +209,7 @@ class Indexer(Module):
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
         self.compressor = cfg.compressor.build()
+        self.inner_indexer = cfg.inner_indexer.build()
 
     @staticmethod
     def _rotate_activation(x):
@@ -228,8 +231,9 @@ class Indexer(Module):
         *,
         positions: torch.Tensor,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
-    ):
-        """Project raw indexer queries, keys, and per-head weights."""
+        return_scores: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project features and return document-local selections and requested scores."""
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -248,33 +252,51 @@ class Indexer(Module):
         # The scale reads the weights_proj output with bare ops.
         remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
-        return q, k, weights
+        return self.inner_indexer(
+            q,
+            k,
+            weights,
+            attention_metadata=attention_metadata,
+            return_scores=return_scores,
+        )
 
-    @staticmethod
-    def select(
+
+class InnerIndexer(Module):
+    """Local-SPMD boundary for discrete selection and differentiable scores."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        ratio: int
+        topk: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.ratio = config.ratio
+        self.topk = config.topk
+
+    @spmd.no_typecheck()
+    def forward(
+        self,
         idx_q,
         idx_k,
         idx_w,
         *,
-        max_seqlen: int,
-        ratio: int,
-        topk: int,
         attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
-        return_scores: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return_scores: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions per folded query token.
 
-        Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
-        recomputes the selected logits inside autograd for the distillation loss.
+        Uses Attention Gym's ``lightning_indexer`` for discrete selection and
+        recomputes the selected logits when the distillation loss needs them.
         With packed documents, returned indices are local to the query's
         document in the packed compressed-KV pool.
 
         Returns:
             ``(indices, scores)``. ``indices`` is int32
-            ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
-            slots. ``scores`` holds live indexer logits for those selected
-            entries and ``-inf`` in unusable slots, or None when return_scores
-            is False (evaluation and disabled auxiliary loss).
+            ``[T, min(topk, max_k // ratio)]`` with ``-1`` in unusable slots,
+            where ``max_k`` comes from the packed metadata.
+            When requested, ``scores`` holds the selected logits with ``-inf``
+            in unusable slots. Otherwise it has shape ``[T, 0]``.
         """
         # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
         # fall back; CPU, fp32, ROCm, and older GPUs use the reference
@@ -284,9 +306,7 @@ class Indexer(Module):
             and idx_q.dtype in (torch.float16, torch.bfloat16)
             and has_cuda_capability(9, 0)
         )
-        k = min(topk, max_seqlen // ratio)
-        cu_seqlens = attention_metadata.cu_seq_q
-        cu_seqlens_k = attention_metadata.cu_seq_compressed
+        k = min(self.topk, attention_metadata.max_k // self.ratio)
         with torch.no_grad():
             topk_indices = lightning_indexer(
                 idx_q.unsqueeze(0),
@@ -294,19 +314,19 @@ class Indexer(Module):
                 idx_w.unsqueeze(0),
                 k,
                 causal=True,
-                compress_ratio=ratio,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_k=cu_seqlens_k,
+                compress_ratio=self.ratio,
+                cu_seqlens=attention_metadata.cu_seq_q,
+                cu_seqlens_k=attention_metadata.cu_seq_compressed,
                 impl="fused" if fused else "reference",
             ).squeeze(0)
 
         if not return_scores:
-            return topk_indices, None
+            return topk_indices, idx_q.new_empty((idx_q.size(0), 0))
+
         valid_TK = topk_indices >= 0
         gather_indices_TK = compressed_gather_indices(
-            topk_indices, attention_metadata, ratio
+            topk_indices, attention_metadata, self.ratio
         )
-
         selected_TKD = idx_k[gather_indices_TK]
         logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
         topk_scores = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
