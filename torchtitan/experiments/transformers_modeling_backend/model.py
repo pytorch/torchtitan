@@ -721,7 +721,7 @@ class HFTransformerModel(BaseModel):
                 is_real = ~input_dict["padding_mask"]
                 positions = input_dict["positions"]
                 if not document_masked:
-                    positions = torch.arange(positions.shape[-1]).expand_as(positions)
+                    positions = torch.arange(positions.shape[0])
                 num_attended_keys = int(((positions + 1) * is_real).sum())
                 return (
                     flops_per_token * int(is_real.sum())
