@@ -282,6 +282,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             interval=10,
             keep_latest_k=0,
             initial_load_model_only=False,
+            async_mode="async_with_pinned_mem",
         )
         manager, backend_manager = self._build_manager(config)
 
@@ -329,6 +330,51 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         self.assertIsInstance(manager._manager_config.save, SyncCheckpointSaverConfig)
         self.assertIsNone(manager._manager_config.save.writer_config.barrier_config)
+        manager.close()
+
+    def test_async_mode_selects_the_backend_saver(self) -> None:
+        for async_mode, saver in (
+            ("async_with_pinned_mem", AsyncCheckpointSaverConfig),
+            ("ASYNC_WITH_PINNED_MEM", AsyncCheckpointSaverConfig),
+            ("disabled", SyncCheckpointSaverConfig),
+        ):
+            with self.subTest(async_mode=async_mode):
+                config = TorchCheckpointingManager.Config(
+                    keep_latest_k=0,
+                    initial_load_model_only=False,
+                    async_mode=async_mode,
+                )
+                manager, _ = self._build_manager(config)
+                self.assertIsInstance(manager._manager_config.save, saver)
+                # Training saves wait for every rank before publishing.
+                self.assertIsNotNone(
+                    manager._manager_config.save.writer_config.barrier_config
+                )
+                manager.close()
+        # The field is shared with the DCP manager, including its default.
+        self.assertEqual("disabled", TorchCheckpointingManager.Config().async_mode)
+        with self.assertRaisesRegex(ValueError, "does not support async_mode='async'"):
+            TorchCheckpointingManager.Config(async_mode="ASYNC")
+
+    def test_sync_save_returns_after_writing_and_skips_prewarm(self) -> None:
+        config = TorchCheckpointingManager.Config(
+            interval=3,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+            async_mode="disabled",
+        )
+        manager, backend_manager = self._build_manager(config)
+        # A synchronous backend save writes before returning, and returns None.
+        backend_manager.save_result = None
+
+        self.assertFalse(manager.save(curr_step=1))
+        self.assertFalse(manager.save(curr_step=2))
+        self.assertTrue(manager.save(curr_step=3))
+
+        self.assertEqual([], backend_manager.prewarm_calls)
+        self.assertEqual(1, len(backend_manager.save_calls))
+        self.assertIsNone(manager.save_future)
+        manager.maybe_wait_for_saving()
         manager.close()
 
     def test_load_only_does_not_construct_checkpoint_barrier(self) -> None:
@@ -845,6 +891,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 keep_latest_k=0,
                 initial_load_model_only=True,
                 initial_load_in_hf=True,
+                async_mode="async_with_pinned_mem",
             )
             backend_manager = _BackendManager()
             hf_manager = _BackendManager()

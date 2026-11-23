@@ -996,6 +996,9 @@ def rl_grpo_checkpoint_resume() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 1
     config.trainer.parallelism.tensor_parallel_degree = 2
     config.generator.parallelism.tensor_parallel_degree = 4
+    # TorchStore is still the only path for gpu_fetch; keep it covered.
+    # TODO: drop with the TorchStore path.
+    config.model_state_dict_transport = None
     return _configure_ci(
         config,
         steps=4,

@@ -3,11 +3,11 @@
 `ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
 model state dict into the generators' prefetched model state dicts with
 one-sided RDMA reads over a `torch.distributed._transport` backend
-(`backend="mooncake"`, the default, or `"nixl"`). It replaces TorchStore when
-`Controller.Config.model_state_dict_transport` is set:
+(`backend="nixl"`, the default, or `"mooncake"`). It is the default
+`Controller.Config.model_state_dict_transport`; select Mooncake with:
 
 ```python
-config.model_state_dict_transport = ModelStateDictTransport.Config(backend="nixl")
+config.model_state_dict_transport = ModelStateDictTransport.Config(backend="mooncake")
 ```
 
 It is a separate path rather than a TorchStore transport: the trainer and
@@ -17,7 +17,7 @@ metadata exchange. The trainer stages a pinned CPU copy already resharded per
 generator rank, so the optimizer can step while generators read and the
 trainer keeps no persistent GPU copy.
 
-`None` keeps TorchStore, which is still needed for
+`None` uses TorchStore instead, which is still needed for
 `model_state_dict_load_mode="gpu_fetch"`. TODO: delete the TorchStore path once
 this one covers `gpu_fetch`.
 
@@ -30,7 +30,9 @@ drop this note once that pin moves past 2026-11-10. Without
 https://github.com/pytorch/pytorch/pull/204113, host memory on other NUMA nodes
 uses node 0's NICs, which can cut read bandwidth several times. On IPv6-only
 hosts set `MC_USE_IPV6=1`; Mooncake's handshake otherwise resolves peer
-hostnames over IPv4.
+hostnames over IPv4. Without RDMA devices Mooncake falls back to its NVLink
+transport, which cannot read pinned CPU memory, and reads fail with
+`Mooncake transfer submission failed`; set `MC_FORCE_TCP=1`.
 
 NIXL needs `nixl==1.5.0` and `nixl-cu13==1.5.0` (installed by
 `scripts/install_rl_env.sh`) and uses its UCX plugin; select NICs and
