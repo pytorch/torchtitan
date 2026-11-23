@@ -106,5 +106,7 @@ Trainers average it over the DP mesh; CP ranks hold the same value.
 `Config.get_parameter_counts(model)` reports unique total and architecturally
 active parameters, including embeddings and encoders and weighting routed experts
 by their active ratio. FLOPs exclude lookup-only embeddings separately.
-Decoder attention uses configured sequence length rather than packed document
-lengths. Causal sparsity, recomputation, and elementwise operations are omitted.
+Decoder attention is charged per query position within its document: a query at
+position p attends to p + 1 keys. Padding tokens are excluded. Sliding-window and
+compressed attention keep the full-length estimate. Recomputation and elementwise
+operations are omitted.
