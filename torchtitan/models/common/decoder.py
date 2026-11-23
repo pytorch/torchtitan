@@ -201,11 +201,12 @@ class Decoder(BaseModel):
                     flops_per_token += full_length_flops
 
             def estimate(input_dict: Mapping[str, Any]) -> int:
-                # positions restart at 0 at each document start.
-                positions = input_dict["positions"]
-                num_attended_keys = int(positions.sum()) + positions.numel()
+                # positions restart at 0 at each document start. Padding does
+                # no useful work, so it is not counted.
+                is_real = ~input_dict["padding_mask"]
+                num_attended_keys = int(((input_dict["positions"] + 1) * is_real).sum())
                 return (
-                    flops_per_token * input_dict["input"].numel()
+                    flops_per_token * int(is_real.sum())
                     + flops_per_key * num_attended_keys
                 )
 

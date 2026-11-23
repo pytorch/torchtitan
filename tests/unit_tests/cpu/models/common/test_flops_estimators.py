@@ -27,6 +27,7 @@ def _text(num_tokens, seq_len=128):
     return {
         "input": torch.empty(num_tokens, dtype=torch.long),
         "positions": torch.full((num_tokens,), seq_len - 1),
+        "padding_mask": torch.zeros(num_tokens, dtype=torch.bool),
     }
 
 
@@ -67,15 +68,21 @@ def test_attention_counts_each_query_at_its_document_position():
     # sees, with GatedDeltaNet, whose cost per token is fixed.
     config, model = _build("qwen3_5")
     estimate = config.build_flops_estimator(model, seq_len=128)
-    # Two packed documents of lengths 3 and 2.
-    positions = torch.tensor([0, 1, 2, 0, 1])
+    # Two packed documents of lengths 3 and 2, then one padding token.
+    positions = torch.tensor([0, 1, 2, 0, 1, 2])
+    padding_mask = torch.tensor([False] * 5 + [True])
     attentions = [attention for _, attention, _, _ in config.traverse(Attention.Config)]
     expected = 5 * active_parameter_flops_per_token(model) + sum(
         attention.flops_per_token(position + 1)
-        for position in positions.tolist()
+        for position in positions[:5].tolist()
         for attention in attentions
     )
-    assert estimate({"input": torch.empty(5), "positions": positions}) == expected
+    inputs = {
+        "input": torch.empty(6),
+        "positions": positions,
+        "padding_mask": padding_mask,
+    }
+    assert estimate(inputs) == expected
 
 
 def test_parameter_counts_include_embeddings_and_deduplicate_tied_weights():
