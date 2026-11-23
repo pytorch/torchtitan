@@ -28,4 +28,5 @@ rocm = [
   "dist_gemm",                               # symmetric memory is CUDA-only.
   "qwen3_fsdp+deepep",
   "pp_dp_tp",                                # CPU-offloaded Adam moments require CUDA.
+  "fsdp+cp+varlen_selective_gather",
 ]
