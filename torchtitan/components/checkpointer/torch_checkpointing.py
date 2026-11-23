@@ -79,6 +79,12 @@ _DEFAULT_ITEM_SPEC = ItemSpec(requires_copy=False)
 CHECKPOINTING_LOGGER_NAME = "torch_checkpointing"
 
 
+# TODO: torch_checkpointing wraps checkpoint ids in Path(), which collapses the
+# "//" of a URI, and a backend manager takes a single StorageConfig. So paths
+# reach it without their scheme, and _BackendCheckpointStorage picks a storage
+# per protocol. Delete _split_uri, _backend_path, _can_hold, and the routing
+# once torch_checkpointing settles on scheme-preserving paths or per-path
+# storage: https://github.com/meta-pytorch/torch_checkpointing/issues/12#issuecomment-6967273963
 def _split_uri(path: str) -> tuple[str | None, str]:
     """Split a checkpoint path into its protocol and the path the backend uses.
 
@@ -314,6 +320,10 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     "use 'disabled' or 'async_with_pinned_mem'."
                 )
 
+    # Narrows the base annotation: the base only reads _storage, and only
+    # __init__ assigns it.
+    _storage: _BackendCheckpointStorage  # pyrefly: ignore[bad-override]
+
     def __init__(
         self,
         config: Config,
@@ -331,8 +341,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.purge_thread: threading.Thread | None = None
 
         self.folder = filesystem.join(base_folder, config.folder)
-        self._backend_storage = _BackendCheckpointStorage(self.folder, storage_config)
-        self._storage = self._backend_storage
+        self._storage = _BackendCheckpointStorage(self.folder, storage_config)
         self.interval = config.interval
         self._validate_extra_state_keys(extra_states)
         self.states = dict(extra_states)
@@ -369,7 +378,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             save_config = _async_save_config()
         manager_config = _default_backend_config(
             save_config,
-            storage_config=self._backend_storage.folder_storage_config,
+            storage_config=self._storage.folder_storage_config,
         )
         self._manager_config = manager_config
         self._prewarmed = False
@@ -414,7 +423,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         """A load-only backend manager on the storage ``checkpoint_id`` is on."""
         manager = _default_backend_config(
             _sync_save_config(use_barrier=False),
-            storage_config=self._backend_storage.storage_config_for(checkpoint_id),
+            storage_config=self._storage.storage_config_for(checkpoint_id),
             items=items,
             default=default,
         ).build()
@@ -491,7 +500,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             # An initial_load_path may be on other storage than the folder.
             with (
                 nullcontext(self._manager)
-                if self._backend_storage.is_on_folder_storage(checkpoint_id)
+                if self._storage.is_on_folder_storage(checkpoint_id)
                 else self._sync_loader(checkpoint_id)
             ) as manager:
                 loaded = manager.load(
@@ -548,6 +557,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         Hugging Face checkpoint loading has not landed in torch_checkpointing yet,
         so automatic loading cannot select those exports.
         """
+        # TODO: On a flat (non-HNS) GCS bucket the commit rename copies each
+        # object and is not atomic, so a preempted commit can leave a step-N that
+        # has metadata.pkl but not all of its shards, and this accepts it. Fixed
+        # once torch_checkpointing publishes metadata.pkl after the rename
+        # (zhixiangli/torch_checkpointing:checkpoint-writer-metadata-staging).
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )

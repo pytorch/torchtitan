@@ -254,30 +254,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         storage.rmdir.assert_called_once_with(Path("bucket/run/checkpoint/step-3"))
         manager.close()
 
-    def test_remote_folder_is_probed_and_loaded_by_scheme_less_path(self) -> None:
-        storage = mock.Mock()
-        storage.ls.return_value = ["step-7"]
-        storage.exists.return_value = True
-        storage.isdir.side_effect = lambda path: not str(path).endswith("metadata.pkl")
-        config = TorchCheckpointingManager.Config(
-            folder="gs://bucket/run/checkpoint",
-            keep_latest_k=0,
-            initial_load_model_only=False,
-            load_only=True,
-        )
-        with mock.patch.object(
-            FsspecStorageConfig, "create_storage", return_value=storage
-        ):
-            manager, backend_manager = self._build_manager(config)
-
-        self.assertTrue(manager.load())
-
-        storage.ls.assert_called_with(Path("bucket/run/checkpoint"))
-        self.assertEqual(
-            "bucket/run/checkpoint/step-7", backend_manager.load_calls[0][0]
-        )
-        manager.close()
-
     def test_storage_reads_each_path_from_the_storage_its_scheme_names(self) -> None:
         # Dropping the scheme and reading through the folder's storage would
         # turn gs://bucket/hf into bucket/hf on S3.
@@ -480,12 +456,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         The folder is relative to a remote base_folder.
         """
         memory_fs = fsspec.filesystem("memory")
-        bucket = f"/hf-round-trip-{uuid.uuid4().hex}"
-        self.addCleanup(
-            lambda: memory_fs.rm(bucket, recursive=True)
-            if memory_fs.exists(bucket)
-            else None
-        )
+        bucket = self._memory_bucket()
         base_folder = f"memory://{bucket}"
         export = f"{bucket}/checkpoint/exports/step-5"
 
@@ -1719,14 +1690,8 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
     def test_load_latest_on_remote_folder_ignores_incomplete_checkpoint_directories(
         self,
     ) -> None:
-        bucket = f"bucket-{uuid.uuid4().hex}"
         memory_fs = fsspec.filesystem("memory")
-        self.addCleanup(
-            lambda: memory_fs.rm(bucket, recursive=True)
-            if memory_fs.exists(bucket)
-            else None
-        )
-        memory_folder = f"{bucket}/checkpoint"
+        memory_folder = f"{self._memory_bucket()}/checkpoint"
         for step in (2, 5):
             memory_fs.pipe_file(f"{memory_folder}/step-{step}/metadata.pkl", b"")
         memory_fs.makedirs(f"{memory_folder}/step-8", exist_ok=True)
