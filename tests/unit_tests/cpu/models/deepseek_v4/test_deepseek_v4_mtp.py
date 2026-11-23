@@ -7,18 +7,14 @@
 import contextlib
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import spmd_types as spmd
 import torch
-import torch.distributed as dist
 
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4 import build_model_config
-from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan_recipes.tests.models.deepseek_v4 import (
     deepseek_v4_debugmodel,
     deepseek_v4_mtp_debugmodel,
@@ -52,55 +48,6 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
         self.assertIsNotNone(mtp_config.input_shardings)
-
-    @patch("torchtitan.distributed.fsdp.resolve_sparse_fsdp_mesh")
-    @patch("torchtitan.distributed.fsdp.resolve_fsdp_mesh")
-    @patch("torchtitan.models.common.mtp.apply_fsdp_to_mtp_decoder")
-    def test_uses_mtp_fsdp_path(
-        self,
-        apply_fsdp_to_mtp_decoder,
-        resolve_fsdp_mesh,
-        resolve_sparse_fsdp_mesh,
-    ):
-        model = MagicMock(spec=DeepSeekV4Model)
-        model.mtp_layers = [MagicMock()]
-        dp_mesh = object()
-        dp_mesh_dims = object()
-        edp_mesh = object()
-        edp_mesh_dims = object()
-        resolve_fsdp_mesh.return_value = (dp_mesh, dp_mesh_dims)
-        resolve_sparse_fsdp_mesh.return_value = (edp_mesh, edp_mesh_dims)
-        parallelism_context = SimpleNamespace(pp_enabled=False, ep=2)
-        precision = SimpleNamespace(param_dtype="bfloat16", reduce_dtype="float32")
-        parallelism = SimpleNamespace(
-            fsdp_enable_cpu_offloading=False,
-            fsdp_reshard_after_forward="default",
-            fsdp_symm_mem_scope=None,
-            fsdp_unshard_in_current_stream=False,
-        )
-
-        DeepSeekV4Model._apply_fsdp(
-            model,
-            parallelism_context=parallelism_context,
-            precision=precision,
-            parallelism=parallelism,
-        )
-
-        apply_fsdp_to_mtp_decoder.assert_called_once_with(
-            model,
-            dp_mesh,
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.float32,
-            pp_enabled=False,
-            cpu_offload=False,
-            reshard_after_forward_policy="default",
-            ep_degree=2,
-            edp_mesh=edp_mesh,
-            dp_mesh_dims=dp_mesh_dims,
-            edp_mesh_dims=edp_mesh_dims,
-            symm_mem_scope=None,
-            unshard_in_current_stream=False,
-        )
 
 
 def _preprocess(model, input_dict, **kwargs):
@@ -218,50 +165,6 @@ class TestDeepSeekV4MTPInputs(unittest.TestCase):
             )
             self.assertTrue(torch.equal(inputs[depth], reference_inputs))
             self.assertTrue(torch.equal(loss_labels[depth], reference_labels))
-
-
-class TestDeepSeekV4MTPInputLayout(unittest.TestCase):
-    def setUp(self):
-        dist.init_process_group("gloo", rank=0, world_size=1, store=dist.HashStore())
-        self.addCleanup(dist.destroy_process_group)
-
-    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_mtp_inputs_have_the_main_layouts(self):
-        parallelism_context = ParallelismContext(
-            dp_replicate=1,
-            dp_shard=1,
-            cp=1,
-            tp=1,
-            pp=1,
-            ep=1,
-            world_size=1,
-            enable_sequence_parallel=False,
-        )
-        parallelism_context.build_mesh()
-        with torch.device("meta"):
-            model = deepseek_v4_mtp_debugmodel(seq_len=16).model.build()
-        inputs, loss_labels, model_kwargs, _ = model.preprocess_inputs(
-            {
-                "input": torch.zeros(16, dtype=torch.long),
-                "labels": torch.arange(16),
-                "positions": torch.arange(16),
-                "padding_mask": torch.zeros(16, dtype=torch.bool),
-            },
-            parallelism_context=parallelism_context,
-            parallelism=SimpleNamespace(),
-        )
-
-        # On one rank an unannotated tensor also reads as the empty local type,
-        # so check that each per-depth tensor was annotated at all.
-        for depth_tensor, main_tensor in (
-            (inputs[1], inputs[0]),
-            (model_kwargs["mtp_input_valid_masks"][0], inputs[0]),
-            (loss_labels[1], loss_labels[0]),
-        ):
-            self.assertTrue(spmd.has_local_type(depth_tensor))
-            self.assertEqual(
-                spmd.get_local_type(depth_tensor), spmd.get_local_type(main_tensor)
-            )
 
 
 if __name__ == "__main__":

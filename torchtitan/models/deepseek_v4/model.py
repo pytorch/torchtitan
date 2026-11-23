@@ -283,8 +283,6 @@ class DeepSeekV4Model(MTPDecoder):
                 )
             tokens, *rest = tokens
             mtp_input_tokens = tuple(rest)
-        elif isinstance(tokens, tuple):
-            raise ValueError("DeepSeek V4 without MTP expects one token tensor.")
 
         if self.tok_embeddings is not None:
             if input_ids_T is None:

@@ -330,7 +330,10 @@ def apply_fsdp_to_mtp_decoder(
 
 
 class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
-    """DeepSeek-V3 weighted multi-term cross-entropy objective."""
+    """Weighted cross-entropy over the main prediction and each MTP depth.
+
+    The main term has weight 1; the MTP terms share ``mtp_scale`` equally.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Loss.Config):

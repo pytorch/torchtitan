@@ -11,7 +11,6 @@ import torch
 import torch_remat as remat
 
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.mtp import MTPCrossEntropyLoss, roll_mtp_sequence
 from torchtitan.models.common.nn_modules import RMSNorm
 
 from .model import DeepSeekV4TransformerBlock
@@ -87,4 +86,4 @@ class DeepSeekV4MTPBlock(DeepSeekV4TransformerBlock):
         return next_hc_hidden, prediction_hidden
 
 
-__all__ = ["DeepSeekV4MTPBlock", "MTPCrossEntropyLoss", "roll_mtp_sequence"]
+__all__ = ["DeepSeekV4MTPBlock"]
