@@ -5,11 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import pickle
-import random
 from pathlib import Path
 from unittest import mock
 
-import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -18,12 +16,11 @@ import torch.multiprocessing as mp
 
 from torchtitan.components.checkpointer.base import DATALOADER, OPTIMIZER
 from torchtitan.components.checkpointer.dcp import CheckpointManager
-from torchtitan.components.checkpointer.rng import RNG_STATE, RngState
-from torchtitan.tools.rng import RngSnapshot
+from torchtitan.components.checkpointer.rng import RNG_STATE, RngSnapshot, RngState
 
 
 class Loader:
-    """Restoration deliberately consumes all global streams, like iterator setup."""
+    """Restoration deliberately consumes the Torch CPU stream, like iterator setup."""
 
     def __init__(self):
         self.position = 0
@@ -37,18 +34,7 @@ class Loader:
 
 
 def draw(device="cpu"):
-    return random.random(), float(np.random.random()), torch.rand(3, device=device)
-
-
-def seed(value):
-    random.seed(value)
-    np.random.seed(value)
-    torch.manual_seed(value)
-
-
-def assert_draw_equal(left, right):
-    assert left[:2] == right[:2]
-    torch.testing.assert_close(left[2], right[2], rtol=0, atol=0)
+    return torch.rand(3, device=device)
 
 
 def manager(folder, *, enabled=True, async_mode="disabled", device="cpu"):
@@ -85,16 +71,16 @@ def manager(folder, *, enabled=True, async_mode="disabled", device="cpu"):
 
 
 def step(model, optimizer, scheduler, loader):
-    a, b, x = draw(next(model.parameters()).device)
+    x = draw(next(model.parameters()).device)
     optimizer.zero_grad()
-    loss = model(x * (a + b)).square().sum()
+    loss = model(x).square().sum()
     loss.backward()
     gradients = [p.grad.clone() for p in model.parameters()]
     optimizer.step()
     scheduler.step()
     loader.position += 1
     return {
-        "draw": (a, b, x),
+        "draw": x,
         "loss": loss.detach(),
         "gradients": gradients,
         "parameters": [p.detach().clone() for p in model.parameters()],
@@ -105,16 +91,16 @@ def step(model, optimizer, scheduler, loader):
 
 
 def test_capture_is_immutable_and_restore_is_explicit():
-    seed(1)
+    torch.manual_seed(1)
     rng = RngState()
     state = rng.state_dict()
     expected = draw()
-    seed(99)
+    torch.manual_seed(99)
     rng.load_state_dict(state)
     unrelated = draw()
-    assert unrelated[0] != expected[0]
+    assert not torch.equal(unrelated, expected)
     rng.restore()
-    assert_draw_equal(draw(), expected)
+    torch.testing.assert_close(draw(), expected, rtol=0, atol=0)
 
 
 def test_legacy_and_evaluation_loads(tmp_path, caplog):
@@ -168,11 +154,11 @@ def restart_worker(rank, folder, rendezvous, mode, asynchronous):
     )
     checkpoint = None
     try:
-        seed(50 if mode == "save" else 300)
+        torch.manual_seed(50 if mode == "save" else 300)
         checkpoint, model, optimizer, scheduler, loader = manager(
             folder, async_mode="async" if asynchronous else "disabled"
         )
-        seed(50 + rank if mode == "save" else 300 + rank)
+        torch.manual_seed(50 + rank if mode == "save" else 300 + rank)
         if mode == "save":
             for _ in range(2):
                 step(model, optimizer, scheduler, loader)
@@ -208,7 +194,9 @@ def test_fresh_process_distributed_restart(tmp_path, asynchronous):
             with open(tmp_path / f"{mode}-{rank}.pkl", "rb") as handle:
                 results[mode] = pickle.load(handle)
         torch.testing.assert_close(results["save"], results["resume"], rtol=0, atol=0)
-        assert results["save"][0]["draw"][0] != results["negative"][0]["draw"][0]
+        assert not torch.equal(
+            results["save"][0]["draw"], results["negative"][0]["draw"]
+        )
     keys = dcp.FileSystemReader(tmp_path / "step-2").read_metadata().state_dict_metadata
     assert {f"{RNG_STATE}.rank_0", f"{RNG_STATE}.rank_1"} <= set(keys)
 
@@ -218,12 +206,12 @@ def test_remote_checkpoint_restores_rng():
 
     checkpoint, *_ = manager(f"memory://rng-test-{uuid.uuid4()}")
     try:
-        seed(4)
+        torch.manual_seed(4)
         checkpoint.save(1)
         expected = draw()
-        seed(9)
+        torch.manual_seed(9)
         assert checkpoint.load(1)
-        assert_draw_equal(draw(), expected)
+        torch.testing.assert_close(draw(), expected, rtol=0, atol=0)
     finally:
         checkpoint.close()
         checkpoint._storage.remove(checkpoint.folder)
@@ -235,38 +223,21 @@ def incompatible_worker(rank, rendezvous):
     )
     try:
         rng = RngState()
-        seed(1 + rank)
+        torch.manual_seed(1 + rank)
         rng.load_state_dict(rng.state_dict())
-        seed(10 + rank)
+        torch.manual_seed(10 + rank)
         snapshot = RngSnapshot.capture()
         expected = draw()
         snapshot.restore()
         with mock.patch.object(RngSnapshot, "compatible", return_value=rank == 0):
             rng.restore()
-        assert_draw_equal(draw(), expected)
+        torch.testing.assert_close(draw(), expected, rtol=0, atol=0)
     finally:
         dist.destroy_process_group()
 
 
 def test_one_incompatible_rank_skips_rng_on_all_ranks(tmp_path):
     mp.spawn(incompatible_worker, args=(str(tmp_path / "rdzv"),), nprocs=2)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_cuda_rng_through_manager(tmp_path):
-    torch.cuda.init()
-    checkpoint, *_ = manager(tmp_path)
-    try:
-        torch.cuda.manual_seed_all(19)
-        checkpoint.save(1)
-        expected = torch.rand(8, device="cuda")
-        torch.cuda.manual_seed_all(91)
-        checkpoint.load(1)
-        torch.testing.assert_close(
-            torch.rand(8, device="cuda"), expected, rtol=0, atol=0
-        )
-    finally:
-        checkpoint.close()
 
 
 def test_disabled_feature_keeps_custom_state_contract(tmp_path):

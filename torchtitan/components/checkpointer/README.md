@@ -136,8 +136,7 @@ That's it. You have now successfully converted a sharded `torchtitan` checkpoint
 
 ### Rank-local RNG state (DCP)
 
-Set `CheckpointManager.Config(enable_rng_state=True)` to include Python, NumPy,
-Torch CPU, and the initialized current accelerator's global random stream in full DCP checkpoints.
+Set `CheckpointManager.Config(enable_rng_state=True)` to include Torch CPU RNG state and the initialized current accelerator's global random stream in full DCP checkpoints.
 This is opt-in and is currently supported by the DCP backend only. TorchFT
 rejects this option because its per-replica participation requires a separate RNG
 checkpoint contract. Each global
@@ -148,7 +147,7 @@ Snapshots are serialized to immutable bytes before asynchronous staging starts.
 Restore happens after the model, optimizer, scheduler and loader have loaded.
 The default Grain loader restores its already-created iterator. Custom loaders
 must complete iterator preparation in `load_state_dict`; lazy setup that consumes
-training RNG after restoration breaks continuation. Dataset worker streams and
+training RNG after restoration breaks continuation. Python and NumPy global streams, dataset worker streams and
 explicit `torch.Generator`, NumPy `Generator`, or Python `Random` objects remain
 owned by their components and must be checkpointed there.
 

@@ -13,12 +13,10 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.utils._pytree import tree_map
-from torchtitan.components.checkpointer.rng import RNG_STATE
-from torchtitan.tools.rng import RngSnapshot
+from torchtitan.components.checkpointer.rng import RNG_STATE, RngSnapshot
 
 from tests.unit_tests.cpu.components.checkpointer.test_rng_checkpoint import (
     manager,
-    seed,
     step,
 )
 
@@ -36,11 +34,11 @@ def _cuda_restart_worker(rank, folder, rendezvous, mode, async_mode):
     )
     checkpoint = None
     try:
-        seed(50 if mode == "save" else 300)
+        torch.manual_seed(50 if mode == "save" else 300)
         checkpoint, model, optimizer, scheduler, loader = manager(
             folder, async_mode=async_mode, device=f"cuda:{rank}"
         )
-        seed(50 + rank if mode == "save" else 300 + rank)
+        torch.manual_seed(50 + rank if mode == "save" else 300 + rank)
         if mode == "save":
             for _ in range(2):
                 step(model, optimizer, scheduler, loader)
@@ -80,7 +78,9 @@ def test_cuda_distributed_restart(tmp_path, async_mode):
             for mode in ("save", "resume", "negative")
         }
         torch.testing.assert_close(results["save"], results["resume"], rtol=0, atol=0)
-        assert results["save"][0]["draw"][0] != results["negative"][0]["draw"][0]
+        assert not torch.equal(
+            results["save"][0]["draw"], results["negative"][0]["draw"]
+        )
 
 
 @pytest.mark.multi_gpu
