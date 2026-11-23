@@ -173,6 +173,40 @@ repeated name in `compile.extra_passes` raises at trainer init. A replacement
 node should copy the meta of the node it replaces, which carries the fake
 value, module FQN, and forward/backward marker that later passes read.
 
+#### Indexed fusion schedules
+
+A recipe's `configure_schedule(plan)` selects operators on the joint graph by
+phase, module path and occurrence. For example,
+`plan.indexed_graph.bwd.layers[0].attention` addresses the first layer's
+backward attention scope. `plan.fuse(name, targets)` groups a selection with
+its connecting views and projections. The outliner preserves data dependencies
+and the order of reads and writes to shared storage.
+
+The four [GB300 recipes](../../../torchtitan_recipes/graph_trainer/fusion_schedules)
+register their plans through `config.compile.extra_passes`. Each region name
+starts with its saved problem ID. The pass checks the operator body, tensor
+contracts, kernel source digest and expected call counts. Regions without a
+verified kernel execute their outlined FX operations.
+
+From the TorchTitan root, put the
+[kernel-packs checkout](https://github.com/SherlockNoMad/graph-trainer-kernel-packs)
+beside TorchTitan or set `GRAPH_TRAINER_KERNEL_PACKS` to its absolute path. Use
+the build in the problem set's manifest. To run DeepSeek debug and compare it
+with the unscheduled step, use
+
+```bash
+export NGPU=8 LOCAL_RANK=0 PYTORCH_ALLOC_CONF=expandable_segments:True
+python -m torchtitan.train \
+    --module torchtitan_recipes.graph_trainer.fusion_schedules.deepseek_v3_debug \
+    --config scheduled --comm-backend fake
+python -m torchtitan.experiments.graph_trainer.tests.check_fusion_schedule deepseek_v3_debug
+```
+
+The checker runs both recipes in fresh processes on the same GPU, counts calls
+to each verified specialization and compares full-precision loss and gradient
+norm. Use `qwen3_30b` with `NGPU=8`, `gpt_oss_120b` with `NGPU=64`, or
+`deepseek_v3_671b` with `NGPU=256` for the other captured layouts.
+
 ### Expert Parallel Overlap
 
 EP overlap is an experimental graph-trainer optimization for MoE models with

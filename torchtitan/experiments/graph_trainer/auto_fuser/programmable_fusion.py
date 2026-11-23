@@ -102,6 +102,12 @@ def _op_name(node: fx.Node) -> str:
     return getattr(node.target, "__name__", str(node.target))
 
 
+def op_scope(node: fx.Node) -> tuple[str, str, str]:
+    """Phase, owning module and operator of a joint-graph node."""
+    phase = "bwd" if _is_backward_node(node) else "fwd"
+    return phase, _get_module_fqn(node), _op_name(node)
+
+
 def op_paths(gm: fx.GraphModule) -> dict[fx.Node, str]:
     """The op path of every addressable node, in graph order."""
     counts: Counter[str] = Counter()
@@ -116,11 +122,11 @@ def op_paths(gm: fx.GraphModule) -> dict[fx.Node, str]:
             continue
         # Nodes outside any module (e.g. gradient-accumulation adds) take their
         # first input's module.
-        module = _get_module_fqn(node) or next(
+        phase, module, op = op_scope(node)
+        module = module or next(
             (m for m in map(_get_module_fqn, node.all_input_nodes) if m), ""
         )
-        phase = "bwd" if _is_backward_node(node) else "fwd"
-        key = ".".join(p for p in (phase, module, _op_name(node)) if p)
+        key = ".".join(p for p in (phase, module, op) if p)
         paths[node] = f"{key}#{counts[key]}"
         counts[key] += 1
     return paths
