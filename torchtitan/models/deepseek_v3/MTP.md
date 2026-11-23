@@ -28,7 +28,7 @@ When `mtp_layers` is non-empty, execution is split into two stages:
 1. `MTPDecoder.preprocess_inputs()` prepares one shifted token/label pair per
    MTP depth before the common CP/SPMD input handling.
 2. Forward runs the main decoder on the original tokens, then each
-   `MTPTransformerBlock` consumes its prepared shifted tokens and the previous
+   `DeepSeekV3MTPBlock` consumes its prepared shifted tokens and the previous
    depth's hidden state.
 
 The dataloader does not need to extend the input sequence for MTP. The model's
@@ -168,7 +168,7 @@ The current implementation therefore:
 
 1. Constructs `mtp_input_tokens` at the token-id level.
 2. Reuses `tok_embeddings(mtp_input_tokens)` so the shifted embedding output follows the configured sharding strategy.
-3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
+3. Passes `mtp_input_valid_mask` into `DeepSeekV3MTPBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
 
 In other words, SP handling does not call `redistribute` explicitly in the forward code. The placement conversion for the mask input is described by the MTP layer sharding config.
 

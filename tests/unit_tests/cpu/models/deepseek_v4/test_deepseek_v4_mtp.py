@@ -55,7 +55,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
 
     @patch("torchtitan.distributed.fsdp.resolve_sparse_fsdp_mesh")
     @patch("torchtitan.distributed.fsdp.resolve_fsdp_mesh")
-    @patch("torchtitan.models.deepseek_v4.model.apply_fsdp_to_mtp_decoder")
+    @patch("torchtitan.models.common.mtp.apply_fsdp_to_mtp_decoder")
     def test_uses_mtp_fsdp_path(
         self,
         apply_fsdp_to_mtp_decoder,
@@ -63,6 +63,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         resolve_sparse_fsdp_mesh,
     ):
         model = MagicMock(spec=DeepSeekV4Model)
+        model.mtp_layers = [MagicMock()]
         dp_mesh = object()
         dp_mesh_dims = object()
         edp_mesh = object()
@@ -105,7 +106,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
 def _preprocess(model, input_dict, **kwargs):
     # SPMD annotation needs a device mesh; these tests check the plumbing only.
     with patch(
-        "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+        "torchtitan.models.common.mtp.annotate_input_spmd_types",
         side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
     ):
         return model.preprocess_inputs(
