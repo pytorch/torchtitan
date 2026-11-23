@@ -235,7 +235,7 @@ class Indexer(Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project features and return document-local selections and requested scores."""
         tp_group = spmd_mesh_group("tp")
-        if tp_group is not None:
+        if tp_group is not None and spmd.is_type_checking():
             # The indexer is TP-invariant: its params only receive the aux-loss
             # gradient, which is identical on every rank.
             assert not x.requires_grad and not qr.requires_grad
