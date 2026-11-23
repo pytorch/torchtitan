@@ -1312,9 +1312,9 @@ class Controller(Configurable):
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
 
-        A failed push or pull puts its error into `training_batch_queue`, so a loop that waits for
-        a batch raises it instead of waiting forever. A loop that already has its batch raises it where
-        it awaits the pull.
+        A failed push or pull puts its error into `training_batch_queue`, so this loop raises it at
+        its next wait for a batch instead of waiting forever. If that batch is already queued, the
+        error is raised where this loop awaits the pull instead.
 
         consumes: a TrainerStepBatch (training_batch_queue.get)
             waits for:    a TrainerStepBatch in the queue
@@ -1526,8 +1526,8 @@ class Controller(Configurable):
                 await self.generator_router.pull_model_state_dict.call_one(version)
                 pull_s = time.perf_counter() - start
         except Exception as error:
-            # No groups get admitted, so no batch follows: hand the error to the loop waiting for one.
-            # A full queue means the loop has a batch and raises at its await of this task instead.
+            # No groups get admitted, so no batch follows: hand the error to `_trainer_loop`, which waits for one.
+            # A full queue means `_trainer_loop` already has its batch and raises when it awaits this task.
             if not training_batch_queue.full():
                 training_batch_queue.put_nowait(error)
             raise

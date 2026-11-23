@@ -367,8 +367,8 @@ class ModelStateDictTransport(Configurable):
         """The ``torch.distributed._transport`` backend."""
 
         min_read_bytes_per_s: float = 100e6
-        """Slowest read speed per generator rank that counts as progress: reads raise after 60s
-        plus their bytes at this speed. 100MB/s lets hundreds of ranks share one RDMA NIC."""
+        """Slowest per-rank read speed that counts as progress: a rank's reads raise after 60s plus
+        the time its bytes take at this speed. 100MB/s lets hundreds of ranks share one RDMA NIC."""
 
     def __init__(self, config: Config):
         self._transport = new_transport(config.backend)

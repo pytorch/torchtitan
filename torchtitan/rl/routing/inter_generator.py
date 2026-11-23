@@ -240,8 +240,8 @@ class InterGeneratorRouter(Configurable):
                 f"Generator {index} failed to load policy version {policy_version}",
                 exc_info=results[index],
             )
-        # TODO: report the failed generators to the router's health state (M0). A failed one may
-        #   still be reading the trainer's staging buffer, so stop it before the next push.
+        # TODO: once the router tracks generator health, report the failed generators there. A failed
+        #   generator may still be reading the trainer's staging buffer, so stop it before the next push.
         if failed:
             raise RuntimeError(
                 f"Generators {failed} failed to load policy version {policy_version}"
