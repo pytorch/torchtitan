@@ -15,6 +15,7 @@ import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     DenseFeedForward,
@@ -39,6 +40,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import (
     colwise_sharding_config,
     dense_activation_placement,
+    dense_param_placement,
     lm_head_sharding_config,
     norm_sharding_config,
     replicated_state_sharding_config,
@@ -76,7 +78,6 @@ from .sharding import (
     hc_pre_sharding_config,
     indexer_sharding_config,
     inner_indexer_sharding_config,
-    invariant_state_sharding_config,
     mtp_block_sharding_config,
     mtp_hc_head_sharding_config,
     wo_a_sharding_config,
@@ -133,12 +134,10 @@ def _make_compressor_config(
     norm_eps: float,
     coff: int,
     rope: RoPE.Config,
-    state_tp: spmd.PerMeshAxisSpmdType = spmd.R,
+    state_tp: spmd.PerMeshAxisSpmdType,
 ) -> "Compressor.Config":
-    state_sharding = (
-        invariant_state_sharding_config("weight")
-        if state_tp is spmd.I
-        else replicated_state_sharding_config("weight")
+    state_sharding = ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=state_tp)}
     )
     return Compressor.Config(
         rope=dataclasses.replace(rope, sharding_config=rope_cache_sharding_config()),
@@ -204,14 +203,18 @@ def _make_indexer_config(
             out_features=num_index_heads * index_head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=invariant_state_sharding_config("weight"),
+            sharding_config=ShardingConfig(
+                state_shardings={"weight": dense_param_placement(tp=spmd.I)}
+            ),
         ),
         weights_proj=Linear.Config(
             in_features=dim,
             out_features=num_index_heads,
             bias=False,
             param_init=_LINEAR_INIT,
-            sharding_config=invariant_state_sharding_config("weight"),
+            sharding_config=ShardingConfig(
+                state_shardings={"weight": dense_param_placement(tp=spmd.I)}
+            ),
         ),
         compressor=_make_compressor_config(
             dim=dim,
@@ -266,6 +269,7 @@ def _make_v4_attn_config(
             norm_eps=norm_eps,
             coff=coff,
             rope=rope,
+            state_tp=spmd.R,
         )
         indexer_cfg = _make_indexer_config(
             dim=dim,
@@ -288,6 +292,7 @@ def _make_v4_attn_config(
             norm_eps=norm_eps,
             coff=coff,
             rope=rope,
+            state_tp=spmd.R,
         )
     if compress_ratio == 4:
         inner_attention_cls = CompressedSparseAttention

@@ -69,9 +69,7 @@ def _hc_mix_placement(*, enable_sp: bool) -> SpmdType:
     return dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
 
 
-def _hc_state_shardings(
-    *, tp: spmd.PerMeshAxisSpmdType = spmd.R
-) -> dict[str, SpmdType]:
+def _hc_state_shardings(*, tp: spmd.PerMeshAxisSpmdType) -> dict[str, SpmdType]:
     return {
         "hc_fn": dense_param_placement(tp=tp),
         "hc_base": dense_param_placement(tp=tp),
@@ -83,7 +81,7 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
     """Local-SPMD sparse attention kernel with queries sharded on heads."""
     query_states = attention_activation_placement()
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    invariant = invariant_activation_placement()
+    invariant = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     input_shardings = {
         "q": query_states,
         "swa_k": replicated_activation,
@@ -140,9 +138,7 @@ def attn_sink_sharding_config() -> ShardingConfig:
     )
 
 
-def compressor_sharding_config(
-    *, tp: spmd.PerMeshAxisSpmdType = spmd.R
-) -> ShardingConfig:
+def compressor_sharding_config(*, tp: spmd.PerMeshAxisSpmdType) -> ShardingConfig:
     """Place the compressor's absolute position embedding along TP."""
     return ShardingConfig(
         state_shardings={"ape": dense_param_placement(tp=tp)},
@@ -160,24 +156,9 @@ def indexer_sharding_config() -> ShardingConfig:
     )
 
 
-def invariant_activation_placement() -> SpmdType:
-    """Tokens sharded on DP/CP; every TP rank holds the same value and grad."""
-    return SpmdType(
-        {DP: spmd.V, CP: spmd.V, TP: spmd.I},
-        partition_spec=spmd.PartitionSpec((DP, CP), None),
-    )
-
-
-def invariant_state_sharding_config(*names: str) -> ShardingConfig:
-    """States whose TP replicas hold identical values and receive identical grads."""
-    return ShardingConfig(
-        state_shardings={name: dense_param_placement(tp=spmd.I) for name in names},
-    )
-
-
 def inner_indexer_sharding_config() -> ShardingConfig:
     """Local-SPMD selection boundary over TP-invariant indexer features."""
-    invariant = invariant_activation_placement()
+    invariant = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     query = SpmdType(
         dict(invariant.local_type),
         partition_spec=spmd.PartitionSpec(*invariant.partition_spec, None),
@@ -240,7 +221,7 @@ def mtp_hc_head_sharding_config() -> ShardingConfig:
     """MTP hyper-connection head over replicated activations."""
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
-        state_shardings=_hc_state_shardings(),
+        state_shardings=_hc_state_shardings(tp=spmd.R),
         input_shardings={"x": replicated_activation},
         output_shardings=replicated_activation,
     )

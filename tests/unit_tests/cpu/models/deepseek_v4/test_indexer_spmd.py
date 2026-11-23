@@ -15,7 +15,10 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.decoder_sharding import residual_activation_placement
+from torchtitan.models.common.decoder_sharding import (
+    residual_activation_placement,
+    token_id_placement,
+)
 from torchtitan.models.deepseek_v4 import build_model_config
 
 
@@ -63,8 +66,9 @@ class TestIndexerSPMD(unittest.TestCase):
         metadata = layer_config.inner_attention.build_attention_metadata(positions)
         x = torch.randn(32, model_config.dim)
         with self.ctx.activate_spmd(typechecking=True):
+            metadata.annotate_spmd_types()
             spmd.assert_type(x, residual_activation_placement(enable_sp=False))
-            spmd.assert_type(positions, spmd.SpmdType({"tp": spmd.I}))
+            spmd.assert_type(positions, token_id_placement())
             attention(
                 x,
                 attention_metadata=metadata,

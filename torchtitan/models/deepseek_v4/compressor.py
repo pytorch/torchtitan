@@ -168,14 +168,6 @@ class Compressor(Module):
         # DeepSeek-V4 reference.
         start_G = attention_metadata.group_start
         first_G = attention_metadata.group_first
-        if spmd.is_type_checking():
-            # Geometry is token-indexed and identical on every TP rank.
-            metadata_layout = spmd.SpmdType(
-                {"dp": spmd.V, "cp": spmd.V, "tp": spmd.I},
-                partition_spec=spmd.PartitionSpec(("dp", "cp")),
-            )
-            spmd.assert_type(start_G, metadata_layout)
-            spmd.assert_type(first_G, metadata_layout)
         token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
         kv, score = kv[token_GR], score[token_GR]
         comp_positions = positions[start_G]
