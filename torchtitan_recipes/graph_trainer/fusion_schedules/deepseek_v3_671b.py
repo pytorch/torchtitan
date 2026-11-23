@@ -28,19 +28,77 @@ from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
 )
 
 PROBLEM_SET = "dsv3_671b_distmoe_mxfp8_fsdp256_ep64_sm103"
+_NUM_DENSE_LAYERS = 3
 
 
 def configure_schedule(plan: SchedulePlan) -> None:
     fwd, bwd = plan.indexed_graph.fwd, plan.indexed_graph.bwd
     num_layers = len(fwd.layers)
+    for i in range(num_layers):
+        _forward_layer(plan, i, num_layers)
+        _backward_layer(plan, i, num_layers)
 
-    for i in range(3, num_layers):
-        aux_loss = fwd.layers[i].feed_forward.router.aux_loss
-        router = fwd.layers[i].feed_forward.router
+    lm_head = bwd.lm_head
+    loss = bwd.loss
+
+    plan.fuse(
+        "r015_loss_backward",
+        [
+            lm_head.mxfp8_quantize[0],
+            lm_head.t,
+            lm_head.triton_mx_block_rearrange[0],
+            lm_head.triton_mx_block_rearrange[2],
+            loss._log_softmax_backward_data,
+            loss._to_copy,
+            loss.alias,
+            loss.div,
+            loss.nll_loss_backward,
+        ],
+    )
+
+    loss = fwd.loss
+
+    plan.fuse(
+        "r022_loss_forward",
+        [
+            loss._log_softmax,
+            loss._to_copy,
+            loss.alias,
+            loss.div,
+            loss.nll_loss_forward,
+            fwd.ones_like,
+        ],
+    )
+
+    lm_head = fwd.lm_head
+
+    plan.fuse(
+        "r025_weight_recompute",
+        [
+            lm_head.t,
+            lm_head.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
+        ],
+    )
+
+
+def _forward_layer(plan: SchedulePlan, i: int, num_layers: int) -> None:
+    fwd = plan.indexed_graph.fwd
+    layer = fwd.layers[i]
+    attention = layer.attention
+    ffn = layer.feed_forward
+    ffn_norm = layer.ffn_norm
+    is_moe = i >= _NUM_DENSE_LAYERS
+    dense_ffn = ffn.shared_experts if is_moe else ffn
+
+    if is_moe:
+        router = ffn.router
+        aux_loss = router.aux_loss
+        routed_experts = ffn.routed_experts
+
         plan.fuse(
             "r000_router_forward",
             [
-                fwd.layers[i].feed_forward.routed_experts.masked_fill,
+                routed_experts.masked_fill,
                 router.add,
                 router.add_,
                 aux_loss._to_copy,
@@ -67,37 +125,167 @@ def configure_schedule(plan: SchedulePlan) -> None:
             ],
         )
 
-    for i in reversed(range(3, num_layers)):
-        w13 = bwd.layers[i].feed_forward.shared_experts.w13
+        if i < num_layers - 1:
+            next_layer = fwd.layers[i + 1]
+
+            plan.fuse(
+                "r006_combine_residual_norm",
+                [
+                    next_layer.attention.wkv_a.mxfp8_quantize,
+                    next_layer.attention.wkv_a.triton_mx_block_rearrange,
+                    next_layer.attention.wq_a.mxfp8_quantize,
+                    next_layer.attention.wq_a.triton_mx_block_rearrange,
+                    next_layer.attention_norm._fused_rms_norm,
+                    layer.add[1],
+                    ffn.add,
+                ],
+            )
+
+        for k in range(2):
+            plan.fuse(
+                "r008_expert_weight_prepare", [routed_experts.prepare_mxfp8_weight[k]]
+            )
+
+    plan.fuse(
+        "r017_w13_weight_quant",
+        [
+            dense_ffn.w13.cat,
+            dense_ffn.w13.t,
+            dense_ffn.w13.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
+        ],
+    )
+
+    plan.fuse(
+        "r020_residual_norm_quant",
+        [
+            layer.add[0],
+            dense_ffn.w13.mxfp8_quantize,
+            dense_ffn.w13.triton_mx_block_rearrange,
+            ffn_norm._fused_rms_norm,
+        ],
+    )
+
+    if not is_moe:
+        next_layer = fwd.layers[i + 1]
+
         plan.fuse(
-            "r001_w13_grad_pack",
+            "r020_residual_norm_quant",
             [
-                w13.cat[1],
-                w13.reshape[3],
-                w13.split[1],
-            ],
-        )
-    for i in reversed(range(3)):
-        w13 = bwd.layers[i].feed_forward.w13
-        plan.fuse(
-            "r001_w13_grad_pack",
-            [
-                w13.cat[1],
-                w13.reshape[3],
-                w13.split[1],
+                next_layer.attention.wq_a.mxfp8_quantize,
+                next_layer.attention.wq_a.triton_mx_block_rearrange,
+                next_layer.attention_norm._fused_rms_norm,
+                layer.add[1],
             ],
         )
 
-    for backward_layer, i in enumerate(reversed(range(3, num_layers))):
+    if i == num_layers - 1:
+        lm_head = fwd.lm_head
+
+        plan.fuse(
+            "r020_residual_norm_quant",
+            [
+                layer.add[1],
+                lm_head.mxfp8_quantize,
+                lm_head.triton_mx_block_rearrange,
+                fwd.norm._fused_rms_norm,
+            ],
+        )
+
+    for linear in (
+        attention.wq_a,
+        attention.wq_b,
+        attention.wkv_a,
+        attention.inner_attention.wkv_b,
+        attention.wo,
+        dense_ffn.w2,
+    ):
+        plan.fuse(
+            "r024_weight_quant",
+            [
+                linear.t,
+                linear.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
+            ],
+        )
+
+    plan.fuse(
+        "r027_swiglu_quant",
+        [
+            dense_ffn.silu_and_mul,
+            dense_ffn.w13.reshape[1],
+            dense_ffn.w2.mxfp8_quantize,
+            dense_ffn.w2.triton_mx_block_rearrange,
+        ],
+    )
+
+    plan.fuse(
+        "r030_kv_norm_quant",
+        [
+            attention.inner_attention.unsqueeze[1],
+            attention.inner_attention.wkv_b.mxfp8_quantize,
+            attention.inner_attention.wkv_b.triton_mx_block_rearrange,
+            attention.kv_norm._fused_rms_norm,
+            attention.split_with_sizes,
+        ],
+    )
+
+    plan.fuse(
+        "r031_wo_input_quant",
+        [
+            attention.reshape[1],
+            attention.wo.mxfp8_quantize,
+            attention.wo.triton_mx_block_rearrange,
+        ],
+    )
+
+    plan.fuse(
+        "r032_q_norm_quant",
+        [
+            attention.q_norm._fused_rms_norm,
+            attention.wq_b.mxfp8_quantize,
+            attention.wq_b.triton_mx_block_rearrange,
+        ],
+    )
+
+
+def _backward_layer(plan: SchedulePlan, i: int, num_layers: int) -> None:
+    bwd = plan.indexed_graph.bwd
+    layer = bwd.layers[i]
+    attention = layer.attention
+    wq_a = attention.wq_a
+    wq_b = attention.wq_b
+    wkv_a = attention.wkv_a
+    wkv_b = attention.inner_attention.wkv_b
+    ffn = layer.feed_forward
+    ffn_norm = layer.ffn_norm
+    attention_norm = layer.attention_norm
+    q_norm = attention.q_norm
+    kv_norm = attention.kv_norm
+    is_moe = i >= _NUM_DENSE_LAYERS
+    dense_ffn = ffn.shared_experts if is_moe else ffn
+    backward_layer = num_layers - 1 - i
+
+    plan.fuse(
+        "r001_w13_grad_pack",
+        [
+            dense_ffn.w13.cat[1],
+            dense_ffn.w13.reshape[3],
+            dense_ffn.w13.split[1],
+        ],
+    )
+
+    if is_moe:
         add_offset = 8 * backward_layer
-        gate = bwd.layers[i].feed_forward.router.gate
-        router = bwd.layers[i].feed_forward.router
+        router = ffn.router
+        aux_loss = router.aux_loss
+        gate = router.gate
+        routed_experts = ffn.routed_experts
+
         plan.fuse(
             "r002_router_backward",
             [
                 bwd.add[add_offset + 1],
                 bwd.add[add_offset + 2],
-                bwd.layers[i].feed_forward.routed_experts.masked_fill[2],
+                routed_experts.masked_fill[2],
                 router.div[3],
                 gate.__lshift__,
                 *gate._to_copy[0:5],
@@ -115,15 +303,11 @@ def configure_schedule(plan: SchedulePlan) -> None:
             ],
         )
 
-    for backward_layer, i in enumerate(reversed(range(3, num_layers))):
-        add_offset = 8 * backward_layer
-        aux_loss = bwd.layers[i].feed_forward.router.aux_loss
-        router = bwd.layers[i].feed_forward.router
         plan.fuse(
             "r003_router_aux_backward",
             [
                 bwd.add[add_offset],
-                bwd.layers[i].feed_forward.routed_experts.masked_fill[1],
+                routed_experts.masked_fill[1],
                 router.add,
                 router.alias[1],
                 aux_loss._to_copy,
@@ -148,515 +332,197 @@ def configure_schedule(plan: SchedulePlan) -> None:
             ],
         )
 
-    for i in reversed(range(num_layers)):
-        wkv_b = bwd.layers[i].attention.inner_attention.wkv_b
-        inner_attention = bwd.layers[i].attention.inner_attention
-        wq_b = bwd.layers[i].attention.wq_b
-        attention = bwd.layers[i].attention
-        plan.fuse(
-            "r004_mla_backward",
-            [
-                attention.fused_mla_q_rope_,
-                inner_attention.fused_mla_kv_backward,
-                inner_attention.squeeze[2],
-                inner_attention.unsqueeze[3],
-                inner_attention.unsqueeze[4],
-                wkv_b.mxfp8_quantize[1],
-                wkv_b.t[1],
-                wkv_b.triton_mx_block_rearrange[1],
-                wkv_b.triton_mx_block_rearrange[2],
-                attention.unsqueeze[2],
-                wq_b.mxfp8_quantize[1],
-                wq_b.t[1],
-                wq_b.triton_mx_block_rearrange[1],
-                wq_b.triton_mx_block_rearrange[3],
-            ],
-        )
-
-    for backward_layer, i in enumerate(reversed(range(3, num_layers))):
-        add_offset = 8 * backward_layer
-        wo = bwd.layers[i].attention.wo
         plan.fuse(
             "r005_ffn_norm_backward",
             [
                 *bwd.add[add_offset + 3 : add_offset + 6],
-                wo.mxfp8_quantize[2],
-                wo.t[1],
-                wo.triton_mx_block_rearrange[2],
-                wo.triton_mx_block_rearrange[3],
-                bwd.layers[i].ffn_norm._fused_rms_norm_backward,
+                attention.wo.mxfp8_quantize[2],
+                attention.wo.t[1],
+                attention.wo.triton_mx_block_rearrange[2],
+                attention.wo.triton_mx_block_rearrange[3],
+                ffn_norm._fused_rms_norm_backward,
             ],
         )
 
-    for i in range(3, num_layers - 1):
-        wkv_a = fwd.layers[i + 1].attention.wkv_a
-        wq_a = fwd.layers[i + 1].attention.wq_a
-        plan.fuse(
-            "r006_combine_residual_norm",
-            [
-                wkv_a.mxfp8_quantize,
-                wkv_a.triton_mx_block_rearrange,
-                wq_a.mxfp8_quantize,
-                wq_a.triton_mx_block_rearrange,
-                fwd.layers[i + 1].attention_norm._fused_rms_norm,
-                fwd.layers[i].add[1],
-                fwd.layers[i].feed_forward.add,
-            ],
-        )
+        for k in range(2):
+            plan.fuse(
+                "r007_expert_weight_recompute",
+                [
+                    routed_experts.new_empty[k],
+                    routed_experts.prepare_mxfp8_weight[k],
+                ],
+            )
 
-    for i in reversed(range(3, num_layers)):
-        routed_experts = bwd.layers[i].feed_forward.routed_experts
-        plan.fuse(
-            "r007_expert_weight_recompute",
-            [
-                routed_experts.new_empty[0],
-                routed_experts.prepare_mxfp8_weight[0],
-            ],
-        )
-    for i in reversed(range(3, num_layers)):
-        routed_experts = bwd.layers[i].feed_forward.routed_experts
-        plan.fuse(
-            "r007_expert_weight_recompute",
-            [
-                routed_experts.new_empty[1],
-                routed_experts.prepare_mxfp8_weight[1],
-            ],
-        )
+        cast_start = 14 * backward_layer + 4
 
-    for i in range(3, num_layers):
-        plan.fuse(
-            "r008_expert_weight_prepare",
-            [
-                fwd.layers[i].feed_forward.routed_experts.prepare_mxfp8_weight[0],
-            ],
-        )
-    for i in range(3, num_layers):
-        plan.fuse(
-            "r008_expert_weight_prepare",
-            [
-                fwd.layers[i].feed_forward.routed_experts.prepare_mxfp8_weight[1],
-            ],
-        )
-
-    for i in reversed(range(num_layers)):
-        wkv_a = bwd.layers[i].attention.wkv_a
-        wq_a = bwd.layers[i].attention.wq_a
-        attention_norm = bwd.layers[i].attention_norm
-        plan.fuse(
-            "r009_attention_norm_recompute",
-            [
-                wkv_a.mxfp8_quantize[0],
-                wkv_a.mxfp8_quantize[2],
-                wkv_a.triton_mx_block_rearrange[0],
-                wkv_a.triton_mx_block_rearrange[2],
-                wq_a.mxfp8_quantize[0],
-                wq_a.mxfp8_quantize[2],
-                wq_a.triton_mx_block_rearrange[0],
-                wq_a.triton_mx_block_rearrange[2],
-                attention_norm._fused_rms_norm,
-                attention_norm.alias[1],
-            ],
-        )
-
-    for backward_layer, i in enumerate(reversed(range(3, num_layers - 1))):
-        add_offset = 8 * backward_layer
-        w2 = bwd.layers[i].feed_forward.shared_experts.w2
-        plan.fuse(
-            "r010_attention_norm_backward",
-            [
-                bwd.add[add_offset + 6],
-                bwd.add[add_offset + 7],
-                bwd.layers[i + 1].attention_norm._fused_rms_norm_backward,
-                w2.mxfp8_quantize[0],
-                w2.t,
-                w2.triton_mx_block_rearrange[0],
-                w2.triton_mx_block_rearrange[1],
-            ],
-        )
-    for backward_layer, i in enumerate(reversed(range(3))):
-        add_offset = 462 + 3 * backward_layer
-        w2 = bwd.layers[i].feed_forward.w2
-        plan.fuse(
-            "r010_attention_norm_backward",
-            [
-                bwd.add[add_offset],
-                bwd.add[add_offset + 1],
-                bwd.layers[i + 1].attention_norm._fused_rms_norm_backward,
-                w2.mxfp8_quantize[0],
-                w2.t,
-                w2.triton_mx_block_rearrange[0],
-                w2.triton_mx_block_rearrange[1],
-            ],
-        )
-
-    for i in reversed(range(3, num_layers)):
-        w13 = bwd.layers[i].feed_forward.shared_experts.w13
-        w2 = bwd.layers[i].feed_forward.shared_experts.w2
-        shared_experts = bwd.layers[i].feed_forward.shared_experts
-        plan.fuse(
-            "r011_swiglu_backward",
-            [
-                shared_experts.silu_and_mul,
-                shared_experts.silu_and_mul_backward,
-                w13.mxfp8_quantize[2],
-                w13.reshape[1],
-                w13.t[1],
-                w13.triton_mx_block_rearrange[2],
-                w13.triton_mx_block_rearrange[3],
-                w2.mxfp8_quantize[1],
-                w2.triton_mx_block_rearrange[2],
-            ],
-        )
-    for i in reversed(range(3)):
-        w13 = bwd.layers[i].feed_forward.w13
-        w2 = bwd.layers[i].feed_forward.w2
-        feed_forward = bwd.layers[i].feed_forward
-        plan.fuse(
-            "r011_swiglu_backward",
-            [
-                feed_forward.silu_and_mul,
-                feed_forward.silu_and_mul_backward,
-                w13.mxfp8_quantize[2],
-                w13.reshape[1],
-                w13.t[1],
-                w13.triton_mx_block_rearrange[2],
-                w13.triton_mx_block_rearrange[3],
-                w2.mxfp8_quantize[1],
-                w2.triton_mx_block_rearrange[2],
-            ],
-        )
-
-    for i in reversed(range(3, num_layers)):
-        w13 = bwd.layers[i].feed_forward.shared_experts.w13
-        ffn_norm = bwd.layers[i].ffn_norm
-        plan.fuse(
-            "r013_ffn_norm_recompute",
-            [
-                bwd.layers[i].add,
-                w13.mxfp8_quantize[0],
-                w13.mxfp8_quantize[1],
-                w13.triton_mx_block_rearrange[0],
-                w13.triton_mx_block_rearrange[1],
-                ffn_norm._fused_rms_norm,
-                ffn_norm.alias[1],
-            ],
-        )
-    for i in reversed(range(3)):
-        w13 = bwd.layers[i].feed_forward.w13
-        ffn_norm = bwd.layers[i].ffn_norm
-        plan.fuse(
-            "r013_ffn_norm_recompute",
-            [
-                bwd.layers[i].add,
-                w13.mxfp8_quantize[0],
-                w13.mxfp8_quantize[1],
-                w13.triton_mx_block_rearrange[0],
-                w13.triton_mx_block_rearrange[1],
-                ffn_norm._fused_rms_norm,
-                ffn_norm.alias[1],
-            ],
-        )
-
-    for i in reversed(range(num_layers)):
-        wo = bwd.layers[i].attention.wo
-        plan.fuse(
-            "r014_wo_input_recompute",
-            [
-                bwd.layers[i].attention.reshape[0],
-                wo.mxfp8_quantize[0],
-                wo.mxfp8_quantize[1],
-                wo.triton_mx_block_rearrange[0],
-                wo.triton_mx_block_rearrange[1],
-            ],
-        )
-
-    lm_head = bwd.lm_head
-    loss = bwd.loss
-    plan.fuse(
-        "r015_loss_backward",
-        [
-            lm_head.mxfp8_quantize[0],
-            lm_head.t,
-            lm_head.triton_mx_block_rearrange[0],
-            lm_head.triton_mx_block_rearrange[2],
-            loss._log_softmax_backward_data,
-            loss._to_copy,
-            loss.alias,
-            loss.div,
-            loss.nll_loss_backward,
-        ],
-    )
-
-    for i in reversed(range(3, num_layers)):
-        w13 = bwd.layers[i].feed_forward.shared_experts.w13
-        plan.fuse(
-            "r016_w13_weight_recompute",
-            [
-                w13.cat[0],
-                w13.t[0],
-                w13.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-            ],
-        )
-    for i in reversed(range(3)):
-        w13 = bwd.layers[i].feed_forward.w13
-        plan.fuse(
-            "r016_w13_weight_recompute",
-            [
-                w13.cat[0],
-                w13.t[0],
-                w13.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-            ],
-        )
-
-    for i in range(3):
-        w13 = fwd.layers[i].feed_forward.w13
-        plan.fuse(
-            "r017_w13_weight_quant",
-            [
-                w13.cat,
-                w13.t,
-                w13.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-            ],
-        )
-    for i in range(3, num_layers):
-        w13 = fwd.layers[i].feed_forward.shared_experts.w13
-        plan.fuse(
-            "r017_w13_weight_quant",
-            [
-                w13.cat,
-                w13.t,
-                w13.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-            ],
-        )
-
-    for i in range(3):
-        w13 = fwd.layers[i].feed_forward.w13
-        plan.fuse(
-            "r020_residual_norm_quant",
-            [
-                fwd.layers[i].add[0],
-                w13.mxfp8_quantize,
-                w13.triton_mx_block_rearrange,
-                fwd.layers[i].ffn_norm._fused_rms_norm,
-            ],
-        )
-    for i in range(3):
-        wq_a = fwd.layers[i + 1].attention.wq_a
-        plan.fuse(
-            "r020_residual_norm_quant",
-            [
-                wq_a.mxfp8_quantize,
-                wq_a.triton_mx_block_rearrange,
-                fwd.layers[i + 1].attention_norm._fused_rms_norm,
-                fwd.layers[i].add[1],
-            ],
-        )
-    for i in range(3, num_layers):
-        w13 = fwd.layers[i].feed_forward.shared_experts.w13
-        plan.fuse(
-            "r020_residual_norm_quant",
-            [
-                fwd.layers[i].add[0],
-                w13.mxfp8_quantize,
-                w13.triton_mx_block_rearrange,
-                fwd.layers[i].ffn_norm._fused_rms_norm,
-            ],
-        )
-    lm_head = fwd.lm_head
-    plan.fuse(
-        "r020_residual_norm_quant",
-        [
-            fwd.layers[60].add[1],
-            lm_head.mxfp8_quantize,
-            lm_head.triton_mx_block_rearrange,
-            fwd.norm._fused_rms_norm,
-        ],
-    )
-
-    for i in reversed(range(num_layers)):
-        wkv_a = bwd.layers[i].attention.wkv_a
-        plan.fuse(
-            "r021_kv_norm_backward",
-            [
-                bwd.layers[i].attention.cat,
-                bwd.layers[i].attention.kv_norm._fused_rms_norm_backward,
-                wkv_a.mxfp8_quantize[1],
-                wkv_a.t[1],
-                wkv_a.triton_mx_block_rearrange[1],
-                wkv_a.triton_mx_block_rearrange[3],
-            ],
-        )
-
-    loss = fwd.loss
-    plan.fuse(
-        "r022_loss_forward",
-        [
-            loss._log_softmax,
-            loss._to_copy,
-            loss.alias,
-            loss.div,
-            loss.nll_loss_forward,
-            fwd.ones_like,
-        ],
-    )
-
-    for backward_layer, i in enumerate(reversed(range(3, num_layers))):
-        _to_copy_offset = 14 * backward_layer
         plan.fuse(
             "r023_wq_grad_cast",
             [
-                *bwd._to_copy[_to_copy_offset + 4 : _to_copy_offset + 16],
-                bwd.layers[i].attention.wq_a.split_with_sizes,
+                *bwd._to_copy[cast_start : cast_start + 12],
+                wq_a.split_with_sizes,
             ],
         )
 
-    for i in range(num_layers):
-        layer = fwd.layers[i]
-        attention = layer.attention
-        ffn = layer.feed_forward
-        w2 = ffn.w2 if i < 3 else ffn.shared_experts.w2
-        for linear in (
-            attention.wq_a,
-            attention.wq_b,
-            attention.wkv_a,
-            attention.inner_attention.wkv_b,
-            attention.wo,
-            w2,
-        ):
-            plan.fuse(
-                "r024_weight_quant",
-                [
-                    linear.t,
-                    linear.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-                ],
-            )
-
-    lm_head = fwd.lm_head
     plan.fuse(
-        "r025_weight_recompute",
+        "r004_mla_backward",
         [
-            lm_head.t,
-            lm_head.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
+            attention.fused_mla_q_rope_,
+            attention.inner_attention.fused_mla_kv_backward,
+            attention.inner_attention.squeeze[2],
+            attention.inner_attention.unsqueeze[3],
+            attention.inner_attention.unsqueeze[4],
+            wkv_b.mxfp8_quantize[1],
+            wkv_b.t[1],
+            wkv_b.triton_mx_block_rearrange[1],
+            wkv_b.triton_mx_block_rearrange[2],
+            attention.unsqueeze[2],
+            wq_b.mxfp8_quantize[1],
+            wq_b.t[1],
+            wq_b.triton_mx_block_rearrange[1],
+            wq_b.triton_mx_block_rearrange[3],
         ],
     )
-    for i in reversed(range(num_layers)):
-        attention = bwd.layers[i].attention
-        for linear in (
-            attention.wq_a,
-            attention.wq_b,
-            attention.wo,
-            attention.wkv_a,
-            attention.inner_attention.wkv_b,
-        ):
-            plan.fuse(
-                "r025_weight_recompute",
-                [
-                    linear.t[0],
-                    linear.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-                ],
-            )
 
-    for i in reversed(range(num_layers)):
-        wq_a = bwd.layers[i].attention.wq_a
-        plan.fuse(
-            "r026_q_norm_backward",
-            [
-                bwd.layers[i].attention.q_norm._fused_rms_norm_backward,
-                wq_a.mxfp8_quantize[1],
-                wq_a.t[1],
-                wq_a.triton_mx_block_rearrange[1],
-                wq_a.triton_mx_block_rearrange[3],
-            ],
-        )
+    plan.fuse(
+        "r009_attention_norm_recompute",
+        [
+            wkv_a.mxfp8_quantize[0],
+            wkv_a.mxfp8_quantize[2],
+            wkv_a.triton_mx_block_rearrange[0],
+            wkv_a.triton_mx_block_rearrange[2],
+            wq_a.mxfp8_quantize[0],
+            wq_a.mxfp8_quantize[2],
+            wq_a.triton_mx_block_rearrange[0],
+            wq_a.triton_mx_block_rearrange[2],
+            attention_norm._fused_rms_norm,
+            attention_norm.alias[1],
+        ],
+    )
 
-    for i in range(3):
-        w2 = fwd.layers[i].feed_forward.w2
+    if i < num_layers - 1:
+        # Root adds follow backward execution order, eight per MoE layer and
+        # three per dense layer. The last two feed the next attention norm's backward.
+        num_dense_after = max(0, _NUM_DENSE_LAYERS - 1 - i)
+        num_moe_after = backward_layer - num_dense_after
+        norm_add = 8 * num_moe_after + 3 * num_dense_after - 2
+
         plan.fuse(
-            "r027_swiglu_quant",
+            "r010_attention_norm_backward",
             [
-                fwd.layers[i].feed_forward.silu_and_mul,
-                fwd.layers[i].feed_forward.w13.reshape[1],
-                w2.mxfp8_quantize,
-                w2.triton_mx_block_rearrange,
-            ],
-        )
-    for i in range(3, num_layers):
-        w2 = fwd.layers[i].feed_forward.shared_experts.w2
-        plan.fuse(
-            "r027_swiglu_quant",
-            [
-                fwd.layers[i].feed_forward.shared_experts.silu_and_mul,
-                fwd.layers[i].feed_forward.shared_experts.w13.reshape[1],
-                w2.mxfp8_quantize,
-                w2.triton_mx_block_rearrange,
+                bwd.add[norm_add],
+                bwd.add[norm_add + 1],
+                bwd.layers[i + 1].attention_norm._fused_rms_norm_backward,
+                dense_ffn.w2.mxfp8_quantize[0],
+                dense_ffn.w2.t,
+                dense_ffn.w2.triton_mx_block_rearrange[0],
+                dense_ffn.w2.triton_mx_block_rearrange[1],
             ],
         )
 
-    for i in reversed(range(num_layers)):
-        q_norm = bwd.layers[i].attention.q_norm
-        wq_b = bwd.layers[i].attention.wq_b
+    plan.fuse(
+        "r011_swiglu_backward",
+        [
+            dense_ffn.silu_and_mul,
+            dense_ffn.silu_and_mul_backward,
+            dense_ffn.w13.mxfp8_quantize[2],
+            dense_ffn.w13.reshape[1],
+            dense_ffn.w13.t[1],
+            dense_ffn.w13.triton_mx_block_rearrange[2],
+            dense_ffn.w13.triton_mx_block_rearrange[3],
+            dense_ffn.w2.mxfp8_quantize[1],
+            dense_ffn.w2.triton_mx_block_rearrange[2],
+        ],
+    )
+
+    plan.fuse(
+        "r013_ffn_norm_recompute",
+        [
+            layer.add,
+            dense_ffn.w13.mxfp8_quantize[0],
+            dense_ffn.w13.mxfp8_quantize[1],
+            dense_ffn.w13.triton_mx_block_rearrange[0],
+            dense_ffn.w13.triton_mx_block_rearrange[1],
+            ffn_norm._fused_rms_norm,
+            ffn_norm.alias[1],
+        ],
+    )
+
+    plan.fuse(
+        "r014_wo_input_recompute",
+        [
+            attention.reshape[0],
+            attention.wo.mxfp8_quantize[0],
+            attention.wo.mxfp8_quantize[1],
+            attention.wo.triton_mx_block_rearrange[0],
+            attention.wo.triton_mx_block_rearrange[1],
+        ],
+    )
+
+    plan.fuse(
+        "r016_w13_weight_recompute",
+        [
+            dense_ffn.w13.cat[0],
+            dense_ffn.w13.t[0],
+            dense_ffn.w13.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
+        ],
+    )
+
+    plan.fuse(
+        "r021_kv_norm_backward",
+        [
+            attention.cat,
+            kv_norm._fused_rms_norm_backward,
+            wkv_a.mxfp8_quantize[1],
+            wkv_a.t[1],
+            wkv_a.triton_mx_block_rearrange[1],
+            wkv_a.triton_mx_block_rearrange[3],
+        ],
+    )
+
+    for linear in (wq_a, wq_b, attention.wo, wkv_a, wkv_b):
         plan.fuse(
-            "r028_q_norm_recompute",
+            "r025_weight_recompute",
             [
-                q_norm._fused_rms_norm,
-                q_norm.alias[1],
-                wq_b.mxfp8_quantize[0],
-                wq_b.mxfp8_quantize[2],
-                wq_b.triton_mx_block_rearrange[0],
-                wq_b.triton_mx_block_rearrange[2],
+                linear.t[0],
+                linear.triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
             ],
         )
 
-    for i in reversed(range(num_layers)):
-        wkv_b = bwd.layers[i].attention.inner_attention.wkv_b
-        kv_norm = bwd.layers[i].attention.kv_norm
-        plan.fuse(
-            "r029_kv_norm_recompute",
-            [
-                bwd.layers[i].attention.inner_attention.unsqueeze[1],
-                wkv_b.mxfp8_quantize[0],
-                wkv_b.triton_mx_block_rearrange[0],
-                wkv_b.triton_mx_block_rearrange[3],
-                kv_norm._fused_rms_norm,
-                kv_norm.alias[1],
-                bwd.layers[i].attention.split_with_sizes,
-            ],
-        )
+    plan.fuse(
+        "r026_q_norm_backward",
+        [
+            q_norm._fused_rms_norm_backward,
+            wq_a.mxfp8_quantize[1],
+            wq_a.t[1],
+            wq_a.triton_mx_block_rearrange[1],
+            wq_a.triton_mx_block_rearrange[3],
+        ],
+    )
 
-    for i in range(num_layers):
-        wkv_b = fwd.layers[i].attention.inner_attention.wkv_b
-        plan.fuse(
-            "r030_kv_norm_quant",
-            [
-                fwd.layers[i].attention.inner_attention.unsqueeze[1],
-                wkv_b.mxfp8_quantize,
-                wkv_b.triton_mx_block_rearrange,
-                fwd.layers[i].attention.kv_norm._fused_rms_norm,
-                fwd.layers[i].attention.split_with_sizes,
-            ],
-        )
+    plan.fuse(
+        "r028_q_norm_recompute",
+        [
+            q_norm._fused_rms_norm,
+            q_norm.alias[1],
+            wq_b.mxfp8_quantize[0],
+            wq_b.mxfp8_quantize[2],
+            wq_b.triton_mx_block_rearrange[0],
+            wq_b.triton_mx_block_rearrange[2],
+        ],
+    )
 
-    for i in range(num_layers):
-        wo = fwd.layers[i].attention.wo
-        plan.fuse(
-            "r031_wo_input_quant",
-            [
-                fwd.layers[i].attention.reshape[1],
-                wo.mxfp8_quantize,
-                wo.triton_mx_block_rearrange,
-            ],
-        )
-
-    for i in range(num_layers):
-        wq_b = fwd.layers[i].attention.wq_b
-        plan.fuse(
-            "r032_q_norm_quant",
-            [
-                fwd.layers[i].attention.q_norm._fused_rms_norm,
-                wq_b.mxfp8_quantize,
-                wq_b.triton_mx_block_rearrange,
-            ],
-        )
+    plan.fuse(
+        "r029_kv_norm_recompute",
+        [
+            attention.inner_attention.unsqueeze[1],
+            wkv_b.mxfp8_quantize[0],
+            wkv_b.triton_mx_block_rearrange[0],
+            wkv_b.triton_mx_block_rearrange[3],
+            kv_norm._fused_rms_norm,
+            kv_norm.alias[1],
+            attention.split_with_sizes,
+        ],
+    )
 
 
 def reference() -> GraphTrainer.Config:
