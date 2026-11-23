@@ -67,58 +67,68 @@ ActivationRematConfig(
 )
 ```
 
-The same policy currently applies to every transformer block. Wildcards such
-as `attention.*` are supported. Unmatched patterns are currently ignored;
-validation must eventually account for regions across all pipeline stages.
+Wildcards such as `attention.*` are supported. Unmatched patterns are
+currently ignored; validation must eventually account for regions across all
+pipeline stages.
+
+### Per-block policies
+
+The policy applies to every transformer block unless `block_overrides`
+changes it for selected blocks. A uniform policy pays the same price in every
+block: if recomputing one expensive region in two blocks is enough to fit,
+the uniform choice is to recompute it in all of them. An override names
+blocks and replaces any of `save_regions`, `recompute_regions`,
+`offload_block_input` and `offload_regions` for them; a field it leaves `None`
+keeps the base value:
+
+```python
+ActivationRematConfig(
+    save_regions=["*"],
+    block_overrides=[
+        # Recompute the attention core only in the first two blocks.
+        BlockRematOverride(
+            blocks=["layers.0", "layers.1"],
+            recompute_regions=["attention.inner_attention"],
+        ),
+    ],
+)
+```
+
+Block names are exact FQNs in the original model, `<container fqn>.<id>`:
+`layers.<id>` for decoder blocks, `mtp_layers.<id>` for multi-token
+prediction blocks and `<encoder>.layers.<id>` (e.g. `vision_encoder.layers.3`)
+for encoder blocks. Each model lists its block containers in
+`BaseModel._remat_block_container_fqns`, and `parallelize` passes them to
+`apply(model, block_container_fqns=...)`. Pipeline splitting keeps original
+layer ids, so an override follows its block to whichever stage holds it.
+Empty overrides and a block named by two overrides raise at config time; a
+name the model lacks is not detected, since each pipeline stage holds only
+some blocks. Within a block's result, `recompute_regions` still wins over
+`save_regions`, so an override that sets only `save_regions` cannot retain a
+region the base recomputes; override `recompute_regions` too. The fixed
+presets accept overrides that set only the offload fields; use
+`ActivationRematConfig` to change what they retain.
 
 ## Saved-tensor hooks
 
 A checkpointed block keeps a few tensors alive from its forward to its
-backward: its inputs, which recompute replays from, and the tensors that its
-save regions keep. Saved-tensor hooks let you decide how those tensors are
-stored. `pack` replaces each one with an opaque payload, and `unpack` rebuilds
-the tensor when recompute or backward needs it. Typical uses are offloading to
-CPU memory, compression, and logging. See torch_remat's
-[offloading guide](https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md)
-for the full semantics.
+backward: its inputs, which recompute replays from, and the tensors its save
+regions keep. torch_remat's saved-tensor hooks see exactly those: `pack`
+replaces each with a payload and `unpack` rebuilds it when recompute or
+backward needs it. Inside `pack`, `torch_remat.current_saved_tensor_info().kind`
+says why a tensor is retained: `CHECKPOINT_INPUT` for a block input,
+`SAVE_OUTPUT` and `BACKWARD` for tensors kept by save regions. `pack` runs at
+block entry, before the forward reads its inputs, so it must not free or
+overwrite their storage; unpacks need not run in reverse pack order; and
+torch_remat rejects the hooks when the checkpoint runs under `torch.compile`.
+See torch_remat's
+[offloading guide](https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md).
 
-To install hooks, pass a `saved_tensors_hooks` callable to
-`config.apply`. It receives each transformer block and its FQN and is
-called once per block, so each block can own its hook state;
-returning `None` leaves a block unhooked. Inside `pack`,
-`torch_remat.current_saved_tensor_info().kind` says why a tensor is retained:
-`CHECKPOINT_INPUT` for a block input, `SAVE_OUTPUT` and `BACKWARD` for tensors
-kept by save regions. For example, to offload each block's hidden-state input
-to CPU:
-
-```python
-import torch_remat as remat
-
-
-def cpu_offload_hooks(module, base_fqn):
-    def pack(tensor):
-        kind = remat.current_saved_tensor_info().kind
-        # The hidden state is the only block input that requires grad.
-        if kind is not remat.SavedTensorKind.CHECKPOINT_INPUT or not tensor.requires_grad:
-            return tensor
-        return tensor.device, tensor.detach().to("cpu")
-
-    def unpack(packed):
-        if isinstance(packed, torch.Tensor):
-            return packed
-        device, cpu_tensor = packed
-        return cpu_tensor.to(device)
-
-    return pack, unpack
-
-
-config.apply(model, saved_tensors_hooks=cpu_offload_hooks)
-```
-
-`pack` runs at block entry, before the forward reads its inputs, so it must not
-free or overwrite their storage; copying is fine. Do not assume unpacks run in
-reverse pack order. torch_remat rejects these hooks when the checkpoint itself
-runs under `torch.compile`.
+TorchTitan uses them for CPU offloading, driven by the remat policy:
+`offload_block_input` and `offload_regions` choose which retained tensors go
+to CPU, and `apply` then installs the offloader, which runs the copies
+overlapped with compute. See
+[ACTIVATION_OFFLOAD.md](ACTIVATION_OFFLOAD.md).
 
 ## Diagnosing the effective policy
 

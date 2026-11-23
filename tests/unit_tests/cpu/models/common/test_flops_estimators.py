@@ -102,6 +102,7 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
     "family,flavor",
     [
         ("kimi_k2_7", "debugmodel"),
+        ("qwen3_8_flash_next", "debugmodel_mm"),
         ("muse_glimmer", "debugmodel_mm"),
         ("muse_spark", "debugmodel_mm"),
     ],
@@ -259,7 +260,9 @@ def test_spark_shared_perception_norm_is_charged_for_both_encoders():
 def test_vision_estimators_accept_raw_microbatches(family):
     config = (
         importlib.import_module(f"torchtitan.models.{family}")
-        .build_model_config("debugmodel", parallelism=ParallelismConfig(), seq_len=128)
+        .build_model_config(
+            "debugmodel_mm", parallelism=ParallelismConfig(), seq_len=128
+        )
         .vision_encoder
     )
     with torch.device("meta"):

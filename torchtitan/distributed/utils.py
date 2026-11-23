@@ -43,6 +43,26 @@ def get_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
 
 
+def as_dtensor_like(param: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+    """Wrap ``local`` as a DTensor with ``param``'s mesh, placements, and shape.
+
+    Returns ``local`` unchanged if ``param`` is not a DTensor. ``local`` must be
+    on ``param``'s device; ``DTensor.from_local`` copies it there otherwise.
+    ``run_check=False`` skips the cross-rank check of ``Replicate()`` placements,
+    so ``local`` must already match on every replica.
+    """
+    if not isinstance(param, DTensor):
+        return local
+    return DTensor.from_local(
+        local,
+        param.device_mesh,
+        param.placements,
+        run_check=False,
+        shape=param.shape,
+        stride=param.stride(),
+    )
+
+
 def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,

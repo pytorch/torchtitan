@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
+from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
@@ -52,8 +54,8 @@ _RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
 
 
 class Rollouter(Configurable):
-    """Turns a problem (train/val datasets, the `MessageEnv` to build per sample, and a
-    `Rubric`) into scored rollouts — the RL training data.
+    """Turns a problem (train/val datasets and a rollout worker config) into scored rollouts, the
+    RL training data.
 
     Like a `Dataloader` turns a `Dataset` into training batches, a `Rollouter`
     turns a problem into rollouts: its worker builds the envs, drives them against the inference engine
@@ -64,13 +66,10 @@ class Rollouter(Configurable):
     batch.
 
         index, sample = rollouter.get_training_sample()
-        group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
+        group = await rollouter.run_group_rollouts(     # one worker runs and scores the group
             generate_fn=generate_fn, release_session_fn=release_session_fn,
             sample=sample, group_id=index,
             group_size=N, sampling=sampling)
-
-    `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
-    adds the message <-> token plumbing.
 
     Example:
         rollouter = Rollouter.Config(
@@ -78,23 +77,24 @@ class Rollouter(Configurable):
                 dataset=MyDataset.Config()
             ),
             validation_dataset=MyDataset.Config(),
-            worker=RolloutWorker.Config(
+            worker=MessageEnvRolloutWorker.Config(
                 rubric=Rubric.Config(
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
                 ),
                 message_env=MyEnv.Config(),
             ),
-        ).build()
+        ).build(max_rollouts_in_flight=256)
 
     Customization:
         Rollouter supports customization at several levels:
           - Sample source: provide source configs for training and validation.
           - Group execution, coarse: override `run_group_rollouts` for your own
-            orchestration. `RolloutWorker` then becomes optional -- but override
+            orchestration. The worker then becomes optional -- but override
             `setup_async` too, or the worker pool is still spawned unused.
           - Group execution, fine: keep the stock orchestration and point `worker`
-            at a `RolloutWorker.Config` subclass, overriding only what you need
-            (`make_env_group`, `score_group`, `run_group`).
+            at a `MessageEnvRolloutWorker.Config` subclass, overriding only what you need
+            (`make_env_group`, `score_group`, `run_group`). A worker whose env isn't a
+            `MessageEnv` subclasses `BaseRolloutWorker` and implements `run_group`.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -105,31 +105,33 @@ class Rollouter(Configurable):
         validation_dataset: RLDataset.Config
         """Builds an iterable validation dataset."""
 
-        worker: RolloutWorker.Config
+        worker: BaseRolloutWorker.Config
         """How a rollout group is built, driven, scored and advantaged. Selects the
-        `RolloutWorker` subclass by config type; one worker is built per pool process."""
+        `BaseRolloutWorker` subclass by config type; one worker is built per pool process."""
 
-        worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        rollouts_per_worker: int = 128
+        """Training rollouts in flight per rollout worker process, on average. It sets the pool size,
+        rounded up: 300 training rollouts in flight / 128 per worker -> 3 workers. Not a cap: validation
+        rollouts come on top, and groups can land unevenly."""
 
+        # TODO: at 128 rollouts per worker, renders and parses (`TokenEnv`) may queue on these threads.
+        #   Measure that wait, then size the pool from it.
         num_threads_per_worker: int = 4
         """Size of each worker process's default thread pool executor, i.e. the pool
         behind every `asyncio.to_thread` call in that process."""
 
         def __post_init__(self) -> None:
-            if self.worker_pool_size < 1:
-                raise ValueError(
-                    "worker_pool_size must be at least 1, got "
-                    f"{self.worker_pool_size}"
-                )
             if self.num_threads_per_worker < 1:
                 raise ValueError(
                     "num_threads_per_worker must be at least 1, got "
                     f"{self.num_threads_per_worker}"
                 )
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, max_rollouts_in_flight: int) -> None:
         self._config = config
+        # The most training rollouts in flight at once. Validation rollouts come on top.
+        # `setup_async` sizes the worker pool from it.
+        self._max_rollouts_in_flight = max_rollouts_in_flight
         training_dataloader = config.training_dataloader.build()
         if not isinstance(training_dataloader, RolloutDataLoader):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
@@ -168,16 +170,32 @@ class Rollouter(Configurable):
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
+        # Constructor args of each rollout worker known only at setup, e.g. a server address.
+        # TODO: VerifiersRollouter is the only user. Once its env runs in the rollout worker, remove
+        # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
+        worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn one rollout worker per `rollouts_per_worker` training rollouts in flight, rounded up,
+        and initialize them."""
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
+
+        num_workers = math.ceil(
+            self._max_rollouts_in_flight / self._config.rollouts_per_worker
+        )
+        logger.info(
+            "%d rollout workers (%d training rollouts in flight, rollouts_per_worker=%d)",
+            num_workers,
+            self._max_rollouts_in_flight,
+            self._config.rollouts_per_worker,
+        )
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
             self._config.worker,
-            num_workers=self._config.worker_pool_size,
+            num_workers=num_workers,
             num_threads=self._config.num_threads_per_worker,
+            **(worker_kwargs or {}),
         )
         await self._worker_actors.setup_async.call(
             tokenizer_config=tokenizer_config,
@@ -194,8 +212,8 @@ class Rollouter(Configurable):
             generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
             run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
 
-        Why wait: if a worker stops while the generator router still owes it a reply, Monarch fails the
-        router and the finished job exits 130.
+        Why wait: so each in-flight `run_group` ends on its own (closing its envs and releasing its
+        sessions) instead of being cut off when its worker stops.
         """
         actor_system = self._actor_system
         self._worker_actors = None
@@ -205,8 +223,7 @@ class Rollouter(Configurable):
             _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
             if pending:
                 logger.warning(
-                    "Stopping rollout workers with %d run_group calls still running; "
-                    "the job may exit 130",
+                    "Stopping rollout workers with %d run_group calls still running",
                     len(pending),
                 )
                 for call in pending:
@@ -230,16 +247,12 @@ class Rollouter(Configurable):
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
-        """Roll out and score one prompt group.
-
-        Builds `group_size` sibling envs from one sample and drives them concurrently;
-        each sibling drives its own `generate_fn` calls, so the generator runs a whole
-        group's calls together in one continuous batch. Then `score_group` fills each reward.
+        """Send one prompt group to a rollout worker and return its scored group.
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
             release_session_fn: Async callable each rollout calls after its last turn, to
-                release its routing session.
+                release resources associated to that session. E.g. generator's kv-cache.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -283,19 +296,14 @@ class Rollouter(Configurable):
         self._training_dataloader.load_state_dict(state_dict)
 
 
-class RolloutWorker(Configurable):
-    """Builds, executes, scores, and advantages one rollout group."""
+class BaseRolloutWorker(Configurable, ABC):
+    """Runs one rollout group in a rollout worker process, then scores it and computes its
+    advantages. Subclasses implement `run_group`."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         rubric: Rubric.Config
         """Reward functions + weights used by `score_group`."""
-
-        message_env: MessageEnv.Config
-        """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
-
-        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
-        """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
         advantage: Configurable.Config = field(
             default_factory=AdvantageEstimator.Config
@@ -305,9 +313,79 @@ class RolloutWorker(Configurable):
 
     def __init__(self, config: Config) -> None:
         self.rubric: Rubric = config.rubric.build()
+        self.advantage_estimator: AdvantageEstimator = config.advantage.build()
+
+    async def setup_async(
+        self,
+        *,
+        tokenizer_config: HuggingFaceTokenizer.Config,
+        renderer_config: RendererConfig,
+        hf_assets_path: str,
+        vision_processor_config: VisionProcessor.Config | None = None,
+    ) -> None:
+        """Called once in the worker process after it is spawned."""
+
+    async def score_group(
+        self,
+        rollouts: list[Rollout],
+        env_input: object,
+    ) -> list[RubricOutput]:
+        """Score one group's rollouts; `run_group` applies the rewards.
+        Default impl delegates to `self.rubric.score_group`.
+
+        Args:
+            rollouts: Sibling rollouts in one prompt group, already stepped.
+            env_input: the env initial input shared by the group.
+
+        Returns:
+            One `RubricOutput` per rollout, in input order.
+        """
+        return await self.rubric.score_group(rollouts, env_input)
+
+    @abstractmethod
+    async def run_group(
+        self,
+        *,
+        generate_fn: GenerateFn,
+        release_session_fn: ReleaseSessionFn,
+        sample: object,
+        group_id: int,
+        group_size: int,
+        sampling: SamplingConfig,
+    ) -> RolloutGroup:
+        """Roll out one prompt group, then set each reward from `score_group` and each
+        advantage from `advantage_estimator`.
+
+        Args:
+            generate_fn: Async callable that returns a Completion given a prompt.
+            release_session_fn: Async callable each rollout calls after its last turn, to
+                release resources associated to that session. E.g. generator's kv-cache.
+            sample: Dataset sample shared by the group.
+            group_id: Stable group id; siblings share it for advantage centering.
+            group_size: Number of sibling rollouts.
+            sampling: Sampling config for every generate call in the group.
+
+        Returns:
+            One scored `RolloutGroup`.
+        """
+
+
+class MessageEnvRolloutWorker(BaseRolloutWorker):
+    """Builds each rollout's env from `message_env` and `token_env`, and drives it against the
+    generator."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseRolloutWorker.Config):
+        message_env: MessageEnv.Config
+        """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
+
+        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
+        """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
-        self.advantage_estimator: AdvantageEstimator = config.advantage.build()
         self._renderer: Renderer
 
     async def setup_async(
@@ -318,7 +396,7 @@ class RolloutWorker(Configurable):
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
-        """Build runtime dependencies after the worker actor is spawned.
+        """Build the renderer that each rollout's `TokenEnv` uses.
 
         ``vision_processor_config``: `Controller.Config.vision_processor`, for a renderer that
         reads image files; None for text prompts.
@@ -356,26 +434,6 @@ class RolloutWorker(Configurable):
             for _ in range(group_size)
         ]
 
-    async def score_group(
-        self,
-        rollouts: list[Rollout],
-        env_input: object,
-    ) -> list[RubricOutput]:
-        """Score one group's rollouts; `run_group` applies the rewards.
-
-        Default impl delegates to `self.rubric.score_group`. Override for
-        cross-sibling scoring (judge, pairwise, diversity) or partial-credit
-        reward shaping.
-
-        Args:
-            rollouts: Sibling rollouts in one prompt group, already stepped.
-            env_input: the env initial input shared by the group.
-
-        Returns:
-            One `RubricOutput` per rollout, in input order.
-        """
-        return await self.rubric.score_group(rollouts, env_input)
-
     async def run_group(
         self,
         *,
@@ -386,26 +444,7 @@ class RolloutWorker(Configurable):
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
-        """Roll out and score one prompt group.
-
-        Builds `group_size` sibling envs from one sample and drives them concurrently;
-        each sibling drives its own `generate_fn` calls, so the generator runs a whole
-        group's calls together in one continuous batch. Then `score_group` fills each reward.
-
-        For custom logic, users can override this method.
-
-        Args:
-            generate_fn: Async callable that returns a Completion given a prompt.
-            release_session_fn: Async callable each rollout calls after its last turn, to
-                release its routing session.
-            sample: Dataset sample shared by the group.
-            group_id: Stable group id; siblings share it for advantage centering.
-            group_size: Number of sibling rollouts.
-            sampling: Sampling config for every generate call in the group.
-
-        Returns:
-            One scored `RolloutGroup`.
-        """
+        """Build `group_size` envs from `sample`, run them concurrently, then score them and fill their advantages."""
         # One prompt becomes [env] * group_size.
         envs = self.make_env_group(
             sample=sample,

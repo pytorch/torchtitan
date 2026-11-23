@@ -46,6 +46,7 @@ package name, `activation_tracer` is imported by putting `scripts/` on
        config.profiler.profile_freq = 2
        config.debug.seed = 42
        config.debug.deterministic = True
+       config.precision.dtype = "float32"
        config.precision.param_dtype = "float32"
        return config
    ```

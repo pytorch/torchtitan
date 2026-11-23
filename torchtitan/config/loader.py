@@ -12,11 +12,11 @@ import argparse
 import importlib
 import logging
 import os
-import pprint
 from typing import Any, get_args
 
 from torchtitan.config.configs import CommBackend
 from torchtitan.config.configurable import Configurable
+from torchtitan.config.format import format_config
 from torchtitan.config.override import OverrideConfig, parse_cli_imports
 
 
@@ -56,7 +56,7 @@ class ConfigLoader:
         config.__post_init__()
 
         if namespace.print_config:
-            pprint.pprint(config)
+            print(format_config(config))
             raise SystemExit(0)
         return config
 

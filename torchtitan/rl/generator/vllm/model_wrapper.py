@@ -22,7 +22,6 @@ from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.utils import torch_utils as _torch_utils
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -52,6 +51,7 @@ from torchtitan.rl.generator.model import (
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.vllm.registry import uses_compressed_mla_cache
+from torchtitan.tools.utils import device_type
 
 
 logger = init_logger(__name__)
@@ -295,13 +295,11 @@ class VLLMModelWrapper(Module):
                 "precision.param_dtype as the engine dtype."
             )
         device = cast(torch.device, vllm_config.device_config.device)
-        self.model, self.parallelism_context = build_inference_model(
+        self.model, self.parallelism_context, frozen_param_keys = build_inference_model(
             self.config,
             parallelism=parallelism,
             precision=precision,
             device=device,
-            # Text-only generators drop the vision encoder; VLLMMultimodalModelWrapper keeps it.
-            keep_vision_encoder=supports_multimodal(self),
         )
         # TorchTitanGPUModelRunner pads a step to a multiple of TP when TP shards the
         # routed tokens.
@@ -316,13 +314,15 @@ class VLLMModelWrapper(Module):
         self._initialize_dist_moe_runtime(
             dist_moe_runtime, max_num_batched_tokens, device
         )
-        maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        maybe_apply_numa_binding(torch.accelerator.current_device_index(), device_type)
         # Loads the initial weights, then unshards the model, so vLLM profiles GPU
         # memory with the model's representation during forward.
         self.model_state_dict_loader = ModelStateDictLoader(
             self.model,
             checkpointer_config=checkpointer_config,
             model_state_dict_load_mode=model_state_dict_load_mode,
+            frozen_param_keys=frozen_param_keys,
+            hf_assets_path=vllm_config.model_config.model,
         )
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.

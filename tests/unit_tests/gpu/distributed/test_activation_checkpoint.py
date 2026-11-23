@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+import unittest.mock
 from copy import deepcopy
 
 import torch
@@ -12,10 +13,11 @@ import torch_remat as remat
 
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
+    BlockRematOverride,
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
-from torchtitan.models.base.module import Module, ModuleDict
+from torchtitan.models.base.module import Module, ModuleDict, ModuleList
 from torchtitan.models.common.linear import Linear
 
 
@@ -62,12 +64,26 @@ class TransformerBlock(Module):
 
 
 class ToyModel(Module):
-    def __init__(self):
+    def __init__(self, layer_ids: tuple[str, ...] = ("0",)):
         super().__init__()
-        self.layers = ModuleDict({"0": TransformerBlock()})
+        self.layers = ModuleDict(
+            {layer_id: TransformerBlock() for layer_id in layer_ids}
+        )
 
     def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
-        return self.layers["0"](x_BD)
+        return sum(block(x_BD) for block in self.layers.values())
+
+
+def _forward_counts(model: ToyModel) -> dict[str, tuple[int, int, int]]:
+    counts = {}
+    for layer_id, block in model.layers.items():
+        assert isinstance(block, TransformerBlock)
+        counts[layer_id] = (
+            block.input_projection.num_forwards,
+            block.inner_compute.num_forwards,
+            block.output_projection.num_forwards,
+        )
+    return counts
 
 
 def _run_forward_backward(
@@ -220,11 +236,119 @@ class TestActivationCheckpointing(unittest.TestCase):
                 "default recompute",
                 lambda: DefaultActivationRematConfig(recompute_regions=[]),
             ),
+            (
+                "full block override",
+                lambda: FullActivationRematConfig(
+                    block_overrides=[
+                        BlockRematOverride(blocks=["layers.0"], save_regions=["*"])
+                    ]
+                ),
+            ),
         ):
             with self.subTest(name), self.assertRaisesRegex(
                 ValueError, "Use ActivationRematConfig"
             ):
                 config_factory()
+
+    def test_block_overrides_replace_fields_by_original_layer_id(self):
+        # PP keeps original layer ids: with blocks 81/82/91 here, "layers.1"
+        # (the second block's position) must match nothing.
+        model = ToyModel(("81", "82", "91"))
+        ActivationRematConfig(
+            save_regions=["*"],
+            block_overrides=[
+                BlockRematOverride(
+                    blocks=["layers.82"], recompute_regions=["inner_compute"]
+                ),
+                BlockRematOverride(
+                    blocks=["layers.91"], save_regions=["output_projection*"]
+                ),
+                BlockRematOverride(blocks=["layers.1"], save_regions=[]),
+            ],
+        ).apply(model)
+        _run_forward_backward(model, torch.randn(8, 32))
+        self.assertEqual(
+            _forward_counts(model),
+            {"81": (1, 1, 1), "82": (1, 2, 1), "91": (2, 2, 1)},
+        )
+
+    def test_block_overrides_name_encoder_blocks_by_encoder_fqn(self):
+        encoder = ToyModel(("82",))
+        model = ModuleDict({"vision_encoder": encoder})
+        ActivationRematConfig(
+            save_regions=["*"],
+            block_overrides=[
+                BlockRematOverride(blocks=["layers.82"], save_regions=[]),
+                BlockRematOverride(
+                    blocks=["vision_encoder.layers.82"],
+                    recompute_regions=["inner_compute"],
+                ),
+            ],
+        ).apply(model, block_container_fqns=["vision_encoder.layers"])
+        _run_forward_backward(encoder, torch.randn(8, 32))
+        self.assertEqual(_forward_counts(encoder), {"82": (1, 2, 1)})
+
+    def test_apply_marks_blocks_of_every_container_and_installs_one_offloader(
+        self,
+    ):
+        # The offloader hooks the blocks apply marked, in every container; a
+        # second offloader on the same model part would hook them all twice.
+        model = ToyModel(("82",))
+        model.vision_encoder = ToyModel(("7",))
+        model.mtp_layers = ModuleList([TransformerBlock()])
+        with unittest.mock.patch(
+            "torchtitan.distributed.activation_remat.ActivationOffloader"
+        ) as offloader:
+            ActivationRematConfig(save_regions=["*"], offload_block_input=True).apply(
+                model,
+                block_container_fqns=["vision_encoder.layers", "layers", "mtp_layers"],
+            )
+        offloader.assert_called_once()
+        self.assertIs(offloader.call_args.args[0], model)
+        self.assertEqual(
+            [
+                block._remat_block_fqn
+                for block in (
+                    model.vision_encoder.layers["7"],
+                    model.layers["82"],
+                    model.mtp_layers[0],
+                )
+            ],
+            ["vision_encoder.layers.7", "layers.82", "mtp_layers.0"],
+        )
+
+    def test_offloading_requires_cuda(self):
+        with unittest.mock.patch.object(
+            torch.accelerator, "current_accelerator", return_value=None
+        ), self.assertRaisesRegex(ValueError, "requires CUDA"):
+            ActivationRematConfig(save_regions=["*"], offload_block_input=True).apply(
+                ToyModel(("82",))
+            )
+
+    def test_block_overrides_are_validated(self):
+        for name, override_factory, message in (
+            (
+                "no blocks",
+                lambda: BlockRematOverride(blocks=[], save_regions=[]),
+                "empty",
+            ),
+            (
+                "no fields",
+                lambda: BlockRematOverride(blocks=["layers.1"]),
+                "sets no field",
+            ),
+        ):
+            with self.subTest(name), self.assertRaisesRegex(ValueError, message):
+                override_factory()
+
+        with self.assertRaisesRegex(ValueError, "more than one"):
+            ActivationRematConfig(
+                save_regions=[],
+                block_overrides=[
+                    BlockRematOverride(blocks=["layers.1"], save_regions=[]),
+                    BlockRematOverride(blocks=["layers.1"], recompute_regions=[]),
+                ],
+            )
 
     def test_recompute_regions_override_save_regions(self):
         model = ToyModel()

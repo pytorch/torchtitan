@@ -27,11 +27,7 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 
-from torchtitan.config.transform import (
-    apply_transforms,
-    ContextParallelTransform,
-    LMHeadFP32OutputConverter,
-)
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.models.common.attention import (
@@ -69,7 +65,7 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.batcher import Batcher
@@ -93,7 +89,7 @@ def _dapo_math_rollouter_config(
             dataset=DapoMathDataset.Config()
         ),
         validation_dataset=validation_dataset,
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardMathVerify.Config(weight=1.0)],
                 error_reward=0.0,
@@ -276,7 +272,6 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
         seq_len=max_total_tokens,
-        moe_comm_backend="standard",
         attn_backend="varlen",
     )
     rollouter = _dapo_math_rollouter_config(
@@ -426,7 +421,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         "30B-A3B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -458,7 +452,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 "timing/validate",
             ],
         ),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -480,9 +473,10 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
-                # Pack several rollouts per microbatch (a multiple of
-                # max_total_tokens).
-                num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
+                # Pack two rollouts per microbatch (a multiple of
+                # max_total_tokens). With FP32 parameters and optimizer
+                # states, four run out of memory on the four trainer GPUs.
+                num_tokens_per_microbatch_per_dp_rank=2 * max_total_tokens,
             ),
             dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             parallelism=trainer_parallelism,

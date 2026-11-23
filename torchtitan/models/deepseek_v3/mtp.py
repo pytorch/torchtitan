@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
@@ -33,7 +34,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -159,16 +160,24 @@ class MTPTransformerBlock(TransformerBlock):
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
-        h = h + self.attention(self.attention_norm(h), attention_metadata, positions)
+        # attention_norm and the residual add read the eh_proj output with bare ops.
+        remat.recompute_needs_tensor(h)
+        attn_out = self.attention(self.attention_norm(h), attention_metadata, positions)
+        # The residual add reads the attention output with a bare op.
+        remat.recompute_needs_tensor(attn_out)
+        h = h + attn_out
         if isinstance(self.feed_forward, MoE):
-            h = h + self.feed_forward(
+            ffn_out = self.feed_forward(
                 self.ffn_norm(h),
                 padding_mask_T=mtp_padding_mask_T,
                 aux_loss_denominator=aux_loss_denominator,
             )
         else:
-            h = h + self.feed_forward(self.ffn_norm(h))
-        return self.mtp_norm(h)
+            ffn_out = self.feed_forward(self.ffn_norm(h))
+        # The residual add reads the feed-forward output with a bare op.
+        remat.recompute_needs_tensor(ffn_out)
+        h = h + ffn_out
+        return maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h))
 
     def _maybe_shard_mtp_valid_mask_across_tp(
         self, mtp_input_valid_mask_T: torch.Tensor
@@ -237,6 +246,12 @@ class MTPDecoder(Decoder):
                     "MTPTransformerBlock.Config instances."
                 )
             self.mtp_layers.append(layer_config.build())
+
+    def _remat_block_container_fqns(self) -> list[str]:
+        return [
+            *super()._remat_block_container_fqns(),
+            *([] if self.mtp_layers is None else ["mtp_layers"]),
+        ]
 
     def _apply_fsdp(
         self,
@@ -425,7 +440,7 @@ class MTPDecoder(Decoder):
             )
 
         prev_depth_hidden = h
-        h = self.norm(h) if self.norm is not None else h
+        h = self._pre_lm_head_norm_and_gather(h)
 
         mtp_outputs = []
         for depth, (layer, depth_tokens, mtp_input_valid_mask) in enumerate(

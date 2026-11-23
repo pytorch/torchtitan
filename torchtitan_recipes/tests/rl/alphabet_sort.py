@@ -34,7 +34,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    ModelConfigConverter,
     TokenDispatcherTransform,
 )
 from torchtitan.models.common.attention import VarlenInnerAttention
@@ -628,7 +627,6 @@ def _kimi_k3_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Kimi K3 ``(trainer, generator)`` model configs for RL, with the lm_head
     fp32 cast always on and no local compile regions."""
@@ -639,7 +637,6 @@ def _kimi_k3_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
@@ -996,6 +993,9 @@ def rl_grpo_checkpoint_resume() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 1
     config.trainer.parallelism.tensor_parallel_degree = 2
     config.generator.parallelism.tensor_parallel_degree = 4
+    # TorchStore is still the only path for gpu_fetch; keep it covered.
+    # TODO: drop with the TorchStore path.
+    config.model_state_dict_transport = None
     return _configure_ci(
         config,
         steps=4,

@@ -88,6 +88,12 @@ class PixelBudgetResize(ResizeRule):
         max_pixels: int
         """Upper pixel budget."""
 
+        def __post_init__(self) -> None:
+            if self.max_pixels < 1:
+                raise ValueError(
+                    f"max_pixels must be at least 1, got {self.max_pixels}."
+                )
+
     def __init__(self, config: Config) -> None:
         self.min_pixels = config.min_pixels
         self.max_pixels = config.max_pixels
@@ -258,6 +264,10 @@ class VisionProcessor(Configurable):
                     "patch_order must be 'block' or 'raster', got "
                     f"{self.patch_order!r}."
                 )
+            for name in ("patch_size", "temporal_patch_size", "spatial_merge_size"):
+                value = getattr(self, name)
+                if value < 1:
+                    raise ValueError(f"{name} must be at least 1, got {value}.")
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -299,6 +309,22 @@ class VisionProcessor(Configurable):
             )
         frames_TCHW = self._resize(frames.permute(0, 3, 1, 2), self.video_resize)
         return self._normalize(frames_TCHW)
+
+    def process_images(
+        self, images: Sequence[str | bytes | Image.Image]
+    ) -> tuple[list[torch.Tensor], list[int]]:
+        """Resize and normalize ``images`` and count each one's placeholder tokens.
+
+        Raises on an image that cannot be processed; the caller decides whether to
+        drop the sample.
+        """
+        pixels: list[torch.Tensor] = []
+        num_tokens: list[int] = []
+        for image in images:
+            image_pixels, grid_thw = self.resize_and_normalize(image)
+            pixels.append(image_pixels)
+            num_tokens.append(self.num_placeholder_tokens(grid_thw))
+        return pixels, num_tokens
 
     def num_placeholder_tokens(self, grid_thw: Sequence[int] | torch.Tensor) -> int:
         """Placeholder tokens of an item with patch grid ``grid_thw``

@@ -7,14 +7,10 @@
 """Qwen3.8 model flavors."""
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
-from torchtitan.models.common import Embedding, Linear
+from torchtitan.models.common import Linear, VocabParallelEmbedding
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
-    pre_lm_head_norm_sharding_config,
+    norm_sharding_config,
     token_embedding_sharding_config,
 )
 from torchtitan.models.qwen3_5.flavors import (
@@ -62,11 +58,11 @@ def _qwen3_8_2_4t_a95b(
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(
             dim,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -104,7 +100,6 @@ def _qwen3_8_2_4t_a95b(
             value_head_dim=128,
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
-            has_vision_encoder=False,
         ),
     )
 
@@ -123,7 +118,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen35Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -137,8 +131,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter_config in converters:
-            config = converter_config.build().convert(config)
     return config

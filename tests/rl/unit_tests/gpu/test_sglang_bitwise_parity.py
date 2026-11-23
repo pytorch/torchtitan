@@ -36,9 +36,11 @@ Debug models with random weights start from the trainer's weights, loaded throug
 same in-place model state dict load.
 
 Runs in the B200 RL CI job.
-Run each class in its own launch, with as many processes as its TP degree (one for
-TestSGLangBitwiseParityKDA, else two), with the SGLang environment (see
-torchtitan/rl/generator/sglang/README.md; the Dist-MoE class also needs the dist_moe
+Run each class in its own launch, with as many processes as its DP x TP degree (one
+for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
+TestSGLangBitwiseParityKDADPEP and TestSGLangBitwiseParityDistMoEDPEP, else two),
+with the SGLang environment (see
+torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
 package):
     torchrun --nproc_per_node=2 -m pytest \
         tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParityVarlen -v
@@ -67,18 +69,21 @@ from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
+from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_config
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest, SamplingConfig
+from torchtitan.rl.rollout.types import Prompt
 from torchtitan.tools.utils import activate_cuda_flash_attention_impl
 from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
 )
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 
@@ -107,6 +112,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     sync_weights_from_trainer = False
     # CUDA graphs SGLang captures (SGLangEngine.Config.cuda_graph).
     cuda_graph = "full"
+    # SGLangEngine.Config.extra_server_args.
+    extra_server_args = {}
     BATCH_SIZE = 5
     PROMPT_LENGTH = 150
     MAX_GEN_TOKENS = 50
@@ -118,10 +125,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     policy_version = 0
     # Off by default, so test 4 covers the cache salt.
     reset_kv_cache_on_model_state_dict_load = False
-    # Whether a request reuses the prompt KV of an earlier request with the same
-    # prompt admitted in the same call. Linear attention models don't (see
-    # SGLangEngine._hold_shared_prompts).
-    reuses_shared_prompt = True
+    # SGLang's chunked prefill budget (Engine max_num_batched_tokens); None: its default.
+    max_num_batched_tokens = None
 
     @classmethod
     def setUpClass(cls):
@@ -148,7 +153,9 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         torch._C._clear_DTensor_sharding_propagator_cache()
         DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
 
-        cls.engine = SGLangEngine.Config(cuda_graph=cls.cuda_graph).build(
+        cls.engine = SGLangEngine.Config(
+            cuda_graph=cls.cuda_graph, extra_server_args=cls.extra_server_args
+        ).build(
             model=config.generator.model,
             parallelism=config.generator.parallelism,
             model_path=config.hf_assets_path,
@@ -156,7 +163,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             precision=config.precision,
             # Leave room for the trainer model in this process.
             gpu_memory_limit=0.5,
-            max_num_batched_tokens=None,
+            max_num_batched_tokens=cls.max_num_batched_tokens,
             checkpointer=(
                 None
                 if cls.sync_weights_from_trainer
@@ -172,6 +179,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                 cls.reset_kv_cache_on_model_state_dict_load
             ),
             model_state_dict_load_mode="gpu_fetch",
+            vision_processor=None,
+            mooncake_master_address=None,
             rank=dist.get_rank(),
             generator_name="generator",
             output_dir=tempfile.gettempdir(),
@@ -201,7 +210,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         for i, ids in enumerate(prompt_ids):
             request = EngineRequest(
                 request_id=f"{time.monotonic_ns()}-{i}",
-                prompt_token_ids=ids,
+                prompt=Prompt(token_ids=ids),
                 sampling=SamplingConfig(
                     temperature=1.0,
                     max_tokens=self.MAX_GEN_TOKENS,
@@ -267,7 +276,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         shared_prompt = self.prompt_ids[0][::-1]
         prompt_ids = self.prompt_ids[:-2] + [shared_prompt, shared_prompt]
         results = self._check_trainer_vs_sglang_decode(prompt_ids)
-        if dist.get_rank() == 0 and self.reuses_shared_prompt:
+        if dist.get_rank() == 0:
             self.assertGreater(results[-1].metrics_inputs.num_cached_tokens, 0)
 
     def test_sglang_decode_batch_invariance(self):
@@ -384,7 +393,7 @@ class TestSGLangBitwiseParityVarlen(SGLangBitwiseParityTestBase):
         requests = [
             EngineRequest(
                 request_id=f"{time.monotonic_ns()}-{length}",
-                prompt_token_ids=self.prompt_ids[0][:1] * length,
+                prompt=Prompt(token_ids=self.prompt_ids[0][:1] * length),
                 sampling=SamplingConfig(
                     temperature=1.0, max_tokens=self.MAX_GEN_TOKENS, stop_token_ids=[]
                 ),
@@ -439,6 +448,37 @@ class TestSGLangBitwiseParityMoEEP(SGLangBitwiseParityTestBase):
     cuda_graph = "none"
 
 
+class TestSGLangBitwiseParityMoEDPEP(SGLangBitwiseParityTestBase):
+    """Qwen3 MoE debug model with random weights, DP 2 x TP 2 with EP 4 across the DP
+    ranks (SGLang's attention DP), on 4 GPUs. The base tests give both DP ranks the
+    same requests; test_dp_ranks_with_different_requests gives them different ones."""
+
+    __test__ = True
+    config_fn = staticmethod(rl_grpo_qwen3_moe_debug_varlen_batch_invariant)
+    sync_weights_from_trainer = True
+    # The all-to-all token dispatcher syncs the host for its split sizes.
+    cuda_graph = "none"
+
+    def test_dp_ranks_with_different_requests(self):
+        # DP rank 1 finishes first and runs idle steps while DP rank 0 decodes; each
+        # DP rank's results still match the trainer.
+        dp_rank = self.engine.data_parallel_rank
+        self.assertEqual(self.engine.data_parallel_size, 2)
+        prompt_ids = self.prompt_ids if dp_rank == 0 else self.prompt_ids[:1]
+        results = self._generate(prompt_ids)
+        sequences = [
+            prompt + result.token_ids
+            for prompt, result in zip(prompt_ids, results, strict=True)
+        ]
+        trainer_lps = self._trainer_logprobs(sequences)
+        for i, (prompt, result) in enumerate(zip(prompt_ids, results)):
+            self._assert_bitwise_equal(
+                f"DP rank {dp_rank} seq {i}: trainer prefill vs SGLang decode",
+                trainer_lps[i][len(prompt) - 1 :],
+                result.token_logprobs,
+            )
+
+
 class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     """Qwen3.5 debug model with random weights: GDN state slots across prefill, decode
     and cached prefixes."""
@@ -448,10 +488,60 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
-    # Tests 4 and 5 then cover the reset path (retract, flush, continue), with
-    # SGLang's normal event loop.
+    # Tests 4 and 5 then cover the reset path (retract, flush, continue).
     reset_kv_cache_on_model_state_dict_load = True
-    reuses_shared_prompt = False
+
+    def test_runs_on_unified_memory(self):
+        """The engine runs GDN models on SGLang's unified pool, not on separate KV
+        and state pools."""
+        from sglang.srt.mem_cache.kv.alloc.chain import ChainAllocator
+
+        self.assertIsInstance(
+            self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
+        )
+
+
+class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
+    """``TestSGLangBitwiseParityGDN`` with HiCache backing KV and GDN states up to
+    host memory."""
+
+    extra_server_args = {"enable_hierarchical_cache": True, "hicache_size": 8}
+
+    def test_trainer_vs_sglang_decode_after_host_load_back(self):
+        """Test 3 with the previous turns evicted from GPU memory, so the next turns
+        load their KV and GDN states back from host memory into the unified pool."""
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+
+        results = self._generate(self.prompt_ids)
+        scheduler = self.engine._scheduler
+        tree_cache = scheduler.tree_cache
+        with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+            # Wait for the host backups, then drop every GPU copy.
+            tree_cache.writing_check(write_back=True)
+            tree_cache.evict(EvictParams(num_tokens=10**9, mamba_num=10**9))
+        self.assertEqual(tree_cache.total_size(), (0, 0))
+        next_prompt_ids = [
+            prompt + result.token_ids + prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+            for prompt, result in zip(self.prompt_ids, results, strict=True)
+        ]
+        # SGLang's request objects, for how many cached tokens came from the host.
+        admitted = []
+        admit = self.engine._output_collector.admit
+
+        def record_admit(req, arrival_time):
+            admitted.append(req)
+            admit(req, arrival_time)
+
+        self.engine._output_collector.admit = record_admit
+        try:
+            next_results = self._check_trainer_vs_sglang_decode(next_prompt_ids)
+        finally:
+            self.engine._output_collector.admit = admit
+        if dist.get_rank() == 0:
+            for prompt, req, result in zip(self.prompt_ids, admitted, next_results):
+                num_cached_tokens = result.metrics_inputs.num_cached_tokens
+                self.assertGreater(num_cached_tokens, len(prompt))
+                self.assertEqual(req.cached_tokens_host, num_cached_tokens)
 
 
 def _debug_model_config(
@@ -530,11 +620,9 @@ class TestSGLangBitwiseParityMLA(SGLangBitwiseParityTestBase):
 class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     """Kimi K3 debug model with random weights: KDA state slots, with Attention Gym's
     replay state of each slot's unfinished 64-token chunk, and MLA. One GPU, as
-    test_bitwise_parity's vLLM Kimi K3 class.
-
-    TODO: also run at TP 2 / EP 2, which covers the TP-sharded replay state. TP 2
-    needs EP, whose all-to-all dispatcher rules out CUDA graphs, and this class covers
-    KDA decode with replay state in CUDA graphs.
+    test_bitwise_parity's vLLM Kimi K3 class. This class covers KDA decode with replay
+    state in CUDA graphs; TestSGLangBitwiseParityKDADPEP covers the TP-sharded replay
+    state, without CUDA graphs.
     """
 
     __test__ = True
@@ -542,7 +630,9 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
     # SGLang cannot capture full prefill graphs of linear attention models.
     cuda_graph = "breakable"
     sync_weights_from_trainer = True
-    reuses_shared_prompt = False
+    # Chunked prefill off the 64-token grid: SGLang's prefix cache then snapshots KDA
+    # states mid-chunk, with replay state (TorchTitanKDAAttnBackend).
+    max_num_batched_tokens = 100
 
     @classmethod
     def setUpClass(cls):
@@ -553,18 +643,75 @@ class TestSGLangBitwiseParityKDA(SGLangBitwiseParityTestBase):
         cls.model.train()
 
 
-def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:
-    """``_qwen3_moe_debug_tp2_ep2_config`` with Dist-MoE experts on both sides."""
+def _kimi_k3_debug_dp2_tp2_ep4_config() -> Controller.Config:
+    """The batch-invariant Kimi K3 debug recipe (KDA, MLA and MoE layers) at
+    DP 2 x TP 2, EP 4, on both sides."""
+    config = rl_grpo_kimi_k3_debug_varlen_batch_invariant()
+    trainer_parallelism = dataclasses.replace(
+        config.trainer.parallelism,
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2, tensor_parallel_degree=2, expert_parallel_degree=4
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_kimi_k3_model_config,
+        "debugmodel",
+        seq_len=config.trainer.model.max_context_length,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile.regions = []
+    config.trainer = dataclasses.replace(
+        config.trainer, model=trainer_model, parallelism=trainer_parallelism
+    )
+    config.generator = dataclasses.replace(
+        config.generator, model=generator_model, parallelism=generator_parallelism
+    )
+    return config
+
+
+class TestSGLangBitwiseParityKDADPEP(
+    TestSGLangBitwiseParityKDA, TestSGLangBitwiseParityMoEDPEP
+):
+    """The Kimi K3 debug model at DP 2 x TP 2, EP 4 across the DP ranks, on 4 GPUs:
+    KDA's TP-sharded replay state, and an idle DP rank's linear attention steps."""
+
+    config_fn = staticmethod(_kimi_k3_debug_dp2_tp2_ep4_config)
+    # The all-to-all token dispatcher syncs the host for its split sizes.
+    cuda_graph = "none"
+
+
+def _with_dist_moe(config: Controller.Config) -> Controller.Config:
+    """``config`` with Dist-MoE experts on both sides."""
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
-    config = _qwen3_moe_debug_tp2_ep2_config()
-    # The most rows a rank can receive at EP 2.
+    # The most rows a rank can receive: every EP rank's tokens.
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
-        scratch_capacity_factor=2.0, inference=True
+        scratch_capacity_factor=float(
+            config.generator.parallelism.expert_parallel_degree
+        ),
+        inference=True,
     )
     config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
     config.generator = apply_transforms(config.generator, [DistMoeTransform()])
     return config
+
+
+def _qwen3_moe_debug_dist_moe_tp2_ep2_config() -> Controller.Config:
+    """``_qwen3_moe_debug_tp2_ep2_config`` with Dist-MoE experts on both sides."""
+    return _with_dist_moe(_qwen3_moe_debug_tp2_ep2_config())
+
+
+def _qwen3_moe_debug_dist_moe_dp2_tp2_ep4_config() -> Controller.Config:
+    """The Qwen3 MoE debug recipe (DP 2 x TP 2, EP 4) with Dist-MoE experts on both
+    sides."""
+    return _with_dist_moe(rl_grpo_qwen3_moe_debug_varlen_batch_invariant())
 
 
 @unittest.skipUnless(
@@ -586,9 +733,7 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
     def setUpClass(cls):
         super().setUpClass()
         cls.model.requires_grad_(False)
-        cls.trainer_dist_moe_runtime = DistMoeRuntime.Config(
-            scratch_capacity_factor=2.0, inference=True
-        ).build(
+        cls.trainer_dist_moe_runtime = cls.config_fn().generator.dist_moe_runtime.build(
             model_parts=[cls.model],
             parallelism_context=cls.parallelism_context,
             device=cls.device,
@@ -603,7 +748,24 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
     def _trainer_logprobs(self, token_ids):
         sequences = token_ids if isinstance(token_ids[0], list) else [token_ids]
         num_tokens = sum(len(sequence) for sequence in sequences)
+        # Every EP rank passes the same count. With DP, the EP group spans the DP
+        # ranks, whose batches can differ in size: take the largest.
+        num_local_tokens = torch.tensor(
+            [num_tokens // self.parallelism_context.tp], device=self.device
+        )
+        dist.all_reduce(num_local_tokens, op=dist.ReduceOp.MAX)
         self.trainer_dist_moe_runtime.set_num_local_input_tokens_per_call(
-            num_tokens // self.parallelism_context.tp
+            int(num_local_tokens.item())
         )
         return super()._trainer_logprobs(token_ids)
+
+
+class TestSGLangBitwiseParityDistMoEDPEP(
+    TestSGLangBitwiseParityDistMoE, TestSGLangBitwiseParityMoEDPEP
+):
+    """Dist-MoE experts at DP 2 x TP 2, EP 4 across the DP ranks, with SGLang's CUDA
+    graphs, on 4 GPUs: covers the Dist-MoE count of the largest DP rank and an idle
+    DP rank's steps in CUDA graphs."""
+
+    config_fn = staticmethod(_qwen3_moe_debug_dist_moe_dp2_tp2_ep4_config)
+    cuda_graph = "full"

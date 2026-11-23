@@ -395,6 +395,9 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
+    # Resume device moments into half pinned host, half device moments.
+    optimizers = config.optim.optimizer.optimizers
+    optimizers[0] = replace(optimizers[0], moment_cpu_offload_fraction=0.5)
     return config
 
 
@@ -848,7 +851,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="SDC replay with accelerator graphs",
             test_name="sdc_replay_accelerator_graph",
             ngpu=1,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_sdc_replay_mismatch],
@@ -858,7 +860,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             # Cross-rank mismatch propagation (all_reduce + all_gather_object)
             # requires real collectives.
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_default],
@@ -929,7 +930,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp_pp_deferred_gradient_reduction",
             ngpu=4,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[
@@ -940,7 +940,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="pp_max_outstanding_sends",
             ngpu=2,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[muse_glimmer_debugmodel_fsdp2_pp2_optimizer_accelerator_graph],
@@ -948,7 +947,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp_pp_optimizer_accelerator_graph",
             ngpu=4,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[muse_glimmer_debugmodel_fsdp2_optimizer_accelerator_graph],
@@ -956,7 +954,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp_optimizer_accelerator_graph",
             ngpu=2,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_tp2_pp2_gpipe],
@@ -1052,7 +1049,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="Ulysses CP with varlen attention",
             test_name="cp_ulysses_varlen",
             ngpu=2,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp2_ulysses_cp2_varlen],
@@ -1060,7 +1056,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp+cp_ulysses_varlen",
             ngpu=4,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_fsdp2_tp2_ulysses_cp2_varlen],
@@ -1068,14 +1063,12 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp+tp+cp_ulysses_varlen",
             ngpu=8,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[muse_glimmer_debugmodel_fsdp2_cp2_varlen],
             test_descr="Muse Glimmer FSDP+CP with varlen attention",
             test_name="fsdp+cp+varlen_attn",
             ngpu=4,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_ddp2_cp2],
@@ -1121,14 +1114,12 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="Per-group accelerator graph replay with FSDP accumulation",
             test_name="fsdp_per_group_accelerator_graph",
             ngpu=2,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[muse_glimmer_debugmodel_shared_eval_accelerator_graph],
             test_descr="Shared train and eval accelerator graphs with FSDP",
             test_name="shared_eval_accelerator_graph",
             ngpu=2,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction],
@@ -1136,7 +1127,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_name="fsdp_deferred_gradient_reduction",
             ngpu=2,
             use_real_pg=True,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_validation_tp2_cp2_pp2],
@@ -1178,7 +1168,6 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             test_descr="FSDP+VARLEN_ATTN + selective AC",
             test_name="fsdp+varlen_attn+per_op_sac",
             ngpu=4,
-            skip_rocm_test=True,
             use_real_pg=True,
         ),
         IntegrationTestDefinition(

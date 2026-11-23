@@ -10,6 +10,9 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
+from dataclasses import replace
+
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.trainer import Trainer
@@ -20,6 +23,10 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 )
 from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
+)
+from torchtitan_recipes.tests.models.qwen3_8_flash_next import (
+    qwen38_flash_next_debugmodel,
+    qwen38_flash_next_debugmodel_mm,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -77,7 +84,7 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     from torchtitan.distributed.pipeline_parallel import (
         _generate_llm_fqn_per_model_part,
     )
-    from torchtitan.models.kimi_k3.model import KimiK3Model
+    from torchtitan.models.kimi_k3.model import KimiK3MultimodalModel
 
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
@@ -101,8 +108,8 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
         parallelism.pipeline_parallel_first_stage_less_layers,
         parallelism.pipeline_parallel_last_stage_less_layers,
     )
-    split[0][:0] = KimiK3Model.pipeline_first_stage_module_fqns
-    split[-1].extend(KimiK3Model.pipeline_last_stage_module_fqns)
+    split[0][:0] = KimiK3MultimodalModel.pipeline_first_stage_module_fqns
+    split[-1].extend(KimiK3MultimodalModel.pipeline_last_stage_module_fqns)
     parallelism.pipeline_parallel_module_fqns_per_model_part = split
     # DistMuon does not support tensor parallelism yet (#3353), so this cell
     # keeps AdamW the way kimi_k3_debugmodel_mm does.
@@ -131,6 +138,59 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     runtime_config.scratch_capacity_factor = 1.0
     runtime_config.vmm_capacity_factor = 4.0
     return config
+
+
+def qwen38_flash_next_debugmodel_mm_checkpoint_save() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel_mm()
+    return replace(
+        config,
+        training=replace(config.training, steps=5),
+        optim=replace(
+            config.optim,
+            # Keep the ten-step LR schedule across the save/load split.
+            lr_scheduler=replace(config.optim.lr_scheduler, total_steps=10),
+        ),
+        checkpointer=CheckpointManager.Config(interval=5, last_save_model_only=False),
+    )
+
+
+def qwen38_flash_next_debugmodel_mm_checkpoint_load() -> Trainer.Config:
+    config = qwen38_flash_next_debugmodel_mm_checkpoint_save()
+    assert config.checkpointer is not None
+    return replace(
+        config,
+        training=replace(config.training, steps=10),
+        checkpointer=replace(config.checkpointer, load_step=5),
+    )
+
+
+def qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2() -> Trainer.Config:
+    """Replay Flash-Next as one accelerator graph with row-sharded PLE and Dist-MoE.
+
+    Step 3 captures forward/backward and step 4 replays it, so capture fails
+    on any host synchronization and replay on any batch-dependent shape.
+    Metadata that is not a registered pytree fails graph input validation.
+    """
+    from torchtitan.config.transform import apply_transforms
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.distributed.activation_remat import FullActivationRematConfig
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    config = qwen38_flash_next_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        )
+    )
+    config.training.steps = 4
+    config.training.disable_accelerator_graphs = False
+    config.activation_remat = FullActivationRematConfig()
+    config.dist_moe_runtime = DistMoeRuntime.Config(
+        activation_slot_capacity_factor=1.0, scratch_capacity_factor=4.0
+    )
+    # TODO: enable SPMD typechecking once Dist-MoE's autograd functions are
+    # registered with it; qwen3_8_flash_next_fsdp typechecks the model with
+    # the default dispatcher.
+    return apply_transforms(config, [DistMoeTransform()])
 
 
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
@@ -180,10 +240,39 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2],
+            test_descr=(
+                "Qwen3.8-Flash-Next accelerator graph with FSDP, row-sharded PLE, "
+                "sparse attention and Dist-MoE"
+            ),
+            test_name="qwen3_8_flash_next_dist_moe_fsdp_ep_accelerator_graph",
+            ngpu=2,
+            use_real_pg=True,
+            # TODO: add a B200 golden (checked bitwise against the same config
+            # run eagerly) so replay reusing stale state also fails. Blocked:
+            # the B200 lane stops at its pytest step on main
+            # (test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism
+            # in tests/unit_tests/cpu/models/common/test_dist_moe.py), so no
+            # integration test runs to produce the golden.
+        ),
+        IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2],
             test_descr="Eager MXFP8 Dist-MoE PP with BF16 reduction",
             test_name="dist_moe_eager_fsdp_ep_pp_accelerator_graph",
             ngpu=4,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                qwen38_flash_next_debugmodel_mm_checkpoint_save,
+                qwen38_flash_next_debugmodel_mm_checkpoint_load,
+            ],
+            test_descr=(
+                "Qwen3.8-Flash-Next FSDP, EP, image fusion, PLE, sparse attention "
+                "and checkpoint resume"
+            ),
+            test_name="qwen3_8_flash_next_fsdp",
+            ngpu=2,
             use_real_pg=True,
         ),
     ]

@@ -94,6 +94,11 @@ def run_linear_attention(
     object.__setattr__(layer, "dt_bias", dt_bias)
     forward_batch = get_forward_batch()
     num_tokens = forward_batch.out_cache_loc.shape[0]
+    if num_tokens == 0:
+        # An idle attention-DP rank: only padding rows, and no attention metadata.
+        return mixed_qkv_TC.new_zeros(
+            mixed_qkv_TC.shape[0], layer.num_v_heads, layer.head_v_dim
+        )
     num_padding = mixed_qkv_TC.shape[0] - num_tokens
     out_THV = layer(
         forward_batch, mixed_qkv_TC[:num_tokens], a[:num_tokens], b[:num_tokens]
@@ -121,6 +126,54 @@ class TorchTitanLinearAttnBackend(MambaAttnBackendBase):
     slots, in place, as the vLLM engine's adapters do. Slot 0 is SGLang's padding slot,
     which the kernels skip. Speculative decoding is not supported.
     """
+
+    def __init__(self, model_runner) -> None:
+        super().__init__(model_runner)
+        # TODO(https://github.com/sgl-project/sglang/issues/48463): SGLang has no
+        # public hooks for the extra_buffer prefix cache. The backends rely on its
+        # internals: conv_states_shape below, the forward_metadata track fields read
+        # in track_extend_states, and the private _track_mamba_state_decode in decode.
+        # SGLang's extend tracking reads the conv window length (W - 1) as the last
+        # dim of conv_states_shape; the pool keeps [W - 1, C] per slot, as SGLang's KDA
+        # backend does, which exposes the transposed shape too.
+        self.conv_states_shape = (
+            self.state_pool.mamba_cache.conv[0].transpose(-1, -2).shape
+        )
+
+    def track_extend_states(
+        self, forward_batch, mixed_qkv_TC: torch.Tensor, conv_state: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Prepare the prefix-cache snapshots for SGLang's ``extra_buffer`` strategy.
+
+        For each request SGLang tracks in this extend, the snapshot is taken at the
+        last 64-token boundary of its new tokens and stored in the request's track
+        slot:
+
+        - the conv history is copied there directly;
+        - the recurrent state is written there by the ``paged_gdn`` / ``paged_kda``
+          kernels, from the returned ``checkpoint_slots`` and ``checkpoint_lens``.
+
+        Returns ``{}`` when no request is tracked.
+        """
+        metadata = self.forward_metadata
+        if not metadata.has_mamba_track_mask:
+            return {}
+        track_mask = forward_batch.mamba_track_mask
+        track_indices = metadata.mamba_track_indices
+        if metadata.mamba_track_mask_indices is None:
+            # Once per forward, as SGLang's KDA backend does: nonzero syncs.
+            metadata.mamba_track_mask_indices = track_mask.nonzero(as_tuple=True)[0]
+        # The conv history is the [W - 1, C] inputs before the position.
+        conv_state[track_indices[metadata.mamba_track_mask_indices]] = mixed_qkv_TC[
+            metadata.track_conv_indices
+        ].to(conv_state.dtype)
+        return {
+            # Untracked rows take no snapshot, so their (garbage) lengths are unused.
+            "checkpoint_slots": torch.where(track_mask, track_indices, -1).to(
+                torch.int32
+            ),
+            "checkpoint_lens": forward_batch.mamba_track_aligned_lens().to(torch.int32),
+        }
 
     def convolve_extend(
         self,
