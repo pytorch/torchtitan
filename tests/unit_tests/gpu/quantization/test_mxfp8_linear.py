@@ -36,6 +36,7 @@ def _make_sharded_mxfp8_linear(
     *,
     bias: bool = True,
     input_activation_format_for_backward: str = "bf16",
+    output_dtype: torch.dtype = torch.bfloat16,
 ) -> MXFP8Linear:
     """Build a layer in its as-constructed state, before any unshard."""
     return (
@@ -44,6 +45,7 @@ def _make_sharded_mxfp8_linear(
             out_features=out_features,
             bias=bias,
             input_activation_format_for_backward=input_activation_format_for_backward,
+            output_dtype=output_dtype,
         )
         .build()
         .cuda()
@@ -57,6 +59,7 @@ def _make_mxfp8_linear(
     *,
     bias: bool = True,
     input_activation_format_for_backward: str = "bf16",
+    output_dtype: torch.dtype = torch.bfloat16,
 ) -> MXFP8Linear:
     """Build a layer that is ready to run forward.
 
@@ -71,6 +74,7 @@ def _make_mxfp8_linear(
             out_features,
             bias=bias,
             input_activation_format_for_backward=input_activation_format_for_backward,
+            output_dtype=output_dtype,
         )
     )
 
@@ -627,3 +631,62 @@ def test_mxfp8_fused_wgrad_accum_matches_ordinary_accumulation(num_linears, grad
 
     relative_error = (fused - ordinary).norm() / ordinary.norm()
     assert relative_error < 1e-2, f"relative L2 error {relative_error:.5f}"
+
+
+@pytest.mark.parametrize("num_rows", [37, 128])
+@pytest.mark.parametrize("input_activation_format_for_backward", ["bf16", "mxfp8"])
+def test_mxfp8_fp32_output_matches_decoded_operands_and_preserves_gradients(
+    num_rows, input_activation_format_for_backward
+):
+    from torchao.prototype.mx_formats.kernels import (
+        mxfp8_quantize_cuda,
+        triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
+    )
+    from torchao.prototype.mx_formats.utils import from_blocked
+
+    torch.manual_seed(42)
+    x_MK = torch.randn(num_rows, 128, device="cuda", dtype=torch.bfloat16)
+    weight_NK = torch.randn(256, 128, device="cuda", dtype=torch.bfloat16)
+    grad_MN = torch.randn(num_rows, 256, device="cuda", dtype=torch.bfloat16)
+    outputs = []
+    gradients = []
+    for output_dtype in (torch.bfloat16, torch.float32):
+        linear = _make_sharded_mxfp8_linear(
+            in_features=128,
+            out_features=256,
+            bias=False,
+            output_dtype=output_dtype,
+            input_activation_format_for_backward=input_activation_format_for_backward,
+        )
+        with torch.no_grad():
+            linear.weight._tensor.copy_(weight_NK)
+        linear = _install_unsharded_weight(linear)
+        input_MK = x_MK.clone().requires_grad_()
+        output_MN = linear(input_MK)
+        assert output_MN.dtype == output_dtype
+        output_MN.backward(grad_MN.to(output_dtype))
+        outputs.append(output_MN.detach())
+        gradients.append((input_MK.grad, linear.weight.grad))
+
+    padded_x_MK = torch.nn.functional.pad(x_MK, (0, 0, 0, (-num_rows) % 32))
+    qdata_MK, _, scales_MK, _ = mxfp8_quantize_cuda(
+        padded_x_MK, rowwise=True, colwise=False, scaling_mode="rceil"
+    )
+    qdata_NK, scales, _ = triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale(
+        weight_NK
+    )
+    decoded_x_MK = qdata_MK[:num_rows].double() * scales_MK[
+        :num_rows
+    ].double().repeat_interleave(32, dim=1)
+    decoded_weight_NK = qdata_NK.double() * from_blocked(
+        scales, 256, 4
+    ).double().repeat_interleave(32, dim=1)
+    oracle_MN = decoded_x_MK @ decoded_weight_NK.t()
+    torch.testing.assert_close(outputs[1].double(), oracle_MN, rtol=1e-5, atol=1e-5)
+    bf16_error = (outputs[0].double() - oracle_MN).abs().max()
+    fp32_error = (outputs[1].double() - oracle_MN).abs().max()
+    assert (
+        fp32_error < bf16_error / 100
+    ), "FP32 output must avoid BF16 epilogue rounding"
+    for actual, expected in zip(gradients[1], gradients[0], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)

@@ -85,7 +85,9 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
         inplace_wgrad_accum: bool,
+        output_dtype: torch.dtype,
     ) -> torch.Tensor:
+        """Compute MXFP8 with the selected floating-point output dtype."""
         # ``weight`` is the module parameter itself, ``[N, K]`` or stacked
         # ``[num_linears, N, K]``, rather than a flattened view of it. WGRAD is
         # returned in its shape so the gradient reaches AccumulateGrad directly:
@@ -181,7 +183,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
             swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
             bias=bias_N,
-            output_dtype=torch.bfloat16,
+            output_dtype=output_dtype,
         )
 
         # Save exactly one input-activation operands for WGRAD. BF16 mode
@@ -358,6 +360,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             grad_bias_N,
             None,
             None,
+            None,
         )
 
 
@@ -378,6 +381,15 @@ class MXFP8Linear(Linear):
     class Config(Linear.Config):
         """Drop-in replacement for ``Linear.Config``."""
 
+        output_dtype: torch.dtype = torch.bfloat16
+        """Dtype written directly by the forward GEMM.
+
+        BF16 is the default. FP32 avoids rounding the GEMM output to BF16
+        before loss computation; it does not change operand quantization or
+        gradient computation. FP32 requires ``bias=False`` because scaled_mm
+        does not support a bias with FP32 outputs.
+        """
+
         input_activation_format_for_backward: InputActivationFormatForBackward = "bf16"
         """Format used to save the input activation needed by WGRAD.
 
@@ -387,6 +399,13 @@ class MXFP8Linear(Linear):
         """
 
         def __post_init__(self) -> None:
+            if self.output_dtype not in {torch.bfloat16, torch.float32}:
+                raise ValueError("MXFP8 output_dtype must be BF16 or FP32")
+            if self.output_dtype == torch.float32 and self.bias:
+                raise ValueError(
+                    "MXFP8 FP32 outputs require bias=False; scaled_mm does not "
+                    "support bias with FP32 outputs"
+                )
             if (
                 self.input_activation_format_for_backward
                 not in _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD
@@ -406,6 +425,7 @@ class MXFP8Linear(Linear):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self.output_dtype = config.output_dtype
         self.input_activation_format_for_backward = (
             config.input_activation_format_for_backward
         )
@@ -496,5 +516,6 @@ class MXFP8Linear(Linear):
             None if bias is None else bias.flatten(),
             self.input_activation_format_for_backward,
             uses_inplace_wgrad_accum(self.inplace_wgrad_accum, physical_weight, self),
+            self.output_dtype,
         )
         return output
