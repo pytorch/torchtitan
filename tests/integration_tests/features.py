@@ -395,6 +395,9 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
+    # Resume device moments into half pinned host, half device moments.
+    optimizers = config.optim.optimizer.optimizers
+    optimizers[0] = replace(optimizers[0], moment_cpu_offload_fraction=0.5)
     return config
 
 
