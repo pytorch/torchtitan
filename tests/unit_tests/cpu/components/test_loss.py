@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
@@ -1724,6 +1725,46 @@ class TestChunkedLossWrapperSPMD(DTensorTestBase):
         h_grad_spmd = h_spmd.grad.clone()
         dist.all_reduce(h_grad_spmd, group=tp_group)
         torch.testing.assert_close(h_grad_spmd, h_grad_ref)
+
+
+@pytest.mark.parametrize("softcap", [None, 20.0])
+@pytest.mark.parametrize("z_loss_weight", [0.0, 0.01])
+def test_muse_softcap_cross_entropy_matches_head_postprocessing(softcap, z_loss_weight):
+    from torchtitan_recipes.overrides.muse_spark_mxfp8_head import (
+        _MuseSparkSoftcapCrossEntropy,
+    )
+
+    torch.manual_seed(42)
+    pred_TV = torch.randn(16, 128, requires_grad=True)
+    labels_T = torch.arange(16)
+    labels_T[-1] = -100
+    token_counts = torch.tensor(32)
+    reference = CrossEntropyLoss.Config(
+        global_vocab_size=128, z_loss_weight=z_loss_weight
+    ).build()
+    actual = _MuseSparkSoftcapCrossEntropy.Config(
+        global_vocab_size=128,
+        z_loss_weight=z_loss_weight,
+        output_multiplier=0.1767766952966369,
+        output_soft_cap_temp=softcap,
+    ).build()
+    # Pin the pre-override eager head arithmetic independently of its helper.
+    scaled_logits_TV = pred_TV * 0.1767766952966369
+    if softcap is not None:
+        scaled_logits_TV = softcap * torch.tanh(scaled_logits_TV / softcap)
+    expected_loss, expected_metrics = reference(
+        scaled_logits_TV, labels_T, token_counts
+    )
+    actual_loss, actual_metrics = actual(pred_TV, labels_T, token_counts)
+    torch.testing.assert_close(actual_loss, expected_loss, rtol=0, atol=0)
+    assert set(actual_metrics) == set(expected_metrics)
+    for key in actual_metrics:
+        torch.testing.assert_close(
+            actual_metrics[key], expected_metrics[key], rtol=0, atol=0
+        )
+    expected_grad = torch.autograd.grad(expected_loss, pred_TV, retain_graph=True)[0]
+    actual_grad = torch.autograd.grad(actual_loss, pred_TV)[0]
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
