@@ -17,6 +17,7 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    replicated_activation_placement,
     residual_activation_placement,
     token_id_placement,
 )
@@ -85,9 +86,8 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
         input_shardings.update(
             {
                 "cmp_k": replicated_activation,
-                "idx_q": replicated_activation,
-                "idx_k": replicated_activation,
-                "idx_w": replicated_activation,
+                "topk_indices": replicated_activation,
+                "topk_scores": replicated_activation,
                 "attn_sink": _attn_sink_placement,
                 "padding_mask_T": token_id_placement(),
             }
@@ -149,6 +149,20 @@ def indexer_sharding_config() -> ShardingConfig:
             "x": replicated_activation,
             "qr": replicated_activation,
         },
+    )
+
+
+def inner_indexer_sharding_config() -> ShardingConfig:
+    """Keep indexer features and both selection outputs replicated across TP."""
+    replicated = replicated_activation_placement()
+    query = SpmdType(
+        replicated.local_type,
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+    return ShardingConfig(
+        input_shardings={"idx_q": query, "idx_k": replicated, "idx_w": replicated},
+        output_shardings=(replicated, replicated),
+        local_spmd=True,
     )
 
 
