@@ -239,8 +239,8 @@ class Indexer(Module):
             # The indexer is TP-invariant: its params only receive the aux-loss
             # gradient, which is identical on every rank.
             assert not x.requires_grad and not qr.requires_grad
-            x = spmd.reinterpret_no_grad(x, tp_group, dst=spmd.I)
-            qr = spmd.reinterpret_no_grad(qr, tp_group, dst=spmd.I)
+            x = spmd.reinterpret_no_grad(x, "tp", dst=spmd.I)
+            qr = spmd.reinterpret_no_grad(qr, "tp", dst=spmd.I)
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
