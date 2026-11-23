@@ -66,6 +66,7 @@ else
 fi
 
 "${BUILD_CMD[@]}" \
+  --no-cache \
   --progress=plain \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
   --build-arg "OS_VERSION=${OS_VERSION}" \

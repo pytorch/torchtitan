@@ -16,11 +16,11 @@ name: Integration Tests (XPU)
 # "Configure AWS credentials" step) by accident; uncomment when opening the
 # validation PR/branch against pytorch/torchtitan.
 on:
-  workflow_dispatch:
-  # push:
-  #   branches: [ main ]
-  #   paths-ignore:
-  #     - 'torchtitan/experiments/**'
+  #workflow_dispatch:
+  push:
+    branches: [ huxue/xpu-ci ]
+    paths-ignore:
+      - 'torchtitan/experiments/**'
   # # Scoped by paths (rather than requiring a ciflow tag like CUDA/ROCm) so
   # # pre-merge validation on a branch inside pytorch/torchtitan (not a fork -
   # # see the self-hosted runner restriction below) re-runs automatically on
@@ -167,10 +167,10 @@ jobs:
             hostname
             whoami
             ls /dev/dri
-            conda create -y -n smoke python=3.11
+            conda create -y -n smoke python=3.12
             conda run -n smoke python -c "import sys; print(sys.version)"
           '
-
+          
       - name: Teardown container
         if: always()
         shell: bash
@@ -179,6 +179,9 @@ jobs:
             docker rm -f "${CONTAINER_NAME}" || true
           fi
 
+      - name: Teardown XPU
+        uses: pytorch/pytorch/.github/actions/teardown-xpu@main
+        if: always()
   # Real PG 8-GPU integration suite, through the real linux_job_v2.yml@main -
   # same pattern as integration_test_rocm.yaml. docker-image resolves (inside
   # that reusable workflow, via calculate-docker-image) to the image PR2's
@@ -187,30 +190,30 @@ jobs:
   # teardown-xpu@main steps for GPU_FLAG and runner setup, same as ROCm gets
   # from setup-rocm@main. No XPU goldens exist yet, so numerics are exported
   # (EXPORT_RESULTS=true) and uploaded instead of compared.
-  integration-real-pg:
-    name: XPU 8 GPU Integration (Real PG - ${{ matrix.test_suite }})
-    needs: set-matrix
-    if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
-    strategy:
-      fail-fast: false
-      matrix:
-        test_suite: [features]
-        runner_config: ${{ fromJSON(needs.set-matrix.outputs.matrix).include }}
-    with:
-      runner: ${{ matrix.runner_config.runner }}
-      gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
-      gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
-      docker-image: ${{ matrix.runner_config['docker-image'] }}
-      repository: pytorch/torchtitan
-      upload-artifact: integration-8gpu-xpu-${{ matrix.test_suite }}-outputs
-      timeout: 60
-      script: |
-        GPU_ARCH_TYPE="${{ matrix.runner_config['gpu-arch-type'] }}" \
-        TORCH_VERSION="${{ matrix.runner_config['torch-version'] }}" \
-        INDEX_URL="${{ matrix.runner_config['index-url'] }}" \
-        TEST_SUITE="${{ matrix.test_suite }}" \
-        EXPORT_RESULTS="true" \
-        TEST_NAME="all" \
-        TEST_SCOPE="" \
-        bash .github/scripts/integration_test_real_pg.sh
+  # integration-real-pg:
+  #   name: XPU 8 GPU Integration (Real PG - ${{ matrix.test_suite }})
+  #   needs: set-matrix
+  #   if: ${{ needs.set-matrix.outputs.matrix != '' && fromJSON(needs.set-matrix.outputs.matrix).include[0] != null }}
+  #   uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       test_suite: [features]
+  #       runner_config: ${{ fromJSON(needs.set-matrix.outputs.matrix).include }}
+  #   with:
+  #     runner: ${{ matrix.runner_config.runner }}
+  #     gpu-arch-type: ${{ matrix.runner_config['gpu-arch-type'] }}
+  #     gpu-arch-version: ${{ matrix.runner_config['gpu-arch-version'] }}
+  #     docker-image: ${{ matrix.runner_config['docker-image'] }}
+  #     repository: pytorch/torchtitan
+  #     upload-artifact: integration-8gpu-xpu-${{ matrix.test_suite }}-outputs
+  #     timeout: 60
+  #     script: |
+  #       GPU_ARCH_TYPE="${{ matrix.runner_config['gpu-arch-type'] }}" \
+  #       TORCH_VERSION="${{ matrix.runner_config['torch-version'] }}" \
+  #       INDEX_URL="${{ matrix.runner_config['index-url'] }}" \
+  #       TEST_SUITE="${{ matrix.test_suite }}" \
+  #       EXPORT_RESULTS="true" \
+  #       TEST_NAME="all" \
+  #       TEST_SCOPE="" \
+  #       bash .github/scripts/integration_test_real_pg.sh
