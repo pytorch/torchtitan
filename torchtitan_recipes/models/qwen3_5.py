@@ -48,11 +48,10 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
     runs between its forward and its backward, so its copies could not overlap
     compute.
 
-    ``max_num_documents`` caps document pieces per row; each slot costs fp32
-    GDN state (about 9 MiB per rank). The values below fit the OpenGenome3 DNA
-    sample, whose shortest document has 131351 tokens: a row of N tokens then
-    holds at most ``(N - 1) // 131351 + 2`` pieces and never pads. The C4
-    placeholder dataset has far shorter documents; set it from your data.
+    ``max_num_documents`` caps document pieces per row (about 9 MiB of GDN
+    state per slot). The recipes size it for the OpenGenome3 DNA sample, whose
+    shortest document has 131351 tokens, so an N-token row holds at most
+    ``(N - 1) // 131351 + 2`` pieces and never pads.
     """
     parallelism = ParallelismConfig()
     model_config = build_model_config(
@@ -125,14 +124,17 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
 
 def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
     """1M context, CP 8 (128K tokens per rank)."""
+    # max_num_documents: (2**20 - 1) // 131351 + 2 = 9
     return _qwen3_5_9b_ulysses_lean_remat_offload("9B_1M", cp=8, max_num_documents=9)
 
 
 def qwen3_5_9b_2m_cp16_ulysses_lean_remat_offload() -> Trainer.Config:
     """2M context, CP 16 (128K tokens per rank)."""
+    # max_num_documents: (2**21 - 1) // 131351 + 2 = 17
     return _qwen3_5_9b_ulysses_lean_remat_offload("9B_2M", cp=16, max_num_documents=17)
 
 
 def qwen3_5_9b_4m_cp16_ulysses_lean_remat_offload() -> Trainer.Config:
     """4M context, CP 16 (256K tokens per rank; Ulysses allows at most CP 16)."""
+    # max_num_documents: (2**22 - 1) // 131351 + 2 = 33
     return _qwen3_5_9b_ulysses_lean_remat_offload("9B_4M", cp=16, max_num_documents=33)
