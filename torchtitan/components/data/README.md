@@ -485,21 +485,21 @@ trainer computes batch 10
 background thread prepares batches 11 and 12
 ```
 
-### Heaviest-first ordering across data-parallel ranks
+### Balancing microbatches across data-parallel ranks
 
-Data-parallel ranks synchronize every microbatch, so a step runs at the speed of its slowest rank. With document masking, attention cost grows with the sum of squared document lengths, and packers emit rows in arbitrary order, so one rank's full-length document often shares a step with other ranks' short documents. `heaviest_first` makes each rank yield every window of `window_size` collated microbatches heaviest first. All ranks open a window at the same step, so each step pairs microbatches of similar cost, without communication:
+Data-parallel ranks synchronize every microbatch, so a step runs at the speed of its slowest rank. With document masking, attention cost grows with the sum of squared document lengths, and packers emit rows in arbitrary order, so one rank's full-length document often shares a step with other ranks' short documents. `balancing` buffers each window of `window_size` collated microbatches and plans which microbatch each rank trains at each step. With `group_size=1` (the default), each rank yields its own window heaviest first. All ranks open a window at the same step, so each step pairs microbatches of similar cost, without communication:
 
 ```python
 import functools
 
 from torchtitan.components.data import (
     document_attention_cost,
-    HeaviestFirstOrderingConfig,
+    MicrobatchBalancingConfig,
 )
 
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_pretraining_ds,
-    heaviest_first=HeaviestFirstOrderingConfig(
+    balancing=MicrobatchBalancingConfig(
         window_size=8,
         # sum(document_length ** 2) + token_weight * non-padding tokens
         cost_fn=functools.partial(document_attention_cost, token_weight=57_220),
@@ -507,11 +507,11 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Ordering works the same for `dp_replicate`, `dp_shard`, CP, gradient accumulation, and pipeline microbatches. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
+Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. With `group_size=1`, balancing works the same for `dp_replicate`, `dp_shard`, CP, gradient accumulation, and pipeline microbatches. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
 
 Measured on GB300 with one microbatch per rank per step (OBELICS on Qwen3.5-9B, 32K rows; ProLong 512K on Llama-3-8B with head-tail CP):
 
-| Data, layout | Step time, packed order | Step time, heaviest first | Speedup |
+| Data, layout | Step time, packed order | Step time, balanced (`group_size=1`) | Speedup |
 |---|---|---|---|
 | OBELICS, FSDP 8 | 10.94 s | 7.71 s | 1.42x |
 | OBELICS, FSDP 16 | 14.77 s | 9.51 s | 1.55x |
@@ -519,25 +519,23 @@ Measured on GB300 with one microbatch per rank per step (OBELICS on Qwen3.5-9B, 
 
 Datasets whose rows already cost about the same (C4, short chat SFT) gain little.
 
-### Global plan across data-parallel ranks
+Heaviest first cannot fix a window in which one rank holds several heavy microbatches. `group_size > 1` plans the window across ranks and moves microbatches between them:
 
-Heaviest-first cannot help when one rank draws several of a window's heavy microbatches: that rank stays the slowest for several steps. `global_plan` plans each window across all data-parallel ranks and moves microbatches between them:
-
-1. each rank buffers its next `window_size` collated microbatches and computes their costs;
-2. the costs are all-gathered over a gloo group of the data-parallel peers;
-3. every rank computes the same plan: sort all `N * window_size` microbatches by cost, step `k` of the window gets the `k`-th group of `N`, and within a step each microbatch stays on its rank when possible;
+1. each rank buffers its window and computes the costs;
+2. the group all-gathers the costs over gloo;
+3. every rank computes the same plan: sort the group's microbatches by cost, step `k` gets the `k`-th `group_size` of them, and within a step each stays on its own rank when possible;
 4. moved microbatches are sent point to point over gloo.
 
 ```python
-from torchtitan.components.data import GlobalPlanConfig
-
 config.dataloader = GrainDataLoader.Config(
     dataset=packed_pretraining_ds,
-    global_plan=GlobalPlanConfig(window_size=8),
+    balancing=MicrobatchBalancingConfig(window_size=8, group_size=None),  # all DP ranks
 )
 ```
 
-It runs on the loader's prefetch thread, so the exchange overlaps training. CP peers read identical microbatches and exchange with the ranks of the same CP index in other data-parallel groups. It assumes global rank = `dp_rank * cp + cp_rank` (no TP or PP) and checks it at startup. The set of microbatches per window is unchanged; each moves at most `window_size - 1` steps. Exclusive with `heaviest_first`.
+`group_size=G` plans within contiguous blocks of `G` data-parallel ranks; `None` plans across all of them. The exchange runs on the loader's prefetch thread, so it overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors: tensors are sent as raw bytes, everything else in a pickled header. CP and TP peers read the same microbatches and exchange with the ranks in the same position of other data-parallel ranks. It assumes the data-parallel mesh dimensions come before CP and TP and no pipeline parallelism, and checks this at startup. The first window waits up to `FIRST_WINDOW_TIMEOUT` (30 min) for every rank's loader, later windows `WINDOW_TIMEOUT` (10 min); on timeout the loader raises instead of falling back, since a rank that kept its own microbatches would train different data than its CP peers.
+
+Measured on 4 GB300 nodes (Qwen3.5-9B, 1M-token DNA rows, DP 8 x CP 2, Ulysses, window 8): balanced with `group_size=None` ran 82.0 s per step against 87.1 s for `group_size=1` (1.06x). Planning takes 0.1 ms and the exchange about 0.1 s per window, overlapped with training.
 
 # Distributed and checkpoint behavior
 

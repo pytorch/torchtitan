@@ -6,7 +6,8 @@
 
 from torchtitan.components.data.balancing import (
     document_attention_cost,
-    HeaviestFirstOrderingConfig,
+    MicrobatchBalancingConfig,
+    plan_window,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
@@ -18,7 +19,6 @@ from torchtitan.components.data.dataset import (
     TextSequence,
     WeightedDataset,
 )
-from torchtitan.components.data.global_balance import GlobalPlanConfig
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.packing import (
     ConcatThenSplitPackingConfig,
@@ -49,8 +49,8 @@ __all__ = [
     "document_attention_cost",
     "FirstFitPackingConfig",
     "GrainDataLoader",
-    "GlobalPlanConfig",
-    "HeaviestFirstOrderingConfig",
+    "MicrobatchBalancingConfig",
+    "plan_window",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",

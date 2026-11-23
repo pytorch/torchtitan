@@ -15,15 +15,11 @@ import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 from torchtitan.components.data.balancing import (
-    HeaviestFirstIterDataset,
-    HeaviestFirstOrderingConfig,
+    MicrobatchBalancingConfig,
+    MicrobatchBalancingIterDataset,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
-from torchtitan.components.data.global_balance import (
-    GlobalPlanConfig,
-    GlobalPlanIterDataset,
-)
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.packing import ConcatThenSplitPackingConfig
@@ -95,14 +91,11 @@ class GrainDataLoader(BaseDataLoader):
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
-        heaviest_first: HeaviestFirstOrderingConfig | None = None
-        """Yield each window of collated microbatches heaviest first so that
-        data-parallel ranks run similar-cost microbatches in the same step.
-        None keeps the packed order."""
-        global_plan: GlobalPlanConfig | None = None
-        """Plan each window across data-parallel ranks and exchange microbatches
-        between them over gloo. Exclusive with ``heaviest_first``. None keeps the
-        packed order."""
+        balancing: MicrobatchBalancingConfig | None = None
+        """Plan each window of collated microbatches so that data-parallel ranks
+        run similar-cost microbatches in the same step, within each rank
+        (``group_size=1``) or across ranks over gloo. None keeps the packed
+        order."""
 
         def __post_init__(self) -> None:
             BaseDataLoader.Config.__post_init__(self)
@@ -192,21 +185,12 @@ class GrainDataLoader(BaseDataLoader):
             batch_fn=collator,
         )
 
-        if config.global_plan is not None:
-            if config.heaviest_first is not None:
-                raise ValueError("global_plan and heaviest_first are exclusive")
-            dataset = GlobalPlanIterDataset(
+        if config.balancing is not None:
+            dataset = MicrobatchBalancingIterDataset(
                 dataset,
-                config=config.global_plan,
+                config=config.balancing,
                 dp_rank=dp_rank,
                 dp_world_size=dp_world_size,
-            )
-
-        if config.heaviest_first is not None:
-            dataset = HeaviestFirstIterDataset(
-                dataset,
-                window_size=config.heaviest_first.window_size,
-                cost_fn=config.heaviest_first.cost_fn,
             )
 
         # Queue completed microbatches while the trainer consumes the previous one.
