@@ -586,18 +586,19 @@ def _muse_spark_816b_dist_moe_spmd_64(
         replace(cast(AdamW.Config, optimizer), moment_cpu_offload_fraction=1.0)
         for optimizer in config.optim.optimizer.optimizers
     ]
-    # No CP rank holds a full-vocab embedding or lm_head weight, or its fp32
-    # gradient.
-    model_config = cast(MuseSparkModel.Config, config.model)
-    tok_embeddings = model_config.tok_embeddings
-    tok_embeddings.embedding = replace(
-        tok_embeddings.embedding,
-        sharding_config=cp_vocab_parallel_token_embedding_sharding_config(),
-    )
-    model_config.lm_head = replace(
-        model_config.lm_head,
-        sharding_config=cp_vocab_parallel_lm_head_sharding_config(),
-    )
+    if context_parallel_degree > 1:
+        # No CP rank holds a full-vocab embedding or lm_head weight, or its fp32
+        # gradient.
+        model_config = cast(MuseSparkModel.Config, config.model)
+        tok_embeddings = model_config.tok_embeddings
+        tok_embeddings.embedding = replace(
+            tok_embeddings.embedding,
+            sharding_config=cp_vocab_parallel_token_embedding_sharding_config(),
+        )
+        model_config.lm_head = replace(
+            model_config.lm_head,
+            sharding_config=cp_vocab_parallel_lm_head_sharding_config(),
+        )
     return config
 
 
@@ -630,7 +631,10 @@ def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_fake() -> Trainer.Config:
 
 
 def _muse_spark_816b_dist_moe_spmd_64_benchmark(
-    *, fake_backend: bool, expert_precision: Literal["bf16", "mxfp8"]
+    *,
+    fake_backend: bool,
+    expert_precision: Literal["bf16", "mxfp8"],
+    context_parallel_degree: int = 2,
 ) -> Trainer.Config:
     """Configure the fastest 64-GPU settings we measured. Benchmark only.
 
@@ -662,7 +666,7 @@ def _muse_spark_816b_dist_moe_spmd_64_benchmark(
     config = _muse_spark_816b_dist_moe_spmd_64(
         fake_backend=fake_backend,
         expert_precision=expert_precision,
-        context_parallel_degree=2,
+        context_parallel_degree=context_parallel_degree,
     )
     # The fake recipe already forces routing.
     if not fake_backend:
@@ -742,6 +746,71 @@ def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark_fake() -> Trainer.Conf
     return _muse_spark_816b_dist_moe_spmd_64_benchmark(
         fake_backend=True, expert_precision="mxfp8"
     )
+
+
+def _muse_spark_816b_mxfp8_spmd_64_benchmark_cp1(
+    *, fake_backend: bool
+) -> Trainer.Config:
+    """Tune the existing benchmark for one CP rank and one microbatch."""
+    from torchtitan_recipes.overrides.muse_spark_mxfp8_head import mxfp8_lm_head
+
+    config = _muse_spark_816b_dist_moe_spmd_64_benchmark(
+        fake_backend=fake_backend, expert_precision="mxfp8", context_parallel_degree=1
+    )
+    config.parallelism.fsdp_reshard_after_forward = "always"
+    config.precision = replace(
+        config.precision, param_dtype="bfloat16", reduce_dtype="bfloat16"
+    )
+    config.optim.optimizer.optimizers = [
+        replace(
+            cast(AdamW.Config, optimizer),
+            fused=True,
+            moment_dtype="bfloat16",
+            moment_cpu_offload_fraction=0.0,
+        )
+        for optimizer in config.optim.optimizer.optimizers
+    ]
+    # This is a total per-live-slot budget, including required saved state.
+    # FakePG's memory ceiling is higher because it omits real communication.
+    config.dist_moe_runtime = replace(
+        config.dist_moe_runtime,
+        activation_slot_capacity_factor=None,
+        activation_slot_bytes=40 * 2**30,
+        scratch_capacity_factor=1.0,
+    )
+    config.debug.deterministic = True
+    config = mxfp8_lm_head(config)
+    regions = config.model.local_compile.regions
+    if "moe_router_topk" not in regions:
+        regions.append("moe_router_topk")
+    return config
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark_cp1() -> Trainer.Config:
+    """Benchmark DP64/EP64/CP1 with BF16 moments/reduction and FP32 MXFP8 head.
+
+    Forced balanced routing is inherited from the benchmark recipe and does
+    not train a usable model. One 32K sequence per rank completes a step without
+    gradient accumulation. FSDP reshards after forward; saved expert activations
+    use the native 40 GiB per-live-slot budget. Experts use the staged pipeline.
+    The softcap/CE and post-router regions use local_compile.
+
+    Requires one NVLink domain for all 64 GPUs, the base benchmark dependencies,
+    and enough device memory for the 40 GiB activation slots. Launch with
+    NCCL_NVLS_ENABLE=1, NCCL_MIN_CTAS=1, NCCL_MAX_CTAS=8 and the base pinned-memory
+    allocator/NUMA settings. The NCCL CTA cap does not affect Dist-MoE barriers.
+    """
+    return _muse_spark_816b_mxfp8_spmd_64_benchmark_cp1(fake_backend=False)
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark_cp1_fake() -> Trainer.Config:
+    """Validate the logical-64 CP1 benchmark with FakePG on one GPU.
+
+    FakePG measures computation and memory without real transport or barriers.
+    A passing FakePG run does not establish the memory ceiling or throughput
+    of the real 64-GPU configuration.
+    """
+    return _muse_spark_816b_mxfp8_spmd_64_benchmark_cp1(fake_backend=True)
 
 
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_256() -> Trainer.Config:

@@ -137,3 +137,53 @@ def test_mxfp8_head_override_rejects_incompatible_model_and_loss():
     config = muse_spark_debugmodel()
     with pytest.raises(ValueError, match="requires chunked CrossEntropyLoss"):
         mxfp8_lm_head(replace(config, loss=CrossEntropyLoss.Config()))
+
+
+@pytest.mark.parametrize("fake_backend", [False, True])
+def test_cp1_benchmark_uses_native_geometry_precision_and_activation_budget(
+    fake_backend,
+):
+    import torch
+    from torchtitan.config.transform.quantization import MXFP8Linear
+    from torchtitan.models.common.decoder_sharding import vocab_sharded_on_cp
+    from torchtitan.models.common.dist_moe.mxfp8 import MXFP8DistMoeRoutedExperts
+    from torchtitan_recipes.overrides.muse_spark_mxfp8_head import _MXFP8MuseSparkLMHead
+
+    # CPU config coverage only; exact provider and execution gates run on GPU.
+    with patch(
+        "torchtitan.config.transform.quantization.has_cuda_capability",
+        return_value=True,
+    ):
+        config = recipes._muse_spark_816b_mxfp8_spmd_64_benchmark_cp1(
+            fake_backend=fake_backend
+        )
+    parallelism = config.parallelism
+    assert parallelism.data_parallel_shard_degree == 64
+    assert parallelism.expert_parallel_degree == 64
+    assert parallelism.context_parallel_degree == 1
+    assert parallelism.tensor_parallel_degree == 1
+    assert parallelism.fsdp_reshard_after_forward == "always"
+    assert config.training.num_tokens_per_train_step == 64 * 32768
+    assert config.training.num_tokens_per_microbatch_per_dp_rank == 32768
+    assert config.precision.dtype == "float32"
+    assert config.precision.param_dtype == config.precision.reduce_dtype == "bfloat16"
+    for optimizer in config.optim.optimizer.optimizers:
+        assert optimizer.fused and optimizer.moment_dtype == "bfloat16"
+        assert optimizer.moment_cpu_offload_fraction == 0.0
+    assert config.dist_moe_runtime.activation_slot_bytes == 40 * 2**30
+    assert config.dist_moe_runtime.activation_slot_capacity_factor is None
+    assert config.dist_moe_runtime.scratch_capacity_factor == 1.0
+    assert isinstance(config.model.lm_head, _MXFP8MuseSparkLMHead.Config)
+    assert config.model.lm_head.output_dtype == torch.float32
+    assert not vocab_sharded_on_cp(config.model.lm_head.sharding_config)
+    assert {"moe_router_topk", "muse_softcap_ce"} <= set(
+        config.model.local_compile.regions
+    )
+    for layer in config.model.layers:
+        assert isinstance(
+            layer.feed_forward.routed_experts, MXFP8DistMoeRoutedExperts.Config
+        )
+        assert (
+            layer.feed_forward.routed_experts.block_scaled_config.pipeline == "staged"
+        )
+        assert isinstance(layer.attention.wo, MXFP8Linear.Config)
