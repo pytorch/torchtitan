@@ -437,6 +437,12 @@ def _describe(val: Any, names: dict[sympy.Symbol, str] | None = None) -> Any:
     return {"value": repr(val)}
 
 
+def tensor_contract(inputs: list[Any], outputs: Any) -> list[Any]:
+    """Describe the inputs and outputs of an outlined call in one symbol namespace."""
+    symbols = _symbol_names([*inputs, outputs])
+    return [_describe(inputs, symbols), _describe(outputs, symbols)]
+
+
 def _spec_json(spec: dict[str, Any]) -> str:
     """``json.dumps(spec, indent=2)`` with lists of numbers on one line."""
     text = json.dumps(spec, indent=2)
@@ -519,11 +525,37 @@ class _KernelModule(torch.nn.Module):
     def __getstate__(self) -> dict[str, Any]:
         return {**self.__dict__, "_run": None}
 
+    def _load_run(self) -> Callable[..., Any]:
+        source = Path(self.path).read_text(encoding="utf-8")
+        return PyCodeCache.load(source).run
+
     def forward(self, *args: Any) -> Any:
         if self._run is None:
-            source = Path(self.path).read_text(encoding="utf-8")
-            self._run = PyCodeCache.load(source).run
+            self._run = self._load_run()
         return self._run(*args)
+
+
+class VerifiedKernel(_KernelModule):
+    """Load a kernel pack entry point only from its verified source."""
+
+    def __init__(
+        self, path: Path, *, problem_id: str, sha256: str, entrypoint: str, impure: bool
+    ) -> None:
+        super().__init__(str(path.resolve()))
+        self.problem_id = problem_id
+        self.sha256 = sha256
+        self.entrypoint = entrypoint
+        self._is_impure = impure
+        self._verified_source()
+
+    def _verified_source(self) -> str:
+        source = Path(self.path).read_bytes()
+        if hashlib.sha256(source).hexdigest() != self.sha256:
+            raise ValueError(f"{self.path} does not match its kernel manifest")
+        return source.decode("utf-8")
+
+    def _load_run(self) -> Callable[..., Any]:
+        return getattr(PyCodeCache.load(self._verified_source()), self.entrypoint)
 
 
 def substitute_with_kernels_pass(
