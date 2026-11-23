@@ -69,6 +69,9 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             if name not in _OPTIONAL_PACKAGE_RECIPES:
                 raise
             continue
+        # fp32 master weights. FSDP mixed precision still runs the trainer forward
+        # in precision.param_dtype, which the generator matches.
+        assert config.precision.dtype == "float32", name
         for model in (config.trainer.model, config.generator.model):
             is_fp32_head = isinstance(model.lm_head, HiMidLoLinear.Config)
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name

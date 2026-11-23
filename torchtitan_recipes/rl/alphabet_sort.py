@@ -26,12 +26,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import (
-    DebugConfig,
-    OverrideConfig,
-    PrecisionConfig,
-    TrainingConfig,
-)
+from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -231,7 +226,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -330,8 +324,6 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     # latest weights before generating so trainer/generator logprobs stay
     # bitwise-identical (bit_wise/logprob_diff == 0) every step, not just step 1.
     config.async_loop.target_offpolicy_steps = 0
-    # fp32 master weights; FSDP mixed precision casts to bf16 for the forward.
-    config.precision = dataclasses.replace(config.precision, dtype="float32")
     config.trainer = dataclasses.replace(
         config.trainer,
         debug=_BATCH_INVARIANT_DEBUG,
@@ -544,7 +536,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -591,6 +582,10 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     Trainer and generator uses TP=2 for dense layers and EP=4 for MoE experts.
 
     Note: Qwen3-30B-A3B has 4 KV heads, so TP degree cannot exceed 4.
+
+    Each trainer GPU holds about 7.6B parameters. Their fp32 master weights,
+    gradients and Adam states (16 bytes per parameter) take about 122 GB before
+    activations, so the trainer needs GPUs with more than 80 GB (e.g. B200).
     """
     num_samples_per_prompt = 8
     seq_len = 2048
@@ -624,7 +619,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -832,7 +826,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -910,6 +903,9 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
 
     Qwen3.6-27B uses the Qwen3.5-compatible dense Gated DeltaNet model flavor.
     The 8-GPU layout assigns TP2 x FSDP2 to training and TP4 to generation.
+    Each trainer GPU holds about 6.7B parameters. Their fp32 master weights and
+    gradients plus bf16 Adam states (12 bytes per parameter) take about 80 GB
+    before activations, so the trainer needs GPUs with more than 80 GB (e.g. B200).
     """
     seq_len = 65536
     config = rl_grpo_qwen3_5_9b_varlen()
