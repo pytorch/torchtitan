@@ -414,6 +414,7 @@ def deepseek_v4_mtp_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             steps=10,
         ),
         parallelism=parallelism,
