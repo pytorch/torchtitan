@@ -5,16 +5,25 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import os
 
 import numpy as np
 import pytest
-from renderers import MultiModalData, ParsedResponse, PlaceholderRange, RenderedTokens
+from renderers import (
+    create_renderer,
+    MultiModalData,
+    ParsedResponse,
+    PlaceholderRange,
+    Qwen35RendererConfig,
+    RenderedTokens,
+)
 from torchtitan.components.renderer import hash_image_file
 from torchtitan.rl.rollout import PromptImage, RolloutStatus, token_env
 
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import Completion
+from transformers import AutoTokenizer
 
 _TOOLS = [
     {
@@ -40,8 +49,12 @@ class _RecordingRenderer:
         self.calls["render"] = {"tools": tools}
         return RenderedTokens(token_ids=[1, 2, 3])
 
-    def parse_response(self, token_ids, *, tools=None):
-        self.calls["parse_response"] = {"token_ids": token_ids, "tools": tools}
+    def parse_response(self, token_ids, *, tools=None, prompt_ids=None):
+        self.calls["parse_response"] = {
+            "token_ids": token_ids,
+            "tools": tools,
+            "prompt_ids": prompt_ids,
+        }
         return ParsedResponse(content="answer", reasoning_content=None, tool_calls=[])
 
     def bridge_to_next_turn(
@@ -92,8 +105,75 @@ def test_env_passes_tools_to_render_parse_and_bridge() -> None:
     env_output = asyncio.run(run())
     assert env_output.status == RolloutStatus.ONGOING
     assert renderer.calls["render"]["tools"] == _TOOLS
-    assert renderer.calls["parse_response"] == {"token_ids": [7, 8], "tools": _TOOLS}
+    assert renderer.calls["parse_response"] == {
+        "token_ids": [7, 8],
+        "tools": _TOOLS,
+        "prompt_ids": [1, 2, 3],
+    }
     assert renderer.calls["bridge_to_next_turn"]["tools"] == _TOOLS
+
+
+class _SearchThenAskEnv(_ToolMessageEnv):
+    """Answers the search call, then asks a new question."""
+
+    async def step(self, completion_message) -> MessageEnvStepOutput:
+        return MessageEnvStepOutput(
+            env_messages=[
+                {"role": "tool", "name": "search", "content": "bob: found"},
+                {"role": "user", "content": "Where is bob?"},
+            ]
+        )
+
+
+def test_env_parses_with_the_prompt_and_re_renders_tool_calls() -> None:
+    # Qwen3.5 with thinking on. Its prompt opens `<think>`, so the parser needs the prompt
+    # to know the completion starts in reasoning. The env's new question makes the bridge
+    # return None, so `step` re-renders the history, tool calls included.
+    tokenizer = AutoTokenizer.from_pretrained(
+        os.environ.get("QWEN3_5_TOKENIZER", "Qwen/Qwen3.5-0.8B")
+    )
+    renderer = create_renderer(tokenizer, Qwen35RendererConfig(enable_thinking=True))
+    env = TokenEnv.Config(max_rollout_tokens=4096).build(
+        message_env=_SearchThenAskEnv(), renderer=renderer
+    )
+    # A search call, then a call with no `<function=` that the parser can't name.
+    completion_ids = tokenizer.encode(
+        "Look bob up.\n</think>\n\n"
+        "<tool_call>\n<function=search>\n<parameter=query>\nbob\n</parameter>\n"
+        "</function>\n</tool_call>\n<tool_call>\nsearch bob\n</tool_call><|im_end|>",
+        add_special_tokens=False,
+    )
+
+    async def run():
+        init_output = await env.init()
+        step_output = await env.step(
+            Completion(
+                min_policy_version=0,
+                max_policy_version=0,
+                request_id="r0",
+                token_ids=completion_ids,
+                token_logprobs=[-0.1] * len(completion_ids),
+                finish_reason="stop",
+            )
+        )
+        return init_output, step_output
+
+    init_output, step_output = asyncio.run(run())
+    assert step_output.status == RolloutStatus.ONGOING
+    # A bridge would keep all of prompt + completion; the re-render drops the reasoning.
+    sampled_len = len(init_output.next_prompt.token_ids) + len(completion_ids)
+    assert step_output.next_prompt_prefix_len < sampled_len
+    assert step_output.completion_message == {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "Look bob up.",
+        "tool_calls": [
+            {
+                "type": "function",
+                "function": {"name": "search", "arguments": {"query": "bob"}},
+            }
+        ],
+    }
 
 
 class _ScriptedRenderer(_RecordingRenderer):
@@ -142,6 +222,8 @@ def test_env_returns_each_next_prompt_as_a_delta() -> None:
     ]
     # A text renderer's prompts carry no images.
     assert all(output.next_prompt.images == () for output in outputs)
+    # The second parse gets the prompt its completion was sampled from, not the first one.
+    assert renderer.calls["parse_response"]["prompt_ids"] == [1, 2, 3, 4, 7]
 
 
 def _image_data(*images: tuple[str, tuple[int, int, int], int]) -> MultiModalData:

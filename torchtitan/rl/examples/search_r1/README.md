@@ -22,8 +22,8 @@ its config.
 - `data.py` — `SearchR1Dataset` / `SearchR1Sample`: streams the NQ/HotpotQA parquet,
   downloaded from the HF dataset `PeterJinGo/nq_hotpotqa_train` (no preprocessing).
 - `env.py` — `SearchR1Env(MessageEnv)`: defines the `search` `ToolSpec`, reads the
-  renderer-parsed `tool_calls`, runs retrieval, and returns the passages as a `tool`
-  message. The per-rollout turn budget is enforced by `TokenEnv.max_num_turns`.
+  `tool_calls` (OpenAI-style `ToolCall` dicts), runs retrieval, and returns the passages
+  as a `tool` message. The per-rollout turn budget is enforced by `TokenEnv.max_num_turns`.
 - `rubric.py` — `RewardExactMatch`. **Default = pure-EM 0/1** on the final answer
   (correct → 1.0, else 0). Two opt-in levers put search on the gradient (anti
   closed-book reward hacking): `no_search_penalty` (a correct answer that never
