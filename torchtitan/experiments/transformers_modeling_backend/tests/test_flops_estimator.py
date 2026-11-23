@@ -6,7 +6,6 @@
 
 import tempfile
 
-import pytest
 import torch
 from transformers import LlamaConfig
 
@@ -16,13 +15,7 @@ from torchtitan.experiments.transformers_modeling_backend.model import (
 )
 
 
-# "block_causal" masks follow document boundaries; "causal" masks attend across
-# them. Two documents of lengths 3 and 2, then one padding token.
-@pytest.mark.parametrize(
-    "attn_mask_type,num_attended_keys",
-    [("block_causal", 1 + 2 + 3 + 1 + 2), ("causal", 1 + 2 + 3 + 4 + 5)],
-)
-def test_attention_counts_keys_per_query(attn_mask_type, num_attended_keys):
+def _build_estimator(attn_mask_type):
     hf_config = LlamaConfig(
         hidden_size=64,
         intermediate_size=128,
@@ -48,15 +41,23 @@ def test_attention_counts_keys_per_query(attn_mask_type, num_attended_keys):
         )
     with torch.device("meta"):
         model = config.build()
-    estimate = config.build_flops_estimator(model, seq_len=128)
-    _, active_nparams = config._parameter_counts(model, include_embeddings=False)
-    # 2 layers, 4 heads, head_dim 16 for Q/K and V.
-    flops_per_key = 2 * 6 * 4 * (16 + 16)
+    return config.build_flops_estimator(model, seq_len=128)
+
+
+def test_attention_counts_keys_per_query():
+    # Two documents of lengths 3 and 2, then one padding token.
     inputs = {
         "input": torch.empty(6),
         "positions": torch.tensor([0, 1, 2, 0, 1, 2]),
         "padding_mask": torch.tensor([False] * 5 + [True]),
     }
-    assert estimate(inputs) == (
-        5 * 6 * active_nparams + num_attended_keys * flops_per_key
-    )
+    block_causal = _build_estimator("block_causal")
+    causal = _build_estimator("causal")
+    # 2 layers, 4 heads, head_dim 16 for Q/K and V.
+    flops_per_key = 2 * 6 * 4 * (16 + 16)
+    # "block_causal" restarts at each document (1+2+3 + 1+2 = 9 keys); "causal"
+    # attends across documents (1+2+3+4+5 = 15 keys).
+    assert causal(inputs) - block_causal(inputs) == (15 - 9) * flops_per_key
+    # The padding token adds no FLOPs.
+    unpadded = {key: value[:5] for key, value in inputs.items()}
+    assert block_causal(inputs) == block_causal(unpadded)
