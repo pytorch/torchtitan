@@ -21,7 +21,7 @@ Each MTP layer follows the normal decoder layer structure, with the following MT
 
 ### 1.2 Model Integration
 
-`DeepSeekV3Model` inherits from `MTPDecoder`. If `mtp_layers` is empty, `MTPDecoder.forward()` falls back to the normal `Decoder.forward()` path, preserving non-MTP behavior.
+`DeepSeekV3Model` inherits from `MTPDecoder` (`torchtitan/models/common/mtp.py`), which DeepSeek-V4 shares. `MTPDecoder` owns the MTP input preprocessing, FSDP wrapping, remat containers, and FLOPs; each model owns its MTP block and MTP forward. If `mtp_layers` is empty, `MTPDecoder` and `DeepSeekV3Model.forward()` fall back to the normal `Decoder` paths, preserving non-MTP behavior.
 
 When `mtp_layers` is non-empty, execution is split into two stages:
 
@@ -215,7 +215,7 @@ boundary exchange between CP ranks.
 ### 4.1 Input Form
 
 `MTPDecoder.preprocess_inputs()` returns aligned tuples containing the main and
-per-depth token inputs and labels. `MTPDecoder` returns a prediction tuple with
+per-depth token inputs and labels. `DeepSeekV3Model.forward()` returns a prediction tuple with
 the same ordering. Predictions are logits on the ordinary path and hidden
 states when `_skip_lm_head=True` for `ChunkedLossWrapper`.
 
