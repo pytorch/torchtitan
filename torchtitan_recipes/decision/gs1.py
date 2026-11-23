@@ -8,23 +8,8 @@
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
-from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.trainer import Trainer
-from torchtitan_recipes.decision.base import DecisionModel
-
-
-class GS1DecisionModel(DecisionModel):
-    """Build the GS1 decision recipe and its model-family boundary."""
-
-    @property
-    def hf_assets_path(self) -> str:
-        return f"./assets/hf/GS1-{self.model_size}"
-
-    def build_backbone_config(self, *, seq_len: int) -> tuple[Qwen35Model.Config, int]:
-        model_config = build_model_config(
-            self.model_size, seq_len=seq_len, parallelism=self.parallelism
-        )
-        return model_config, model_config.max_context_length
+from torchtitan_recipes.decision.base import build_candidate_distribution_config
 
 
 def gs1_decision(
@@ -34,6 +19,13 @@ def gs1_decision(
     brier_weight: float = 1.0,
 ) -> Trainer.Config:
     """Build a GS1 data recipe with distribution NLL plus expected Brier."""
-    return GS1DecisionModel(
-        model_size, parallelism=parallelism, brier_weight=brier_weight
-    ).build_trainer_config(data_path="./assets/hf/gs1-distribution/train.jsonl")
+    parallelism = parallelism or ParallelismConfig()
+    model_config = build_model_config(model_size, seq_len=8192, parallelism=parallelism)
+    return build_candidate_distribution_config(
+        model_config=model_config,
+        hf_assets_path=f"./assets/hf/GS1-{model_size}",
+        data_path="./assets/hf/gs1-distribution/train.jsonl",
+        parallelism=parallelism,
+        brier_weight=brier_weight,
+        max_context_length=model_config.max_context_length,
+    )

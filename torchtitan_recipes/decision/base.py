@@ -7,7 +7,6 @@
 """Reusable components for candidate-distribution decision fine-tuning."""
 
 import math
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
@@ -232,9 +231,96 @@ class DecisionLoss(ChunkedLossWrapper):
         )
 
 
-class DecisionModel(ABC):
-    """Model-family hooks shared by TorchTitan candidate-decision recipes."""
+def build_candidate_distribution_config(
+    *,
+    model_config: Configurable.Config,
+    hf_assets_path: str,
+    data_path: str,
+    parallelism: ParallelismConfig | None = None,
+    brier_weight: float = 1.0,
+    max_context_length: int,
+    max_num_questions: int = 256,
+    steps: int = 600,
+) -> Trainer.Config:
+    """Build the shared soft-candidate training plumbing for a model recipe.
 
+    Model families provide their own model config and asset path. This helper
+    is deliberately a function rather than a model-family base class: Jev's
+    hard-label recipe and GS1's distribution recipe have different objectives.
+    """
+    parallelism = parallelism or ParallelismConfig()
+    if not math.isfinite(brier_weight) or brier_weight < 0:
+        raise ValueError("brier_weight must be finite and nonnegative")
+    if (
+        parallelism.tensor_parallel_degree > 1
+        or parallelism.pipeline_parallel_degree > 1
+        or parallelism.context_parallel_degree > 1
+        or parallelism.expert_parallel_degree > 1
+    ):
+        raise ValueError("This decision recipe currently supports data parallelism only")
+    tokenizer = HuggingFaceTokenizer(tokenizer_path=hf_assets_path)
+    candidate_token_ids = [
+        tokenizer.encode(f" {letter}", add_bos=False, add_eos=False)
+        for letter in LETTERS
+    ]
+    if any(len(token_ids) != 1 for token_ids in candidate_token_ids):
+        raise ValueError("The tokenizer must encode each space-prefixed answer letter as one token")
+    candidate_token_ids = [token_ids[0] for token_ids in candidate_token_ids]
+    if len(set(candidate_token_ids)) != MAX_CANDIDATES:
+        raise ValueError("Answer-letter tokens must be distinct")
+    return Trainer.Config(
+        loss=DecisionLoss.Config(
+            loss_fn=CandidateDistributionLoss.Config(
+                candidate_token_ids=candidate_token_ids,
+                brier_weight=brier_weight,
+            ),
+            max_num_supervised=max_num_questions,
+        ),
+        hf_assets_path=hf_assets_path,
+        model=model_config,
+        parallelism=parallelism,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-5, weight_decay=0.0)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                decay_ratio=0.9,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
+        ),
+        training=TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=4 * max_context_length,
+            steps=steps,
+        ),
+        dataloader=GrainDataLoader.Config(
+            dataset=FirstFitPackingConfig(
+                dataset=SingleDatasetConfig(
+                    source=HuggingFaceRandomAccessSource.Config(
+                        path="json",
+                        split="train",
+                        load_dataset_kwargs={"data_files": data_path},
+                    ),
+                    processor=DecisionSampleProcessor.Config(),
+                    post_filters=(lambda sample: sample is not None,),
+                ),
+            ),
+            max_num_documents=max_num_questions,
+            read_options=grain.ReadOptions(num_threads=0),
+            num_prefetch_microbatches=4,
+        ),
+        metrics=MetricsProcessor.Config(log_freq=10),
+        checkpointer=CheckpointManager.Config(
+            initial_load_in_hf=True,
+            last_save_in_hf=True,
+            export_dtype="bfloat16",
+        ),
+    )
+def _removed_decision_model_base() -> None:
+    """Keep the old symbol out of the public recipe API."""
+    return None
+
+'''  # The former DecisionModel implementation is retained below temporarily.
     def __init__(
         self,
         model_size: str,
@@ -337,3 +423,4 @@ class DecisionModel(ABC):
                 export_dtype="bfloat16",
             ),
         )
+'''
