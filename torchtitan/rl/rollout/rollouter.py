@@ -28,6 +28,7 @@ from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
+    error_entry,
     GenerateFn,
     ReleaseSessionFn,
     Rollout,
@@ -82,6 +83,7 @@ class Rollouter(Configurable):
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
                 ),
                 message_env=MyEnv.Config(),
+                token_env=TokenEnv.Config(max_rollout_tokens=32768),
             ),
         ).build(max_rollouts_in_flight=256)
 
@@ -296,6 +298,36 @@ class Rollouter(Configurable):
         self._training_dataloader.load_state_dict(state_dict)
 
 
+def log_failed_rollout(rollout: Rollout) -> None:
+    """Log a rollout whose status is an error. A rollout that didn't fail logs nothing.
+
+    Example:
+        "rollout group=3/rollout=1 failed: ERROR_TIMEOUT | TimeoutError: MessageEnv.step timed out
+        after 1800.0s"
+    """
+    if not rollout.status.is_error():
+        return
+
+    parts = [
+        f"rollout group={rollout.group_id}/rollout={rollout.rollout_id} failed: "
+        f"{rollout.status.name}"
+    ]
+
+    # add errors from logs, if any
+    errors = rollout.logs.get("errors", [])
+    if errors:
+        error = errors[-1]
+        parts.append(f"{error['type']}: {error['message']}")
+        parts.extend((error.get("traceback") or "").strip().splitlines()[-3:])
+
+    # add other logs, if any
+    other_logs = {key: value for key, value in rollout.logs.items() if key != "errors"}
+    if other_logs:
+        parts.append(" ".join(f"{key}={value}" for key, value in other_logs.items()))
+
+    logger.warning(" | ".join(parts))
+
+
 class BaseRolloutWorker(Configurable, ABC):
     """Runs one rollout group in a rollout worker process, then scores it and computes its
     advantages. Subclasses implement `run_group`."""
@@ -330,8 +362,7 @@ class BaseRolloutWorker(Configurable, ABC):
         rollouts: list[Rollout],
         env_input: object,
     ) -> list[RubricOutput]:
-        """Score one group's rollouts; `run_group` applies the rewards.
-        Default impl delegates to `self.rubric.score_group`.
+        """Score one group's rollouts. Default impl delegates to `self.rubric.score_group`.
 
         Args:
             rollouts: Sibling rollouts in one prompt group, already stepped.
@@ -353,8 +384,7 @@ class BaseRolloutWorker(Configurable, ABC):
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
-        """Roll out one prompt group, then set each reward from `score_group` and each
-        advantage from `advantage_estimator`.
+        """Roll out one prompt group.
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
@@ -369,6 +399,56 @@ class BaseRolloutWorker(Configurable, ABC):
             One scored `RolloutGroup`.
         """
 
+    async def make_scored_group(
+        self,
+        *,
+        rollouts: list[Rollout],
+        sample: object,
+        group_id: int,
+    ) -> RolloutGroup:
+        """Score one group's trainable rollouts and fill their advantages.
+
+        Example, group 7, rewards from `score_group`:
+
+            rollouts    [Rollout(0, COMPLETED), Rollout(1, ERROR_INFRA), Rollout(2, ERROR)]
+            rewards     [1.0,                   None,                    0.0]
+            advantages  [0.5,                   None,                    -0.5]
+
+        A rollout that isn't `is_trainable()` gets no reward or advantage, and isn't trained.
+
+        Args:
+            rollouts: one per sibling, in rollout-id order.
+            sample: the dataset sample the group shares; passed to `score_group`.
+            group_id: the group's id.
+        """
+        # ======== Score the trainable rollouts ========
+        # "Trainable" is about the status, not about training: validation groups are scored here too.
+        rollouts_to_score = [
+            rollout for rollout in rollouts if rollout.status.is_trainable()
+        ]
+        if not rollouts_to_score:
+            return RolloutGroup(group_id=group_id, rollouts=rollouts)
+
+        # TODO: a reward fn that raises (e.g. a judge that is down) fails the whole group. Catch it
+        #   per rollout instead, so its siblings still train.
+        rubric_outputs = await self.score_group(rollouts_to_score, sample)
+        for rollout, rubric_output in zip(
+            rollouts_to_score, rubric_outputs, strict=True
+        ):
+            rollout.reward = rubric_output.reward
+            rollout.reward_breakdown = rubric_output.reward_breakdown
+
+        # ======== Compute advantages ========
+        # TODO: run an ordered list of group postprocessors here, e.g. a length penalty, or drop a
+        # group whose rewards all match, then compute advantages. The advantage estimator becomes
+        # one of them.
+        advantages = self.advantage_estimator(
+            RolloutGroup(group_id=group_id, rollouts=rollouts_to_score)
+        )
+        for rollout, advantage in zip(rollouts_to_score, advantages, strict=True):
+            rollout.advantage = advantage
+        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+
 
 class MessageEnvRolloutWorker(BaseRolloutWorker):
     """Builds each rollout's env from `message_env` and `token_env`, and drives it against the
@@ -379,7 +459,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         message_env: MessageEnv.Config
         """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
 
-        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
+        token_env: TokenEnv.Config
         """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
     def __init__(self, config: Config) -> None:
@@ -454,42 +534,30 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
-            # produce the rollouts
-            rollouts = await asyncio.gather(
-                *(
-                    self._run_single_rollout(
-                        generate_fn=generate_fn,
-                        release_session_fn=release_session_fn,
-                        env=env,
-                        # Offset the base seed per sample so a group's n=1
-                        # requests are diverse yet reproducible run-to-run.
-                        sampling=(
-                            sampling
-                            if sampling.seed is None
-                            else replace(sampling, seed=sampling.seed + sample_idx)
-                        ),
-                        group_id=group_id,
-                        rollout_id=sample_idx,
+            async with asyncio.TaskGroup() as task_group:
+                tasks = [
+                    task_group.create_task(
+                        self._run_single_rollout(
+                            generate_fn=generate_fn,
+                            release_session_fn=release_session_fn,
+                            env=env,
+                            sampling=(
+                                sampling
+                                if sampling.seed is None
+                                else replace(sampling, seed=sampling.seed + sample_idx)
+                            ),
+                            group_id=group_id,
+                            rollout_id=sample_idx,
+                        )
                     )
                     for sample_idx, env in enumerate(envs)
-                )
-            )
+                ]
         finally:
             # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
-
-        # score
-        outputs = await self.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
-            rollout.reward = output.reward
-            rollout.reward_breakdown = output.reward_breakdown
-
-        # Post-scoring: turn group rewards into per-rollout advantages.
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self.advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
-            rollout.advantage = advantage
-        return group
+        return await self.make_scored_group(
+            rollouts=[task.result() for task in tasks], sample=sample, group_id=group_id
+        )
 
     async def _run_single_rollout(
         self,
@@ -502,7 +570,8 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         rollout_id: int,
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
-        until the env is terminal (env `done`, truncation, errors).
+        until the env is terminal (env `done`, truncation, errors). An exception ends it as
+        `ERROR_INFRA`. A failed rollout is logged once, at the end.
 
         For custom logic, users can override this method.
 
@@ -518,14 +587,13 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 per-turn `RolloutTurnID`, and stored as `Rollout.rollout_id`.
 
         Returns:
-            One unscored `Rollout`; `run_group` fills its reward later.
+            One unscored `Rollout`; `make_scored_group` fills its reward later.
         """
         # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
         routing_session_id = RolloutTurnID(
             group_id=group_id, rollout_id=rollout_id, turn_id=0
         ).to_string(include_turn=False)
         turns: list[RolloutTurn] = []
-        status = RolloutStatus.ERROR
         try:
             env_step = await env.init()
             while not env_step.status.is_terminal():
@@ -577,25 +645,25 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 env_step = next_env_step
 
             status = env_step.status
-        except Exception:
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
-            logger.exception(
-                "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
-                group_id,
-                rollout_id,
-                len(turns),
-            )
-            status = RolloutStatus.ERROR
+            errors = env_step.errors
+        except Exception as error:
+            # An exception is ERROR_INFRA.
+            # TODO: at shutdown, every rollout still generating lands here and logs a failure.
+            # Raise a typed error on generator close, and skip the log for it.
+            status = RolloutStatus.ERROR_INFRA
+            errors = [error_entry(error)]
 
         try:
             await release_session_fn(routing_session_id=routing_session_id)
         except Exception:
             # Not fatal: `max_sessions` evicts an unreleased session.
             logger.exception("releasing routing session %s failed", routing_session_id)
-        return Rollout(
+        rollout = Rollout(
             group_id=group_id,
             rollout_id=rollout_id,
             status=status,
             turns=turns,
+            logs={"errors": errors} if errors else {},
         )
+        log_failed_rollout(rollout)
+        return rollout
