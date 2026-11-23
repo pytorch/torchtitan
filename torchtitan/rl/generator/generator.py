@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 from collections.abc import Callable, Iterable
@@ -83,8 +84,10 @@ class Generator(Configurable):
         config: Generator-specific configuration, including its model.
         precision: The trainer's dtypes, which the generator's model mirrors.
         model_path: Path to the HF model checkpoint.
-        max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
-            fewer if KV is tight).
+        avg_num_seqs_per_dp_rank: Each generator DP rank's even share of the training
+            rollouts in flight. With ``Config.max_num_seqs`` it sets the engine's upper bound
+            on concurrently scheduled sequences (``Config.resolve_max_num_seqs``); the engine
+            may admit fewer if KV is tight.
         output_dir: Structured-logger output directory.
         open_result_channel: Opens the asynchronous channel used to fan in
             completions from nonzero data-parallel replicas to rank 0. It must
@@ -141,6 +144,14 @@ class Generator(Configurable):
         """The engine's chunked-prefill chunk size: max tokens scheduled per engine step
         (prefill + decode, summed over the batch). ``None`` (default) leaves the
         engine's own default in place."""
+
+        max_num_seqs: int | None = None
+        """The engine's cap on concurrently scheduled sequences per generator DP rank.
+        ``None`` (default) derives it from the rollouts in flight
+        (``resolve_max_num_seqs``). Set it lower when the derived cap OOMs the generator
+        at startup: vLLM's CUDA graph memory profile allocates one KV page per sequence,
+        and pages hold 256 tokens on GPUs older than SM90 (PyTorch's FA2 paged KV requires
+        it, see ``VLLMEngine``)."""
 
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the engine's model.
@@ -215,13 +226,50 @@ class Generator(Configurable):
                     "cached KV cannot cross a policy update"
                 )
 
+        def resolve_max_num_seqs(self, avg_num_seqs_per_dp_rank: int) -> int:
+            """The engine's ``max_num_seqs``: ``self.max_num_seqs`` when set, else 2x
+            ``avg_num_seqs_per_dp_rank`` rounded up to a power of two. Either must lie in
+            [token budget / 64, token budget]: an override outside raises, the derived value
+            is clamped. The token budget is ``max_num_batched_tokens``, or 2048 when unset.
+
+            Checked here, not in ``__post_init__``, so a value assigned after the config is
+            built is checked too.
+
+            Example (token budget unset, ``max_num_seqs`` unset):
+                avg 192 -> 2 x 192 = 384 -> 512
+                avg 22  -> 2 x 22 = 44   -> 64
+                avg 8   -> 2 x 8 = 16    -> 32
+            """
+            max_num_batched_tokens = self.max_num_batched_tokens or 2048
+            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop the lower
+            # bound once fixed. vLLM's memory profile splits a power-of-two budget evenly over
+            # max_num_seqs; FA2 writes out of bounds past 64 each.
+            min_num_seqs = max_num_batched_tokens / 64
+            if self.max_num_seqs is not None:
+                # vLLM requires max_num_seqs <= max_num_batched_tokens.
+                if not min_num_seqs <= self.max_num_seqs <= max_num_batched_tokens:
+                    raise ValueError(
+                        f"generator.max_num_seqs ({self.max_num_seqs}) must be in "
+                        f"[{math.ceil(min_num_seqs)}, {max_num_batched_tokens}], i.e. "
+                        "[max_num_batched_tokens / 64, max_num_batched_tokens] with "
+                        f"max_num_batched_tokens={max_num_batched_tokens}."
+                    )
+                return self.max_num_seqs
+            # 2x is headroom
+            max_num_seqs = 2 ** math.ceil(
+                math.log2(max(2 * avg_num_seqs_per_dp_rank, min_num_seqs))
+            )
+            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
+            # the engine torchtitan builds.
+            return min(max_num_seqs, max_num_batched_tokens)
+
     def __init__(
         self,
         config: Config,
         *,
         precision: PrecisionConfig,
         model_path: str,
-        max_num_seqs: int,
+        avg_num_seqs_per_dp_rank: int,
         output_dir: str,
         rank: int | None = None,
         generator_name: str = "generator",
@@ -251,6 +299,9 @@ class Generator(Configurable):
 
         set_batch_invariance(config.debug.batch_invariant)
         self._set_determinism(config.debug)
+
+        max_num_seqs = config.resolve_max_num_seqs(avg_num_seqs_per_dp_rank)
+        logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
 
         with sl.log_trace_span("engine_init"):
             # The engine is built and used only on the engine loop thread (see `EngineLoop`).
