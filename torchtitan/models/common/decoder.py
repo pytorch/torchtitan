@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -177,15 +178,38 @@ class Decoder(BaseModel):
             seq_len: int,
             excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
-            parameter_flops = active_parameter_flops_per_token(
+            flops_per_token = active_parameter_flops_per_token(
                 model, excluded_submodules=excluded_submodules
             )
-            attention_flops = sum(
-                attention.flops_per_token(seq_len)
-                for _, attention, _, _ in self.traverse(Attention.Config)
-            )
-            flops_per_token = parameter_flops + attention_flops
-            return lambda input_dict: flops_per_token * input_dict["input"].numel()
+            # A causal query at document position p attends to p + 1 keys. When
+            # attention FLOPs are affine in the number of keys, the batch total
+            # needs only sum(positions + 1).
+            flops_per_key = 0
+            for _, attention, _, _ in self.traverse(Attention.Config):
+                one_key_flops = attention.flops_per_token(1)
+                layer_flops_per_key = attention.flops_per_token(2) - one_key_flops
+                full_length_flops = attention.flops_per_token(seq_len)
+                if (
+                    full_length_flops
+                    == one_key_flops + (seq_len - 1) * layer_flops_per_key
+                ):
+                    flops_per_token += one_key_flops - layer_flops_per_key
+                    flops_per_key += layer_flops_per_key
+                else:
+                    # TODO: sliding-window and compressed attention are not affine
+                    # in the number of keys; they keep the full-length estimate.
+                    flops_per_token += full_length_flops
+
+            def estimate(input_dict: Mapping[str, Any]) -> int:
+                # positions restart at 0 at each document start.
+                positions = input_dict["positions"]
+                num_attended_keys = int(positions.sum()) + positions.numel()
+                return (
+                    flops_per_token * input_dict["input"].numel()
+                    + flops_per_key * num_attended_keys
+                )
+
+            return estimate
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().

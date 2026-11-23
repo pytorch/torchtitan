@@ -33,12 +33,13 @@ def quadratic_attention_flops_per_token(
     2. the flash attention does 1 more matmul recomputation in the backward
        but recomputation should not be counted in calculating MFU           (+0)
     3. each matmul performs 1 multiplication and 1 addition                 (*2)
-    4. we follow the convention and do not account for sparsity in causal attention
 
+    ``seq_len`` is the number of keys one query attends to.
+    ``Decoder.Config.build_flops_estimator`` applies causal and document
+    masking by summing over each query's position in its document.
     ``qk_head_dim`` and ``v_head_dim`` describe the two attention
     contractions. The factor of 6 accounts for multiply-adds in forward and
-    backward. As in the existing MFU convention, causal sparsity and backward
-    recomputation are not counted.
+    backward. Backward recomputation is not counted.
     """
     attended_tokens = (
         seq_len if sliding_window_size is None else min(seq_len, sliding_window_size)
