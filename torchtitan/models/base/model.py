@@ -162,13 +162,20 @@ class BaseModel(Module, ABC):
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if activation_remat is not None:
-                activation_remat.apply(self)
+                activation_remat.apply(
+                    self, block_container_fqns=self._remat_block_container_fqns()
+                )
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 precision=precision,
                 parallelism=parallelism,
             )
         return self
+
+    def _remat_block_container_fqns(self) -> list[str]:
+        """FQNs of the submodules whose children are the transformer blocks
+        that activation remat checkpoints."""
+        return ["layers"]
 
     @abstractmethod
     def _apply_fsdp(

@@ -153,6 +153,9 @@ class DeepSeekV4Model(Decoder):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
         register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
+    def _remat_block_container_fqns(self) -> list[str]:
+        return [*super()._remat_block_container_fqns(), "mtp_layers"]
+
     def _apply_fsdp(
         self,
         *,
