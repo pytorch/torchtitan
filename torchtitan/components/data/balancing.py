@@ -24,33 +24,25 @@ rank's heavy row often lands in the same step as other ranks' light rows:
       3    ##         ##         2       #          ##         2
                           total 24                        total 18
 
-Each rank buffers ``window_size`` consecutive microbatches. A planner then
-decides, for every step of the window, which microbatch each rank trains:
-
-    plan[k][d] = (s, i): at step k, rank d trains rank s's i-th microbatch
-
-``plan_window`` sorts the costs of a group of ``G`` ranks' windows together
-and gives step ``k`` the ``k``-th group of ``G`` microbatches, keeping each
-microbatch on its own rank when possible. Every rank in a group computes the
-same plan, so they agree without a coordinator.
-
-``group_size=1`` (the default) plans each rank's window alone: each rank
-yields its own microbatches heaviest first. Every rank opens a window at the
-same step, so step ``k`` runs every rank's ``k``-th heaviest microbatch. For
-sorted sequences this pairing minimizes the sum of per-step maxima, with no
-communication. It cannot fix a window in which one rank holds several heavy
-microbatches; larger groups move microbatches between ranks to do that.
+Each rank buffers ``window_size`` consecutive microbatches and a
+``MicrobatchBalancer`` decides which of them it trains at each step of the
+window. ``LocalBalancer`` yields each rank's own window heaviest first. Every
+rank opens a window at the same step, so step ``k`` runs every rank's ``k``-th
+heaviest microbatch. For sorted sequences this pairing minimizes the sum of
+per-step maxima, with no communication. It cannot fix a window in which one
+rank holds several heavy microbatches.
 
 The set of microbatches per window is unchanged; each moves at most
-``window_size - 1`` steps (like the packer's own bin shuffling). With
-``group_size=1`` nothing depends on the mesh, so it applies unchanged to
-dp_replicate, dp_shard, CP (CP peers read the same data and plan it the same
-way), gradient accumulation, and pipeline-parallel microbatches. No plan can
+``window_size - 1`` steps (like the packer's own bin shuffling). Local
+balancing does not depend on the mesh, so it applies unchanged to
+dp_replicate, dp_shard, CP (CP peers read the same data and order it the same
+way), gradient accumulation, and pipeline-parallel microbatches. No order can
 split a single document: a row that is one full-length document stays as
 heavy as it is.
 """
 
-from collections.abc import Callable, Sequence
+from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -61,10 +53,7 @@ from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
-
-Plan = list[list[tuple[int, int]]]
-"""``plan[k][d] = (s, i)``: at step ``k``, group rank ``d`` trains group rank
-``s``'s ``i``-th microbatch of the window."""
+from torchtitan.config import Configurable
 
 
 def document_attention_cost(
@@ -109,128 +98,73 @@ def document_attention_cost(
     return float(torch.dot(lengths, lengths)) + token_weight * doc_ids.numel()
 
 
-def plan_window(costs: Sequence[Sequence[float]]) -> Plan:
-    """Plan one window for a group of ranks.
+class MicrobatchBalancer(Configurable, ABC):
+    """Decides which microbatch of a window this rank trains at each step."""
 
-    ``costs[s][i]`` is the cost of group rank ``s``'s ``i``-th microbatch; every
-    rank holds the same number of microbatches. All microbatches are sorted by
-    cost (ties by rank, then index), step ``k`` gets the ``k``-th group of ``G``,
-    and within a step each microbatch stays on its own rank when possible (at
-    most one per rank), so as few as possible move. With one rank this is the
-    rank's own window heaviest first.
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        window_size: int = 8
+        """Consecutive microbatches balanced together. Larger windows balance
+        better but hold more collated microbatches in host memory and move
+        microbatches further from their packed order."""
+        cost_fn: Callable[[TrainingMicrobatch], float] = document_attention_cost
+        """Relative cost of one microbatch; use ``functools.partial`` to set the
+        weights of a cost function."""
 
-    Args:
-        costs: Per-rank microbatch costs, ``G`` lists of equal length ``W``.
+        def __post_init__(self) -> None:
+            if self.window_size < 1:
+                raise ValueError("window_size must be positive")
 
-    Returns:
-        ``plan[k][d] = (s, i)`` for ``k < W`` and ``d < G``.
-    """
-    num_ranks = len(costs)
-    window = len(costs[0]) if num_ranks else 0
-    if any(len(c) != window for c in costs):
-        raise ValueError("every rank must hold the same number of microbatches")
-    order = sorted(
-        ((float(costs[s][i]), s, i) for s in range(num_ranks) for i in range(window)),
-        key=lambda x: (-x[0], x[1], x[2]),
-    )
-    plan: Plan = []
-    for k in range(window):
-        step: list[tuple[int, int] | None] = [None] * num_ranks
-        moved = []
-        for _, s, i in order[k * num_ranks : (k + 1) * num_ranks]:
-            if step[s] is None:
-                step[s] = (s, i)
-            else:
-                moved.append((s, i))
-        free = [d for d in range(num_ranks) if step[d] is None]
-        for d, src in zip(free, moved):
-            step[d] = src
-        plan.append([src for src in step if src is not None])
-    return plan
+    def __init__(self, config: Config, **kwargs: Any) -> None:
+        del kwargs  # runtime context (dp_rank, dp_world_size) some balancers use
+        self.window_size = config.window_size
+        self._cost_fn = config.cost_fn
+
+    @abstractmethod
+    def balance(self, rows: list[Any]) -> list[Any]:
+        """Return the microbatches this rank trains in the next ``len(rows)``
+        steps, in step order. Every rank calls it at the same step."""
 
 
-@dataclass(frozen=True, kw_only=True, slots=True)
-class MicrobatchBalancingConfig:
-    """Plan each window of ``window_size`` microbatches across ``group_size`` ranks."""
+class LocalBalancer(MicrobatchBalancer):
+    """Yield this rank's own window heaviest first, without communication."""
 
-    window_size: int = 8
-    """Consecutive microbatches planned together. Larger windows balance better
-    but hold more collated microbatches in host memory and move microbatches
-    further from their packed order."""
-    group_size: int | None = 1
-    """Data-parallel ranks that plan a window together. 1 orders each rank's own
-    window heaviest first, without communication."""
-    cost_fn: Callable[[TrainingMicrobatch], float] = document_attention_cost
-    """Relative cost of one microbatch; use ``functools.partial`` to set the
-    weights of a cost function."""
-    planner: Callable[[Sequence[Sequence[float]]], Plan] = plan_window
-    """Maps a group's per-rank costs to a plan."""
+    @dataclass(kw_only=True, slots=True)
+    class Config(MicrobatchBalancer.Config):
+        pass
 
-    def __post_init__(self) -> None:
-        if self.window_size < 1:
-            raise ValueError("window_size must be positive")
-        if self.group_size is not None and self.group_size < 1:
-            raise ValueError("group_size must be positive or None")
-        # TODO: group_size > 1 (and None = all DP ranks) exchanges microbatches
-        # between ranks; implemented in the next PR of this stack.
-        if self.group_size != 1:
-            raise NotImplementedError("group_size other than 1 is not supported yet")
-
-
-class _LocalPeers:
-    """A group of one rank: nothing to gather or exchange."""
-
-    def gather_costs(self, costs: list[float]) -> tuple[list[list[float]], int]:
-        return [costs], 0
-
-    def route(self, plan: Plan, local: list[Any], me: int) -> list[Any]:
-        return [local[step[me][1]] for step in plan]
+    def balance(self, rows: list[Any]) -> list[Any]:
+        # Stable: equal costs keep their packed order.
+        costs = [self._cost_fn(row) for row in rows]
+        return [rows[i] for i in sorted(range(len(rows)), key=lambda i: -costs[i])]
 
 
 class MicrobatchBalancingIterDataset(grain.IterDataset):
-    """Plan each window of ``window_size`` parent elements across a group of ranks."""
+    """Balance each window of ``balancer.window_size`` parent elements."""
 
-    def __init__(
-        self,
-        parent: grain.IterDataset,
-        *,
-        config: MicrobatchBalancingConfig,
-        dp_rank: int = 0,
-        dp_world_size: int = 1,
-    ) -> None:
+    def __init__(self, parent: grain.IterDataset, *, balancer: MicrobatchBalancer):
         super().__init__(parent)
-        del dp_rank, dp_world_size  # used by groups larger than one rank
-        self._config = config
-        self._peers = _LocalPeers()
+        self._balancer = balancer
 
     def __iter__(self) -> grain.DatasetIterator:
-        return _MicrobatchBalancingIterator(
-            iter(self._parent), config=self._config, peers=self._peers
-        )
+        return _MicrobatchBalancingIterator(iter(self._parent), self._balancer)
 
 
 class _MicrobatchBalancingIterator(grain.DatasetIterator):
-    """Buffer one window, plan it, and yield this rank's share in step order.
+    """Buffer one window, balance it, and yield this rank's share in step order.
 
     The checkpoint state is the parent state at the window start plus the
     number of elements already yielded from the window; restoring re-reads
-    the window from the parent (and re-plans it) and skips them.
+    the window from the parent, balances it again, and skips them.
     """
 
     def __init__(
-        self,
-        parent: grain.DatasetIterator,
-        *,
-        config: MicrobatchBalancingConfig,
-        peers: Any,
+        self, parent: grain.DatasetIterator, balancer: MicrobatchBalancer
     ) -> None:
         super().__init__(parent)
-        self._window_size = config.window_size
-        self._cost_fn = config.cost_fn
-        self._planner = config.planner
-        self._peers = peers
-        self._window: list[Any] = []
-        self._window_parent_state: dict[str, Any] | None = None
+        self._balancer = balancer
+        self._window: list[Any] = []  # this rank's microbatches, in step order
+        self._window_start: dict[str, Any] | None = None  # parent state
         self._next_index = 0
 
     def __next__(self) -> Any:
@@ -245,30 +179,26 @@ class _MicrobatchBalancingIterator(grain.DatasetIterator):
         return element
 
     def _fill_window(self) -> None:
-        self._window_parent_state = self._parent.get_state()
-        local = []
-        for _ in range(self._window_size):
+        self._window_start = self._parent.get_state()
+        rows = []
+        for _ in range(self._balancer.window_size):
             try:
-                local.append(next(self._parent))
+                rows.append(next(self._parent))
             except StopIteration:
                 break
-        costs, me = self._peers.gather_costs([self._cost_fn(e) for e in local])
-        self._window = self._peers.route(self._planner(costs), local, me)
+        self._window = self._balancer.balance(rows) if rows else []
         self._next_index = 0
 
     def get_state(self) -> dict[str, Any]:
         if self._next_index == len(self._window):
             return {"parent": self._parent.get_state(), "window_index": 0}
-        assert self._window_parent_state is not None
-        return {
-            "parent": self._window_parent_state,
-            "window_index": self._next_index,
-        }
+        assert self._window_start is not None
+        return {"parent": self._window_start, "window_index": self._next_index}
 
     def set_state(self, state: dict[str, Any]) -> None:
         self._parent.set_state(state["parent"])
         self._window = []
-        self._window_parent_state = None
+        self._window_start = None
         self._next_index = 0
         if state["window_index"]:
             self._fill_window()
