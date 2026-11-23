@@ -1324,7 +1324,9 @@ def test_validate_rolls_out_each_prompt_n_times(
         _finish_in_worker(_scored_group(-(i + 1), group_rewards), is_validation=True)
         for i, group_rewards in enumerate(rewards)
     ]
-    run_group_rollouts = AsyncMock(side_effect=groups)
+    run_group_rollouts = AsyncMock(
+        side_effect=[pack_rollout_group(group) for group in groups]
+    )
     controller._rollouter = SimpleNamespace(
         get_validation_samples=lambda steps: ["a", "b"],
         run_group_rollouts=run_group_rollouts,

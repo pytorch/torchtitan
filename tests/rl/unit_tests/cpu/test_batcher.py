@@ -76,7 +76,7 @@ def _packer(
     max_context_length: int | None = None,
     pad_id: int = 0,
     temperature: float = 1.0,
-    per_sample_pad_multiple: int | None = None,
+    per_sample_pad_multiple: int = 1,
     build_mrope_positions: bool = False,
     vision_processor: VisionProcessor.Config | None = None,
 ) -> MicrobatchPacker:
@@ -246,12 +246,19 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
         max_num_documents = rng.choice([None, 1, 3, 6])
         batcher = Batcher.Config(
             max_num_documents=max_num_documents,
-            per_sample_pad_multiple=pad_multiple,
+            microbatch_packer=MicrobatchPacker.Config(
+                per_sample_pad_multiple=pad_multiple
+            ),
         ).build(
             num_tokens_per_microbatch_per_dp_rank=num_rows * seq_len,
             max_context_length=seq_len,
             num_prompts_per_train_step=1,
             dp_degree=dp_degree,
+        )
+        packer = _packer(
+            num_rows * seq_len,
+            max_context_length=seq_len,
+            per_sample_pad_multiple=pad_multiple,
         )
         samples = _make_samples(
             [rng.randint(1, seq_len) for _ in range(rng.randint(1, 30))]
@@ -270,7 +277,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
                 )
                 if max_num_documents is not None:
                     assert len(rank_samples) <= max_num_documents
-                microbatch = batcher._packer.pack(
+                microbatch = packer.pack(
                     [samples[spec.rollout_id.rollout_id] for spec in rank_samples]
                 )
                 assert int((~microbatch.padding_mask).sum()) == sum(
@@ -293,15 +300,16 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     samples[0].logprobs = np.array([0, -1, -2, -np.inf, -4, -5], dtype=np.float64)
     samples[0].advantage = np.arange(6, dtype=np.float32)
     samples[0].loss_mask[1] = False
-    batcher = Batcher.Config(per_sample_pad_multiple=pad_multiple).build(
+    batcher = Batcher.Config(
+        microbatch_packer=MicrobatchPacker.Config(per_sample_pad_multiple=pad_multiple)
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=24,
         max_context_length=24,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=99,
-        temperature=1.0,
     )
-    microbatch = batcher._packer.pack(samples)
+    packer = _packer(24, pad_id=99, per_sample_pad_multiple=pad_multiple)
+    microbatch = packer.pack(samples)
     valid = ~microbatch.padding_mask
     assert microbatch.input[valid].tolist() == [10, 11, 12, 13, 14, 20, 21, 22]
     assert microbatch.labels[valid].tolist() == [11, 12, 13, 14, 15, 21, 22, 23]
@@ -327,7 +335,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     samples[0].advantage = samples[0].advantage[:-1]
     samples[1].advantage = np.pad(samples[1].advantage, (0, 1))
     with pytest.raises(ValueError, match="Segment fields must share one length"):
-        batcher._packer.pack(samples)
+        packer.pack(samples)
 
 
 def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
@@ -563,15 +571,13 @@ def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
         max_context_length=10,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
     samples = _make_samples([10, 10, 4])
 
     assignments = batcher._assign_training_samples_to_microbatches(
         list(map(_spec, samples))
     )
-    microbatch = batcher._packer.pack(samples)
+    microbatch = _packer(25, max_context_length=10).pack(samples)
     metadata = create_varlen_metadata_for_document(
         microbatch.positions,
         padding_mask=microbatch.padding_mask,
@@ -593,6 +599,4 @@ def test_token_budget_must_fit_a_full_context_sample() -> None:
             max_context_length=10,
             num_prompts_per_train_step=1,
             dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
         )
