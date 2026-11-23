@@ -9,23 +9,35 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import urllib.request
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 pytest.importorskip("verifiers")
 
 import verifiers.v1 as vf
+from renderers import Qwen3RendererConfig
+from tokenizers import Tokenizer
 
-from torchtitan.components.renderer import RenderersConfigAdapter
+from torchtitan.components.renderer import from_renderers, RenderersConfigAdapter
 
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
 from torchtitan.rl.examples.verifiers.dapo_math import data
-from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.rollouter import VerifiersRollouter
+from torchtitan.rl.examples.verifiers.data import (
+    VerifiersTaskDataset,
+    VerifiersTaskSample,
+)
+from torchtitan.rl.examples.verifiers.rollouter import VerifiersRolloutWorker
+from torchtitan.rl.generator.types import SamplingConfig
+from torchtitan.rl.rollout.rollouter import Rollouter
+from torchtitan.rl.rollout.types import Completion, RolloutStatus
 from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
+from verifiers.v1.utils.scope import run_scope
 
 
 def test_verifiers_task_scores_math_response() -> None:
@@ -96,18 +108,15 @@ def test_verifiers_task_dataset_keeps_the_first_num_tasks(monkeypatch) -> None:
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
     rollouter_config = _verifiers_math_rollouter_config(max_rollout_tokens=10240)
-    config = rollouter_config.verifiers_env_server
+    environment = rollouter_config.worker.environment
 
-    assert isinstance(config.environment, vf.SingleAgentEnvConfig)
-    assert isinstance(config.environment.agent.runtime, vf.SubprocessConfig)
-    assert isinstance(config.environment.agent.harness, VerifiersNullHarnessConfig)
-    assert isinstance(config.serve.pool, vf.StaticPoolConfig)
-    assert config.serve.pool.num_workers == 1
+    assert isinstance(environment, vf.SingleAgentEnvConfig)
+    assert isinstance(environment.agent.runtime, vf.SubprocessConfig)
+    assert isinstance(environment.agent.harness, VerifiersNullHarnessConfig)
     assert (
-        config.environment.taskset
+        environment.taskset
         == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
-    assert config.local_taskset_module == data.__name__
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
@@ -119,10 +128,145 @@ def test_verifiers_config_keeps_dapo_training_recipe() -> None:
             "rl_dapo_qwen3_4b_verifiers_8k",
         ]
     )
-    assert isinstance(config.rollouter, VerifiersRollouter.Config)
+    assert isinstance(config.rollouter, Rollouter.Config)
+    assert isinstance(config.rollouter.worker, VerifiersRolloutWorker.Config)
     assert config.generator.sampling.max_tokens == 8192
     assert config.rollouter.worker.generation_server.max_rollout_tokens == 10240
     assert config.dump_folder == "outputs/rl/qwen3_4b_verifiers_8k"
     assert isinstance(config.renderer, RenderersConfigAdapter)
     assert config.renderer.renderers_config.name == "qwen3"
     assert config.renderer.renderers_config.enable_thinking
+
+
+@pytest.mark.parametrize(
+    "group_id, group_size, temperature",
+    [
+        pytest.param(5, 2, 1.0, id="training"),
+        # The controller gives validation groups negative ids, one greedy rollout each.
+        pytest.param(-1, 1, 0.0, id="validation"),
+    ],
+)
+def test_a_group_runs_end_to_end_in_a_rollout_worker(
+    monkeypatch, group_id: int, group_size: int, temperature: float
+) -> None:
+    """One group through a real `VerifiersRolloutWorker`: the Verifiers env and agent, the
+    renderer client, the generation server, the trace decode and the reward. Only the
+    generator is fake: rollout 0 answers right, rollout 1 wrong.
+
+    Fails when a Verifiers or renderers upgrade changes what the generation server receives
+    or what a trace holds; the other tests use fake traces.
+    """
+    # The null harness installs its chat program's packages through uv, from uv's index:
+    # PyPI unless UV_DEFAULT_INDEX or UV_INDEX_URL names another. CI and the release check
+    # install Verifiers just before, so this skips only off-network.
+    index = (
+        os.environ.get("UV_DEFAULT_INDEX")
+        or os.environ.get("UV_INDEX_URL")
+        or "https://pypi.org/simple"
+    )
+    try:
+        urllib.request.urlopen(f"{index.rstrip('/')}/openai/", timeout=10).close()
+    except OSError as error:
+        pytest.skip(
+            f"uv's package index is unreachable ({error}); the null harness needs it"
+        )
+    tokenizer = Tokenizer.from_file("tests/assets/tokenizer/tokenizer.json")
+    end_of_turn = tokenizer.token_to_id("<|im_end|>")
+    answers = [r"The answer is \boxed{2}.", r"I think \boxed{3}."]
+    # (group id, temperature) of each model call.
+    generate_calls = []
+
+    async def generate_fn(prompt, *, request_id, group_id, **kwargs):
+        generate_calls.append((group_id, kwargs["sampling_config"].temperature))
+        # run_group gives rollout i the seed 100 + i.
+        answer = answers[kwargs["sampling_config"].seed - 100]
+        token_ids = tokenizer.encode(answer, add_special_tokens=False).ids
+        token_ids.append(end_of_turn)
+        return Completion(
+            min_policy_version=3,
+            max_policy_version=4,
+            request_id=request_id,
+            token_ids=token_ids,
+            token_logprobs=[-0.5] * len(token_ids),
+            finish_reason="stop",
+            metrics=[],
+        )
+
+    def load_math_dataset(name):
+        raise AssertionError("a rollout worker must not load the dataset's rows")
+
+    monkeypatch.setattr(data, "_load_math_dataset", load_math_dataset)
+    # The worker edits these for the whole process; set here, monkeypatch restores them.
+    for name in ("VF_RUN_ID", "no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "")
+    worker = _verifiers_math_rollouter_config(max_rollout_tokens=2048).worker.build()
+    release_session_fn = AsyncMock()
+
+    async def run():
+        # Monarch runs setup_async and close in different tasks: two endpoint calls.
+        await asyncio.create_task(
+            worker.setup_async(
+                tokenizer_config=None,
+                renderer_config=from_renderers(
+                    Qwen3RendererConfig(enable_thinking=False)
+                ),
+                hf_assets_path="tests/assets/tokenizer",
+            )
+        )
+        try:
+            return await worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample=VerifiersTaskSample(
+                    verifiers_task_data={
+                        "idx": 0,
+                        "prompt": "What is 1 + 1?",
+                        "ground_truth": "2",
+                    },
+                ),
+                group_id=group_id,
+                group_size=group_size,
+                sampling=SamplingConfig(
+                    temperature=temperature, top_p=1.0, max_tokens=64, seed=100
+                ),
+            )
+        finally:
+            await asyncio.create_task(worker.close())
+
+    group = asyncio.run(run())
+    assert [rollout.status for rollout in group.rollouts] == [
+        RolloutStatus.COMPLETED
+    ] * group_size
+    assert [rollout.reward for rollout in group.rollouts] == [1.0, 0.0][:group_size]
+    # The generation server found each call's group from its session.
+    assert set(generate_calls) == {(group_id, temperature)}
+    right = group.rollouts[0]
+    [turn] = right.turns
+    # Verifiers' named reward rides on turn 0, once per rollout.
+    assert [
+        (metric.key, metric.value.value)
+        for metric in turn.metrics
+        if metric.key.startswith("verifiers/")
+    ] == [("verifiers/reward/math_verify", 1.0)]
+    assert turn.completion_token_ids.tolist() == tokenizer.encode(
+        answers[0], add_special_tokens=False
+    ).ids + [end_of_turn]
+    assert turn.completion_logprobs.tolist() == [-0.5] * len(turn.completion_token_ids)
+    assert (turn.min_policy_version, turn.max_policy_version) == (3, 4)
+    assert turn.completion_message["content"].endswith(r"\boxed{2}.")
+    # One routing session per trace, each released once.
+    assert release_session_fn.await_count == group_size
+
+
+def test_rollout_worker_sets_the_verifiers_run_id_from_its_config(monkeypatch) -> None:
+    """Each worker sets Verifiers' `VF_RUN_ID` from the config, so one label finds all the
+    sandboxes of a run."""
+    # A worker sets VF_RUN_ID for its whole process. Empty reads as unset, and `setenv` makes
+    # monkeypatch remove the variable after the test (`delenv` of an unset one wouldn't).
+    monkeypatch.setenv("VF_RUN_ID", "")
+    config = _verifiers_math_rollouter_config(max_rollout_tokens=2048).worker
+
+    config.build()
+
+    # Verifiers labels each sandbox with `run_scope()`.
+    assert run_scope() == config.run_id

@@ -12,6 +12,8 @@ import gc
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch import (
     provisioning,
@@ -21,7 +23,7 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.observability import metrics as m
 
-from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
+from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import (
     BaseRolloutWorker,
     MessageEnvRolloutWorker,
@@ -68,7 +70,6 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
         RolloutWorkerActor.__init__(
             actor,
             worker_config=worker_config,
-            worker_kwargs={},
             num_threads=1,
             # Bound like the controller's; the worker overrides source and rank.
             structured_logger_init_fn=functools.partial(
@@ -126,7 +127,6 @@ def test_rollout_worker_reports_its_metrics() -> None:
         RolloutWorkerActor.__init__(
             actor,
             worker_config=SimpleNamespace(build=_LoopBlockingWorker),
-            worker_kwargs={},
             num_threads=1,
             structured_logger_init_fn=None,
         )
@@ -183,7 +183,9 @@ def test_rollout_worker_reports_its_metrics() -> None:
     assert second_metrics["rollout_worker/peak_ram_gib/max"] > 0.0
 
 
-class _SetupEndpoint:
+class _CallEndpoint:
+    """An endpoint called on every worker of the mesh with `.call`."""
+
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
@@ -193,12 +195,16 @@ class _SetupEndpoint:
 
 class _WorkerActorMesh:
     def __init__(self) -> None:
-        self.setup_async = _SetupEndpoint()
+        self.setup_async = _CallEndpoint()
         self.run_group = _ChooseRunGroupEndpoint()
+        self.close = _CallEndpoint()
         self.stopped = False
+        # How many times `close` ran when the workers stopped.
+        self.close_calls_at_stop: int | None = None
 
     async def stop(self) -> None:
         self.stopped = True
+        self.close_calls_at_stop = len(self.close.calls)
 
 
 class _WorkerMesh:
@@ -233,7 +239,11 @@ def _rollouter_without_datasets() -> Rollouter:
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker_config, rollouts_per_worker=7, rollouts_per_thread=4
+        worker=worker_config,
+        rollouts_per_worker=7,
+        rollouts_per_thread=4,
+        run_group_drain_timeout_s=30.0,
+        worker_close_timeout_s=60.0,
     )
     # 20 training rollouts in flight / 7 per worker -> 3 workers
     rollouter._max_rollouts_in_flight = 20
@@ -287,7 +297,6 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         # The actor gets the worker's own config, not the whole Rollouter config.
         assert kwargs == {
             "worker_config": rollouter._config.worker,
-            "worker_kwargs": {},
             "num_threads": 2,
             "structured_logger_init_fn": structured_logger_init_fn,
         }
@@ -300,7 +309,8 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
             }
         ]
         await rollouter.close()
-        assert worker_mesh.actor_mesh.stopped
+        # The workers' close ran once, before they stopped.
+        assert worker_mesh.actor_mesh.close_calls_at_stop == 1
         assert worker_mesh.stopped
 
     asyncio.run(run())
@@ -392,9 +402,9 @@ def test_close_waits_for_run_group_of_cancelled_caller(monkeypatch) -> None:
 
 def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
     async def run() -> None:
-        monkeypatch.setattr(rollouter_module, "_RUN_GROUP_DRAIN_TIMEOUT_S", 0.0)
         actor_mesh = _WorkerActorMesh()
         rollouter = _rollouter_without_datasets()
+        rollouter._config.run_group_drain_timeout_s = 0.0
         worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
         await _dispatch_then_cancel_caller(rollouter, actor_mesh)
 
@@ -404,3 +414,53 @@ def test_close_stops_waiting_after_drain_timeout(monkeypatch) -> None:
         assert not rollouter._inflight_run_group_calls
 
     asyncio.run(run())
+
+
+class _HangingCallEndpoint(_CallEndpoint):
+    """Records each `.call(...)`, which then never returns."""
+
+    async def call(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+        await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("close_ends_with", ["return", "hang"])
+def test_close_closes_the_workers_then_stops_them(
+    close_ends_with, monkeypatch, caplog
+) -> None:
+    """The workers get `close`. If it hangs, `close` waits `worker_close_timeout_s`, then stops
+    the workers anyway."""
+
+    async def run() -> _WorkerMesh:
+        actor_mesh = _WorkerActorMesh()
+        if close_ends_with == "hang":
+            actor_mesh.close = _HangingCallEndpoint()
+        rollouter = _rollouter_without_datasets()
+        rollouter._config.worker_close_timeout_s = 0.05
+        worker_mesh = await _setup(rollouter, actor_mesh, monkeypatch)
+        await rollouter.close()
+        return worker_mesh
+
+    worker_mesh = asyncio.run(run())
+    # The workers stop once, after their close was called.
+    assert worker_mesh.actor_mesh.close_calls_at_stop == 1
+    assert worker_mesh.stopped
+    assert ("still closing after" in caplog.text) == (close_ends_with == "hang")
+
+
+def test_close_stops_the_pool_of_a_spawn_that_failed() -> None:
+    """`spawn_rollout_workers` raised: no worker handle, but the pool still stops."""
+    stop_calls = []
+
+    async def stop_rollout_workers() -> None:
+        stop_calls.append(True)
+
+    async def run() -> None:
+        rollouter = _rollouter_without_datasets()
+        rollouter._actor_system = SimpleNamespace(
+            stop_rollout_workers=stop_rollout_workers
+        )
+        await rollouter.close()
+
+    asyncio.run(run())
+    assert stop_calls == [True]

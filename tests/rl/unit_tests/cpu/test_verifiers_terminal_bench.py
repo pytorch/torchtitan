@@ -25,7 +25,7 @@ from torchtitan.components.renderer import RenderersConfigAdapter
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.rl.controller.controller import Controller
-from torchtitan.rl.examples.verifiers import env_server
+from torchtitan.rl.examples.verifiers.rollouter import _local_taskset_module
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
@@ -35,15 +35,14 @@ from torchtitan_recipes.rl.verifiers_terminal_bench import (
     _terminal_bench_rollouter_config,
 )
 from verifiers.v1.runtimes import ProgramResult
-from verifiers.v1.serve import env_config_data
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
+from verifiers.v1.trace import Timing
 from verifiers.v1.utils.loaders import load_harness, resolve_env_config
 
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
 MAX_TURNS = 64
-MAX_CONCURRENT_ROLLOUTS = 64
 
 
 def _rollouter_config(train_dataset: str, validation_dataset: str):
@@ -52,7 +51,6 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
         max_turns=MAX_TURNS,
-        max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
     )
 
 
@@ -94,7 +92,7 @@ def _run_terminus_program(
 
     harness_config = _rollouter_config(
         TRAIN_DATASET, EVAL_DATASET
-    ).verifiers_env_server.environment.agent.harness
+    ).worker.environment.agent.harness
     harness = load_harness(harness_config.model_copy(update=options))
     runtime = _RecordingRuntime()
     asyncio.run(
@@ -192,7 +190,9 @@ def test_tmux_server_outlives_launch_until_cleanup() -> None:
     and the jobs started from it must still be alive then."""
     harness = TerminalBenchTerminusHarness(TerminalBenchTerminusHarnessConfig())
     runtime = _RecordingRuntime()
-    trace = SimpleNamespace(id="trace")
+    # Verifiers marks the agent as started once setup succeeds, before `launch`.
+    trace = SimpleNamespace(id="trace", timing=Timing())
+    trace.timing.agent.start = 1.0
     asyncio.run(
         harness.launch(
             SimpleNamespace(model="torchtitan"),
@@ -216,9 +216,19 @@ def test_tmux_server_outlives_launch_until_cleanup() -> None:
     assert list(runtime.files) == ["/tmp/vf-terminus-2-trace.prompts.json"]
 
 
+def test_cleanup_skips_a_rollout_whose_setup_failed() -> None:
+    """A sandbox that never started has no tmux server, and Verifiers may have torn
+    its runtime down already, so cleanup must not run anything on it."""
+    harness = TerminalBenchTerminusHarness(TerminalBenchTerminusHarnessConfig())
+    runtime = _RecordingRuntime()
+    trace = SimpleNamespace(id="trace", timing=Timing())
+    asyncio.run(harness.cleanup(trace, runtime))
+    assert runtime.commands == []
+
+
 def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
-    environment = config.verifiers_env_server.environment
+    environment = config.worker.environment
 
     assert isinstance(environment, HarborEnvConfig)
     assert isinstance(environment.agent.runtime, vf.DockerConfig)
@@ -230,56 +240,32 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert environment.taskset == config.training_dataloader.dataset.verifiers_taskset
     assert config.training_dataloader.dataset.verifiers_taskset.dataset == TRAIN_DATASET
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
-    assert config.verifiers_env_server.local_taskset_module == taskset.__name__
-    worker_config = resolve_env_config(env_config_data(environment))
+    assert _local_taskset_module(environment.taskset) == taskset.__name__
+    worker_config = resolve_env_config(environment)
     assert worker_config.agent.harness == environment.agent.harness
     assert isinstance(
         load_harness(worker_config.agent.harness), TerminalBenchTerminusHarness
     )
 
 
-def test_env_server_workers_skip_the_trainer_imports(monkeypatch) -> None:
-    """A pool worker loads the broker's ``__main__``, runs the pickled ``log_setup``, then
-    resolves the env config, whose taskset id is the local alias. It must find the taskset
-    and the harness without importing torch, vLLM or Monarch.
+def test_a_fresh_worker_process_loads_the_terminal_bench_env() -> None:
+    """A rollout worker is a spawned process: it gets its config pickled, then builds the
+    worker, which loads the env. The taskset id is a local alias that only this test's process
+    registered, so the worker must register it again before Verifiers imports the taskset.
     """
-    captured = {}
-
-    def serve_env(**kwargs) -> None:
-        captured["main"] = sys.modules["__main__"]
-        captured["log_setup"] = pickle.dumps(kwargs["log_setup"])
-        captured["config_data"] = pickle.dumps(kwargs["config_data"])
-
-    monkeypatch.setattr(env_server, "serve_env", serve_env)
-    # _run_env_server_process replaces __main__ and edits no_proxy; restore both after the test.
-    monkeypatch.setitem(sys.modules, "__main__", sys.modules["__main__"])
-    monkeypatch.setenv("no_proxy", "")
-    monkeypatch.setenv("NO_PROXY", "")
-    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).verifiers_env_server
-    env_server._run_env_server_process(
-        environment=env_config_data(config.environment),
-        serve=config.serve,
-        local_taskset_module=config.local_taskset_module,
-        address_queue=None,
-        death_pipe=None,
-    )
-
-    # Spawn re-runs __main__ in each worker if it has a module name or a file.
-    assert captured["main"].__spec__ is None
-    assert not hasattr(captured["main"], "__file__")
+    worker_config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).worker
     worker = f"""
-import pickle, sys
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
-pickle.loads({captured["log_setup"]!r})()
-env_config = resolve_env_config(pickle.loads({captured["config_data"]!r}))
-print(type(load_harness(env_config.agent.harness)).__name__)
-print([name for name in ("torch", "vllm", "monarch") if name in sys.modules])
+import pickle
+from verifiers.v1.utils.loaders import load_harness
+worker = pickle.loads({pickle.dumps(worker_config)!r}).build()
+env = worker._verifiers_env
+print(type(env.taskset).__name__, type(load_harness(env.config.agent.harness)).__name__)
 """
     result = subprocess.run(
         [sys.executable, "-c", worker], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.split() == ["TerminalBenchTerminusHarness", "[]"]
+    assert result.stdout.split() == ["TerminalTaskset", "TerminalBenchTerminusHarness"]
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:
@@ -321,6 +307,9 @@ def test_training_recipe_uses_separate_datasets() -> None:
         == TRAIN_DATASET
     )
     assert config.rollouter.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
+    # The job's config dump holds the env as nested JSON data, its taskset's fields included.
+    environment = config.to_dict()["rollouter"]["worker"]["environment"]
+    assert environment["taskset"]["dataset"] == TRAIN_DATASET
 
 
 def _num_kv_heads(model: object) -> int:
@@ -353,7 +342,7 @@ def test_muse_glimmer_terminal_bench_recipe_uses_worker_loadable_renderer() -> N
     assert config.generator.model.max_context_length == 16384
     assert config.rollouter.worker.generation_server.max_rollout_tokens == 16384
     assert config.generator.sampling.max_tokens == 4096
-    assert config.rollouter.verifiers_env_server.environment.agent.max_turns == 8
+    assert config.rollouter.worker.environment.agent.max_turns == 8
     assert config.generator.engine.cuda_graph.mode == "NONE"
     assert isinstance(config.trainer.activation_remat, FullActivationRematConfig)
     assert _num_kv_heads(config.generator.model) == 2
@@ -439,8 +428,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     """Every model trains on the same loop; only size-dependent settings differ.
 
     Master weights stay fp32 (the default): at a 1e-6 learning rate bf16
-    parameters round most updates away. The env server must run every rollout
-    the controller keeps in flight, or the excess queues and the generators idle.
+    parameters round most updates away.
     """
     config = _terminal_bench_config(name)
     assert config.precision.dtype == "float32"
@@ -448,14 +436,9 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.batcher.training_sample_builder.drop_zero_std_reward_groups
     assert config.generator.sampling.max_tokens == 16384
-    agent = config.rollouter.verifiers_env_server.environment.agent
+    agent = config.rollouter.worker.environment.agent
     assert agent.max_turns == 120
     assert (
         config.rollouter.worker.generation_server.max_rollout_tokens
         == config.trainer.model.max_context_length
-    )
-    loop = config.async_loop
-    serve = config.rollouter.verifiers_env_server.serve
-    assert serve.pool.num_workers * serve.max_concurrent >= (
-        loop.max_active_rollout_groups * loop.num_samples_per_prompt
     )
