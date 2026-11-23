@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from torchtitan.components.data.balancing import (
+    document_attention_cost,
+    HeaviestFirstOrderingConfig,
+)
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
     DatasetConcatConfig,
@@ -41,8 +45,10 @@ __all__ = [
     "DatasetConfig",
     "DatasetIterationPolicy",
     "DatasetMixConfig",
+    "document_attention_cost",
     "FirstFitPackingConfig",
     "GrainDataLoader",
+    "HeaviestFirstOrderingConfig",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
     "IndexedJsonlSource",
