@@ -283,6 +283,8 @@ class DeepSeekV4Model(MTPDecoder):
                 )
             tokens, *rest = tokens
             mtp_input_tokens = tuple(rest)
+        else:
+            tokens = cast(torch.Tensor, tokens)
 
         if self.tok_embeddings is not None:
             if input_ids_T is None:
