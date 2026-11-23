@@ -30,33 +30,40 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.data import c4_document_capacity
 
-
-def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
-    """Qwen3.5 9B text model at 1M context with YaRN RoPE and CP 8.
+def _qwen3_5_9b_ulysses_lean_remat_offload(
+    flavor: str, *, cp: int, max_num_documents: int
+) -> Trainer.Config:
+    """Qwen3.5 9B text model at long context with YaRN RoPE and Ulysses CP.
 
     Full attention uses Ulysses CP with FA3. Ulysses copies each of the 4 KV
-    heads to 2 of the 8 CP ranks. It needs contiguous token shards, so there is
-    no load balancer.
+    heads to ``cp // 4`` CP ranks. It needs contiguous token shards, so there
+    is no load balancer.
 
     Lean remat keeps full attention out of recompute and offloads what blocks
     retain. Each block keeps only its input, and each full-attention block also
     its attention kernel's output and LSE; everything else, including the CP
     communication, is recomputed. Both go to CPU (about 38 GiB of pinned memory
-    per rank at 1M), except in the last block: only the loss runs between its
-    forward and its backward, so its copies could not overlap compute.
+    per rank at 128K tokens per rank), except in the last block: only the loss
+    runs between its forward and its backward, so its copies could not overlap
+    compute.
+
+    ``max_num_documents`` caps document pieces per row; each slot costs fp32
+    GDN state (about 9 MiB per rank). The values below fit the OpenGenome3 DNA
+    sample, whose shortest document has 131351 tokens: a row of N tokens then
+    holds at most ``(N - 1) // 131351 + 2`` pieces and never pads. The C4
+    placeholder dataset has far shorter documents; set it from your data.
     """
     parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "9B_1M", attn_backend="varlen", parallelism=parallelism
+        flavor, attn_backend="varlen", parallelism=parallelism
     )
     num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     config = Trainer.Config(
         loss=ChunkedLossWrapper.Config(
-            # 4096 tokens per chunk on each of the 8 CP ranks keeps one bf16
-            # logits chunk (248320-token vocab) at about 2 GiB.
-            num_chunks=num_tokens_per_microbatch_per_dp_rank // (8 * 4096),
+            # 4096 tokens per chunk on each CP rank keeps one bf16 logits
+            # chunk (248320-token vocab) at about 2 GiB.
+            num_chunks=num_tokens_per_microbatch_per_dp_rank // (cp * 4096),
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
@@ -64,9 +71,7 @@ def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            max_num_documents=c4_document_capacity(
-                num_tokens_per_microbatch_per_dp_rank
-            ),
+            max_num_documents=max_num_documents,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         optim=Optim.Config(
@@ -84,7 +89,7 @@ def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
     )
     # CP is set after the base config validates; the transform below adds the
     # CP inner attention and validates again.
-    config.parallelism.context_parallel_degree = 8
+    config.parallelism.context_parallel_degree = cp
     config = apply_transforms(
         config,
         [
@@ -116,3 +121,18 @@ def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
     # TODO: re-enable once CUDA graph capture works with this PyTorch build.
     config.training.disable_accelerator_graphs = True
     return config
+
+
+def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
+    """1M context, CP 8 (128K tokens per rank)."""
+    return _qwen3_5_9b_ulysses_lean_remat_offload("9B_1M", cp=8, max_num_documents=9)
+
+
+def qwen3_5_9b_2m_cp16_ulysses_lean_remat_offload() -> Trainer.Config:
+    """2M context, CP 16 (128K tokens per rank)."""
+    return _qwen3_5_9b_ulysses_lean_remat_offload("9B_2M", cp=16, max_num_documents=17)
+
+
+def qwen3_5_9b_4m_cp16_ulysses_lean_remat_offload() -> Trainer.Config:
+    """4M context, CP 16 (256K tokens per rank; Ulysses allows at most CP 16)."""
+    return _qwen3_5_9b_ulysses_lean_remat_offload("9B_4M", cp=16, max_num_documents=33)

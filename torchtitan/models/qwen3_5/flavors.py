@@ -1480,6 +1480,14 @@ MODEL_FLAVORS = {
         ),
         2**20,
     ),
+    "9B_2M": (
+        partial(
+            _9b,
+            has_vision_encoder=False,
+            rope_scaling=YaRNScalingConfig(factor=8.0, original_seq_len=262144),
+        ),
+        2**21,
+    ),
     "9B_4M": (
         partial(
             _9b,
