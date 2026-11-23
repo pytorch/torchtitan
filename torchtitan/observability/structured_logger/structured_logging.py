@@ -296,7 +296,12 @@ def init_structured_logger(
     _ensure_root_forwarder()
 
 
-def log_trace_scalar(scalars: dict[str, float | int], *, stacklevel: int = 2) -> None:
+def log_trace_scalar(
+    scalars: dict[str, float | int],
+    *,
+    step: int | None = None,
+    stacklevel: int = 2,
+) -> None:
     """Emit a record per (name, value) pair. Useful when adding more context
     to the trace for debugging, e.g. registering `num_tokens_processed`.
 
@@ -307,6 +312,8 @@ def log_trace_scalar(scalars: dict[str, float | int], *, stacklevel: int = 2) ->
     Args:
         scalars: Mapping of scalar name to numeric value. Non-numeric
             values are skipped with a warning.
+        step: Step to stamp on the records, for values emitted after their
+            step ended. Defaults to the step from ``set_step()``.
         stacklevel: Passed through to ``logger.info`` so the ``caller`` field
             in the emitted record points at the real call site. Increase from
             the default 2 if you wrap this function in a helper.
@@ -317,7 +324,8 @@ def log_trace_scalar(scalars: dict[str, float | int], *, stacklevel: int = 2) ->
     """
     if _structured_logger_disabled() or torch.compiler.is_compiling():
         return
-    step = get_step()
+    if step is None:
+        step = get_step()
     bad_keys: list[str] = []
     for name, value in scalars.items():
         if not isinstance(value, (float, int)) or isinstance(value, bool):

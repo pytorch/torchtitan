@@ -384,7 +384,7 @@ class Trainer(Configurable):
                 local_loss_token_counts.reshape(-1),
                 local_routing_token_counts.reshape(-1),
             )
-        ).to(engine.device)
+        ).to(engine.device, non_blocking=True)
         if parallelism_context.dp_enabled:
             global_token_counts = dist_utils.dist_sum_tensor(
                 global_token_counts, parallelism_context.get_mesh("dp")
@@ -400,6 +400,9 @@ class Trainer(Configurable):
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
+        # Emit the previous logged step after this step is queued, so waiting
+        # for its values overlaps with this step on the device.
+        self.metrics_processor.flush()
         global_main_loss_token_count = (
             global_loss_token_counts
             if global_loss_token_counts.ndim == 0
@@ -420,26 +423,21 @@ class Trainer(Configurable):
         mean_num_flops = self._local_num_flops_since_last_log
 
         with sl.log_trace_span("collect_dist_metrics"):
-            sl.log_trace_scalar(
-                {"global_valid_tokens": int(global_main_loss_token_count)}
-            )
-
             # Combine loss metrics over microbatches and loss-mesh ranks; under PP,
             # ranks without the last stage have none.
             # TODO(#4202): migrate loss-metric collection to the distributed
             # tensor logging framework once it lands.
             loss_mesh = parallelism_context.get_optional_mesh("loss")
-            loss_metrics = {
-                key: float(value.item())
-                for key, value in combine_loss_metrics(
+            loss_metrics = dict(
+                combine_loss_metrics(
                     (
                         microbatch_metrics
                         for group_metrics in forward_backward_result.loss_metrics
                         for microbatch_metrics in group_metrics
                     ),
                     mesh=loss_mesh,
-                ).items()
-            }
+                )
+            )
 
             if parallelism_context.dp_cp_enabled:
 
@@ -458,26 +456,24 @@ class Trainer(Configurable):
                     / local_main_loss_token_count
                 )
                 global_avg_loss, global_max_loss, global_ntokens_seen = (
-                    dist_utils.dist_sum(accumulated_loss, loss_mesh),
-                    dist_utils.dist_max(local_avg_loss, loss_mesh),
-                    dist_utils.dist_sum(
-                        torch.tensor(
-                            engine.ntokens_seen,
-                            dtype=torch.int64,
-                            device=engine.device,
+                    dist_utils.dist_sum_tensor(accumulated_loss, loss_mesh),
+                    dist_utils.dist_max_tensor(local_avg_loss, loss_mesh),
+                    dist_utils.dist_sum_tensor(
+                        torch.tensor(engine.ntokens_seen, dtype=torch.int64).to(
+                            engine.device, non_blocking=True
                         ),
                         loss_mesh,
                     ),
                 )
                 if parallelism_context.dp_enabled:
                     mean_num_flops = dist_utils.dist_mean(
-                        torch.tensor(
-                            mean_num_flops, dtype=torch.float64, device=engine.device
+                        torch.tensor(mean_num_flops, dtype=torch.float64).to(
+                            engine.device, non_blocking=True
                         ),
                         parallelism_context.get_mesh("dp"),
                     )
             else:
-                global_avg_loss = global_max_loss = float(accumulated_loss.item())
+                global_avg_loss = global_max_loss = accumulated_loss
                 global_ntokens_seen = engine.ntokens_seen
 
         extra_metrics = {
@@ -486,13 +482,14 @@ class Trainer(Configurable):
             **collect_aux_loss_metrics(parallelism_context),
             **loss_metrics,
         }
-        self.metrics_processor.log(
+        self.metrics_processor.log_async(
             engine.num_completed_steps,
             global_avg_loss,
             global_max_loss,
-            float(grad_norm.item()),
+            grad_norm,
             extra_metrics=extra_metrics,
             num_flops=mean_num_flops,
+            trace_scalars={"global_valid_tokens": global_main_loss_token_count},
         )
 
     @record
@@ -531,6 +528,7 @@ class Trainer(Configurable):
                     if config.validator is not None and self.validator.should_validate(
                         engine.num_completed_steps
                     ):
+                        self.metrics_processor.flush()
                         self.validator.validate(
                             engine.model_parts, engine.num_completed_steps
                         )
@@ -547,6 +545,7 @@ class Trainer(Configurable):
                             ),
                             parallelism_context=engine.parallelism_context,
                         )
+            self.metrics_processor.flush()
         except BaseException as e:
             # Pass the failure so an OOM writes the exit memory snapshot. The
             # entry point also calls close() for checkpoint and graph cleanup;

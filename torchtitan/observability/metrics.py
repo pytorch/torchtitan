@@ -30,6 +30,7 @@ from torch.utils.tensorboard import FileWriter
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext
+from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import Color, NoColor
 from torchtitan.tools import utils
 from torchtitan.tools.utils import device_module, device_type
@@ -115,6 +116,55 @@ def build_device_memory_monitor():
         f"with {device_memory_monitor.device_capacity_gib:.2f}GiB memory"
     )
     return device_memory_monitor
+
+
+def _record_time() -> torch.Event | float:
+    """Return a timestamp taken after the device work queued so far.
+
+    CPU has no events, and its work runs before this call returns.
+    """
+    if device_type == "cpu":
+        return time.perf_counter()
+    event = torch.Event(enable_timing=True)
+    event.record()
+    return event
+
+
+def _elapsed_seconds(start: torch.Event | float, end: torch.Event | float) -> float:
+    """Wait for ``end`` and return the seconds since ``start``."""
+    if isinstance(start, float):
+        assert isinstance(end, float)
+        return end - start
+    assert isinstance(end, torch.Event)
+    end.synchronize()
+    return start.elapsed_time(end) / 1000
+
+
+@dataclass
+class _PendingLog:
+    """A logged step whose device values are still being copied to the host."""
+
+    step: int
+    num_steps: int
+    num_tokens: int
+    data_loading_times: list[float]
+    device_mem_stats: DeviceMemStats
+    window_start: torch.Event | float
+    window_end: torch.Event | float
+    # Python values and host copies of tensors, read at flush.
+    values: dict[str, Any]
+    trace_scalars: dict[str, Any]
+
+
+def _read(value: Any) -> Any:
+    return value.item() if isinstance(value, torch.Tensor) else value
+
+
+def _copy_to_host(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        # non_blocking pins the host tensor.
+        return value.detach().to("cpu", non_blocking=True)
+    return value
 
 
 def compute_training_performance_metrics(
@@ -453,7 +503,6 @@ class MetricsProcessor(Configurable):
     gpu_peak_flops: float | None
     ntokens_since_last_log: int
     data_loading_times: list[float]
-    time_last_log: float
     step_last_log: int | None
 
     has_quantization: bool
@@ -512,8 +561,9 @@ class MetricsProcessor(Configurable):
         # last reset(), not only since the last log.
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
-        self.time_last_log = time.perf_counter()
+        self._window_start = _record_time()
         self.step_last_log = None
+        self._pending: _PendingLog | None = None
         self.device_memory_monitor.reset_peak_stats()
 
         self.has_quantization = has_quantization
@@ -530,12 +580,12 @@ class MetricsProcessor(Configurable):
     def log(
         self,
         step: int,
-        global_avg_loss: float,
-        global_max_loss: float,
-        grad_norm: float,
+        global_avg_loss: float | torch.Tensor,
+        global_max_loss: float | torch.Tensor,
+        grad_norm: float | torch.Tensor,
         extra_metrics: dict[str, Any] | None = None,
         *,
-        num_flops: float,
+        num_flops: float | torch.Tensor,
     ):
         """
         Log training metrics including loss, throughput, and memory statistics.
@@ -551,11 +601,77 @@ class MetricsProcessor(Configurable):
             num_flops: Mean model-wide logical FLOPs per DP replica in this interval
 
         """
+        self.log_async(
+            step,
+            global_avg_loss,
+            global_max_loss,
+            grad_norm,
+            extra_metrics,
+            num_flops=num_flops,
+        )
+        self.flush()
 
-        time_delta = time.perf_counter() - self.time_last_log
+    def log_async(
+        self,
+        step: int,
+        global_avg_loss: float | torch.Tensor,
+        global_max_loss: float | torch.Tensor,
+        grad_norm: float | torch.Tensor,
+        extra_metrics: dict[str, Any] | None = None,
+        *,
+        num_flops: float | torch.Tensor,
+        trace_scalars: dict[str, torch.Tensor] | None = None,
+    ) -> None:
+        """Like ``log``, but emit the metrics at the next ``flush()``.
+
+        Tensor values are copied to the host without waiting for the device, so
+        the host can queue the next step while the device finishes this one.
+        The throughput window ends when the device reaches this call.
+        ``trace_scalars`` are emitted as structured trace records of ``step``.
+        """
+        self.flush()
+        values = {
+            "loss_metrics/global_avg_loss": global_avg_loss,
+            "loss_metrics/global_max_loss": global_max_loss,
+            "grad_norm": grad_norm,
+            "num_flops": num_flops,
+            **(extra_metrics or {}),
+        }
+        assert self.step_last_log is not None
+        self._pending = _PendingLog(
+            step=step,
+            num_steps=step - self.step_last_log,
+            num_tokens=self.ntokens_since_last_log,
+            data_loading_times=list(self.data_loading_times),
+            device_mem_stats=self.device_memory_monitor.get_peak_stats(),
+            values={k: _copy_to_host(v) for k, v in values.items()},
+            trace_scalars={
+                k: _copy_to_host(v) for k, v in (trace_scalars or {}).items()
+            },
+            window_start=self._window_start,
+            # Recorded after the copies on the same stream.
+            window_end=_record_time(),
+        )
+        self.step_last_log = step
+
+    def flush(self) -> None:
+        """Emit the metrics queued by ``log_async``, if any."""
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        # Waits for window_end, which is after the copies to the host.
+        time_delta = _elapsed_seconds(pending.window_start, pending.window_end)
+        values = {k: _read(v) for k, v in pending.values.items()}
+        sl.log_trace_scalar(
+            {k: _read(v) for k, v in pending.trace_scalars.items()}, step=pending.step
+        )
+        global_avg_loss = values.pop("loss_metrics/global_avg_loss")
+        global_max_loss = values.pop("loss_metrics/global_max_loss")
+        grad_norm = values.pop("grad_norm")
+        num_flops = values.pop("num_flops")
 
         performance = compute_training_performance_metrics(
-            num_tokens=self.ntokens_since_last_log,
+            num_tokens=pending.num_tokens,
             elapsed_time=time_delta,
             non_data_parallel_size=self.parallelism_context.non_data_parallel_size,
             num_flops=num_flops,
@@ -566,12 +682,12 @@ class MetricsProcessor(Configurable):
         tflops = performance["tflops"]
         mfu = performance.get("mfu_percent")
 
-        assert self.step_last_log is not None
-        time_end_to_end = time_delta / (step - self.step_last_log)
-        time_data_loading = sum(self.data_loading_times) / len(self.data_loading_times)
-        time_data_loading_pct = 100 * sum(self.data_loading_times) / time_delta
+        data_loading_times = pending.data_loading_times
+        time_end_to_end = time_delta / pending.num_steps
+        time_data_loading = sum(data_loading_times) / len(data_loading_times)
+        time_data_loading_pct = 100 * sum(data_loading_times) / time_delta
 
-        device_mem_stats = self.device_memory_monitor.get_peak_stats()
+        device_mem_stats = pending.device_mem_stats
 
         metrics = {
             "loss_metrics/global_avg_loss": global_avg_loss,
@@ -592,16 +708,15 @@ class MetricsProcessor(Configurable):
         if mfu is not None:
             metrics["mfu(%)"] = mfu
 
-        if extra_metrics:
-            metrics.update(extra_metrics)
+        metrics.update(values)
 
         for metric_logger in self.loggers:
-            metric_logger.log(metrics, step)
+            metric_logger.log(metrics, pending.step)
 
         color = self.color
         mfu_str = f"{mfu:.2f}%" if mfu is not None else "N/A"
         logger.info(
-            f"{color.red}step: {step:2}  "
+            f"{color.red}step: {pending.step:2}  "
             f"{color.green}loss: {global_avg_loss:8.5f}  "
             f"{color.orange}grad_norm: {grad_norm:7.4f}  "
             f"{color.turquoise}memory: {device_mem_stats.max_reserved_gib:5.2f}GiB"
@@ -610,8 +725,6 @@ class MetricsProcessor(Configurable):
             f"{color.cyan}tflops: {tflops:,.2f}  "
             f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
-
-        self.step_last_log = step
 
     def reset(self) -> None:
         """Start a new window for throughput, data-loading time and peak memory.
@@ -622,13 +735,13 @@ class MetricsProcessor(Configurable):
         """
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
-        self.time_last_log = time.perf_counter()
+        self._window_start = _record_time()
         self.device_memory_monitor.reset_peak_stats()
 
     def log_validation(
         self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None
     ):
-        time_delta = time.perf_counter() - self.time_last_log
+        time_delta = _elapsed_seconds(self._window_start, _record_time())
 
         device_mem_stats = self.device_memory_monitor.get_peak_stats()
 

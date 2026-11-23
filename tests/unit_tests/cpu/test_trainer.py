@@ -979,6 +979,7 @@ def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
             config=SimpleNamespace(),
             engine=engine,
             dataloader=object(),
+            metrics_processor=MagicMock(),
             microbatch_generator=MagicMock(return_value=iter(())),
             should_continue_training=MagicMock(return_value=failure is not None),
             train_step=MagicMock(side_effect=failure),
@@ -1035,7 +1036,8 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
         should_log=MagicMock(return_value=True),
         step_last_log=0,
         reset=MagicMock(),
-        log=MagicMock(),
+        log_async=MagicMock(),
+        flush=MagicMock(),
     )
     trainer = cast(
         TrainingEngine,
@@ -1084,21 +1086,24 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
 
     Trainer.train_step(_training_loop(trainer), data_iterator)
 
-    metrics_processor.log.assert_called_once_with(
-        1,
-        6.0,
-        6.0,
-        4.0,
-        extra_metrics={"n_tokens_seen": 3},
-        # A fake process group sums nothing, so the DP mean is the local value.
-        num_flops=600.0,
-    )
+    metrics_processor.log_async.assert_called_once()
+    args, kwargs = metrics_processor.log_async.call_args
+    assert args[0] == 1
+    assert [float(value) for value in args[1:]] == [6.0, 6.0, 4.0]
+    assert {k: float(v) for k, v in kwargs["extra_metrics"].items()} == {
+        "n_tokens_seen": 3
+    }
+    # A fake process group sums nothing, so the DP mean is the local value.
+    assert float(kwargs["num_flops"]) == 600.0
+    assert kwargs["trace_scalars"] == {
+        "global_valid_tokens": loss_token_counts.reshape(-1)[0] * 3
+    }
     # The first step after loading starts a new metrics window.
     metrics_processor.reset.assert_called_once()
     assert trainer.num_completed_steps == 1
 
     metrics_processor.should_log.return_value = False
-    metrics_processor.log.reset_mock()
+    metrics_processor.log_async.reset_mock()
     metrics_processor.reset.reset_mock()
     Trainer.train_step(
         _training_loop(trainer),
@@ -1107,7 +1112,9 @@ def test_trainer_accumulates_reused_accelerator_graph_losses(
         ),
     )
 
-    metrics_processor.log.assert_not_called()
+    metrics_processor.log_async.assert_not_called()
+    # The step emits the previous logged step after queuing its own work.
+    metrics_processor.flush.assert_called()
     # A step in the middle of a window does not start a new one.
     metrics_processor.reset.assert_not_called()
     assert trainer.num_completed_steps == 2
