@@ -40,6 +40,7 @@ pipeline, context, and expert parallelism without rewriting the model.
 
 ## Latest news
 
+- **[2026/10]** [Zephon](https://github.com/datologyai/zephon), a data loader by [DatologyAI](https://www.datologyai.com/), released its [TorchTitan integration](https://github.com/datologyai/torchtitan-zephon). Zephon keeps the same training batches in the same order even when your GPU count changes (elastic determinism). Check out the [blog post on pytorch.org](https://pytorch.org/blog/bringing-elastically-deterministic-data-loading-to-torchtitan-with-zephon/).
 - **[2026/08]** [TitanRL](torchtitan/rl) is a hackable RL stack for scaling and debugging. It reuses TorchTitan model definitions and kernels across training and vLLM generation and supports batch-invariant mode.
 - **[2025/11]** AMD released an [optimized fork](https://github.com/AMD-AGI/torchtitan-amd/tree/main) of `torchtitan` for AMD GPUs.
 - **[2025/10]** We released `torchtitan` [v0.2.0](https://github.com/pytorch/torchtitan/releases).
@@ -113,7 +114,7 @@ and [`torchtitan_recipes`](torchtitan_recipes/README.md) for the verified recipe
 | [Kimi K2.7](torchtitan/models/kimi_k2_7) | Moonlight-16B-A3B, Kimi-VL-A3B, K2.5 | Text, vision | | |
 | [Kimi K3](torchtitan/models/kimi_k3) | K3 | Text, vision | | Soon |
 | [Muse Glimmer](torchtitan/models/muse_glimmer) | 30B | Text, vision | `muse_glimmer_30b` | ✅ |
-| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b` | ✅ text |
+| [Muse-Spark-Open](torchtitan/models/muse_spark) | 816B-A42B | Text, vision, audio | `muse_spark_816b_a42b_dist_moe_bf16_spmd_256` | ✅ text |
 | [FLUX](torchtitan/models/flux) | dev, schnell | Text-to-image | `flux_dev`, `flux_schnell` | |
 
 Every model has debug configurations exercised in CI. Verified recipes have
@@ -135,7 +136,8 @@ the [model guide](torchtitan/models/README.md).
 - [Dist-MoE](torchtitan/models/common/dist_moe/README.md): fused dispatch, expert compute, and combine on Blackwell
 
 **Memory and performance**
-- [Activation checkpointing](torchtitan/distributed/REMAT.md): full, selective, and regional
+- [Activation checkpointing](torchtitan/distributed/ACTIVATION_REMAT.md): full, selective, and regional
+- [Activation offloading](torchtitan/distributed/ACTIVATION_OFFLOAD.md) to CPU of the activations remat (activation checkpointing) retains
 - Regional `torch.compile` and CUDA graphs
 - [MXFP8](torchtitan/quantization/mxfp8/README.md) and [NVFP4](torchtitan/quantization/nvfp4/README.md) training
 - FlashAttention 3/4, FlexAttention, and varlen attention
@@ -225,11 +227,11 @@ validated against; see [RELEASE.md](RELEASE.md).
 <details>
 <summary><b>Optional dependencies</b></summary>
 
-- **Low precision (MXFP8, NVFP4):** install a `torchao` nightly matching your
-  `torch` build. It is not in `requirements.txt` so it cannot be resolved
-  against a different `torch`:
+- **Low precision (MXFP8, NVFP4):** install the `torchao` nightly CI pins, from
+  the index matching your `torch` build. It is not in `requirements.txt` so it
+  cannot be resolved against a different `torch`:
   ```bash
-  USE_CPP=0 pip install --pre --upgrade torchao --index-url https://download.pytorch.org/whl/nightly/cu132
+  USE_CPP=0 pip install --pre -r .github/requirements-torchao.txt --index-url https://download.pytorch.org/whl/nightly/cu132
   ```
 - **RL:** `scripts/install_rl_env.sh` installs the vLLM, Monarch, and TorchStore
   nightlies and the FlashAttention build for your GPU. See the

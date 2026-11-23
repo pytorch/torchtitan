@@ -34,7 +34,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    ModelConfigConverter,
     TokenDispatcherTransform,
 )
 from torchtitan.models.common.attention import VarlenInnerAttention
@@ -628,7 +627,6 @@ def _kimi_k3_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Kimi K3 ``(trainer, generator)`` model configs for RL, with the lm_head
     fp32 cast always on and no local compile regions."""
@@ -639,7 +637,6 @@ def _kimi_k3_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
@@ -761,8 +758,8 @@ def rl_grpo_kimi_k3_debug_varlen_batch_invariant(
 def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init DeepSeek V3 GRPO whose generator caches compressed MLA latents.
 
-    Without batch invariance, the generator uses vLLM's native MLA and captures
-    decode CUDA graphs.
+    Without batch invariance, the generator decodes the compressed cache with
+    Attention Gym's latent MLA kernel and captures decode CUDA graphs.
     """
     trainer_parallelism = ParallelismConfig(data_parallel_shard_degree=2)
     generator_parallelism = InferenceParallelismConfig(
@@ -867,6 +864,10 @@ def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    # Covers validations beside training, then the validation after training.
+    config.async_loop.validation = ValidationConfig(
+        steps=20, freq=2, validate_after_training=True
+    )
     return _configure_ci(
         config,
         steps=5,
@@ -992,6 +993,9 @@ def rl_grpo_checkpoint_resume() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 1
     config.trainer.parallelism.tensor_parallel_degree = 2
     config.generator.parallelism.tensor_parallel_degree = 4
+    # TorchStore is still the only path for gpu_fetch; keep it covered.
+    # TODO: drop with the TorchStore path.
+    config.model_state_dict_transport = None
     return _configure_ci(
         config,
         steps=4,

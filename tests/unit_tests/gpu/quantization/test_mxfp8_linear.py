@@ -346,6 +346,8 @@ def test_mxfp8_linear_runs_outside_plain_eager(
     )
 
     if execution_mode == "compile":
+        # Compiled autograd requires the non-in-place WGRAD path.
+        linear.inplace_wgrad_accum = False
         output = torch.compile(linear, fullgraph=True)(x)
     else:
         output = checkpoint(linear, x, use_reentrant=False)
@@ -492,11 +494,11 @@ def test_fsdp_post_all_gather_drops_the_padding():
 
 
 def test_fsdp_hooks_support_a_non_zero_shard_dim():
-    """Structured weights move their sharded matrix axis to the gather axis."""
+    """Structured weights keep their layout; FSDP gathers along the sharded dim."""
     sharded_weight = _LinearShardedTensorWithMXFP8Compute(
         torch.randn(2, 48, 128, device="cuda", dtype=torch.bfloat16)
     )
-    (comm_N2K,), metadata = sharded_weight.fsdp_pre_all_gather(
+    (comm_2NK,), metadata = sharded_weight.fsdp_pre_all_gather(
         _StubMesh(2),
         torch.Size([2, 96, 128]),
         None,
@@ -504,10 +506,11 @@ def test_fsdp_hooks_support_a_non_zero_shard_dim():
         _StubMixedPrecisionPolicy(),
     )
 
-    assert comm_N2K.shape == (48, 2, 128)
-    gathered_N2K = torch.randn(96, 2, 128, device="cuda", dtype=torch.bfloat16)
+    assert comm_2NK.shape == (2, 48, 128)
+    # FSDP's output, viewed as (-1, *input.shape[1:])
+    gathered = torch.randn(4, 48, 128, device="cuda", dtype=torch.bfloat16)
     unsharded, inner_tensors = sharded_weight.fsdp_post_all_gather(
-        (gathered_N2K,), metadata, torch.bfloat16
+        (gathered,), metadata, torch.bfloat16
     )
     assert unsharded.shape == (2, 96, 128)
     assert len(inner_tensors) == 3

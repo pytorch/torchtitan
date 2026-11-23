@@ -9,27 +9,26 @@
 from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
+from typing import Any
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 
+from torchtitan.components.data.multimodal.vision_processor import NaViTPatchGridResize
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
+    ColumnParallelLinear,
     Conv1d,
     DenseFeedForward,
-    Embedding,
     GatedRMSNorm,
     HiMidLoLinear,
     Linear,
     RowParallelLinear,
     Sigmoid,
     SiTUGLU,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.attention import FlexInnerAttention, InnerAttention
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
@@ -45,7 +44,6 @@ from torchtitan.models.common.decoder_sharding import (
     mla_attention_local_spmd_sharding_config,
     mla_kv_projection_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     replicated_input_colwise_sharding_config,
     replicated_state_sharding_config,
     residual_activation_placement,
@@ -59,29 +57,32 @@ from torchtitan.models.common.moe.sharding import (
     router_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.rope import ComplexVisionRoPE
 from torchtitan.models.common.vision_encoder import (
-    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_sharding_config,
-    multimodal_token_embedding_sharding_config,
     vision_attention_sharding_config,
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
-    moonvit_rotary_sharding_config,
 )
-from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .attention import KimiMLAAttention
-from .model import AttentionResidual, KimiK3Model, KimiK3TransformerBlock
+from .model import (
+    AttentionResidual,
+    KimiK3Model,
+    KimiK3MultimodalModel,
+    KimiK3TransformerBlock,
+)
 from .moe import KimiLatentMoE
 from .sharding import (
     inner_kda_sharding_config,
@@ -90,14 +91,15 @@ from .sharding import (
     latent_routed_down_sharding_config,
     latent_routed_up_sharding_config,
     mla_attention_sharding_config,
-    multimodal_first_layer_sharding_config,
     tp_unsharded_weight_sharding_config,
 )
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
+    "KIMI_K3_VISION_PROCESSOR_KWARGS",
     "KimiK3Model",
+    "KimiK3MultimodalModel",
     "KimiK3VisionEncoder",
     "MODEL_FLAVORS",
     "build_model_config",
@@ -110,6 +112,28 @@ KIMI_K3_SPECIAL_TOKENS = {
     "vision_start_token": "<|media_begin|>",
     "vision_end_token": "<|media_end|>",
     "pad_token": "[PAD]",
+}
+
+# ``VisionProcessor.Config`` fields, used like the special tokens:
+# ``VisionProcessor.Config(**KIMI_K3_VISION_PROCESSOR_KWARGS)``. The values match
+# ``media_proc_cfg`` in the Hugging Face ``preprocessor_config.json``
+# (``in_patch_limit``, ``patch_limit_on_one_side``, ``merge_kernel_size``);
+# MoonViT3d patches one frame at a time (``temporal_patch_size=1``). Two fields
+# are not in the Hugging Face config: ``resize`` reimplements the NaViT
+# patch-grid resize in the processor's code, and ``patch_order`` is the raster
+# layout MoonViT3d expects.
+_MAX_PATCHES_PER_SIDE = 512
+
+KIMI_K3_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
+    "patch_size": 14,
+    "temporal_patch_size": 1,
+    "spatial_merge_size": 2,
+    "image_mean": (0.5, 0.5, 0.5),
+    "image_std": (0.5, 0.5, 0.5),
+    "resize": NaViTPatchGridResize.Config(
+        max_patches=65_536, max_patches_per_side=_MAX_PATCHES_PER_SIDE
+    ),
+    "patch_order": "raster",
 }
 
 
@@ -170,13 +194,28 @@ def _linear(
     )
 
 
+def _vision_column_parallel_linear(
+    in_features: int,
+    out_features: int,
+    *,
+    param_init: dict[str, Callable] | None = None,
+) -> ColumnParallelLinear.Config:
+    return ColumnParallelLinear.Config(
+        in_features=in_features,
+        out_features=out_features,
+        bias=False,
+        param_init=param_init or _LINEAR_INIT,
+        sharding_config=vision_colwise_sharding_config(),
+    )
+
+
 def _vision_row_parallel_linear(
     in_features: int,
     out_features: int,
     *,
     param_init: dict[str, Callable] | None = None,
-) -> InvariantRowParallelLinear.Config:
-    return InvariantRowParallelLinear.Config(
+) -> RowParallelLinear.Config:
+    return RowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=False,
@@ -445,6 +484,7 @@ def _vision_encoder_config(
     init_pos_emb_height: int = 16,
     init_pos_emb_width: int = 16,
     max_num_frames: int = 4,
+    max_rope_positions: int = _MAX_PATCHES_PER_SIDE,
 ) -> KimiK3VisionEncoder.Config:
     patch_dim = in_channels * patch_size * patch_size
     head_dim = qkv_dim // num_heads
@@ -461,6 +501,12 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
+            rope=ComplexVisionRoPE.Config(
+                dim=head_dim,
+                max_context_length=max_rope_positions,
+                pair_layout="interleaved",
+                sharding_config=vision_rope_sharding_config(),
+            ),
             wq=_linear(
                 dim,
                 qkv_dim,
@@ -480,14 +526,11 @@ def _vision_encoder_config(
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
-            fc1=_linear(
-                dim,
-                hidden_dim,
-                param_init=_fan_in_linear_init(dim),
-                sharding_config=vision_colwise_sharding_config(),
+            fc1=_vision_column_parallel_linear(
+                dim, hidden_dim, param_init=_fan_in_linear_init(dim)
             ),
             fc2=_vision_row_parallel_linear(
                 hidden_dim, dim, param_init=_fan_in_linear_init(hidden_dim)
@@ -508,17 +551,11 @@ def _vision_encoder_config(
         patch_embed_proj=_linear(
             patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
         ),
-        rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim, sharding_config=moonvit_rotary_sharding_config()
-        ),
         block=block,
         final_norm=vision_norm,
         projector=KimiK3VisionProjector.Config(
-            linear_1=_linear(
-                merged_dim,
-                merged_dim,
-                param_init=_fan_in_linear_init(merged_dim),
-                sharding_config=vision_colwise_sharding_config(),
+            linear_1=_vision_column_parallel_linear(
+                merged_dim, merged_dim, param_init=_fan_in_linear_init(merged_dim)
             ),
             linear_2=_vision_row_parallel_linear(
                 merged_dim,
@@ -561,7 +598,7 @@ def _kimi_k3_config(
     num_experts: int,
     top_k: int,
     num_shared_experts: int,
-    vision_encoder: KimiK3VisionEncoder.Config,
+    vision_encoder: KimiK3VisionEncoder.Config | None,
     attn_backend: str,
     parallelism: ParallelismConfig,
 ) -> KimiK3Model.Config:
@@ -571,13 +608,12 @@ def _kimi_k3_config(
     is KDA. Layer 0 is the single dense FFN layer (released
     ``first_k_dense_replace=1``); the rest are LatentMoE.
 
-    With a vision encoder, ``tok_embeddings`` keeps a TP-replicated output for
-    the vision scatter and layer 0's input boundary restores the decoder's
-    layout.
+    With a vision encoder, the model gathers the token embeddings to
+    TP-``Replicate`` before the vision scatter, and its forward restores the
+    decoder residual layout after the scatter.
     """
     enable_sp = parallelism.enable_sequence_parallel
     enable_ep = parallelism.expert_parallel_degree > 1
-    multimodal = vision_encoder is not None
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
 
     def residual_norm() -> RMSNorm.Config:
@@ -650,32 +686,21 @@ def _kimi_k3_config(
                 ffn_res_norm=residual_norm(),
                 ffn_res_proj=residual_proj(),
                 attention_residual=AttentionResidual.Config(),
-                sharding_config=(
-                    multimodal_first_layer_sharding_config(enable_sp=enable_sp)
-                    if multimodal and layer_idx == 0
-                    else None
-                ),
             )
         )
 
-    return KimiK3Model.Config(
+    fields: dict[str, Any] = dict(
         max_context_length=max_context_length,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
-            sharding_config=(
-                multimodal_token_embedding_sharding_config()
-                if multimodal
-                else token_embedding_sharding_config(enable_sp=enable_sp)
-            ),
+            sharding_config=token_embedding_sharding_config(enable_sp=enable_sp),
         ),
         layers=layers,
-        norm=_norm(
-            dim, sharding_config=pre_lm_head_norm_sharding_config(enable_sp=enable_sp)
-        ),
+        norm=_norm(dim, sharding_config=norm_sharding_config(enable_sp=enable_sp)),
         lm_head=_linear(
             dim,
             vocab_size,
@@ -684,8 +709,10 @@ def _kimi_k3_config(
         ),
         output_res_norm=residual_norm(),
         output_res_proj=residual_proj(),
-        vision_encoder=vision_encoder,
     )
+    if vision_encoder is None:
+        return KimiK3Model.Config(**fields)
+    return KimiK3MultimodalModel.Config(vision_encoder=vision_encoder, **fields)
 
 
 def _debugmodel(
@@ -693,7 +720,9 @@ def _debugmodel(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> KimiK3Model.Config:
+    """Debug config for Kimi K3, with a vision encoder if ``has_vision_encoder``."""
     dim = 256
     return _kimi_k3_config(
         max_context_length=seq_len,
@@ -704,7 +733,7 @@ def _debugmodel(
         attn_res_block_size=4,
         num_heads=4,
         q_lora_rank=128,
-        kv_lora_rank=64,
+        kv_lora_rank=512,
         qk_nope_head_dim=128,
         qk_rope_head_dim=64,
         v_head_dim=128,
@@ -716,15 +745,19 @@ def _debugmodel(
         num_experts=8,
         top_k=2,
         num_shared_experts=2,
-        vision_encoder=_vision_encoder_config(
-            text_dim=dim,
-            dim=256,
-            qkv_dim=512,
-            hidden_dim=512,
-            num_layers=2,
-            num_heads=4,
-            init_pos_emb_height=32,
-            init_pos_emb_width=32,
+        vision_encoder=(
+            _vision_encoder_config(
+                text_dim=dim,
+                dim=256,
+                qkv_dim=512,
+                hidden_dim=512,
+                num_layers=2,
+                num_heads=4,
+                init_pos_emb_height=32,
+                init_pos_emb_width=32,
+            )
+            if has_vision_encoder
+            else None
         ),
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -736,7 +769,9 @@ def _kimi_k3(
     *,
     seq_len: int,
     parallelism: ParallelismConfig,
+    has_vision_encoder: bool = True,
 ) -> KimiK3Model.Config:
+    """Kimi K3 config, with a vision encoder if ``has_vision_encoder``."""
     dim = 7168
     return _kimi_k3_config(
         max_context_length=seq_len,
@@ -759,15 +794,19 @@ def _kimi_k3(
         num_experts=896,
         top_k=16,
         num_shared_experts=2,
-        vision_encoder=_vision_encoder_config(
-            text_dim=dim,
-            dim=1024,
-            qkv_dim=1536,
-            hidden_dim=4096,
-            num_layers=27,
-            num_heads=12,
-            init_pos_emb_height=64,
-            init_pos_emb_width=64,
+        vision_encoder=(
+            _vision_encoder_config(
+                text_dim=dim,
+                dim=1024,
+                qkv_dim=1536,
+                hidden_dim=4096,
+                num_layers=27,
+                num_heads=12,
+                init_pos_emb_height=64,
+                init_pos_emb_width=64,
+            )
+            if has_vision_encoder
+            else None
         ),
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -775,15 +814,16 @@ def _kimi_k3(
 
 
 MODEL_FLAVORS = {
-    "debugmodel": (_debugmodel, 16384),
-    "Kimi-K3": (_kimi_k3, 262144),
+    "debugmodel": (partial(_debugmodel, has_vision_encoder=False), 16384),
+    "debugmodel_mm": (_debugmodel, 16384),
+    "Kimi-K3": (partial(_kimi_k3, has_vision_encoder=False), 262144),
+    "Kimi-K3_mm": (_kimi_k3, 262144),
 }
 
 
 def build_model_config(
     flavor: str,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
@@ -800,8 +840,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter in converters:
-            config = converter.build().convert(config)
     return config

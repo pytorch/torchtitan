@@ -11,7 +11,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -99,8 +99,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
-    with patch("torchtitan.experiments.graph_trainer.trainer.maybe_apply_numa_binding"):
-        engine._initialize_forward_backward()
+    engine._initialize_forward_backward()
 
     assert engine._dist_moe_runtime is runtime
     assert runtime_config.build.call_args.kwargs["pp_schedule"] is (

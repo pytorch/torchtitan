@@ -50,7 +50,6 @@ def test_hf_config_adds_no_stop_token():
 
 def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
     from torchtitan.models.llama3 import build_model_config as build_llama3_config
-    from torchtitan.rl.generator.vllm.attention import attention
 
     config = build_llama3_config("debugmodel", parallelism=ParallelismConfig())
     config.layers[
@@ -58,8 +57,8 @@ def test_hf_config_uses_full_attention_after_sliding_attention(monkeypatch):
     ].attention.inner_attention = SlidingWindowVarlenInnerAttention.Config(
         sliding_window_size=128
     )
-    get_dimensions = Mock(wraps=attention.get_attention_dimensions)
-    monkeypatch.setattr(attention, "get_attention_dimensions", get_dimensions)
+    get_dimensions = Mock(wraps=registry.get_attention_dimensions)
+    monkeypatch.setattr(registry, "get_attention_dimensions", get_dimensions)
 
     model_config_to_hf_config_dict(config)
 

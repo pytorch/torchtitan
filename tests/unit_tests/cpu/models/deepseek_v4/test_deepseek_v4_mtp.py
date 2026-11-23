@@ -45,8 +45,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         assert config.mtp_layers is not None
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
-        self.assertIsNotNone(mtp_config.in_src_shardings)
-        self.assertIsNone(mtp_config.in_dst_shardings)
+        self.assertIsNotNone(mtp_config.input_shardings)
 
     @patch("torchtitan.distributed.fsdp.resolve_sparse_fsdp_mesh")
     @patch("torchtitan.distributed.fsdp.resolve_fsdp_mesh")
@@ -70,6 +69,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             fsdp_enable_cpu_offloading=False,
             fsdp_reshard_after_forward="default",
             fsdp_symm_mem_scope=None,
+            fsdp_unshard_in_current_stream=False,
         )
 
         DeepSeekV4Model._apply_fsdp(
@@ -92,6 +92,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=None,
+            unshard_in_current_stream=False,
         )
 
 

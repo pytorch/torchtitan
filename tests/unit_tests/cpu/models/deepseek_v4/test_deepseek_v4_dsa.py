@@ -13,9 +13,12 @@ from unittest.mock import patch
 
 import torch
 
-from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.attention import (
+    CompressedSparseAttention,
+    DeepSeekV4CompressedSparseAttentionMetadata,
+)
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
@@ -30,8 +33,16 @@ class TestIndexerSelect(unittest.TestCase):
         idx_k = torch.randn(n_cmp, 32, generator=g, device=device)
         idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
-        selected, selected_scores = Indexer.select(
-            idx_q, idx_k, idx_w, max_seqlen=seqlen, ratio=ratio, topk=topk
+        metadata = CompressedSparseAttention.Config(
+            window_size=1, compress_ratio=ratio, softmax_scale=0.1
+        ).build_attention_metadata(torch.arange(seqlen))
+        indexer = InnerIndexer.Config(ratio=ratio, topk=topk).build()
+        selected, selected_scores = indexer(
+            idx_q,
+            idx_k,
+            idx_w,
+            attention_metadata=metadata,
+            return_scores=True,
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -71,7 +82,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
         metadata = model._get_attention_metadata(positions, padding_mask=padding_mask)
         self.assertTrue(metadata)
         for value in metadata.values():
-            self.assertIsInstance(value, VarlenAttentionMetadata)
+            self.assertIsInstance(value, DeepSeekV4CompressedSparseAttentionMetadata)
             self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
 
     def test_preprocess_inputs_passes_document_offsets(self):
@@ -114,16 +125,16 @@ class TestDSVPackedDocuments(unittest.TestCase):
         # Exactly-zero indexer scores (every head's relu at 0) tie, and top-k
         # breaks ties by layout; let CSA select every causal candidate instead
         # (the longest document below has 384 // 4 compressed entries).
-        attention_configs[4].inner_attention.index_topk = 96
-        # Group-aligned lengths also compare against the unpacked path; the
-        # others cover partial groups and documents shorter than a group.
-        for lengths, reference in (
-            ([256, 128, 384], "unpacked"),
-            ([300, 37, 150, 5], "packed alone"),
-        ):
+        attention_configs[4].indexer.inner_indexer.topk = 96
+        # Group-aligned lengths exercise exact groups; the others cover partial
+        # groups and documents shorter than a group.
+        for lengths in ([256, 128, 384], [300, 37, 150, 5]):
             positions = torch.cat([torch.arange(n) for n in lengths])
             for attention_config in attention_configs.values():
-                attention = attention_config.build().double()
+                with torch.device("meta"):
+                    attention = attention_config.build().double()
+                attention.to_empty(device="cpu")
+                attention.init_states(buffer_device=torch.device("cpu"))
                 metadata = attention_config.inner_attention.build_attention_metadata(
                     positions
                 )
@@ -142,9 +153,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
                     for x_doc in x.split(lengths):
                         doc_positions = torch.arange(len(x_doc))
                         doc_metadata = (
-                            None
-                            if reference == "unpacked"
-                            else attention_config.inner_attention.build_attention_metadata(
+                            attention_config.inner_attention.build_attention_metadata(
                                 doc_positions
                             )
                         )

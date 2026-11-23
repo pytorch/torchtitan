@@ -889,6 +889,7 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torchtitan.components.checkpointer.dcp.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torch.cuda.Stream")
+    @mock.patch("torch.accelerator.current_stream")
     @mock.patch("torchtitan.components.checkpointer.dcp.DefaultStager")
     @mock.patch("torchtitan.components.checkpointer.dcp.dist.new_group")
     @mock.patch.object(
@@ -901,6 +902,7 @@ class TestCheckpointManager(unittest.TestCase):
         mock_async_save,
         mock_new_group,
         mock_default_stager,
+        mock_current_stream,
         mock_cuda_stream,
         mock_rank,
         mock_logger,
@@ -933,6 +935,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertIsNone(manager.staging_future)
 
         manager.save(curr_step=1, last_step=False)
+        # Staging must wait for the optimizer step on the current stream.
+        staging_stream = mock_default_stager.return_value._staging_stream
+        staging_stream.wait_stream.assert_called_once_with(
+            mock_current_stream.return_value
+        )
         # After save, staging_future shouldn't be None ...
         self.assertIsNotNone(manager.staging_future)
         # ... and staging should be running

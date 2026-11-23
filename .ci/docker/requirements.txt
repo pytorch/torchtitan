@@ -1,15 +1,23 @@
 grain == 0.2.18
-datasets >= 3.6.0, < 4.8.0
+# datasets caps fsspec in every release; 5.2.0 is the first to allow fsspec
+# 2026.9.0.
+datasets >= 5.2.0
 # PyArrow 26 requires NumPy 2; PyTorch CI also covers NumPy 1.x.
 pyarrow < 26
 tensorboard
 wandb
 tokenizers >= 0.15.0
 renderers == 0.1.12
+# TODO: renderers 0.1.12 imports httpx without declaring it
+httpx == 0.28.1
 safetensors
 einops
 pillow
 spmd_types == 0.3.1
-attn-gym[linear,cudnn]==0.0.17
-torch_remat == 0.2.2
+# TODO: pin an Attention Gym release with StateCheckpoints and copy_replay_tails
+# (meta-pytorch/attention-gym#975, #977).
+attn-gym[linear] @ git+https://github.com/meta-pytorch/attention-gym.git@755691f3fe5da772a6e4023ea08bbb4db8173b49
+# TODO: pin a release once torch_remat publishes one with SavedTensorInfo.region
+# (meta-pytorch/remat 6c05e8d), which per-region activation offload needs.
+torch_remat @ git+https://github.com/meta-pytorch/remat.git@6c05e8d8d6895a60dcc02674af0774b28155b5af
 torch_checkpointing == 0.1.1

@@ -138,4 +138,5 @@ class RDMAMicrobatchPrefetcher:
         start = time.perf_counter()
         microbatch = asyncio.run(rdma_microbatch.read())
         self.read_s += time.perf_counter() - start
-        return microbatch
+        # Preprocess the images here too, so training hides it like the read.
+        return microbatch.preprocess_images()

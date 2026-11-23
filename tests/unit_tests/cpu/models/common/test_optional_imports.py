@@ -55,7 +55,7 @@ for kernel in (
         kernel()
     except ModuleNotFoundError as error:
         assert error.name == "attn_gym"
-        assert "attn-gym[linear,cudnn]==0.0.17" in str(error)
+        assert "python -m pip install -r requirements.txt" in str(error)
     else:
         raise AssertionError("A missing Attention Gym kernel ran")
 
@@ -158,7 +158,7 @@ try:
 except ModuleNotFoundError as error:
     assert error.name == missing_package
     if missing_package == "attn_gym":
-        assert "attn-gym[linear,cudnn]==0.0.17" in str(error)
+        assert "python -m pip install -r requirements.txt" in str(error)
     else:
         assert str(error) == "blocked dependency"
 else:
@@ -477,6 +477,7 @@ def test_attention_modules_report_their_own_backend_at_build(
 ) -> None:
     """A module fails at build when an export it calls lacks its backend."""
     script = r"""
+from dataclasses import make_dataclass
 import importlib.abc
 import importlib.util
 import sys
@@ -512,6 +513,8 @@ class FakeAttentionGym(importlib.abc.MetaPathFinder, importlib.abc.Loader):
                 raise AttributeError(name)
             if name == broken:
                 raise ImportError(f"{name} needs {missing_backend}") from blocked()
+            if name == "ContextParallelRouting":
+                return make_dataclass(name, [])
             return type(name, (), {})
 
         module.__getattr__ = export

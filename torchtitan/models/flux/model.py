@@ -99,11 +99,14 @@ def _get_attention_metadata(
 
 class FluxModel(BaseModel):
     state_dict_adapter_cls = FluxStateDictAdapter
-    supports_pipeline_parallel = False
 
     """
     Transformer model for flow matching on sequences.
     """
+
+    def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
+        """Flux has no pipeline-parallel plan."""
+        raise NotImplementedError("FluxModel does not support pipeline parallelism.")
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
@@ -291,6 +294,11 @@ class FluxModel(BaseModel):
         precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
+        if parallelism.fsdp_unshard_in_current_stream:
+            raise ValueError(
+                "parallelism.fsdp_unshard_in_current_stream is not supported for Flux."
+            )
+
         from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 
         from torchtitan.distributed.fsdp import (

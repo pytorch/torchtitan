@@ -247,7 +247,8 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 Set `config.profiler.trace = KinetoTraceProfiler.Config()` in the recipe.
 Set `KinetoTraceProfiler.Config(freq=...)` to control which step is captured
-(default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
+(default: 10). Each rank writes
+`{dump_folder}/profiling/traces/iteration_{step}/rank{N}_trace.json.gz`.
 
 ```bash
 NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_profile ./run_train.sh
@@ -258,9 +259,10 @@ NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_profile ./run_train.sh
 Set `config.profiler.memory_snapshot = MemorySnapshotProfiler.Config()` in the
 recipe to capture a memory snapshot.
 The snapshot fires at every `freq`-th step (default: 10) and is saved to
-`{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
-Each rank produces its own file:
-`iteration_{step}/rank{N}_memory_snapshot.pickle`.
+`{dump_folder}/profiling/memory_snapshot/` (default:
+`./outputs/profiling/memory_snapshot/`). Each rank produces its own file:
+`step_{step:012d}/{N:06d}_step_{step}.pickle`. An OOM dumps to
+`step_{step:012d}_exit/` instead.
 
 Open the `.pickle` files with the
 [PyTorch Memory Viz](https://pytorch.org/memory_viz) tool.
