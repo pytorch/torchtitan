@@ -25,12 +25,12 @@ from torchtitan.models.common.attn_gym import AuxRequest, gather_attn
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import LayerNorm
 
-# TODO: move Indexer, SparseIndexerLoss and their metadata to models/common/
+# TODO: move InnerIndexer, SparseIndexerLoss and their metadata to models/common/
 # after #5863 lands; Kimi K3.1 is their second user.
 from torchtitan.models.deepseek_v4.attention import (
     DeepSeekV4CompressedSparseAttentionMetadata,
 )
-from torchtitan.models.deepseek_v4.compressor import Indexer, SparseIndexerLoss
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer, SparseIndexerLoss
 
 from .attention import KimiMLAAttention
 
@@ -146,7 +146,7 @@ class KimiSparseAttention(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
         wkv_b: AbsorbedKVProjection.Config
-        index_topk: int
+        inner_indexer: InnerIndexer.Config
         aux_loss: SparseIndexerLoss.Config | None = None
         impl: Literal["fused", "reference"] = "fused"
         """Attention Gym ``gather_attn`` implementation. ``"fused"`` runs the
@@ -186,7 +186,7 @@ class KimiSparseAttention(InnerAttention):
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.wkv_b = config.wkv_b.build()
-        self.index_topk = config.index_topk
+        self.inner_indexer = config.inner_indexer.build()
         self.impl = config.impl
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
@@ -206,17 +206,13 @@ class KimiSparseAttention(InnerAttention):
     ) -> torch.Tensor:
         aux_loss = self.aux_loss if self.training else None
         cu_seqlens = attention_metadata.cu_seq_q
-        with spmd.no_typecheck():
-            topk_indices_TS, topk_scores_TS = Indexer.select(
-                idx_q_TIE,
-                idx_k_TE,
-                idx_w_TI,
-                max_seqlen=attention_metadata.max_k,
-                ratio=1,
-                topk=self.index_topk,
-                attention_metadata=attention_metadata,
-                return_scores=aux_loss is not None,
-            )
+        topk_indices_TS, topk_scores_TS = self.inner_indexer(
+            idx_q_TIE,
+            idx_k_TE,
+            idx_w_TI,
+            attention_metadata=attention_metadata,
+            return_scores=aux_loss is not None,
+        )
 
         nope_dim = q_THK.shape[-1] - k_shared_TR.shape[-1]
         w_uk_HNL, w_uv_HVL = self.wkv_b()
@@ -305,7 +301,7 @@ class KimiDSAAttention(KimiMLAAttention):
                 num_heads=self.n_heads,
                 qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
-                seq_len=min(seq_len, self.inner_attention.index_topk),
+                seq_len=min(seq_len, self.inner_attention.inner_indexer.topk),
             )
             indexer_flops = (
                 6 * self.indexer.num_index_heads * self.indexer.index_head_dim * seq_len

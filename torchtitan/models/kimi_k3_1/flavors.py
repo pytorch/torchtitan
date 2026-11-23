@@ -20,7 +20,7 @@ from torchtitan.models.common.decoder_sharding import (
     replicated_state_sharding_config,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
-from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
+from torchtitan.models.deepseek_v4.compressor import InnerIndexer, SparseIndexerLoss
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 
 from torchtitan.models.kimi_k3.dsa import (
@@ -96,7 +96,7 @@ def _dsa_config(
                     state_shardings={"weight": dense_param_placement(tp=spmd.S(0))}
                 ),
             ),
-            index_topk=index_topk,
+            inner_indexer=InnerIndexer.Config(ratio=1, topk=index_topk),
             aux_loss=(
                 SparseIndexerLoss.Config(
                     coeff=indexer_loss_coeff,
