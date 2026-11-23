@@ -519,6 +519,26 @@ Measured on GB300 with one microbatch per rank per step (OBELICS on Qwen3.5-9B, 
 
 Datasets whose rows already cost about the same (C4, short chat SFT) gain little.
 
+### Global plan across data-parallel ranks
+
+Heaviest-first cannot help when one rank draws several of a window's heavy microbatches: that rank stays the slowest for several steps. `global_plan` plans each window across all data-parallel ranks and moves microbatches between them:
+
+1. each rank buffers its next `window_size` collated microbatches and computes their costs;
+2. the costs are all-gathered over a gloo group of the data-parallel peers;
+3. every rank computes the same plan: sort all `N * window_size` microbatches by cost, step `k` of the window gets the `k`-th group of `N`, and within a step each microbatch stays on its rank when possible;
+4. moved microbatches are sent point to point over gloo.
+
+```python
+from torchtitan.components.data import GlobalPlanConfig
+
+config.dataloader = GrainDataLoader.Config(
+    dataset=packed_pretraining_ds,
+    global_plan=GlobalPlanConfig(window_size=8),
+)
+```
+
+It runs on the loader's prefetch thread, so the exchange overlaps training. CP peers read identical microbatches and exchange with the ranks of the same CP index in other data-parallel groups. It assumes global rank = `dp_rank * cp + cp_rank` (no TP or PP) and checks it at startup. The set of microbatches per window is unchanged; each moves at most `window_size - 1` steps. Exclusive with `heaviest_first`.
+
 # Distributed and checkpoint behavior
 
 Only the effective data-parallel coordinate selects data:

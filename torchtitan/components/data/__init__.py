@@ -18,6 +18,7 @@ from torchtitan.components.data.dataset import (
     TextSequence,
     WeightedDataset,
 )
+from torchtitan.components.data.global_balance import GlobalPlanConfig
 from torchtitan.components.data.loader import GrainDataLoader
 from torchtitan.components.data.packing import (
     ConcatThenSplitPackingConfig,
@@ -48,6 +49,7 @@ __all__ = [
     "document_attention_cost",
     "FirstFitPackingConfig",
     "GrainDataLoader",
+    "GlobalPlanConfig",
     "HeaviestFirstOrderingConfig",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",
