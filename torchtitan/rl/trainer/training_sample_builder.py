@@ -6,10 +6,14 @@
 
 """Converts one generated rollout group into trainable training_samples.
 
-RolloutGroup -> group filters -> rollout_to_training_samples -> sample filters -> TrainingSampleGroup
+RolloutGroup -> rollout filter -> group filters -> rollout_to_training_samples -> sample filters
+    -> TrainingSampleGroup
 """
 
+import logging
+import math
 import statistics
+from collections import Counter
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -19,6 +23,8 @@ from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup
 from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -77,6 +83,59 @@ class TrainingSampleGroup:
     group_id: int
     training_samples: list[TrainingSample]
     metrics: list[m.Metric]
+
+
+def _select_rollouts_to_train(
+    rollouts: list[Rollout],
+) -> tuple[list[Rollout], list[m.Metric]]:
+    """Keep the rollouts that can train, and count the dropped ones by reason.
+
+    Drop reasons, in the order checked:
+    - untrainable: a status that never trains, e.g. ERROR_INFRA
+    - empty_turn: no turn, or a turn with no completion tokens (a rollouter bug)
+    - no_advantage: a trainable rollout with no advantage (a rollouter bug)
+    """
+    rollouts_to_train: list[Rollout] = []
+    num_rollouts_dropped: Counter[str] = Counter()
+    for rollout in rollouts:
+        # Rollout tagged as untrainable, e.g. due to ERROR_INFRA
+        if not rollout.status.is_trainable():
+            num_rollouts_dropped["untrainable"] += 1
+            continue
+
+        # Sanity check: filter a rollout with no turn, or a turn with no completion.
+        if not rollout.turns or any(
+            len(turn.completion_token_ids) == 0 for turn in rollout.turns
+        ):
+            logger.warning(
+                "rollout %s/rollout=%d has no turn, or a turn with no completion; dropping it",
+                rollout.group_id,
+                rollout.rollout_id,
+            )
+            num_rollouts_dropped["empty_turn"] += 1
+            continue
+
+        # Sanity check: the rollouter fills an advantage for every trainable rollout.
+        if rollout.advantage is None:
+            logger.warning(
+                "rollout %s/rollout=%d is trainable but has no advantage; dropping it",
+                rollout.group_id,
+                rollout.rollout_id,
+            )
+            num_rollouts_dropped["no_advantage"] += 1
+            continue
+
+        rollouts_to_train.append(rollout)
+
+    # One key per reason, e.g. training_sample_builder/num_rollouts_dropped/empty_turn.
+    metrics = [
+        m.Metric(
+            f"training_sample_builder/num_rollouts_dropped/{reason}",
+            m.Sum(float(count)),
+        )
+        for reason, count in num_rollouts_dropped.items()
+    ]
+    return rollouts_to_train, metrics
 
 
 def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
@@ -150,29 +209,17 @@ class TrainingSampleBuilder(Configurable):
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
-        # A status that never trains (e.g. ERROR_INFRA) has no reward or advantage: skip those
-        # rollouts, and run the checks below on the rest.
-        rollouts_to_train = [
-            rollout for rollout in rollout_group.rollouts if rollout.status.is_trainable()
-        ]
-
-        # No completion: any trainable sibling with no completion tokens -> drop the whole group
-        if any(
-            not any(len(turn.completion_token_ids) > 0 for turn in rollout.turns)
-            for rollout in rollouts_to_train
-        ):
-            metrics.append(
-                m.Metric(
-                    "training_sample_builder/num_groups_dropped_untrainable", m.Sum(1.0)
-                )
-            )
-            return TrainingSampleGroup(
-                group_id=rollout_group.group_id, training_samples=[], metrics=metrics
-            )
+        # ======== Pick the rollouts to train ========
+        rollouts_to_train, dropped_metrics = _select_rollouts_to_train(
+            rollout_group.rollouts
+        )
+        metrics += dropped_metrics
 
         # Zero-std reward: no learning signal across siblings. A group of 2 or more with fewer than 2
         # scored rollouts counts too: e.g. 3 of 4 are ERROR_INFRA, and the one left has advantage 0.
-        rewards = [rollout.reward for rollout in rollouts_to_train]
+        rewards = [
+            rollout.reward for rollout in rollouts_to_train if rollout.reward is not None
+        ]
         is_zero_std = len(rollout_group.rollouts) > 1 and (
             len(rewards) < 2 or statistics.pstdev(rewards) == 0.0
         )
@@ -192,24 +239,13 @@ class TrainingSampleBuilder(Configurable):
                 group_id=rollout_group.group_id, training_samples=[], metrics=metrics
             )
 
+        # ======== Build the training samples ========
         # One rollout may branch into multiple trainable training_samples.
         training_samples: list[TrainingSample] = []
-        unfiltered_training_samples: list[TrainingSample] = []
         branches_per_rollout: list[float] = []
         num_samples_dropped_no_valid_tokens = 0
-        num_rollouts_dropped_empty_completion = 0
         for rollout in rollouts_to_train:
-            # A later turn with no completion (e.g. a request aborted before its first token): drop the
-            # rollout, so `rollout_to_training_samples` doesn't raise and stop the run.
-            if any(
-                len(rollout_turn.completion_token_ids) == 0
-                for rollout_turn in rollout.turns[1:]
-            ):
-                num_rollouts_dropped_empty_completion += 1
-                continue
-
             rollout_training_samples = self.rollout_to_training_samples(rollout)
-            unfiltered_training_samples.extend(rollout_training_samples)
             kept = [
                 training_sample
                 for training_sample in rollout_training_samples
@@ -221,13 +257,6 @@ class TrainingSampleBuilder(Configurable):
             training_samples.extend(kept)
             branches_per_rollout.append(float(len(rollout_training_samples)))
 
-        if num_rollouts_dropped_empty_completion:
-            metrics.append(
-                m.Metric(
-                    "training_sample_builder/num_rollouts_dropped_empty_completion",
-                    m.Sum(float(num_rollouts_dropped_empty_completion)),
-                )
-            )
         if num_samples_dropped_no_valid_tokens:
             metrics.append(
                 m.Metric(
@@ -236,13 +265,12 @@ class TrainingSampleBuilder(Configurable):
                 )
             )
 
+        # ======== Group metrics ========
         min_policy_versions = [
-            training_sample.min_policy_version
-            for training_sample in unfiltered_training_samples
+            training_sample.min_policy_version for training_sample in training_samples
         ]
         max_policy_versions = [
-            training_sample.max_policy_version
-            for training_sample in unfiltered_training_samples
+            training_sample.max_policy_version for training_sample in training_samples
         ]
         advantages = [rollout.advantage for rollout in rollouts_to_train]
         metrics += [
@@ -251,6 +279,17 @@ class TrainingSampleBuilder(Configurable):
                 m.Sum(float(len(training_samples))),
             ),
             m.Metric("advantage", m.SummaryStats.from_list(advantages)),
+            # Share of trained rollouts whose advantage is 0: they add nothing to the gradient, only
+            # tokens to the loss's token count.
+            m.Metric(
+                "training_sample_builder/zero_advantage_frac",
+                m.Mean.from_list(
+                    [
+                        float(math.isclose(advantage, 0.0, abs_tol=1e-9))
+                        for advantage in advantages
+                    ]
+                ),
+            ),
             m.Metric(
                 "rollout/branches_per_rollout", m.Mean.from_list(branches_per_rollout)
             ),
@@ -317,21 +356,7 @@ class TrainingSampleBuilder(Configurable):
         prev_images: tuple[PromptImage, ...] = ()
         prev_image_placeholders: tuple[PlaceholderRange, ...] = ()
 
-        # Skip if no completion (nothing to train on). This happens when the prompt is too
-        # long in the first turn, before any generation. We keep these rollouts for debugging.
-        # TODO(async-rl): confirm this signal actually reaches the rollout_recorder.
         for turn_idx, rollout_turn in enumerate(rollout.turns):
-            if len(rollout_turn.completion_token_ids) == 0:
-                if len(rollout.turns) == 1:
-
-                    continue
-
-                # empty rollouts should only happen when initial prompt is too long
-                raise ValueError(
-                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: "
-                    f"non-final turn {turn_idx} has no completion"
-                )
-
             prompt_prefix_len = rollout_turn.prompt_prefix_len
             prompt_delta_token_ids = rollout_turn.prompt_delta_token_ids
 
