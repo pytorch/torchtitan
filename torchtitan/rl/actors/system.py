@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from torchtitan.rl.generator.generator import Generator
     from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
     from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
-    from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
+    from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, RolloutWorkerRoles
     from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
     from torchtitan.rl.trainer.batcher import Batcher
     from torchtitan.rl.trainer.trainer import Trainer
@@ -43,6 +43,23 @@ class TrainerHandle(ServiceHandle):
     by_dp_rank: list[Any]
     """``by_dp_rank[i]`` reaches the pp * cp * tp actors at DP rank ``i``, which train
     the batcher's column ``i``, e.g. ``by_dp_rank[i].forward_backward.call(...)``."""
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutWorkersHandle:
+    """Handles to the rollout workers, grouped by host and one per worker.
+
+    Example, 5 workers on 3 hosts:
+
+        by_host   = [host A's 2 workers, host B's 2 workers, host C's 1 worker]
+        by_worker = [A0, A1, B0, B1, C0]
+    """
+
+    by_host: list[Any]
+    """``by_host[i]`` reaches every worker on host ``i``, e.g. ``by_host[i].sync_log_step.call(step=step)``."""
+
+    by_worker: list[Any]
+    """``by_worker[i]`` reaches worker ``i`` only, e.g. ``by_worker[i].run_group.call_one(...)``."""
 
 
 class ActorSystem(Configurable, abc.ABC):
@@ -122,9 +139,11 @@ class ActorSystem(Configurable, abc.ABC):
         *,
         num_workers: int,
         num_threads: int,
-    ) -> Any:
-        """Spawn a pool of ``num_workers`` rollout worker processes on the
-        controller host, each running ``num_threads`` rollout threads."""
+        worker_roles: RolloutWorkerRoles,
+    ) -> RolloutWorkersHandle:
+        """Spawn ``num_workers`` rollout worker processes, spread evenly over the hosts that
+        ``worker_roles`` picks (see ``RolloutWorkerRoles``). Each worker gets a
+        ``num_threads``-thread pool for ``asyncio.to_thread``."""
 
     @abc.abstractmethod
     async def stop_rollout_workers(self) -> None:

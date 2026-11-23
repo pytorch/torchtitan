@@ -16,6 +16,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 from monarch.actor import HostMesh
 
@@ -47,7 +48,12 @@ class Layout:
     role_mesh: dict[str, str]
     """Role -> host mesh name; roles may share a mesh."""
 
-    def host_meshes(self, meshes: dict[str, HostMesh]) -> HostMeshes:
+    def host_meshes(
+        self,
+        meshes: dict[str, HostMesh],
+        *,
+        controller_on_first_trainer_host: bool,
+    ) -> HostMeshes:
         """Map acquired meshes to roles; roles sharing a mesh get the same object.
 
         Example: 8 GPUs per node, a 32-GPU trainer and two 16-GPU generators.
@@ -64,6 +70,7 @@ class Layout:
                 trainer=meshes["trainer"],
                 generators=[meshes["generator_0"], meshes["generator_1"]],
                 gpus_per_node=8,
+                controller_on_first_trainer_host=controller_on_first_trainer_host,
             )
 
         Example: the same node size, a 4-GPU trainer and three 4-GPU generators
@@ -80,6 +87,7 @@ class Layout:
                 trainer=meshes["node_0"],
                 generators=[meshes["node_0"], meshes["node_1"], meshes["node_1"]],
                 gpus_per_node=8,
+                controller_on_first_trainer_host=controller_on_first_trainer_host,
             )
         """
         num_generators = len(self.role_mesh) - 1
@@ -90,6 +98,7 @@ class Layout:
                 for role in generator_role_names(num_generators)
             ],
             gpus_per_node=self.gpus_per_node,
+            controller_on_first_trainer_host=controller_on_first_trainer_host,
         )
 
     def to_json(self) -> str:
@@ -122,7 +131,8 @@ class LaunchPlan:
 class MonarchLauncher(Configurable, abc.ABC):
     """Gets an RL job's hosts from a cluster scheduler as Monarch host meshes.
 
-    Where the controller runs is up to the scheduler; each launcher documents it.
+    Where the controller runs is up to the scheduler. Each launcher documents it and sets
+    ``controller_on_first_trainer_host``.
     If any role fails, the controller exits non-zero and the job releases all of
     its hosts; after a clean finish, no worker keeps holding hosts.
     """
@@ -143,6 +153,11 @@ class MonarchLauncher(Configurable, abc.ABC):
                     "launcher.job_name must be non-empty and contain only letters, "
                     f"digits, '_' or '-', got {self.job_name!r}"
                 )
+
+    controller_on_first_trainer_host: ClassVar[bool] = False
+    """True when the controller runs on the trainer's first host. False: it runs outside the
+    job's hosts. With True, trainer host 0 has the controller's role too, so
+    ``rollouter.worker_roles.controller=False`` keeps rollout workers off that host."""
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -273,5 +288,10 @@ class MonarchControllerWithLauncher(Controller):
     async def _build_actor_system(self) -> MonarchActorSystem:
         # Raises unless submit started this job.
         layout = Layout.from_env()
-        meshes = await self.config.launcher.build().acquire_hosts(layout)
-        return self.config.actor_system.build(host_meshes=layout.host_meshes(meshes))
+        launcher = self.config.launcher.build()
+        meshes = await launcher.acquire_hosts(layout)
+        host_meshes = layout.host_meshes(
+            meshes,
+            controller_on_first_trainer_host=launcher.controller_on_first_trainer_host,
+        )
+        return self.config.actor_system.build(host_meshes=host_meshes)
