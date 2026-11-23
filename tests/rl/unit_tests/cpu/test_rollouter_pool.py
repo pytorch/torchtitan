@@ -11,6 +11,8 @@ import functools
 import gc
 import os
 import pathlib
+import re
+import socket
 import sys
 import time
 from dataclasses import dataclass
@@ -18,10 +20,11 @@ from types import SimpleNamespace
 
 import cloudpickle
 import pytest
-from monarch.actor import Actor, endpoint, this_host
+from monarch.actor import Actor, ActorError, endpoint, this_host
 from monarch.job import ProcessJob
 
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl._env import apply_rollout_worker_env_defaults
 from torchtitan.rl.actors.monarch import (
     provisioning,
     rollout_worker as rollout_worker_module,
@@ -30,9 +33,11 @@ from torchtitan.rl.actors.monarch import (
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 from torchtitan.rl.actors.system import RolloutWorkersHandle
+from torchtitan.rl.examples.slake.data import SlakeDataset
 from torchtitan.rl.observability import metrics as m
 
 from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.rollout.data import RLDataset
 from torchtitan.rl.rollout.rollouter import (
     BaseRolloutWorker,
     MessageEnvRolloutWorker,
@@ -65,11 +70,11 @@ class _RunGroupEndpoint:
         return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
 
 
-def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
+def test_rollout_worker_actor_inits_its_logger_and_builds_its_worker_at_setup(
     monkeypatch,
 ) -> None:
     async def run() -> None:
-        worker = object()
+        worker = _LoopBlockingWorker()
         worker_config = SimpleNamespace(build=lambda: worker)
         init_calls = []
         monkeypatch.setattr(
@@ -88,11 +93,28 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
             first_worker_index=3,
         )
 
-        assert actor._worker is worker
         # Rank 2 in the proc mesh of a host whose first worker is worker 3.
         assert init_calls == [{"source": "rl_rollout_worker", "rank": 5}]
+        # The worker is built in `setup_async`, so a build error reaches the caller as an endpoint
+        # error instead of killing the actor.
+        assert not hasattr(actor, "_worker")
+        setup_async = RolloutWorkerActor.setup_async._method.__wrapped__
+        await setup_async(
+            actor,
+            tokenizer_config=_NO_OP_CONFIG,
+            renderer_config=_NO_OP_CONFIG,
+            hf_assets_path="",
+            paths_on_every_host=[],
+        )
+        assert actor._worker is worker
+        worker._event_loop_lag.close()
+        worker._thread_pool_lag.close()
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        # Give the frozen objects back to the collector, for the tests that run after this one.
+        gc.unfreeze()
 
 
 # A tokenizer or renderer config for fake workers: the base `setup_async` builds None from it.
@@ -156,6 +178,7 @@ def test_rollout_worker_reports_its_metrics() -> None:
             tokenizer_config=_NO_OP_CONFIG,
             renderer_config=_NO_OP_CONFIG,
             hf_assets_path="",
+            paths_on_every_host=[],
         )
         # Setup moved the objects built so far out of garbage collection.
         assert gc.get_freeze_count() > freeze_count_before_setup
@@ -277,6 +300,7 @@ def _rollouter_without_datasets() -> Rollouter:
         run_group_drain_timeout_s=30.0,
         worker_close_timeout_s=60.0,
         worker_roles=RolloutWorkerRoles(),
+        training_dataloader=SimpleNamespace(dataset=RLDataset.Config()),
     )
     # 20 training rollouts in flight / 7 per worker -> 3 workers
     rollouter._max_rollouts_in_flight = 20
@@ -338,8 +362,11 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
             lambda: structured_logger_init_fn,
         )
         rollouter = _rollouter_without_datasets()
-        # A launcher's hosts. Its controller runs outside them, so the default `worker_roles`
-        # (the controller's host only) puts every worker on `this_host()`.
+        rollouter._config.worker_roles = RolloutWorkerRoles(
+            generator=None, controller=True
+        )
+        # A launcher's hosts. Its controller runs outside them, so `controller=True` alone puts
+        # every worker on `this_host()`.
         launcher_hosts = provisioning.HostMeshes(
             trainer=_FakeHostMesh(num_hosts=1, name="t"),
             generators=[_FakeHostMesh(num_hosts=1, name="g")],
@@ -356,7 +383,10 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
             hf_assets_path="hf_assets_path",
         )
 
-        assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
+        assert host.spawn_kwargs == {
+            "per_host": {"cpus": 3},
+            "bootstrap": apply_rollout_worker_env_defaults,
+        }
         args, kwargs = worker_mesh.spawn_args
         assert args[0] == "rollout_worker"
         assert args[1] is RolloutWorkerActor
@@ -374,6 +404,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
                 "tokenizer_config": "tokenizer_config",
                 "renderer_config": "renderer_config",
                 "hf_assets_path": "hf_assets_path",
+                "paths_on_every_host": [],
                 "vision_processor_config": None,
             }
         ]
@@ -562,12 +593,12 @@ def test_rollout_worker_hosts_raises_when_every_host_is_vetoed(monkeypatch) -> N
 
 
 def test_rollout_worker_hosts_uses_the_default_of_an_unset_role(monkeypatch) -> None:
-    # `controller` defaults to True, so `generator=True` alone adds the generator hosts and keeps
-    # the controller's host.
+    # `generator` defaults to True, so `controller=True` alone adds the controller's host and keeps
+    # the generator hosts.
     monkeypatch.setattr(provisioning, "this_host", lambda: "this_host")
     hosts = provisioning.rollout_worker_hosts(
         host_meshes=_host_meshes("t*2", ["g*2", "g*2"], True),
-        worker_roles=RolloutWorkerRoles(generator=True),
+        worker_roles=RolloutWorkerRoles(controller=True),
     )
     assert hosts == ["this_host", "g0", "g1"]
 
@@ -667,6 +698,7 @@ def test_rollout_workers_spread_over_the_hosts_of_a_job(tmp_path, monkeypatch):
                         tokenizer_config=_NO_OP_CONFIG,
                         renderer_config=_NO_OP_CONFIG,
                         hf_assets_path="",
+                        paths_on_every_host=[],
                     )
                     for host_workers in workers.by_host
                 )
@@ -923,3 +955,50 @@ def test_close_stops_the_workers_of_a_spawn_that_failed_partway() -> None:
 
     asyncio.run(run())
     assert stop_calls == [True]
+
+
+class _NoOpWorker:
+    async def setup_async(self, **kwargs) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+class _NoOpWorkerConfig:
+    def build(self) -> _NoOpWorker:
+        return _NoOpWorker()
+
+
+def test_setup_fails_naming_a_missing_dataset_dir(tmp_path) -> None:
+    """One host, SLAKE's data dir overridden to a dir this host lacks: setup fails naming the
+    overridden dir and the host."""
+    data_dir = tmp_path / "slake"
+    dataset = SlakeDataset.Config(data_dir="./assets/datasets/slake")
+    # What an override of the dataset config does.
+    dataset.data_dir = str(data_dir)
+    rollouter = _rollouter_without_datasets()
+    rollouter._config.worker = _NoOpWorkerConfig()
+    rollouter._config.training_dataloader = SimpleNamespace(dataset=dataset)
+    # One worker.
+    rollouter._max_rollouts_in_flight = rollouter._config.rollouts_per_worker
+
+    async def run() -> None:
+        # The worker processes can't import this test module, so ship the fakes by value.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        try:
+            await rollouter.setup_async(
+                actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
+                tokenizer_config=None,
+                renderer_config=None,
+                hf_assets_path="",
+            )
+        finally:
+            await rollouter.close()
+            cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+    with pytest.raises(
+        ActorError,
+        match=re.escape(f"{data_dir} is missing on host {socket.gethostname()}."),
+    ):
+        asyncio.run(run())

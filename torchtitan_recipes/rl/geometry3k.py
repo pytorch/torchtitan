@@ -9,8 +9,10 @@
 Data: Hugging Face ``hiyouga/geometry3k`` (2,101 train / 601 test problems, one diagram
 each). The dataset writes the diagrams to ``./assets/datasets/geometry3k/images`` on first
 use: the renderer reads each image's header from its file, and the generator and the
-trainer decode the image file the prompt carries. Answers are graded by Math-Verify on the
-last ``\\boxed{}``.
+trainer decode the image file the prompt carries. The rollout workers read these image
+files, so on more than one host ``GEOMETRY3K_IMAGE_DIR`` must resolve to the same files on
+every host, best in a shared folder (see "Rollout workers on more than one host" in
+``torchtitan/rl/README.md``). Answers are graded by Math-Verify on the last ``\\boxed{}``.
 
 Run with ``--module torchtitan_recipes.rl.geometry3k --config rl_grpo_qwen3_5_0_8b_geometry3k``
 (or ``rl_grpo_qwen3_5_0_8b_geometry3k_lora``).

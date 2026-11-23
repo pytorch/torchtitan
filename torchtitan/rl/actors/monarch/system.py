@@ -18,6 +18,7 @@ from monarch.actor import ProcMesh
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl._env import apply_rollout_worker_env_defaults
 from torchtitan.rl.actors.monarch.batcher import BatcherActor
 from torchtitan.rl.actors.monarch.generator import GeneratorActor
 from torchtitan.rl.actors.monarch.provisioning import (
@@ -227,7 +228,10 @@ class MonarchActorSystem(ActorSystem):
             )
             if num_host_workers == 0:  # fewer workers than hosts
                 continue
-            procs = host.spawn_procs(per_host={"cpus": num_host_workers})
+            procs = host.spawn_procs(
+                per_host={"cpus": num_host_workers},
+                bootstrap=apply_rollout_worker_env_defaults,
+            )
             # Save the mesh right away, so `stop_rollout_workers` stops it even if a later host
             # fails to spawn.
             self._rollout_worker_meshes.append(procs)

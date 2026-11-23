@@ -57,7 +57,11 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
+from torchtitan.rl.rollout.rollouter import (
+    MessageEnvRolloutWorker,
+    Rollouter,
+    RolloutWorkerRoles,
+)
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.losses import DAPOLoss
@@ -91,6 +95,14 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
             ),
             advantage=AdvantageEstimator.Config(should_std_normalize=True),
         ),
+        # The default `message_env.search_url` is on 127.0.0.1, so a worker on another host would
+        # get empty search results.
+        # TODO: spread these workers over the generators' hosts, to use their CPUs: serve the
+        #   retriever on an address every host can reach, and set `message_env.search_url` to it.
+        #   Not done here: the user starts the retriever by hand (see "Local dense retrieval
+        #   server" in `torchtitan/rl/examples/search_r1/README.md`), so the recipe can't know
+        #   its address.
+        worker_roles=RolloutWorkerRoles(generator=None, controller=True),
     )
 
 
