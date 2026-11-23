@@ -28,6 +28,11 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.controller.metrics import combine_microbatch_metrics
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
 from torchtitan.rl.trainer.rdma_microbatch import (
     RDMAMicrobatch,
@@ -136,6 +141,8 @@ class Trainer(Configurable):
             if precision.param_dtype != precision.dtype
             else None
         )
+        # Set by `register_model_state_dict_source`; None pushes through TorchStore.
+        self._model_state_dict_transport: ModelStateDictTransport | None = None
 
         self.gpu_peak_flops = utils.get_peak_flops(
             engine.device_memory_monitor.device_name
@@ -195,8 +202,9 @@ class Trainer(Configurable):
             return
 
         # Capture the dependency when weights become final: the push must wait
-        # for optimizer updates, but not for next-step forward/backward kernels
-        # that may be queued before the concurrent push starts.
+        # for the optimizer updates. optim_step syncs the host before the push
+        # starts, so the stream saves nothing today; it is kept for the TODO in
+        # `Controller._trainer_loop` that overlaps the push with forward/backward.
         self._push_model_state_dict_stream.wait_stream(
             torch.accelerator.current_stream(self.engine.device)
         )
@@ -439,25 +447,41 @@ class Trainer(Configurable):
     async def push_model_state_dict(self) -> None:
         """Publish model weights for generators to pull.
 
-        The live GPU tensors are put directly, so the trainer keeps no CPU
-        snapshot of its own. With the colocated SharedMemory transport,
+        With TorchStore, the live GPU tensors are put directly, so the trainer
+        keeps no CPU snapshot of its own. With the colocated SharedMemory transport,
         TorchStore copies (and casts) each tensor straight into StorageVolume
         memory; other transports make a GPU cast copy of each batch first.
 
-        The controller overlaps this push with the next forward/backward (see
-        `Controller._trainer_loop`), which is safe because:
+        Ordering (see `Controller._trainer_loop`):
         - The worker synchronizes the push stream and runs the put with it
-          current, so TorchStore reads weights after the last optimizer step
-          without waiting on later forward/backward work, and forward/backward
-          does not mutate persistent model state.
+          current, so TorchStore reads weights after the last optimizer step.
         - The TorchStore put runs in an `asyncio.to_thread` worker, so it
-          progresses while a synchronous forward/backward blocks this actor's
-          event loop.
-        - The controller awaits this push before the next optimizer step mutates
-          the model, and awaits the generators' pull of it before the next push
-          overwrites the TorchStore key.
+          doesn't block this actor's event loop.
+        - The controller awaits this push before the next forward/backward,
+          which blocks this actor's event loop and would delay the push's reply.
+        - The controller awaits the generators' pull of this push before the
+          next push overwrites the TorchStore key.
+
+        Every push carries the trainable parameters and the buffers. Generators load the
+        frozen parameters from `generator.checkpointer`: for LoRA the base, so a push
+        carries only the adapters (`lora_a`, `lora_b`) and the buffers.
+
+        With a ``ModelStateDictTransport``, the push instead stages the tensors in
+        its pinned staging buffer, which generators read directly; the same
+        ordering applies, and the next push overwrites the staging buffer.
+        Staging enqueues its copies on the push stream from this thread; only
+        the wait for them is off the event loop.
         """
-        model_state_dict = self._model_state_dict()
+        transport = self._model_state_dict_transport
+        if transport is not None:
+            stream = self._push_model_state_dict_stream
+            with stream if stream is not None else nullcontext():
+                transport.stage(self._trainable_model_state_dict())
+            # Generators read the staging buffer outside stream order.
+            if stream is not None:
+                await asyncio.to_thread(stream.synchronize)
+            return
+        model_state_dict = self._trainable_model_state_dict()
         await asyncio.to_thread(
             self._put_model_state_dict,
             model_state_dict,
@@ -489,16 +513,46 @@ class Trainer(Configurable):
                 )
             )
 
-    def _model_state_dict(self) -> dict[str, torch.Tensor]:
-        """Merge the state dicts of this rank's model parts.
+    def register_model_state_dict_source(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        generator_rank_layouts: list[dict[str, TensorShard]],
+    ) -> TrainerSource:
+        """Allocate and register the staging buffer generators read pushes from.
+
+        Args:
+            config: The transport config.
+            generator_rank_layouts: The layout of each rank of a generator, in
+                rank order.
+        """
+        self._model_state_dict_transport = config.build()
+        model_state_dict = self._trainable_model_state_dict()
+        return self._model_state_dict_transport.register_trainer_source(
+            model_state_dict,
+            generator_rank_layouts=generator_rank_layouts,
+            transfer_dtype=self._transfer_dtype,
+            preserve_dtype_keys=self._preserve_dtype_keys(model_state_dict),
+        )
+
+    def _trainable_model_state_dict(self) -> dict[str, torch.Tensor]:
+        """Merge the state dicts of this rank's model parts, leaving out the parameters
+        that do not train.
 
         Under PP each rank holds only its own stages, so every stage publishes
-        a partial state dict into the same TorchStore key.
+        a partial state dict.
         """
+        frozen = frozenset(
+            canonical_fqn(name)
+            for model_part in self.engine.model_parts
+            for name, param in model_part.named_parameters(remove_duplicate=False)
+            if not param.requires_grad
+        )
         return {
             name: tensor
             for model_part in self.engine.model_parts
             for name, tensor in model_part.state_dict().items()
+            if canonical_fqn(name) not in frozen
         }
 
     def _preserve_dtype_keys(

@@ -12,19 +12,15 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 
 from torchtitan.models.common import (
     ComplexRoPE,
     compute_ffn_hidden_dim,
-    Embedding,
     Linear,
     RMSNorm,
     RoPE,
     TransformerBlock,
+    VocabParallelEmbedding,
 )
 from torchtitan.models.common.config_utils import (
     get_attention_config,
@@ -34,10 +30,10 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
     norm_sharding_config,
-    pre_lm_head_norm_sharding_config,
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
+from torchtitan.models.common.rope import Llama3ScalingConfig
 
 from .model import Llama3Model, Llama3TransformerBlock
 
@@ -135,7 +131,7 @@ def _debugmodel(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=2048,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=2048,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -146,7 +142,7 @@ def _debugmodel(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -165,7 +161,7 @@ def _debugmodel(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -189,7 +185,7 @@ def _1b(
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -200,7 +196,7 @@ def _1b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -222,9 +218,8 @@ def _1b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
                 # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
-                scaling_factor=32.0,
+                scaling=Llama3ScalingConfig(factor=32.0),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -248,7 +243,7 @@ def _3b(
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_SKIP_INIT,
@@ -259,7 +254,7 @@ def _3b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -281,9 +276,8 @@ def _3b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
                 # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
-                scaling_factor=32.0,
+                scaling=Llama3ScalingConfig(factor=32.0),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -306,7 +300,7 @@ def _8b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -317,7 +311,7 @@ def _8b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -339,7 +333,7 @@ def _8b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -362,7 +356,7 @@ def _70b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -373,7 +367,7 @@ def _70b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -395,7 +389,7 @@ def _70b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -418,7 +412,7 @@ def _405b(
         max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -429,7 +423,7 @@ def _405b(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=parallelism.enable_sequence_parallel
             ),
         ),
@@ -451,7 +445,7 @@ def _405b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -478,7 +472,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Llama3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -492,8 +485,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

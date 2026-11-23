@@ -416,7 +416,7 @@ def test_rollouter_builds_one_env_per_group_member(
 ) -> None:
     _patch_names(monkeypatch)
     config = _alphabet_sort_rollouter_config()
-    rollouter = config.build()
+    rollouter = config.build(max_rollouts_in_flight=24)
     worker = config.worker.build()
     asyncio.run(
         worker.setup_async(

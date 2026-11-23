@@ -47,6 +47,7 @@ from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
     VerifiersRollouter,
+    VerifiersRolloutWorker,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     register_harness_alias,
@@ -143,14 +144,16 @@ def _terminal_bench_rollouter_config(
                 address="tcp://127.0.0.1:0",
             ),
         ),
-        rubric=Rubric.Config(
-            reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
-            error_reward=0.0,
+        worker=VerifiersRolloutWorker.Config(
+            rubric=Rubric.Config(
+                reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
+                error_reward=0.0,
+            ),
+            generation_server=GenerationServer.Config(
+                max_rollout_tokens=max_context_length
+            ),
+            connection_timeout_sec=1800.0,
         ),
-        generation_server=GenerationServer.Config(
-            max_rollout_tokens=max_context_length
-        ),
-        connection_timeout_sec=1800.0,
     )
 
 
@@ -447,7 +450,7 @@ def rl_grpo_muse_glimmer_30b_terminal_bench() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
-        # Muse's SoftCappedLinear head cannot use LMHeadFP32OutputConverter.
+        # Muse's SoftCappedLinear head cannot use LMHeadFP32OutputTransform.
         fp32_lm_head=False,
     )
     return Controller.Config(

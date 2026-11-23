@@ -5,15 +5,13 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
-import dataclasses
 import json
 import logging
 import os
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
@@ -32,6 +30,7 @@ from torchtitan.config import (
     OverrideConfig,
     PrecisionConfig,
 )
+from torchtitan.config.format import format_config
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.base.model import BaseModel
@@ -120,23 +119,9 @@ class Trainer(Configurable):
                     "load_only=False."
                 )
 
-        def to_dict(self) -> dict[str, Any]:
-            d = {}
-            for f in dataclasses.fields(self):
-                val = getattr(self, f.name)
-                if hasattr(val, "to_dict"):
-                    d[f.name] = val.to_dict()
-                elif dataclasses.is_dataclass(val):
-                    d[f.name] = asdict(val)
-                else:
-                    d[f.name] = val
-            return d
-
         def maybe_log(self) -> None:
             if self.debug.print_config:
-                logger.info(
-                    f"Running with configs: {json.dumps(self.to_dict(), indent=2, ensure_ascii=False)}"
-                )
+                logger.info(f"Running with configs: {format_config(self)}")
 
             if self.debug.save_config_file is not None:
                 config_file = os.path.join(
@@ -562,10 +547,14 @@ class Trainer(Configurable):
                             ),
                             parallelism_context=engine.parallelism_context,
                         )
-        finally:
-            # The entry point also calls close() for checkpoint and graph
-            # cleanup; close the profiler here so direct train() callers get
-            # balanced lifecycle handling.
+        except BaseException as e:
+            # Pass the failure so an OOM writes the exit memory snapshot. The
+            # entry point also calls close() for checkpoint and graph cleanup;
+            # close the profiler here so direct train() callers get balanced
+            # lifecycle handling.
+            engine.close_profiler(e)
+            raise
+        else:
             engine.close_profiler()
 
         if torch.distributed.get_rank() == 0:

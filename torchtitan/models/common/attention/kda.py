@@ -22,7 +22,7 @@ from torchtitan.models.common.attn_gym import (
     bound_gate,
     causal_conv1d,
     chunk_kda,
-    ChunkKdaCudnn,
+    ChunkKdaWarpdrive,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -51,7 +51,7 @@ from .linear_attention import (
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
-for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
+for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaWarpdrive, _MaskRows):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -103,7 +103,6 @@ class KDAKernel(Module):
             gate_1THK,
             beta_1TH,
             cu_seqlens=cu_seqlens,
-            autotune=not torch.are_deterministic_algorithms_enabled(),
             kernel_options=chunk_kernel_options(q_1THK),
         )
         return output_1THV
@@ -130,10 +129,9 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
-        autotune = not torch.are_deterministic_algorithms_enabled()
         return (
-            l2norm(q_1THK, autotune=autotune),
-            l2norm(k_1THK, autotune=autotune),
+            l2norm(q_1THK),
+            l2norm(k_1THK),
             gate_1THK,
             raw_beta_1TH.float().sigmoid(),
         )
