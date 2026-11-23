@@ -534,7 +534,7 @@ config.dataloader = GrainDataLoader.Config(
 
 It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors. CP and TP peers read the same microbatches and exchange with the ranks in the same position of other data-parallel ranks. It assumes the data-parallel mesh dimensions come before CP and TP and no pipeline parallelism, and checks this at startup. A peer that stops producing microbatches for 30 minutes makes the loader raise rather than fall back, since a rank that kept its own microbatches would train different data than its CP peers.
 
-Measured on 4 GB300 nodes (Qwen3.5-9B, 1M-token DNA rows, DP 8 x CP 2, Ulysses, window 8): `GlobalBalancer` ran 82.0 s per step against 87.1 s for `LocalBalancer` (1.06x). Planning takes 0.1 ms and the exchange about 0.1 s per window, overlapped with training.
+Measured on 4 GB300 nodes (Qwen3.5-9B, 1M-token rows of up to 4 documents, DP 8 x CP 2, Ulysses, window 8): `GlobalBalancer` ran 82.0 s per step against 87.1 s for `LocalBalancer` (1.06x). Planning takes 0.1 ms and the exchange about 0.1 s per window, overlapped with training.
 
 # Distributed and checkpoint behavior
 
