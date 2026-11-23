@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+from dataclasses import replace
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
@@ -24,6 +25,8 @@ from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.base.module import Module
+from torchtitan.models.common.decoder_sharding import vocab_sharded_on_cp
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
 
@@ -409,6 +412,12 @@ def apply_fsdp_to_decoder(
         fsdp_config["dp_mesh_dims"] = dp_mesh_dims
     if cpu_offload:
         fsdp_config["offload_policy"] = CPUOffloadPolicy()
+    # A module whose vocab is sharded over CP gets its full gradient on each CP
+    # rank, so FSDP shards and reduces it over DP only. Validation requires
+    # CP > 1 for this, so dp_mesh_dims is set (asserted where it is used).
+    dp_only_fsdp_config = dict(fsdp_config)
+    if dp_mesh_dims is not None:
+        dp_only_fsdp_config["dp_mesh_dims"] = replace(dp_mesh_dims, shard="dp_shard")
 
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
@@ -428,9 +437,30 @@ def apply_fsdp_to_decoder(
         )
     else:
         if model.tok_embeddings is not None:
+            embeddings = [
+                module
+                for module in model.tok_embeddings.modules()
+                if isinstance(module, VocabParallelEmbedding)
+            ]
+            embedding_on_cp = any(
+                vocab_sharded_on_cp(embedding._sharding_config)
+                for embedding in embeddings
+            )
+            # The unit is reduced over DP only, which is wrong for any other
+            # parameter in it, such as a norm weight.
+            embedding_weights = {embedding.weight for embedding in embeddings}
+            assert not embedding_on_cp or dp_mesh_dims is not None
+            if embedding_on_cp and any(
+                param not in embedding_weights
+                for param in model.tok_embeddings.parameters()
+            ):
+                raise ValueError(
+                    "Token embeddings with CP-sharded vocab must hold no "
+                    "parameters other than the embedding weight."
+                )
             fully_shard(
                 model.tok_embeddings,
-                **fsdp_config,
+                **(dp_only_fsdp_config if embedding_on_cp else fsdp_config),
                 reshard_after_forward=reshard_after_forward,
             )
             # Embedding backward needs only grad_output and the token indices,
@@ -444,11 +474,24 @@ def apply_fsdp_to_decoder(
                 model.tok_embeddings.set_unshard_in_backward(False)
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
-        if model.norm is not None and model.lm_head is not None:
+        reshard_last = reshard_after_forward_policy == "always"
+        if model.lm_head is not None and vocab_sharded_on_cp(
+            model.lm_head._sharding_config
+        ):
+            # The norm still needs the DP x CP reduction, so it is a separate
+            # unit from the CP-sharded lm_head.
+            assert model.norm is not None and dp_mesh_dims is not None
+            fully_shard(model.norm, **fsdp_config, reshard_after_forward=reshard_last)
+            fully_shard(
+                model.lm_head,
+                **dp_only_fsdp_config,
+                reshard_after_forward=reshard_last,
+            )
+        elif model.norm is not None and model.lm_head is not None:
             fully_shard(
                 [model.norm, model.lm_head],
                 **fsdp_config,
-                reshard_after_forward=reshard_after_forward_policy == "always",
+                reshard_after_forward=reshard_last,
             )
 
     for layer_id, transformer_block in model.layers.items():
@@ -618,6 +661,8 @@ def apply_fsdp_to_decoder(
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
     if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
+        # With a CP-sharded vocab, the lm_head backward runs inside the loss,
+        # before the main backward, so this all-gather is issued early.
         model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
 
     for transformer_block, prev_transformer_block in zip(

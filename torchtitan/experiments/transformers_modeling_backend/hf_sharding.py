@@ -194,7 +194,9 @@ class HFVocabParallelEmbedding(VocabParallelEmbedding):
         ),
     )
     def _local_hf_lookup_vocab_shard(self, input: torch.Tensor) -> torch.Tensor:
-        return self._lookup_vocab_shard(input)
+        tp_group = spmd_mesh_group(TP)
+        assert tp_group is not None
+        return self._lookup_vocab_shard(input, tp_group)
 
 
 def _set_row_parallel(module: nn.Module, *, output_sp: bool) -> None:

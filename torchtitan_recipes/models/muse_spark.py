@@ -68,6 +68,10 @@ from torchtitan.models.common.attention.cp_attention import (
     UlyssesVarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
+from torchtitan.models.common.decoder_sharding import (
+    cp_vocab_parallel_lm_head_sharding_config,
+    cp_vocab_parallel_token_embedding_sharding_config,
+)
 from torchtitan.models.common.moe import (
     RoundRobinTokenChoiceTopKRouter,
     RoutedExperts,
@@ -503,8 +507,9 @@ def _muse_spark_816b_dist_moe_bf16_spmd(
 def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Config:
     """Configure 32K BF16 Dist-MoE SPMD on 64 GPUs: DP8, CP8, EP64.
 
-    It uses FA4 varlen attention with K/V all-gather CP and keeps the Adam
-    moments in pinned host memory.
+    It uses FA4 varlen attention with K/V all-gather CP, shards the token
+    embedding and lm_head vocab over CP, and keeps the Adam moments in pinned
+    host memory.
     """
     config = _muse_spark_816b_dist_moe_bf16_spmd(
         seq_len=32 * 1024,
@@ -522,7 +527,7 @@ def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Con
         # than the default save regions.
         remat_save_regions=[*_MUSE_SPARK_DIST_MOE_SAVE_REGIONS, "attention.*"],
     )
-    # Without PP, "default" keeps only the last [norm, lm_head] unit unsharded
+    # Without PP, "default" keeps the last units (norm and lm_head) unsharded
     # after forward, so the loss does not all-gather the lm_head weight again.
     config.parallelism.fsdp_reshard_after_forward = "default"
     # VarlenInnerAttention defaults to cuDNN first. Pin FA4.
@@ -533,6 +538,18 @@ def _muse_spark_816b_dist_moe_bf16_spmd_64(*, fake_backend: bool) -> Trainer.Con
         replace(cast(AdamW.Config, optimizer), moment_cpu_offload_fraction=1.0)
         for optimizer in config.optim.optimizer.optimizers
     ]
+    # No CP rank holds a full-vocab embedding or lm_head weight, or its fp32
+    # gradient.
+    model_config = cast(MuseSparkModel.Config, config.model)
+    tok_embeddings = model_config.tok_embeddings
+    tok_embeddings.embedding = replace(
+        tok_embeddings.embedding,
+        sharding_config=cp_vocab_parallel_token_embedding_sharding_config(),
+    )
+    model_config.lm_head = replace(
+        model_config.lm_head,
+        sharding_config=cp_vocab_parallel_lm_head_sharding_config(),
+    )
     return config
 
 
