@@ -223,6 +223,26 @@ class CheckpointStorage(Protocol):
         ...
 
 
+class FilesystemCheckpointStorage:
+    """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
+
+    Local paths go through ``os``/``shutil`` and remote fsspec URIs through
+    fsspec.
+    """
+
+    def isdir(self, path: str) -> bool:
+        return filesystem.isdir(path)
+
+    def isfile(self, path: str) -> bool:
+        return filesystem.isfile(path)
+
+    def listdir(self, path: str) -> list[str]:
+        return filesystem.listdir(path)
+
+    def remove(self, path: str) -> None:
+        filesystem.rmtree(path)
+
+
 class BaseCheckpointManager(Configurable, ABC):
     """Contract every TorchTitan checkpoint manager implements.
 

@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import json
 import logging
 import os
@@ -51,9 +50,9 @@ from torchtitan.components.checkpointer import (
     ModelWrapper,
     OPTIMIZER,
 )
+from torchtitan.components.checkpointer.base import FilesystemCheckpointStorage
 from torchtitan.components.checkpointer.torch_checkpointing import (
     _async_save_config,
-    _BackendCheckpointStorage,
     _default_backend_config,
     TorchCheckpointingManager,
 )
@@ -141,7 +140,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self,
         config: TorchCheckpointingManager.Config,
         *,
-        storage_config=None,
         base_folder: str = "/tmp",
         model_parts=None,
         optimizers=None,
@@ -163,7 +161,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 extra_states=extra_states or {"train_state": _Stateful("train")},
                 sd_adapter=sd_adapter,
                 base_folder=base_folder,
-                storage_config=storage_config,
             )
         return manager, backend_manager
 
@@ -221,11 +218,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             keep_latest_k=0,
             initial_load_model_only=False,
         )
-        storage = mock.Mock()
-        with mock.patch.object(
-            FsspecStorageConfig, "create_storage", return_value=storage
-        ):
-            manager, backend_manager = self._build_manager(config)
+        manager, backend_manager = self._build_manager(config)
 
         self.assertEqual("gs://bucket/run/checkpoint/", manager.folder)
         storage_config = manager._manager_config.storage_config
@@ -248,53 +241,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertEqual(
             "bucket/run/checkpoint/exports/step-6", sync_manager.save_calls[0][0]
         )
-
-        # Retention deletes through the same storage, by scheme-less path.
-        manager._storage.remove("gs://bucket/run/checkpoint/step-3")
-        storage.rmdir.assert_called_once_with(Path("bucket/run/checkpoint/step-3"))
         manager.close()
-
-    def test_storage_reads_each_path_from_the_storage_its_scheme_names(self) -> None:
-        # Dropping the scheme and reading through the folder's storage would
-        # turn gs://bucket/hf into bucket/hf on S3.
-        folder_storage_config = FsspecStorageConfig(protocol="s3")
-        folder_storage, local_storage, gcs_storage = (mock.Mock() for _ in range(3))
-        with (
-            mock.patch.object(
-                FsspecStorageConfig,
-                "create_storage",
-                autospec=True,
-                side_effect=lambda config: {"s3": folder_storage, "gs": gcs_storage}[
-                    config.protocol
-                ],
-            ),
-            mock.patch.object(
-                LocalFileSystemStorageConfig,
-                "create_storage",
-                return_value=local_storage,
-            ),
-        ):
-            adapter = _BackendCheckpointStorage(
-                "s3://bucket/run", folder_storage_config
-            )
-            adapter.isdir("s3://bucket/run/step-1")
-            adapter.isdir("/data/hf")
-            adapter.isdir("gs://bucket/hf")
-
-        folder_storage.isdir.assert_called_once_with(Path("bucket/run/step-1"))
-        local_storage.isdir.assert_called_once_with(Path("/data/hf"))
-        gcs_storage.isdir.assert_called_once_with(Path("bucket/hf"))
-        # The backend managers that load these paths get the same storage.
-        self.assertIs(
-            folder_storage_config, adapter.storage_config_for("s3://bucket/run")
-        )
-        self.assertEqual(
-            LocalFileSystemStorageConfig(), adapter.storage_config_for("/data/hf")
-        )
-        self.assertEqual(
-            FsspecStorageConfig(protocol="gs"),
-            adapter.storage_config_for("gs://bucket/hf"),
-        )
 
     def test_remote_folder_round_trip(self) -> None:
         """Save and resume through a URI folder with the real backend."""
@@ -334,42 +281,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             finally:
                 loader.close()
             torch.testing.assert_close(restored.weight, saved.weight)
-
-    def test_caller_supplied_storage_config_wins_for_a_remote_folder(self) -> None:
-        storage_config = mock.Mock()
-        storage_config.create_storage.return_value = mock.Mock()
-        config = TorchCheckpointingManager.Config(
-            folder="gs://bucket/run/checkpoint",
-            keep_latest_k=0,
-        )
-
-        manager, _ = self._build_manager(config, storage_config=storage_config)
-
-        self.assertIs(storage_config, manager._manager_config.storage_config)
-        manager.close()
-
-        # A storage the folder's URI cannot be on would silently drop the
-        # scheme: gs://bucket/run becomes the local relative path bucket/run.
-        for mismatched in (
-            LocalFileSystemStorageConfig(),
-            FsspecStorageConfig(protocol="s3"),
-        ):
-            with self.subTest(storage_config=mismatched):
-                with self.assertRaisesRegex(ValueError, "storage_config"):
-                    self._build_manager(config, storage_config=mismatched)
-
-        # The reverse: a local folder on remote storage would turn
-        # /tmp/checkpoint into gs://tmp/checkpoint. fsspec's local filesystem
-        # holds it as is.
-        local_config = TorchCheckpointingManager.Config(keep_latest_k=0)
-        with self.assertRaisesRegex(ValueError, "storage_config"):
-            self._build_manager(
-                local_config, storage_config=FsspecStorageConfig(protocol="gs")
-            )
-        manager, _ = self._build_manager(
-            local_config, storage_config=FsspecStorageConfig(protocol="file")
-        )
-        manager.close()
 
     def _memory_bucket(self) -> str:
         memory_fs = fsspec.filesystem("memory")
@@ -499,34 +410,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         finally:
             loader.close()
         torch.testing.assert_close(restored.weight, saved.weight)
-
-    def test_storage_config_is_an_init_parameter_not_a_config_field(self) -> None:
-        # Backend storage is a live object, so it is passed programmatically
-        # rather than declared as serializable configuration.
-        field_names = {
-            field.name for field in dataclasses.fields(TorchCheckpointingManager.Config)
-        }
-        self.assertNotIn("storage_config", field_names)
-
-        storage = mock.Mock()
-        storage_config = mock.Mock()
-        storage_config.create_storage.return_value = storage
-        config = TorchCheckpointingManager.Config(
-            keep_latest_k=0,
-            initial_load_model_only=False,
-            load_only=True,
-        )
-
-        manager, _ = self._build_manager(config, storage_config=storage_config)
-
-        # Path probes go through the same storage, wrapped to answer the
-        # CheckpointStorage protocol, and it is pushed into the backend config
-        # so saves and loads use it too.
-        self.assertIsInstance(manager._storage, CheckpointStorage)
-        manager._storage.isdir("/somewhere")
-        storage.isdir.assert_called_once_with(Path("/somewhere"))
-        self.assertIs(storage_config, manager._manager_config.storage_config)
-        manager.close()
 
     def test_save_obeys_cadence_and_tracks_backend_future(self) -> None:
         config = TorchCheckpointingManager.Config(
@@ -963,9 +846,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # backend metadata would mark a finished export abandoned, and the next
         # run's pre-save retention deletes abandoned directories outright.
         manager = TorchCheckpointingManager.__new__(TorchCheckpointingManager)
-        manager._storage = _BackendCheckpointStorage(
-            "/checkpoint", LocalFileSystemStorageConfig(use_direct_io=False)
-        )
+        manager._storage = FilesystemCheckpointStorage()
 
         for marker, is_resumable in (
             ("metadata.pkl", True),
@@ -1062,8 +943,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             last_save_model_only=True,
             last_save_in_hf=True,
         )
-        storage_config = mock.Mock()
-        storage_config.create_storage.return_value = mock.Mock()
         backend_manager = _BackendManager()
         sync_manager = _BackendManager()
         sync_manager.save_result = None
@@ -1081,7 +960,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 extra_states={"train_state": _Stateful("train")},
                 sd_adapter=adapter,
                 base_folder="/tmp",
-                storage_config=storage_config,
             )
             self.assertTrue(manager.save(curr_step=5, last_step=True))
 
@@ -1126,7 +1004,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             output_dir="/tmp/checkpoint/exports/step-5",
             item_key=MODEL,
             fqn_to_index_mapping=adapter.fqn_to_index_mapping,
-            storage_config=storage_config,
+            storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
         )
         manager.close()
 
@@ -1145,7 +1023,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 ema=None,
                 extra_states={},
                 sd_adapter=_StateDictAdapter(),
-                storage_config=mock.Mock(),
             )
 
     def test_hf_load_uses_temporary_model_only_manager_and_restores_model(
@@ -1279,7 +1156,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 extra_states={"train_state": _Stateful("train")},
                 sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
                 base_folder=base_folder,
-                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
             )
             try:
                 self.assertTrue(manager.load())
@@ -1320,7 +1196,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 extra_states={"train_state": _Stateful("train")},
                 sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
                 base_folder=base_folder,
-                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
             )
             try:
                 self.assertTrue(manager.load())
@@ -1616,35 +1491,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         self.assertIn(EMA, loaded)
         self.assertNotIn(mock.call({}), ema.load_state_dict.call_args_list)
-
-    def test_load_latest_uses_configured_storage(self) -> None:
-        # The backend Storage the adapter wraps: step-7 is a directory holding a
-        # metadata.pkl file.
-        storage = mock.Mock()
-        storage.ls.return_value = ["step-7"]
-        storage.exists.return_value = True
-        storage.isdir.side_effect = lambda path: not str(path).endswith("metadata.pkl")
-        storage_config = mock.Mock()
-        storage_config.create_storage.return_value = storage
-        config = TorchCheckpointingManager.Config(
-            folder="checkpoint",
-            keep_latest_k=0,
-            initial_load_model_only=False,
-            load_only=True,
-        )
-        manager, backend_manager = self._build_manager(
-            config,
-            storage_config=storage_config,
-            base_folder="/custom",
-        )
-
-        self.assertTrue(manager.load())
-
-        self.assertEqual(
-            "/custom/checkpoint/step-7",
-            backend_manager.load_calls[0][0],
-        )
-        manager.close()
 
     def test_load_latest_ignores_incomplete_checkpoint_directories(self) -> None:
         with tempfile.TemporaryDirectory() as base_folder:

@@ -37,6 +37,7 @@ from .base import (
     BaseCheckpointManager,
     EMA,
     export_state_dict,
+    FilesystemCheckpointStorage,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -64,27 +65,6 @@ class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
-
-
-class _FilesystemCheckpointStorage:
-    """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
-
-    Local paths go through ``os``/``shutil`` and remote fsspec URIs through
-    fsspec, so DCP keeps reading and writing remote checkpoint folders exactly
-    as it did before.
-    """
-
-    def isdir(self, path: str) -> bool:
-        return filesystem.isdir(path)
-
-    def isfile(self, path: str) -> bool:
-        return filesystem.isfile(path)
-
-    def listdir(self, path: str) -> list[str]:
-        return filesystem.listdir(path)
-
-    def remove(self, path: str) -> None:
-        filesystem.rmtree(path)
 
 
 class CheckpointManager(BaseCheckpointManager):
@@ -171,7 +151,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
-        self._storage = _FilesystemCheckpointStorage()
+        self._storage = FilesystemCheckpointStorage()
 
         self._validate_extra_state_keys(extra_states)
         self.states = dict(extra_states)
