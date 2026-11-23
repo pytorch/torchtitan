@@ -7,10 +7,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import itertools
 import logging
 import math
-import random
 import socket
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -40,6 +40,8 @@ from torchtitan.rl.rollout.types import (
     RolloutTurn,
     RolloutTurnID,
 )
+from torchtitan.rl.routing.strategies import LeastLoadedRoutingStrategy
+from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
 from torchtitan.tools.garbage_collector import GarbageCollector
 
 if TYPE_CHECKING:
@@ -208,6 +210,9 @@ class Rollouter(Configurable):
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
         self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
+        # Each worker's rollouts in flight, in `by_worker` order. `setup_async` fills it.
+        self._worker_loads: list[_RolloutWorkerLoad] = []
+        self._worker_strategy = LeastLoadedRoutingStrategy.Config().build()
 
     def get_training_sample(self) -> tuple[int, object]:
         """Return the next globally identified input from the training loader."""
@@ -261,6 +266,10 @@ class Rollouter(Configurable):
             ),
             worker_roles=self._config.worker_roles,
         )
+        # Every worker on every host, with its rollouts in flight: each new group goes to the least loaded.
+        self._worker_loads = [
+            _RolloutWorkerLoad(actor=actor) for actor in self._workers.by_worker
+        ]
         # Each worker checks these on its host. The validation dataset isn't checked: it is built only
         # at validation, after the workers start, and may be downloaded then.
         paths_on_every_host = (
@@ -383,9 +392,15 @@ class Rollouter(Configurable):
         if self._workers is None:
             raise RuntimeError("rollout worker pool is not initialized")
 
-        # A worker picked uniformly at random, as Monarch's `choose` does on one mesh.
+        # The worker with the fewest rollouts in flight. On a tie, the one chosen longest ago.
+        # TODO: balance the workers better: lower a worker's count as each of its rollouts ends.
+        #   Today the count drops only when the whole group returns, so a group of 8 with 7 rollouts
+        #   done still counts 8.
+        # TODO: retire a worker whose groups keep failing (e.g. its env can't start). Its count drops to
+        #   0 at once, so it gets most new groups. Needs a rule for "broken", e.g. 3 failed groups in a row.
+        worker = self._worker_strategy.choose(RoutingContext(), self._worker_loads)
         call = asyncio.ensure_future(
-            random.choice(self._workers.by_worker).run_group.call_one(
+            worker.actor.run_group.call_one(
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 sample=sample,
@@ -394,16 +409,56 @@ class Rollouter(Configurable):
                 sampling=sampling,
             )
         )
+        # Count the group only after the send. If the send raises (e.g. an argument can't be pickled),
+        # the done callback below is never added, so a count added before the send would never come down.
+        worker.reserved_load += group_size
         self._inflight_run_group_calls.add(call)
-        call.add_done_callback(self._on_run_group_call_done)
+        # When run_group ends: lower this worker's count, forget the call and read its error.
+        call.add_done_callback(
+            functools.partial(
+                self._on_run_group_call_done, worker=worker, group_size=group_size
+            )
+        )
         # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
         return await asyncio.shield(call)
 
-    def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
+    def _on_run_group_call_done(
+        self,
+        call: asyncio.Future[RolloutGroup],
+        *,
+        worker: _RolloutWorkerLoad,
+        group_size: int,
+    ) -> None:
+        worker.reserved_load -= group_size
         self._inflight_run_group_calls.discard(call)
         # A cancelled caller never reads the error; read it so asyncio does not log it.
         if not call.cancelled():
             call.exception()
+
+    def metrics(self) -> list[m.Metric]:
+        """Return the busiest worker's rollouts in flight and the mean over workers, read now.
+
+        Example, 3 workers with 16, 8 and 0 rollouts in flight:
+
+            rollout_worker/num_rollouts_in_flight_max    16
+            rollout_worker/num_rollouts_in_flight_mean    8
+
+        A max well above the mean: the load is uneven, and the busiest worker fills first.
+        """
+        # A Rollouter subclass that overrides `setup_async` may spawn no workers.
+        if not self._worker_loads:
+            return []
+        loads = [worker.reserved_load for worker in self._worker_loads]
+        return [
+            m.Metric(
+                "rollout_worker/num_rollouts_in_flight_max",
+                m.NoReduce(float(max(loads))),
+            ),
+            m.Metric(
+                "rollout_worker/num_rollouts_in_flight_mean",
+                m.NoReduce(sum(loads) / len(loads)),
+            ),
+        ]
 
     def state_dict(self) -> dict[str, object]:
         """Return the checkpoint state of the training input iterator."""
@@ -412,6 +467,18 @@ class Rollouter(Configurable):
     def load_state_dict(self, state_dict: dict[str, object]) -> None:
         """Restore the training iterator, including uncommitted inputs."""
         self._training_dataloader.load_state_dict(state_dict)
+
+
+@dataclass(kw_only=True, slots=True)
+class _RolloutWorkerLoad(RoutingCandidate):
+    """A rollout worker and its rollouts in flight, for `LeastLoadedRoutingStrategy` to pick from."""
+
+    actor: Any
+    """The worker's actor, from `RolloutWorkersHandle.by_worker`."""
+
+    reserved_load: int = 0
+    """Rollouts in flight on this worker: up by the group size when a group is sent, down when it
+    returns."""
 
 
 def log_failed_rollout(rollout: Rollout) -> None:
