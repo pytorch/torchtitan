@@ -28,8 +28,10 @@ _RECIPE_MODULES = [
     for module in pkgutil.iter_modules(package.__path__)
     if module.name != "model_configs"
 ]
-# Reward packages that some recipe modules import (dapo_math, the verifiers recipes).
-_OPTIONAL_PACKAGES = {"math_verify", "verifiers"}
+# Optional packages; a recipe module that needs a missing one is skipped: math_verify
+# (dapo_math), verifiers (the verifiers recipes) and swerebench_v2, prime-envs'
+# SWE-rebench taskset (verifiers_swe_rebench).
+_OPTIONAL_PACKAGES = {"math_verify", "verifiers", "swerebench_v2"}
 # Recipes that need an optional package: torchao nightly (MXFP8), dist_moe and SGLang.
 _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_qwen3_0_6b_varlen_mxfp8",
