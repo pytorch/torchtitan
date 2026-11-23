@@ -362,11 +362,19 @@ def test_prefix_that_is_not_the_longest_raises(
         ([], [1, 2], (0, [])),  # empty prompt
     ],
 )
-def test_split_prompt(prompt, previous, expected) -> None:
-    prompt_prefix_len, prompt_delta_token_ids = split_prompt(
-        Prompt(token_ids=prompt), previous=Prompt(token_ids=previous)
-    )
+@pytest.mark.parametrize("token_ids_as", ["prompt", "array"])
+def test_split_prompt(prompt, previous, expected, token_ids_as) -> None:
+    # The native rollout passes `Prompt`s; the Verifiers converter passes int32 arrays.
+    if token_ids_as == "prompt":
+        prompt_prefix_len, prompt_delta_token_ids = split_prompt(
+            Prompt(token_ids=prompt), previous=Prompt(token_ids=previous)
+        )
+    else:
+        prompt_prefix_len, prompt_delta_token_ids = split_prompt(
+            np.array(prompt, np.int32), previous=np.array(previous, np.int32)
+        )
     assert (prompt_prefix_len, prompt_delta_token_ids.tolist()) == expected
+    assert prompt_delta_token_ids.dtype == np.int32
 
 
 @pytest.mark.parametrize(

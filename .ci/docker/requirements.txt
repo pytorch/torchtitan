@@ -7,8 +7,8 @@ pyarrow < 26
 tensorboard
 wandb
 tokenizers >= 0.15.0
-renderers == 0.1.12
-# TODO: renderers 0.1.12 imports httpx without declaring it
+renderers == 0.2.0
+# TODO: remove when renderers declares httpx.
 httpx == 0.28.1
 safetensors
 einops
