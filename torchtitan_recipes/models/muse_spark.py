@@ -813,6 +813,80 @@ def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark_cp1_fake() -> Trainer.
     return _muse_spark_816b_mxfp8_spmd_64_benchmark_cp1(fake_backend=True)
 
 
+def _muse_spark_816b_dist_moe_spmd_64_bf16_state_benchmark(
+    *, fake_backend: bool, expert_precision: Literal["bf16", "mxfp8"]
+) -> Trainer.Config:
+    """Benchmark the CP2 recipe with BF16 Adam moments and reductions.
+
+    Same workload as ``_muse_spark_816b_dist_moe_spmd_64_benchmark`` (DP32,
+    CP2, EP64, 32K rows, forced routing). Master weights and gradients stay
+    FP32; Adam moments and FSDP gradient reductions are BF16. The freed memory
+    goes to the Dist-MoE activation slot, which saves more MoE layers instead
+    of recomputing them. Only attention regions and block inputs are offloaded.
+    """
+    config = _muse_spark_816b_dist_moe_spmd_64_benchmark(
+        fake_backend=fake_backend, expert_precision=expert_precision
+    )
+    config.precision.reduce_dtype = "bfloat16"
+    config.optim.optimizer.optimizers = [
+        replace(cast(AdamW.Config, optimizer), moment_dtype="bfloat16")
+        for optimizer in config.optim.optimizer.optimizers
+    ]
+    config.activation_remat = replace(
+        config.activation_remat,
+        save_regions=[*_MUSE_SPARK_DIST_MOE_SAVE_REGIONS, "attention.*"],
+        offload_regions=["attention.*"],
+    )
+    # Slot sizes are the measured 64-GPU settings. MXFP8 instead keeps the
+    # gathered weights from forward to backward, so its slot is smaller.
+    if expert_precision == "mxfp8":
+        config.parallelism.fsdp_reshard_after_forward = "never"
+    # Forced routing needs no scratch headroom.
+    config.dist_moe_runtime = replace(
+        config.dist_moe_runtime,
+        activation_slot_bytes=(70 if expert_precision == "bf16" else 29) * 2**30,
+        activation_slot_capacity_factor=None,
+        scratch_capacity_factor=1.0,
+    )
+    return config
+
+
+def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_bf16_state_benchmark() -> (
+    Trainer.Config
+):
+    """Benchmark 32K BF16 Dist-MoE on 64 GPUs with BF16 Adam moments."""
+    return _muse_spark_816b_dist_moe_spmd_64_bf16_state_benchmark(
+        fake_backend=False, expert_precision="bf16"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_bf16_spmd_64_bf16_state_benchmark_fake() -> (
+    Trainer.Config
+):
+    """Validate the logical-64 BF16-state benchmark recipe with FakePG."""
+    return _muse_spark_816b_dist_moe_spmd_64_bf16_state_benchmark(
+        fake_backend=True, expert_precision="bf16"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_bf16_state_benchmark() -> (
+    Trainer.Config
+):
+    """Benchmark 32K MXFP8 Dist-MoE on 64 GPUs with BF16 Adam moments."""
+    return _muse_spark_816b_dist_moe_spmd_64_bf16_state_benchmark(
+        fake_backend=False, expert_precision="mxfp8"
+    )
+
+
+def muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_bf16_state_benchmark_fake() -> (
+    Trainer.Config
+):
+    """Validate the logical-64 MXFP8 BF16-state benchmark recipe with FakePG."""
+    return _muse_spark_816b_dist_moe_spmd_64_bf16_state_benchmark(
+        fake_backend=True, expert_precision="mxfp8"
+    )
+
+
 def muse_spark_816b_a42b_dist_moe_bf16_spmd_256() -> Trainer.Config:
     """Configure 96K BF16 Dist-MoE SPMD on 256 GPUs."""
     return _muse_spark_816b_dist_moe_spmd(
