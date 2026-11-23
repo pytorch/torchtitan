@@ -18,7 +18,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_multimodal_encoder,
 )
-from torchtitan.distributed.utils import dtensor_rng_off_for_cpu_shards
+from torchtitan.distributed.utils import dtensor_rng_tracker_off
 from torchtitan.models.base.module import Module
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
 from torchtitan.models.muse_spark.vision_encoder import NaViTEncoder
@@ -195,15 +195,14 @@ class TestCPUOffloadRandomInit(DTensorTestBase):
     def test_random_init_of_cpu_shards_advances_the_generator(self) -> None:
         with torch.device("meta"):
             linear = nn.Linear(32, 64, bias=False)
-        fully_shard(
-            linear, mesh=self.build_device_mesh(), offload_policy=CPUOffloadPolicy()
-        )
+        mesh = self.build_device_mesh()
+        fully_shard(linear, mesh=mesh, offload_policy=CPUOffloadPolicy())
         # trainer.py materializes the whole model on CPU under cpu offload.
         linear.to_empty(device="cpu")
         weight = linear.weight
         tracker = torch.distributed.tensor._random._rng_tracker
         std = 32**-0.5
-        with torch.no_grad(), dtensor_rng_off_for_cpu_shards(linear):
+        with torch.no_grad(), dtensor_rng_tracker_off(mesh):
             first = weight.normal_().to_local().clone()
             second = weight.normal_().to_local().clone()
             # DTensor's RNG tracker would rewind the CPU generator: the second

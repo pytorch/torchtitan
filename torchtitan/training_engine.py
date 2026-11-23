@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -173,6 +174,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "parallelism.fsdp_enable_cpu_offloading requires 'dp_shard' in "
                     "debug.distinct_seed_mesh_axes; otherwise every FSDP shard "
                     "is initialized with the same CPU RNG stream."
+                )
+
+            if self.parallelism.fsdp_enable_cpu_offloading and (
+                self.parallelism.tensor_parallel_degree > 1
+                or self.parallelism.context_parallel_degree > 1
+            ):
+                # Init draws from per-rank CPU seeds, which differ only along
+                # distinct_seed_mesh_axes, so TP/CP shards would be identical.
+                raise ValueError(
+                    "parallelism.fsdp_enable_cpu_offloading does not support "
+                    "tensor_parallel_degree > 1 or context_parallel_degree > 1: "
+                    "TP and CP ranks would initialize identical parameter shards."
                 )
 
             if self.parallelism.num_pp_microbatches <= 0:
@@ -451,11 +464,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
 
+        init_shards_on_cpu = (
+            self.config.parallelism.fsdp_enable_cpu_offloading
+            and not create_seed_checkpoint
+        )
         with self.parallelism_context.activate_spmd():
             for model_part in self.model_parts:
                 model_part.to_empty(device=init_device)
-                with torch.no_grad(), dist_utils.dtensor_rng_off_for_cpu_shards(
-                    model_part
+                with torch.no_grad(), (
+                    dist_utils.dtensor_rng_tracker_off(
+                        self.parallelism_context.world_mesh
+                    )
+                    if init_shards_on_cpu
+                    else contextlib.nullcontext()
                 ):
                     model_part.init_weights(buffer_device=buffer_device)
                 model_part.train()

@@ -266,8 +266,8 @@ def set_determinism(
 
 
 @contextlib.contextmanager
-def dtensor_rng_off_for_cpu_shards(module: torch.nn.Module) -> Iterator[None]:
-    """Draw random init of CPU shards on an accelerator mesh from the CPU generator.
+def dtensor_rng_tracker_off(mesh: DeviceMesh) -> Iterator[None]:
+    """Run DTensor random ops on CPU-offloaded shards on the CPU generator.
 
     Under FSDP CPU offload the parameters are DTensors on an accelerator mesh
     whose local shards live on CPU. DTensor runs random ops on them inside its
@@ -278,19 +278,8 @@ def dtensor_rng_off_for_cpu_shards(module: torch.nn.Module) -> Iterator[None]:
     shard because CPU offload requires ``dp_shard`` in
     ``debug.distinct_seed_mesh_axes``.
     """
-    mesh = next(
-        (
-            p.device_mesh
-            for p in module.parameters()
-            if isinstance(p, DTensor)
-            and p.device_mesh.device_type != "cpu"
-            and p.to_local().device.type == "cpu"
-        ),
-        None,
-    )
-    if mesh is None:
-        yield
-        return
+    # TODO: drop once OffsetBasedRNGTracker advances the CPU generator for CPU
+    # local shards: <pytorch issue link>
     dtensor_random = torch.distributed.tensor._random
     saved = dtensor_random._rng_tracker
     # DTensor creates an enabled tracker on the first random op if none exists.
