@@ -14,7 +14,7 @@ import torch
 
 from torchtitan.components.data.balancing import (
     document_attention_cost,
-    MicrobatchBalancingConfig,
+    LocalBalancer,
     MicrobatchBalancingIterDataset,
     plan_window,
 )
@@ -69,21 +69,30 @@ class TestDocumentAttentionCost(unittest.TestCase):
 
 
 def _ordered(values, window_size):
+    balancer = LocalBalancer.Config(
+        window_size=window_size, cost_fn=lambda x: x[0]
+    ).build()
     dataset = MicrobatchBalancingIterDataset(
-        grain.MapDataset.source(values).to_iter_dataset(),
-        config=MicrobatchBalancingConfig(
-            window_size=window_size, cost_fn=lambda x: x[0]
-        ),
+        grain.MapDataset.source(values).to_iter_dataset(), balancer=balancer
     )
     return iter(dataset)
 
 
-class TestPlanWindow(unittest.TestCase):
-    def test_single_rank_orders_heaviest_first(self):
-        costs = [3.0, 9.0, 1.0, 9.0, 4.0]
-        order = [step[0][1] for step in plan_window([costs])]
-        self.assertEqual(order, sorted(range(5), key=lambda i: (-costs[i], i)))
+class TestLocalBalancer(unittest.TestCase):
+    def test_heaviest_first_ties_in_input_order(self):
+        balancer = LocalBalancer.Config(cost_fn=lambda x: x[0]).build()
+        rows = [(3, "a"), (9, "b"), (1, "c"), (9, "d"), (4, "e")]
+        self.assertEqual(
+            balancer.balance(rows),
+            [(9, "b"), (9, "d"), (4, "e"), (3, "a"), (1, "c")],
+        )
 
+    def test_rejects_empty_window_size(self):
+        with self.assertRaises(ValueError):
+            LocalBalancer.Config(window_size=0)
+
+
+class TestPlanWindow(unittest.TestCase):
     def test_groups_by_cost_and_keeps_rows_local(self):
         rng = random.Random(0)
         for num_ranks, window in [(1, 4), (4, 8), (8, 8), (24, 32)]:
@@ -104,18 +113,6 @@ class TestPlanWindow(unittest.TestCase):
                 self.assertEqual(set(step), group)  # step k holds the k-th cost group
                 kept = sum(1 for d, (s, _) in enumerate(step) if s == d)
                 self.assertEqual(kept, len({s for s, _ in group}))  # max kept local
-
-    def test_rejects_bad_group_sizes(self):
-        with self.assertRaises(ValueError):
-            MicrobatchBalancingConfig(group_size=0)
-        parent = grain.MapDataset.source([1]).to_iter_dataset()
-        with self.assertRaisesRegex(ValueError, "must divide"):
-            MicrobatchBalancingIterDataset(
-                parent,
-                config=MicrobatchBalancingConfig(group_size=3),
-                dp_rank=0,
-                dp_world_size=4,
-            )
 
 
 class TestMicrobatchBalancingIterDataset(unittest.TestCase):
@@ -162,7 +159,7 @@ class TestMicrobatchBalancingIterDataset(unittest.TestCase):
 
 
 class TestLoaderIntegration(unittest.TestCase):
-    def _build(self, balancing):
+    def _build(self, balancer):
         config = GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(
                 dataset=SingleDatasetConfig(
@@ -179,7 +176,7 @@ class TestLoaderIntegration(unittest.TestCase):
             collator=TextCollator.Config(),
             max_num_documents=64,
             num_prefetch_microbatches=1,
-            balancing=balancing,
+            balancer=balancer,
         )
         return config.build(
             dp_world_size=2,
@@ -191,7 +188,7 @@ class TestLoaderIntegration(unittest.TestCase):
 
     def test_reorders_within_windows_and_resumes(self):
         window = 4
-        ordering = MicrobatchBalancingConfig(
+        ordering = LocalBalancer.Config(
             window_size=window,
             cost_fn=functools.partial(document_attention_cost, token_weight=1.0),
         )

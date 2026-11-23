@@ -4,12 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multi-process gloo tests for microbatch balancing with group_size > 1."""
+"""Multi-process gloo tests for GlobalBalancer."""
 
 import os
 import tempfile
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any
 
 import grain.python as grain
@@ -18,9 +17,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from torchtitan.components.data import balancing
 from torchtitan.components.data.balancing import (
-    MicrobatchBalancingConfig,
+    GlobalBalancer,
     MicrobatchBalancingIterDataset,
     plan_window,
 )
@@ -64,18 +62,20 @@ def _cost(mb: _Microbatch) -> float:
     return mb.cost
 
 
-def _worker(rank, world, dp, group_size, init_file, out_dir, resume_at):
+def _dataset(dp_rank: int, dp: int) -> MicrobatchBalancingIterDataset:
+    balancer = GlobalBalancer.Config(window_size=WINDOW, cost_fn=_cost).build(
+        dp_rank=dp_rank, dp_world_size=dp
+    )
+    parent = grain.MapDataset.source(_local_microbatches(dp_rank)).to_iter_dataset()
+    return MicrobatchBalancingIterDataset(parent, balancer=balancer)
+
+
+def _worker(rank, world, dp, init_file, out_dir, resume_at):
     dist.init_process_group(
         "gloo", init_method=f"file://{init_file}", rank=rank, world_size=world
     )
     dp_rank = rank // (world // dp)
-    config = MicrobatchBalancingConfig(
-        window_size=WINDOW, group_size=group_size, cost_fn=_cost
-    )
-    parent = grain.MapDataset.source(_local_microbatches(dp_rank)).to_iter_dataset()
-    ds = MicrobatchBalancingIterDataset(
-        parent, config=config, dp_rank=dp_rank, dp_world_size=dp
-    )
+    ds = _dataset(dp_rank, dp)
     it = iter(ds)
     got = [next(it) for _ in range(resume_at)]
     if resume_at:
@@ -108,15 +108,14 @@ def _assert_same(a: Any, b: Any) -> None:
 
 
 @pytest.mark.parametrize(
-    "dp,cp,group_size,resume_at",
-    [(4, 2, None, 0), (4, 2, 2, 0), (3, 1, None, 0), (4, 1, 2, 6)],
+    "dp,cp,resume_at", [(4, 2, 0), (3, 1, 0), (4, 1, 6), (1, 2, 0)]
 )
-def test_ranks_receive_planned_microbatches(dp, cp, group_size, resume_at):
+def test_ranks_receive_planned_microbatches(dp, cp, resume_at):
     world = dp * cp
     with tempfile.TemporaryDirectory() as d:
         mp.spawn(
             _worker,
-            args=(world, dp, group_size, os.path.join(d, "init"), d, resume_at),
+            args=(world, dp, os.path.join(d, "init"), d, resume_at),
             nprocs=world,
             join=True,
         )
@@ -124,41 +123,33 @@ def test_ranks_receive_planned_microbatches(dp, cp, group_size, resume_at):
             r: torch.load(os.path.join(d, f"r{r}.pt"), weights_only=False)
             for r in range(world)
         }
-    size = group_size or dp
     src = {s: _local_microbatches(s) for s in range(dp)}
     for w in range(WINDOWS):
-        for g0 in range(0, dp, size):
-            costs = [
-                [src[g0 + s][w * WINDOW + i].cost for i in range(WINDOW)]
-                for s in range(size)
-            ]
-            for k, step in enumerate(plan_window(costs)):
-                for d, (s, i) in enumerate(step):
-                    expected = src[g0 + s][w * WINDOW + i]
-                    for c in range(cp):
-                        _assert_same(expected, got[(g0 + d) * cp + c][w * WINDOW + k])
+        costs = [
+            [src[s][w * WINDOW + i].cost for i in range(WINDOW)] for s in range(dp)
+        ]
+        for k, step in enumerate(plan_window(costs)):
+            for d, (s, i) in enumerate(step):
+                for c in range(cp):
+                    _assert_same(
+                        src[s][w * WINDOW + i], got[d * cp + c][w * WINDOW + k]
+                    )
 
 
-def _timeout_worker(rank, init_file):
+def _dead_peer_worker(rank, init_file):
     dist.init_process_group(
         "gloo", init_method=f"file://{init_file}", rank=rank, world_size=2
     )
-    balancing.FIRST_WINDOW_TIMEOUT = timedelta(seconds=2)
-    parent = grain.MapDataset.source(_local_microbatches(rank)).to_iter_dataset()
-    ds = MicrobatchBalancingIterDataset(
-        parent,
-        config=MicrobatchBalancingConfig(
-            window_size=WINDOW, group_size=None, cost_fn=_cost
-        ),
-        dp_rank=rank,
-        dp_world_size=2,
-    )
-    if rank == 0:  # rank 1 never reaches the first window
-        with pytest.raises(RuntimeError, match="timed out"):
-            next(iter(ds))
+    ds = _dataset(rank, 2)
+    if rank == 1:
+        os._exit(0)  # dies before the first window
+    with pytest.raises(RuntimeError, match="GlobalBalancer exchange failed"):
+        next(iter(ds))
     os._exit(0)  # skip destroy_process_group on the broken group
 
 
-def test_exchange_times_out_with_a_clear_error():
+def test_dead_peer_raises_a_clear_error():
     with tempfile.TemporaryDirectory() as d:
-        mp.spawn(_timeout_worker, args=(os.path.join(d, "init"),), nprocs=2, join=True)
+        mp.spawn(
+            _dead_peer_worker, args=(os.path.join(d, "init"),), nprocs=2, join=True
+        )
