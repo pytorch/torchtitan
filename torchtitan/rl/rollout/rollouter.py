@@ -325,10 +325,7 @@ class BaseRolloutWorker(Configurable, ABC):
             until the group's last `generate` call returns.
         Each read is a round trip back to this worker, so only multi-MB files gain: across GB300
         hosts with ibverbs, reading broke even with sending at ~2 MB per file, was ~2x faster
-        from 5 MB, and 2-6x slower below 1 MB (e.g. Geometry3K's ~15 KB files). With Monarch, each
-        rollout worker makes a CUDA context (~256 MiB) on GPU 0 of its host when it starts,
-        `Rollouter.Config.worker_pool_size` x 256 MiB in all; on a single-host run, GPU 0 is
-        trainer rank 0's GPU."""
+        from 5 MB, and 2-6x slower below 1 MB (e.g. Geometry3K's ~15 KB files)."""
 
         def __post_init__(self) -> None:
             if self.rdma_min_image_bytes is not None and self.rdma_min_image_bytes < 1:
