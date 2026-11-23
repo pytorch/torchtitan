@@ -38,6 +38,9 @@ from collections.abc import Callable
 import torch
 
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.experiments.graph_trainer.auto_fuser.programmable_fusion import (
+    programmable_fusion_pass,
+)
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
@@ -391,6 +394,13 @@ def compile_time_passes(
 
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
+
+    if config.compile.programmable_fusion is not None:
+        passes.append(
+            functools.partial(
+                programmable_fusion_pass, config=config.compile.programmable_fusion
+            )
+        )
 
     # Registered passes (e.g. kernel fusions) run last on the joint graph,
     # after memory policy, remat and collective scheduling, and before any

@@ -10,6 +10,9 @@ from typing import Literal
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.experiments.graph_trainer.auto_fuser.programmable_fusion import (
+    ProgrammableFusionConfig,
+)
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -308,6 +311,10 @@ class GraphTrainerCompileConfig:
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
     manual TP/FSDP/EP."""
+
+    programmable_fusion: ProgrammableFusionConfig | None = None
+    """Fusion regions the recipe names by op path (``programmable_fusion.py``),
+    outlined and replaced by cached kernels. None disables it."""
 
 
 def validate_ep_overlap_config(
