@@ -80,9 +80,13 @@ python -m torchtitan.rl.train \
 
 The recipe trains Qwen3.5-9B on V2.1's Python tasks at 64K context on one 8-GPU host:
 4 trainer GPUs (FSDP=4) and 4 one-GPU generators. It reads the checkpoint from `./assets/hf/Qwen3.5-9B`. It has
-run for 5 steps with a remote-sandbox runtime in place of local Docker, so the load that
-pulling task images and running containers puts on the training host is untested. In
-that run, half of the validation rollouts reached the 64K context limit.
+run for 5 steps with a remote-sandbox runtime in place of local Docker. In that run,
+half of the validation rollouts reached the 64K context limit.
+
+With local Docker, which has not run yet, the host also runs one container per rollout
+in flight: up to 192 (24 groups of 8), each capped at 4 CPUs and 7 GB, from task images
+of 1-3.5 GB each. If the host cannot keep up, lower `target_offpolicy_steps`: at 0, the
+recipe keeps 8 groups (64 containers) in flight.
 
 ## Datasets
 
@@ -94,11 +98,11 @@ first use; set the taskset's `dataset_dir` to read a local copy instead.
   1,129 Rust, and 2,464 in 15 other languages. Every language is kept by default;
   `languages` keeps only some (`task.toml`'s `language`). The recipe keeps only
   `["python"]`, the language of the gold check below.
-- **Split.** V2.1 has no split. `partition="train"` and `"validation"` split the projects
-  by `validation_project_fraction`, so no project is in both, even when V2.1 lists it
+- **Split.** V2.1 has no split. `partition="train"` and `"validation"` split the projects,
+  holding out 10% for validation, so no project is in both, even when V2.1 lists it
   under two owners after a rename.
 - **Quality flags.** Tasks that V2.1 flags `weak_f2p` (their FAIL_TO_PASS tests barely
-  check the fix) are skipped by default (`exclude_quality_flags`).
+  check the fix) are skipped.
 - **Resources.** The taskset asks for 4 CPUs, 7 GB memory and 10 GB disk per sandbox
   (`resources`), less than the 6 CPUs, 24 GB and 32 GB in every V2.1 `task.toml`. Docker
   applies the CPU and memory values as per-container caps, not reservations, and ignores

@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -256,42 +255,42 @@ SWEREBENCH_V2_TEST_OUTPUT_END
 """
 
 
-def test_scoring_restores_tests_from_the_recorded_commit(tmp_path) -> None:
-    """The fix passes, but it breaks one of the two tests that passed before."""
-    data = read_task_directory(_write_task(tmp_path, "t-1"), resources=RESOURCES).data
-    runtime = _ScriptedRuntime(TEST_LOG)
-    trace = SimpleNamespace(info={BASE_COMMIT_KEY: BASE_AT_SETUP}, metrics={})
-    trace.record_metrics = trace.metrics.update
-
-    score = asyncio.run(
-        SWERebenchV21Task(data, vf.TaskConfig()).solved(runtime=runtime, trace=trace)
-    )
-
-    assert score == 0.75
-    restore_env = next(env for argv, env in runtime.commands if "base" in env)
-    assert restore_env["base"] == BASE_AT_SETUP
-    assert trace.metrics == {
-        "resolved": 0.0,
-        "fail_to_pass_fraction": 1.0,
-        "pass_to_pass_fraction": 0.5,
-        "parsed_tests": 3.0,
-    }
-
-
 @pytest.mark.parametrize(
-    "pass_to_pass",
+    "fail_to_pass, pass_to_pass, expected_score, expected_metrics",
     [
-        # One of two FAIL_TO_PASS tests passes; the one PASS_TO_PASS test still passes.
-        ["tests/test_app.py::test_old_a"],
-        # No PASS_TO_PASS tests: only FAIL_TO_PASS counts.
-        [],
+        # The fix passes, but it breaks one of the two tests that passed before.
+        (
+            FAIL_TO_PASS,
+            PASS_TO_PASS,
+            0.75,
+            {
+                "resolved": 0.0,
+                "fail_to_pass_fraction": 1.0,
+                "pass_to_pass_fraction": 0.5,
+            },
+        ),
+        # One of two FAIL_TO_PASS tests passes, and there are no PASS_TO_PASS tests.
+        (
+            ["tests/test_app.py::test_fix", "tests/test_app.py::test_fix_2"],
+            [],
+            0.5,
+            {
+                "resolved": 0.0,
+                "fail_to_pass_fraction": 0.5,
+                "pass_to_pass_fraction": 1.0,
+            },
+        ),
     ],
 )
 def test_verifiers_scores_the_task_with_its_one_reward(
-    tmp_path, pass_to_pass: list[str]
+    tmp_path,
+    fail_to_pass: list[str],
+    pass_to_pass: list[str],
+    expected_score: float,
+    expected_metrics: dict[str, float],
 ) -> None:
-    """Score through Verifiers, which finds rewards by their decorator and name."""
-    fail_to_pass = ["tests/test_app.py::test_fix", "tests/test_app.py::test_fix_2"]
+    """Score through Verifiers, which finds rewards by their decorator and name.
+    Scoring restores the test files from the commit setup recorded."""
     task_dir = _write_task(
         tmp_path, "t-1", fail_to_pass=fail_to_pass, pass_to_pass=pass_to_pass
     )
@@ -305,19 +304,18 @@ def test_verifiers_scores_the_task_with_its_one_reward(
         agent=vf.AgentInfo(config=vf.AgentConfig(), name="test", trainable=False),
     )
     trace.info[BASE_COMMIT_KEY] = BASE_AT_SETUP
-    test_log = (
-        "SWEREBENCH_V2_TEST_OUTPUT_START\n"
-        "PASSED tests/test_app.py::test_fix\n"
-        "FAILED tests/test_app.py::test_fix_2 - AssertionError\n"
-        "PASSED tests/test_app.py::test_old_a\n"
-        "SWEREBENCH_V2_TEST_OUTPUT_END\n"
-    )
+    runtime = _ScriptedRuntime(TEST_LOG)
 
-    asyncio.run(task.score(trace, _ScriptedRuntime(test_log)))
+    asyncio.run(task.score(trace, runtime))
 
     # The bridge trains on trace.reward.
-    assert {name: r.score for name, r in trace.rewards.items()} == {"solved": 0.5}
-    assert trace.reward == 0.5
+    assert {name: r.score for name, r in trace.rewards.items()} == {
+        "solved": expected_score
+    }
+    assert trace.reward == expected_score
+    restore_env = next(env for argv, env in runtime.commands if "base" in env)
+    assert restore_env["base"] == BASE_AT_SETUP
+    assert trace.metrics == {**expected_metrics, "parsed_tests": 3.0}
 
 
 def test_a_crashed_grader_fails_scoring_instead_of_scoring_zero() -> None:

@@ -63,6 +63,14 @@ ANSWER_KEY_DIR = "/swebench_matterhorn"
 BASE_COMMIT_KEY = "swe_rebench_base_commit"
 """`trace.info` key for the repository commit the agent started from."""
 
+_VALIDATION_PROJECT_FRACTION = 0.1
+"""Fraction of the projects held out for `partition="validation"`, rounded, at
+least one."""
+
+_EXCLUDED_QUALITY_FLAGS = frozenset({"weak_f2p"})
+"""Tasks with any of these V2.1 `quality_flags` are skipped. `weak_f2p` marks tasks
+whose FAIL_TO_PASS tests barely check the fix."""
+
 # V2.1's tests/test.sh exports the task's test environment variables, if any,
 # then reads the test command from this heredoc.
 _TEST_COMMAND = re.compile(
@@ -359,17 +367,9 @@ class SWERebenchV21TasksetConfig(vf.TasksetConfig):
     """V2.1 has no split, so this taskset splits the projects: no project is in both
     partitions, even under a renamed owner."""
 
-    validation_project_fraction: float = Field(0.1, gt=0, lt=1)
-    """Fraction of the projects held out for `partition="validation"`, rounded, at
-    least one."""
-
     languages: list[str] | None = None
     """Keep only tasks in these languages (task.toml's `language`, e.g. "python",
     "go", "rust"); None keeps every language."""
-
-    exclude_quality_flags: list[str] = Field(default_factory=lambda: ["weak_f2p"])
-    """Skip tasks that carry any of these V2.1 `quality_flags`. `weak_f2p` marks
-    tasks whose FAIL_TO_PASS tests barely check the fix."""
 
     resources: vf.TaskResources = vf.TaskResources(cpu=4, memory=7, disk=10)
     """CPU cores and GB of memory and disk per sandbox, below the 6 CPUs, 24 GB
@@ -393,11 +393,11 @@ class SWERebenchV21Taskset(vf.Taskset[SWERebenchV21Task, SWERebenchV21TasksetCon
         ]
         if not task_dirs:
             raise ValueError(f"no SWE-rebench V2.1 tasks found in {root}")
-        # Split all projects before filtering, so changing `languages` or
-        # `exclude_quality_flags` does not move a project between partitions.
+        # Split all projects before filtering, so changing `languages` does not
+        # move a project between partitions.
         validation = validation_projects(
             {project_name(task_dir.repo) for task_dir in task_dirs},
-            fraction=config.validation_project_fraction,
+            fraction=_VALIDATION_PROJECT_FRACTION,
         )
         for task_dir in task_dirs:
             if (
@@ -405,7 +405,7 @@ class SWERebenchV21Taskset(vf.Taskset[SWERebenchV21Task, SWERebenchV21TasksetCon
                 and task_dir.language not in config.languages
             ):
                 continue
-            if set(config.exclude_quality_flags) & set(task_dir.quality_flags):
+            if _EXCLUDED_QUALITY_FLAGS & set(task_dir.quality_flags):
                 continue
             in_validation = project_name(task_dir.repo) in validation
             if in_validation != (config.partition == "validation"):
