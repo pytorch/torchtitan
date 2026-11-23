@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import socket
+from dataclasses import replace
+
 from monarch.actor import endpoint
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -15,6 +18,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.monarch.rdma_microbatch import MonarchRDMAMicrobatch
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 
@@ -61,11 +65,19 @@ class _BatcherActorEndpoints:
     ) -> tuple[TrainerStepBatch | None, bool]:
         """Plain `@endpoint`, not `@concurrent_endpoint`: calls run one at a time, so groups reach the
         stateful batcher in arrival order. `async` because Monarch rejects mixing sync and async endpoints."""
-        return super().add_group(rollout_group=rollout_group)
+        batch, has_samples = super().add_group(rollout_group=rollout_group)
+        if batch is not None:
+            # This process's RAM, logged with the step this batch trains.
+            batch = replace(batch, metrics=[*batch.metrics, *m.ram_metrics("batcher")])
+        return batch, has_samples
 
     @endpoint
     async def maybe_release_oldest_batch(self) -> None:
         await super().maybe_release_oldest_batch()
+
+    @endpoint
+    async def get_hostname(self) -> str:
+        return socket.gethostname()
 
     @endpoint
     async def sync_log_step(self, step: int) -> None:

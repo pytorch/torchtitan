@@ -9,6 +9,7 @@
 from .console import log_to_console
 from .loop_lag import EventLoopLag, ThreadPoolLag
 from .processor import MetricBackend, MetricsProcessor
+from .ram import ram_metrics
 from .types import (
     fold,
     Max,
@@ -34,6 +35,7 @@ __all__ = [
     "MetricValue",
     "Min",
     "NoReduce",
+    "ram_metrics",
     "Std",
     "Sum",
     "SummaryStats",

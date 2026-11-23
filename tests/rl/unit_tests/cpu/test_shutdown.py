@@ -28,6 +28,7 @@ from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, RolloutWorkerRoles
 from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.tools.utils import get_visible_devices_env_var
 
 
@@ -601,10 +602,25 @@ def test_stop_rollout_workers_stops_every_host_at_once_when_one_fails(caplog):
     assert system._rollout_worker_meshes == []
 
 
+def _cpu_host(name: str, events: list[str]) -> SimpleNamespace:
+    """A host whose `spawn_procs` records "<n> cpu proc on <name>". Its procs spawn an actor whose
+    `get_hostname` returns `name`."""
+
+    async def get_hostname():
+        return name
+
+    actor = SimpleNamespace(get_hostname=SimpleNamespace(call_one=get_hostname))
+
+    def spawn_procs(*, per_host):
+        events.append(f"{per_host['cpus']} cpu proc on {name}")
+        return SimpleNamespace(spawn=lambda *args, **kwargs: actor)
+
+    return SimpleNamespace(spawn_procs=spawn_procs)
+
+
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
-    """`provision` spawns the GPU meshes on the launcher's hosts, then the router's and
-    the batcher's procs, then sets up torch elastic on each GPU mesh, before any actor
-    is spawned."""
+    """`provision` spawns the GPU meshes on the launcher's hosts, then the router's proc on
+    this host, then sets up torch elastic on each GPU mesh, before any actor is spawned."""
     events: list[str] = []
 
     def spawn_proc_mesh(trainer_world_size, per_generator_world_size, **kwargs):
@@ -620,9 +636,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
 
     monkeypatch.setattr(monarch_system, "spawn_proc_mesh", spawn_proc_mesh)
     monkeypatch.setattr(
-        monarch_system,
-        "spawn_cpu_procs",
-        lambda num_procs: events.append(f"cpu procs {num_procs}") or "cpu_mesh",
+        monarch_system, "this_host", lambda: _cpu_host("this host", events)
     )
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
@@ -639,12 +653,41 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
 
     assert events == [
         "gpu meshes 2+2x2 on host_meshes",
-        "cpu procs 1",
-        "cpu procs 1",
+        "1 cpu proc on this host",
         "torch elastic trainer_mesh",
         "torch elastic generator_mesh_0",
         "torch elastic generator_mesh_1",
     ]
+
+
+@pytest.mark.parametrize(
+    "rdma_min_tensor_bytes, expected",
+    [(None, "this host"), (1024, "the batcher's host in host_meshes")],
+    ids=["by_value", "rdma"],
+)
+def test_spawn_batcher_leaves_the_controller_host_only_with_rdma(
+    monkeypatch, rdma_min_tensor_bytes, expected
+):
+    events: list[str] = []
+    monkeypatch.setattr(
+        monarch_system, "this_host", lambda: _cpu_host("this host", events)
+    )
+    monkeypatch.setattr(
+        monarch_system,
+        "batcher_host",
+        lambda *, host_meshes: _cpu_host(
+            f"the batcher's host in {host_meshes}", events
+        ),
+    )
+    actor_system = MonarchActorSystem.Config().build(host_meshes="host_meshes")
+
+    asyncio.run(
+        actor_system.spawn_batcher(
+            Batcher.Config(rdma_min_tensor_bytes=rdma_min_tensor_bytes)
+        )
+    )
+
+    assert events == [f"1 cpu proc on {expected}"]
 
 
 class _FakeTrainerRanks:
