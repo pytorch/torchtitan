@@ -9,6 +9,7 @@ import importlib
 import logging
 import math
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, MISSING
 from fractions import Fraction
 from typing import Any
@@ -657,7 +658,10 @@ class HFTransformerModel(BaseModel):
                         ["full_attention"] * (len(model.layers) - len(layer_types))
                     )
 
-            attention_op_flops = 0
+            # Full attention is charged per key a query attends to; other layer
+            # types keep the full-length estimate.
+            flops_per_token = 6 * active_nparams
+            flops_per_key = 0
             unsupported_layer_types = set()
             for layer_type in layer_types:
                 if layer_type in ("attention", "full_attention"):
@@ -683,13 +687,21 @@ class HFTransformerModel(BaseModel):
                         layer_qk_head_dim = global_head_dim
                         layer_v_head_dim = global_head_dim
 
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=self.n_heads,
-                    qk_head_dim=layer_qk_head_dim,
-                    v_head_dim=layer_v_head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=sliding_window_size,
-                )
+                if sliding_window_size is None:
+                    flops_per_key += quadratic_attention_flops_per_token(
+                        num_heads=self.n_heads,
+                        qk_head_dim=layer_qk_head_dim,
+                        v_head_dim=layer_v_head_dim,
+                        seq_len=1,
+                    )
+                else:
+                    flops_per_token += quadratic_attention_flops_per_token(
+                        num_heads=self.n_heads,
+                        qk_head_dim=layer_qk_head_dim,
+                        v_head_dim=layer_v_head_dim,
+                        seq_len=seq_len,
+                        sliding_window_size=sliding_window_size,
+                    )
 
             if unsupported_layer_types:
                 logger.warning(
@@ -698,8 +710,25 @@ class HFTransformerModel(BaseModel):
                     "approximating them as full attention."
                 )
 
-            num_flops_per_token = 6 * active_nparams + attention_op_flops
-            return lambda input_dict: num_flops_per_token * input_dict["input"].numel()
+            document_masked = (
+                getattr(self, "attn_mask_type", "causal") == "block_causal"
+            )
+
+            def estimate(input_dict: Mapping[str, Any]) -> int:
+                # A causal query at position p attends to p + 1 keys. positions
+                # restart at each document, which only "block_causal" masks
+                # follow. Padding does no useful work, so it is not counted.
+                is_real = ~input_dict["padding_mask"]
+                positions = input_dict["positions"]
+                if not document_masked:
+                    positions = torch.arange(positions.shape[-1]).expand_as(positions)
+                num_attended_keys = int(((positions + 1) * is_real).sum())
+                return (
+                    flops_per_token * int(is_real.sum())
+                    + flops_per_key * num_attended_keys
+                )
+
+            return estimate
 
     def __init__(self, config: Config):
         super().__init__()

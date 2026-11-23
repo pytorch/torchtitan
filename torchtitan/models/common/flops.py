@@ -35,8 +35,9 @@ def quadratic_attention_flops_per_token(
     3. each matmul performs 1 multiplication and 1 addition                 (*2)
 
     ``seq_len`` is the number of keys one query attends to.
-    ``Decoder.Config.build_flops_estimator`` applies causal and document
-    masking by summing over each query's position in its document.
+    ``Decoder.Config.build_flops_estimator`` sums this over each query's
+    position in its document when it is affine in ``seq_len``; sliding-window
+    and compressed attention keep the full-length estimate.
     ``qk_head_dim`` and ``v_head_dim`` describe the two attention
     contractions. The factor of 6 accounts for multiply-adds in forward and
     backward. Backward recomputation is not counted.
