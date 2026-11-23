@@ -126,8 +126,8 @@ class VerifiersRollouter(Rollouter):
                 ),
             )
 
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
+    def __init__(self, config: Config, *, max_rollouts_in_flight: int) -> None:
+        super().__init__(config, max_rollouts_in_flight=max_rollouts_in_flight)
         self._verifiers_env_server = config.verifiers_env_server.build()
 
     async def setup_async(

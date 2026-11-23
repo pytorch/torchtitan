@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import dataclasses
 import itertools
 import json
 import logging
@@ -61,6 +62,43 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+def _controller_config_with_groups(
+    *, num_groups: int, group_size: int, rollouts_per_worker: int = 128
+) -> Controller.Config:
+    """A CI recipe with `num_groups` training groups of `group_size` in flight."""
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
+    async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        num_prompts_per_train_step=num_groups,
+        num_samples_per_prompt=group_size,
+    )
+    rollouter = dataclasses.replace(
+        config.rollouter, rollouts_per_worker=rollouts_per_worker
+    )
+    # `replace` reruns `__post_init__`, so the group-size check runs.
+    return dataclasses.replace(config, async_loop=async_loop, rollouter=rollouter)
+
+
+# rollouts_per_worker=0 must raise this ValueError too: `Rollouter.setup_async` divides by it.
+@pytest.mark.parametrize("group_size, rollouts_per_worker", [(256, 128), (8, 0)])
+def test_a_group_larger_than_rollouts_per_worker_raises(
+    group_size, rollouts_per_worker
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"num_samples_per_prompt \({group_size}\) is larger than "
+        rf"rollouter.rollouts_per_worker \({rollouts_per_worker}\)",
+    ):
+        _controller_config_with_groups(
+            num_groups=16,
+            group_size=group_size,
+            rollouts_per_worker=rollouts_per_worker,
+        )
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
