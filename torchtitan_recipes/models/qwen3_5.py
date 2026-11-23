@@ -6,9 +6,14 @@
 
 """Qwen3.5 training recipes."""
 
+from dataclasses import dataclass, fields
+
+import torch
+import torch.nn.functional as F
+
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.text_datasets import DATASETS
-from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
+from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
@@ -22,6 +27,7 @@ from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     BlockRematOverride,
 )
+from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
@@ -31,10 +37,38 @@ from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.trainer import Trainer
 
 
+_DNA_VOCAB_SIZE = 128
+
+
+class _FP32LMHead(Linear):
+    """LM head with an FP32 weight and an FP32 matmul, as in the Blackberry config.
+
+    ``preserve_dtype_params`` keeps the weight in FP32 under FSDP mixed
+    precision; the BF16 hidden state is upcast for the matmul.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def _linear(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return F.linear(input.float(), weight, bias)
+
+
 def _qwen3_5_9b_ulysses_lean_remat_offload(
     flavor: str, *, cp: int, max_num_documents: int
 ) -> Trainer.Config:
     """Qwen3.5 9B text model at long context with YaRN RoPE and Ulysses CP.
+
+    The vocabulary is the 128-token DNA vocabulary of the Blackberry config
+    (evo-design/blackberry, configs/torchtitan/from_scratch_1m.json), not
+    Qwen's 248320 tokens. The logits are small, so the loss needs no chunking.
+    As in that config, the LM head runs in FP32.
 
     Full attention uses Ulysses CP with FA3. Ulysses copies each of the 4 KV
     heads to ``cp // 4`` CP ranks. It needs contiguous token shards, so there
@@ -57,15 +91,24 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
     model_config = build_model_config(
         flavor, attn_backend="varlen", parallelism=parallelism
     )
+    model_config.vocab_size = _DNA_VOCAB_SIZE
+    model_config.tok_embeddings.num_embeddings = _DNA_VOCAB_SIZE
+    model_config.lm_head = _FP32LMHead.Config(
+        **{
+            f.name: getattr(model_config.lm_head, f.name)
+            for f in fields(model_config.lm_head)
+            if f.init
+        }
+        | dict(
+            out_features=_DNA_VOCAB_SIZE,
+            preserve_dtype_params=("weight",),
+            inplace_wgrad_accum=False,
+        )
+    )
     num_tokens_per_microbatch_per_dp_rank = model_config.max_context_length
     config = Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            # 4096 tokens per chunk on each CP rank keeps one bf16 logits
-            # chunk (248320-token vocab) at about 2 GiB.
-            num_chunks=num_tokens_per_microbatch_per_dp_rank // (cp * 4096),
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_config),
-            ),
+        loss=CrossEntropyLoss.Config(
+            global_vocab_size=decoder_vocab_size(model_config),
         ),
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         model=model_config,
