@@ -14,8 +14,9 @@ import torch
 
 from torchtitan.components.data.balancing import (
     document_attention_cost,
-    HeaviestFirstIterDataset,
-    HeaviestFirstOrderingConfig,
+    MicrobatchBalancingConfig,
+    MicrobatchBalancingIterDataset,
+    plan_window,
 )
 from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
@@ -68,15 +69,48 @@ class TestDocumentAttentionCost(unittest.TestCase):
 
 
 def _ordered(values, window_size):
-    dataset = HeaviestFirstIterDataset(
+    dataset = MicrobatchBalancingIterDataset(
         grain.MapDataset.source(values).to_iter_dataset(),
-        window_size=window_size,
-        cost_fn=lambda x: x[0],
+        config=MicrobatchBalancingConfig(
+            window_size=window_size, cost_fn=lambda x: x[0]
+        ),
     )
     return iter(dataset)
 
 
-class TestHeaviestFirstIterDataset(unittest.TestCase):
+class TestPlanWindow(unittest.TestCase):
+    def test_single_rank_orders_heaviest_first(self):
+        costs = [3.0, 9.0, 1.0, 9.0, 4.0]
+        order = [step[0][1] for step in plan_window([costs])]
+        self.assertEqual(order, sorted(range(5), key=lambda i: (-costs[i], i)))
+
+    def test_groups_by_cost_and_keeps_rows_local(self):
+        rng = random.Random(0)
+        for num_ranks, window in [(1, 4), (4, 8), (8, 8), (24, 32)]:
+            costs = [[rng.random() for _ in range(window)] for _ in range(num_ranks)]
+            plan = plan_window(costs)
+            flat = sorted(src for step in plan for src in step)
+            self.assertEqual(
+                flat, [(s, i) for s in range(num_ranks) for i in range(window)]
+            )
+            order = sorted(
+                ((costs[s][i], s, i) for s in range(num_ranks) for i in range(window)),
+                key=lambda x: (-x[0], x[1], x[2]),
+            )
+            for k, step in enumerate(plan):
+                group = {
+                    (s, i) for _, s, i in order[k * num_ranks : (k + 1) * num_ranks]
+                }
+                self.assertEqual(set(step), group)  # step k holds the k-th cost group
+                kept = sum(1 for d, (s, _) in enumerate(step) if s == d)
+                self.assertEqual(kept, len({s for s, _ in group}))  # max kept local
+
+    def test_group_size_above_one_is_not_supported_yet(self):
+        with self.assertRaises(NotImplementedError):
+            MicrobatchBalancingConfig(group_size=2)
+
+
+class TestMicrobatchBalancingIterDataset(unittest.TestCase):
     def test_sorts_each_window_and_keeps_every_element(self):
         values = [(c, i) for i, c in enumerate([3, 9, 1, 9, 4, 2, 8, 5, 7, 6])]
         out = list(_ordered(values, window_size=4))
@@ -120,7 +154,7 @@ class TestHeaviestFirstIterDataset(unittest.TestCase):
 
 
 class TestLoaderIntegration(unittest.TestCase):
-    def _build(self, heaviest_first):
+    def _build(self, balancing):
         config = GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(
                 dataset=SingleDatasetConfig(
@@ -137,7 +171,7 @@ class TestLoaderIntegration(unittest.TestCase):
             collator=TextCollator.Config(),
             max_num_documents=64,
             num_prefetch_microbatches=1,
-            heaviest_first=heaviest_first,
+            balancing=balancing,
         )
         return config.build(
             dp_world_size=2,
@@ -149,7 +183,7 @@ class TestLoaderIntegration(unittest.TestCase):
 
     def test_reorders_within_windows_and_resumes(self):
         window = 4
-        ordering = HeaviestFirstOrderingConfig(
+        ordering = MicrobatchBalancingConfig(
             window_size=window,
             cost_fn=functools.partial(document_attention_cost, token_weight=1.0),
         )
