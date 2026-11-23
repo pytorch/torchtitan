@@ -18,7 +18,6 @@ from torchtitan.models.deepseek_v4.attention import (
     HeavilyCompressedAttention,
     SlidingWindowAttention,
 )
-from torchtitan.models.deepseek_v4.compressor import Indexer
 
 SEQLEN, N_HEADS, HEAD_DIM, WINDOW, SCALE, TOPK = 32, 4, 8, 6, 0.1234, 5
 
@@ -77,7 +76,6 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
         window_size=WINDOW,
         compress_ratio=ratio,
         softmax_scale=SCALE,
-        index_topk=TOPK,
     )
     module = cls(config)
     metadata = config.build_attention_metadata(torch.arange(SEQLEN, device=device))
@@ -107,25 +105,18 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
             out = module(q, swa_k, cmp_k, attn_sink, attention_metadata=metadata)
             cmp_allowed = causal_cmp_allowed(ratio)
         case CompressedSparseAttention():
-            idx_q, idx_k, idx_w = (
-                torch.randn(*shape)
-                for shape in ((SEQLEN, 3, 6), (n_cmp, 6), (SEQLEN, 3))
+            # Leave gaps among the causal keys so the oracle checks the selection.
+            last_block = (torch.arange(SEQLEN) + 1) // ratio - 1
+            cmp_topk = (last_block[:, None] - 2 * torch.arange(TOPK)).clamp_min(-1)
+            out = module(
+                q,
+                swa_k,
+                cmp_k,
+                cmp_topk.to(device, torch.int32),
+                q.new_empty((SEQLEN, 0)),
+                attn_sink,
+                attention_metadata=metadata,
             )
-            idx = [t.to(device) for t in (idx_q, idx_k, idx_w)]
-            out = module(q, swa_k, cmp_k, *idx, attn_sink, attention_metadata=metadata)
-            cmp_topk, _ = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                max_seqlen=SEQLEN,
-                ratio=ratio,
-                topk=TOPK,
-                attention_metadata=config.build_attention_metadata(
-                    torch.arange(SEQLEN)
-                ),
-                return_scores=False,
-            )
-            cmp_topk = cmp_topk.long()
             cmp_allowed = torch.zeros(SEQLEN, n_cmp, dtype=torch.bool)
             rows = torch.arange(SEQLEN).unsqueeze(1).expand_as(cmp_topk)
             cmp_allowed[rows[cmp_topk >= 0], cmp_topk[cmp_topk >= 0]] = True

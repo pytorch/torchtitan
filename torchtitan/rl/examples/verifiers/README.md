@@ -68,12 +68,13 @@ One group, top to bottom. Each column is a process, or the agent in its runtime.
 10. The worker turns the rollout's trainable trace into TitanRL rollout turns
     ([`rollouter.py`](./rollouter.py)), scores the group, computes its advantages, and returns it.
 
-How many processes: the controller, the rollouter's `worker_pool_size` rollout workers, and one env
-server that all workers share. With a pool (`verifiers_env_server.serve.pool`), the env server runs
-its rollouts in its pool workers. So 4 rollout workers and a pool of 8 add 4 + 1 + 8 processes to
-the controller, not 4 x 8. The env server and each pool worker first run
-[`worker_setup.py`](./worker_setup.py), so that module must not import torch: importing torch costs
-each process about 0.5 GB of memory (peak RSS after `import torch`).
+How many processes: the controller, the rollout workers (one per `rollouts_per_worker` training
+rollouts in flight, rounded up), and one env server that all workers share. With a pool
+(`verifiers_env_server.serve.pool`), the env server runs its rollouts in its pool workers. So 4
+rollout workers and a pool of 8 add 4 + 1 + 8 processes to the controller, not 4 x 8. The env
+server and each pool worker first run [`worker_setup.py`](./worker_setup.py), so that module must
+not import torch: importing torch costs each process about 0.5 GB of memory (peak RSS after
+`import torch`).
 
 The taskset is set once, in the training dataset (`VerifiersTaskDataset.Config.verifiers_taskset`).
 `VerifiersRollouter.Config` fills the env server's taskset from it, so leave

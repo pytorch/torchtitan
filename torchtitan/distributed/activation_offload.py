@@ -357,10 +357,10 @@ class ActivationOffloader:
     def _hook_blocks(self, model_part: nn.Module) -> None:
         """Hook every block under ``model_part`` that apply checkpointed.
 
-        Runs at the first forward, once apply has run for the model part and
-        for each encoder in it, in whatever order. That is after fully_shard,
-        so the post-hook is prepended to run before FSDP2's (which reshards);
-        the pre-hook runs after FSDP2's either way, since FSDP2 prepends its.
+        Runs at the first forward, after apply has run for the model part.
+        That is after fully_shard, so the post-hook is prepended to run before
+        FSDP2's (which reshards); the pre-hook runs after FSDP2's either way,
+        since FSDP2 prepends its.
         """
         blocks = [
             (module._remat_block_fqn, module)
