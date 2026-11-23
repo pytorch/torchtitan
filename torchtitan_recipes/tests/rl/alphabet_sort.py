@@ -24,12 +24,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import (
-    DebugConfig,
-    OverrideConfig,
-    PrecisionConfig,
-    TrainingConfig,
-)
+from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -548,7 +543,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -678,7 +672,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
