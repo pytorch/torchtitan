@@ -22,15 +22,14 @@ A recipe calls ``configure_capture(config, out_dir)``. The step then runs the
 import functools
 import gzip
 import json
-import operator
 import os
 import re
 from typing import Any
 
 import torch
 import torch.fx as fx
-from torch.utils import _pytree as pytree
 
+from torchtitan.experiments.graph_trainer.auto_fuser.region import storage_effects
 from torchtitan.experiments.graph_trainer.custom_codegen import custom_codegen_pass
 from torchtitan.experiments.graph_trainer.passes import (
     construct_default_graph_passes,
@@ -137,37 +136,6 @@ def _code_lines(gm: fx.GraphModule) -> dict[str, str]:
             typed = f"{name}: '{annotation}'" if annotation else name
             lines[name] = f"{typed} = {rhs.split(';  ')[0]}"
     return lines
-
-
-def storage_effects(node: fx.Node) -> tuple[list[str], list[str]]:
-    """Names of the inputs whose storage ``node`` writes, and of the inputs whose
-    storage its output aliases, from the op schema (``Tensor(a!)``, ``Tensor(a)``).
-
-    A ``getitem`` aliases its input.
-    """
-    if node.target is operator.getitem:
-        source = node.args[0]
-        return [], [source.name] if isinstance(source, fx.Node) else []
-    if not isinstance(node.target, torch._ops.OpOverload):
-        return [], []
-    schema = node.target._schema
-    writes, aliased = [], []
-    for i, arg in enumerate(schema.arguments):
-        if arg.alias_info is None:
-            continue
-        if not arg.kwarg_only and i < len(node.args):
-            value = node.args[i]
-        elif arg.name in node.kwargs:
-            value = node.kwargs[arg.name]
-        else:
-            continue
-        names = [x.name for x in pytree.tree_leaves(value) if isinstance(x, fx.Node)]
-        aliased += names
-        if arg.alias_info.is_write:
-            writes += names
-    if not any(r.alias_info is not None for r in schema.returns):
-        aliased = []
-    return writes, aliased
 
 
 # Size arguments typed int[] instead of SymInt[] in their schema.
