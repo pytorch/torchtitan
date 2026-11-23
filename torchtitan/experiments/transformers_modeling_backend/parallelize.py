@@ -195,6 +195,13 @@ def parallelize_hf_transformers(
 # ---------------------------------------------------------------------------
 
 
+def _has_params(module: nn.Module | None) -> bool:
+    """False for missing modules and PP ``nn.Identity`` placeholders. A
+    parameterless FSDP unit only adds hooks, and FSDP2 warns when the tensor it
+    passes through is a view (e.g. a remat block output)."""
+    return module is not None and next(module.parameters(), None) is not None
+
+
 def apply_fsdp(
     model: nn.Module,
     dp_mesh: DeviceMesh,
@@ -251,12 +258,12 @@ def apply_fsdp(
             [
                 m
                 for m in (model.tok_embeddings, model.norm, model.lm_head)
-                if m is not None
+                if _has_params(m)
             ],
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
-    elif model.tok_embeddings is not None:
+    elif _has_params(model.tok_embeddings):
         fully_shard(
             model.tok_embeddings,
             **fsdp_config,
@@ -326,9 +333,10 @@ def apply_fsdp(
     # As an optimization, do not reshard_after_forward the last layers by default
     # since FSDP would prefetch them immediately after the forward pass. When
     # weights are tied, norm/lm_head are already grouped with tok_embeddings above.
-    if not tie_word_embeddings and model.norm is not None and model.lm_head is not None:
+    last_modules = [m for m in (model.norm, model.lm_head) if _has_params(m)]
+    if not tie_word_embeddings and last_modules:
         fully_shard(
-            [model.norm, model.lm_head],
+            last_modules,
             **fsdp_config,
             reshard_after_forward=reshard_after_forward_policy == "always",
         )
@@ -349,7 +357,7 @@ def apply_fsdp(
     transformer_blocks = list(model.layers.values())
     next_transformer_blocks = transformer_blocks[1:] + [None]
 
-    if model.tok_embeddings is not None and model.layers is not None:
+    if _has_params(model.tok_embeddings) and model.layers is not None:
         model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
 
     for transformer_block, next_transformer_block in zip(
@@ -357,26 +365,22 @@ def apply_fsdp(
     ):
         if next_transformer_block is not None:
             transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
-        elif model.norm is not None and model.lm_head is not None:
-            transformer_block.set_modules_to_forward_prefetch(
-                [model.norm, model.lm_head]
-            )
+        elif last_modules:
+            transformer_block.set_modules_to_forward_prefetch(last_modules)
 
     # backward
     reversed_transformer_blocks = list(reversed(model.layers.values()))
     prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
 
-    if (
-        model.norm is not None
-        and model.lm_head is not None
-        and model.layers is not None
-    ):
-        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
+    if last_modules and model.layers is not None:
+        last_modules[-1].set_modules_to_backward_prefetch(
+            [reversed_transformer_blocks[0]]
+        )
 
     for transformer_block, prev_transformer_block in zip(
         reversed_transformer_blocks, prev_transformer_blocks
     ):
         if prev_transformer_block is not None:
             transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
-        elif model.tok_embeddings is not None:
+        elif _has_params(model.tok_embeddings):
             transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])

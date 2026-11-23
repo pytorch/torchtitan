@@ -10,6 +10,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass, fields, replace
 from typing import ClassVar, TypeVar
 
+import torch
+
 from torchtitan.observability import structured_logger as sl
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ class Configurable:
                     return {k: _convert(v) for k, v in val.items()}
                 elif isinstance(val, (str, int, float, bool, type(None))):
                     return val
+                elif isinstance(val, torch.dtype):
+                    return str(val)
                 elif callable(val):
                     return repr(val)
                 else:

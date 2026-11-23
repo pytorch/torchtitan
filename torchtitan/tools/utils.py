@@ -8,7 +8,6 @@ import contextlib
 import importlib.util
 import logging
 import os
-import subprocess
 from collections.abc import Generator
 from types import ModuleType
 
@@ -168,19 +167,6 @@ def get_local_device() -> torch.device:
 # AMD MI250, MI300X, MI325X, MI350X, MI355X, Intel PVC, and AWS Trainium/Inferentia
 def get_peak_flops(device_name: str) -> float | None:
     """Return the dense BF16 peak FLOPS per device, or None if it is unknown."""
-    try:
-        # Run the lspci command and capture the output
-        result = subprocess.run(["lspci"], stdout=subprocess.PIPE, text=True)
-        # Filter the output for lines containing both "NVIDIA" and "H100"
-        filtered_lines = [
-            line
-            for line in result.stdout.splitlines()
-            if "NVIDIA" in line and "H100" in line
-        ]
-        # Join all filtered lines into a single string
-        device_name = " ".join(filtered_lines) or device_name
-    except FileNotFoundError as e:
-        logger.warning(f"Error running lspci: {e}, fallback to use device_name")
     if "A100" in device_name:
         # data from https://www.nvidia.com/en-us/data-center/a100/
         return 312e12

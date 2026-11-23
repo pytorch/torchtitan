@@ -749,8 +749,3 @@ class BaseCheckpointManager(Configurable, ABC):
                     "checkpointer.load_only is True; enable_first_step_checkpoint "
                     "will be ignored."
                 )
-            if self.initial_load_model_only and not self.initial_load_path:
-                logger.warning(
-                    "initial_load_model_only=True has no effect without "
-                    "an initial_load_path."
-                )
