@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -71,6 +72,23 @@ class TransformerBlock(Module):
         feed_forward: FeedForward.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
+
+
+def _equal_ignoring_param_init(a: object, b: object) -> bool:
+    """Whether two configs are equal apart from parameter initialization.
+
+    Layers often differ only in depth-scaled ``param_init``, which does not
+    change FLOPs.
+    """
+    if dataclasses.is_dataclass(a) and type(a) is type(b):
+        return all(
+            field.name == "param_init"
+            or _equal_ignoring_param_init(
+                getattr(a, field.name), getattr(b, field.name)
+            )
+            for field in dataclasses.fields(a)
+        )
+    return a == b
 
 
 class Decoder(BaseModel):
@@ -183,15 +201,22 @@ class Decoder(BaseModel):
             parameter_flops_per_token = active_parameter_flops_per_token(
                 model, excluded_submodules=excluded_submodules
             )
-            attentions = [
-                attention for _, attention, _, _ in self.traverse(Attention.Config)
-            ]
+            # Layers repeat a few attention configs; count each distinct one once.
+            attention_counts: list[tuple[Attention.Config, int]] = []
+            for _, attention, _, _ in self.traverse(Attention.Config):
+                for i, (seen, count) in enumerate(attention_counts):
+                    if _equal_ignoring_param_init(seen, attention):
+                        attention_counts[i] = (seen, count + 1)
+                        break
+                else:
+                    attention_counts.append((attention, 1))
 
             def estimate(input_dict: Mapping[str, Any]) -> int:
                 # Padding does no useful work, so it is not counted.
                 positions = input_dict["positions"][~input_dict["padding_mask"]]
                 return parameter_flops_per_token * positions.numel() + sum(
-                    attention.flops(positions) for attention in attentions
+                    count * attention.flops(positions)
+                    for attention, count in attention_counts
                 )
 
             return estimate

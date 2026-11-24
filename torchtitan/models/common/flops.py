@@ -55,7 +55,12 @@ def quadratic_attention_flops(
     query at document position p attends to p + 1 keys. Each query costs
     ``quadratic_attention_flops_per_token`` at its number of keys.
     """
-    return 6 * num_heads * (qk_head_dim + v_head_dim) * int(num_keys.sum())
+    return quadratic_attention_flops_per_token(
+        num_heads=num_heads,
+        qk_head_dim=qk_head_dim,
+        v_head_dim=v_head_dim,
+        seq_len=int(num_keys.sum()),
+    )
 
 
 def delta_rule_flops_per_token(
