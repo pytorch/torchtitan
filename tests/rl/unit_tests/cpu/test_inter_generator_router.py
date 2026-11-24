@@ -272,6 +272,21 @@ def test_sticky_session_respects_max_sessions():
     assert _route(router, session_id="s0") == "gen1"
 
 
+def test_evicted_session_frees_its_tokens():
+    router = _router(
+        [_Actor("gen0"), _Actor("gen1")],
+        strategy=StickySessionRoutingStrategy.Config(
+            max_sessions=1, repin_load_ratio=None
+        ),
+    )
+    # s0's release_session never arrives; its 8 tokens stay on gen0.
+    assert _route(router, session_id="s0", num_tokens=8) == "gen0"
+    # s1 evicts s0 (max_sessions=1), and s0's tokens leave gen0's load with it.
+    assert _route(router, session_id="s1", num_tokens=4) == "gen1"
+    assert [h.reserved_load for h in router._generators] == [0, 4]
+    assert "s0" not in router._session_tokens
+
+
 def test_release_session_unpins_it_and_frees_its_kv_on_its_generator():
     actors = [_Actor("gen0"), _Actor("gen1")]
     # No repinning, which would also move s0 off its busy generator.

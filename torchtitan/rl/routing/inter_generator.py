@@ -135,6 +135,9 @@ class InterGeneratorRouter(Configurable):
         self._reservations: dict[str, tuple[_GeneratorHandle, int]] = {}
         # routing session -> (generator, tokens its last call left there).
         self._session_tokens: dict[str, tuple[_GeneratorHandle, int]] = {}
+        # A session whose release_session never arrives (e.g. the RPC failed) is
+        # evicted by the strategy; its tokens must leave the load with it.
+        self._strategy.set_session_eviction_callback(self._drop_session_tokens)
 
     def reserve(
         self, request_id: str, *, routing_session_id: str | None, num_tokens: int
@@ -146,6 +149,9 @@ class InterGeneratorRouter(Configurable):
             request_id: Unique per call; ``release_reservation`` takes the same id.
             routing_session_id: Session the call belongs to, or ``None``.
             num_tokens: KV tokens the call can hold: prompt tokens plus ``max_tokens``.
+
+        Returns:
+            The chosen generator's rank-0 actor handle.
         """
         assert (
             request_id not in self._reservations

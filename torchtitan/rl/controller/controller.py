@@ -744,7 +744,7 @@ class Controller(Configurable):
             generator = await generator_router.reserve.call_one(
                 request_id,
                 routing_session_id=routing_session_id,
-                num_tokens=len(prompt_token_ids) + max_tokens,
+                num_tokens=len(prompt.token_ids) + max_tokens,
             )
             try:
                 return await generator.generate.call_one(
