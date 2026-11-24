@@ -427,8 +427,9 @@ def _parse_sampling_config(value: object):
         field_name="stop_token_ids",
     )
     # The rollouter always sends these. Without them the generator would silently use
-    # SamplingConfig's defaults (temperature 0.8, max_tokens 100).
-    missing = {"temperature", "top_p", "max_tokens"} - set(value)
+    # SamplingConfig's defaults (temperature 0.8, max_tokens 100), and return no top-k rows
+    # for a loss that needs them.
+    missing = {"temperature", "top_p", "max_tokens", "num_topk_logprobs"} - set(value)
     if missing:
         raise ValueError(f"sampling_params must include {sorted(missing)}")
     return SamplingConfig(
@@ -437,5 +438,5 @@ def _parse_sampling_config(value: object):
         max_tokens=int(value["max_tokens"]),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
-        num_topk_logprobs=int(value.get("num_topk_logprobs", 0)),
+        num_topk_logprobs=int(value["num_topk_logprobs"]),
     )

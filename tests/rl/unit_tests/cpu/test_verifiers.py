@@ -741,6 +741,7 @@ def test_generation_server_forwards_token_request() -> None:
                                 "temperature": 1.0,
                                 "top_p": 1.0,
                                 "max_tokens": 2,
+                                "num_topk_logprobs": 0,
                                 "seed": 4,
                                 "logprobs": 1,
                                 "torchtitan_group_id": 1,
@@ -887,6 +888,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
                             "temperature": 1.0,
                             "top_p": 1.0,
                             "max_tokens": 2,
+                            "num_topk_logprobs": 0,
                             "torchtitan_group_id": 1,
                             "stop_token_ids": [99],
                         },
@@ -935,6 +937,7 @@ _GOOD_SAMPLING_PARAMS = {
     "temperature": 1.0,
     "top_p": 1.0,
     "max_tokens": 2,
+    "num_topk_logprobs": 0,
     "stop_token_ids": [99],
     "torchtitan_group_id": 1,
 }
@@ -1043,6 +1046,7 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
                                 "temperature": 1.0,
                                 "top_p": 1.0,
                                 "max_tokens": 2,
+                                "num_topk_logprobs": 0,
                                 "torchtitan_group_id": 1,
                                 "stop_token_ids": [99],
                             },
@@ -1592,14 +1596,15 @@ def test_a_rollout_that_raises_fails_its_group_after_its_siblings_stop() -> None
     assert stopped == [1]
 
 
-def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
+def test_parse_sampling_config_requires_the_fields_the_rollouter_sends() -> None:
     sampling_params = {
         "temperature": 0.0,
         "top_p": 1.0,
         "max_tokens": 5,
+        "num_topk_logprobs": 0,
         "stop_token_ids": [1],
     }
-    for name in ("temperature", "top_p", "max_tokens"):
+    for name in ("temperature", "top_p", "max_tokens", "num_topk_logprobs"):
         with pytest.raises(ValueError, match=rf"must include \['{name}'\]"):
             _parse_sampling_config(
                 {key: value for key, value in sampling_params.items() if key != name}
@@ -1624,6 +1629,7 @@ def test_parse_sampling_config_accepts_only_full_vocabulary_top_k_and_min_p(
         "temperature": 1.0,
         "top_p": 1.0,
         "max_tokens": 2,
+        "num_topk_logprobs": 0,
         "stop_token_ids": [99],
         **update,
     }
