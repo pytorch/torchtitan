@@ -257,6 +257,10 @@ def pack_rollout_group(
         start = image_spans[hash_value]
         image_regions[hash_value] = buffer[start : start + len(data)]
         image_regions[hash_value][:] = np.frombuffer(data, dtype=np.uint8)
+    # TODO: drop the logging fields (each turn's `prompt_messages` and `env_messages`, each
+    # rollout's `logs` and `reward_breakdown`) from the summary and the regions. Training reads
+    # none of them after this worker, which already made the metrics and recorder lines. At
+    # 256 prompts x 4 samples, keeping them triples the controller's GC time per step.
     summary = RolloutGroupSummary(
         group=replace(group, rollouts=summary_rollouts),
         turn_lengths=tuple(rollout_turn_lengths(rollout) for rollout in group.rollouts),
