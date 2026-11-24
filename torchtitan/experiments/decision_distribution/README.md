@@ -11,14 +11,20 @@ It does not load native GS1 checkpoints or reproduce GS1's decision head.
 
 The existing `torchtitan_recipes/decision/` directory remains the validated
 Jev pipeline: `prepare_data.py` produces prompts for `qwen3.py`, and
-`evaluate.py` evaluates those checkpoints. Neither pipeline imports the other.
+`evaluate.py` evaluates those checkpoints. The experiment shares Jev’s answer-position loss wrapper.
 
 ```bash
-python scripts/download_hf_assets.py --repo_id Qwen/Qwen3.5-0.8B --assets tokenizer safetensors config
+python scripts/download_hf_assets.py --repo_id Qwen/Qwen3.5-0.8B-Base --assets tokenizer safetensors config
 python -m torchtitan.experiments.decision_distribution.prepare_data --input /path/to/train.jsonl
 NGPU=2 MODULE=torchtitan.experiments.decision_distribution.recipe CONFIG=qwen3_5_distribution ./run_train.sh
 ```
 
-The preparation default of 3,000 questions is a configurable smoke-run subset,
-not a convergence recommendation. GPU training and checkpoint parity remain
-unverified; this experiment is not a validated public recipe.
+Preparation accepts a JSONL file with one `request` and `targets` object per
+line. Each question target supplies `candidate_ids` and `distribution`. The
+distribution-v4.5 export used for validation is local to the GS1 project.
+
+On one A800, Qwen3.5-0.8B-Base completed 10 optimizer steps and exported its
+final weights. The run used 3,000 sampled questions (preparation seed 0),
+8,192 tokens per microbatch, and accelerator graphs disabled. Training loss
+was 1.93938 at step 1 and 1.50018 at step 10. Held-out calibration and
+comparisons with full-vocabulary CE remain to be measured.

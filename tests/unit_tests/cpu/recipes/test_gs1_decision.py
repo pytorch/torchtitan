@@ -6,7 +6,7 @@
 
 import json
 
-import grain
+import grain.python as grain
 import numpy as np
 import torch
 
@@ -84,9 +84,7 @@ def test_structured_type_metadata_is_text() -> None:
     record = {
         "request": {
             "state": {"metadata": {"type": "image"}},
-            "questions": {
-                "q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}
-            },
+            "questions": {"q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}},
         },
         "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
     }
@@ -97,9 +95,9 @@ def test_nested_media_content_is_filtered() -> None:
     record = {
         "request": {
             "state": {"frames": [{"type": "image", "path": "frame.png"}]},
-            "questions": {},
+            "questions": {"q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}},
         },
-        "targets": {},
+        "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
     }
     assert flatten_record(record) == []
 
@@ -115,8 +113,8 @@ def test_processor_carries_candidate_count_and_samples_target_label() -> None:
         DecisionSampleProcessor.Config(), context=context
     )
     sequence = processor(_sample(), np.random.default_rng(3))
-    assert sequence.labels[-2] == -3
-    assert sequence.labels[-1] in {10, 11, 12}
+    assert (sequence.labels != -100).sum() == 1
+    assert sequence.labels[-1] in {26, 27, 28}
     assert sequence.input_ids[-1] == 40
 
 
@@ -127,7 +125,9 @@ def test_processor_drops_overlength_rows() -> None:
         num_tokens_per_microbatch=2,
         read_options=grain.ReadOptions(num_threads=1),
     )
-    processor = DecisionSampleProcessor(DecisionSampleProcessor.Config(), context=context)
+    processor = DecisionSampleProcessor(
+        DecisionSampleProcessor.Config(), context=context
+    )
     assert processor(_sample(), np.random.default_rng(0)) is None
 
 
@@ -147,9 +147,8 @@ def test_sampled_nll_brier_has_soft_target_expectation() -> None:
     for index, probability in enumerate(target):
         loss, _ = loss_fn(
             logits,
-            torch.tensor([candidate_ids[index]]),
+            torch.tensor([26 + index]),
             torch.tensor(1.0),
-            candidate_counts=torch.tensor([3]),
         )
         observed += float(probability * loss)
     expected_nll = -(target * probs.log()).sum()

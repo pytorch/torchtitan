@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-import grain
+import grain.python as grain
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -24,7 +24,7 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.data.dataset import SampleProcessor, TextSequence
 from torchtitan.components.data.types import DatasetBuildContext
-from torchtitan.components.loss import IGNORE_INDEX, ChunkedLossWrapper, Loss
+from torchtitan.components.loss import IGNORE_INDEX, Loss
 from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
@@ -37,6 +37,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
+from torchtitan_recipes.decision.qwen3 import AnswerTokenLoss
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MIN_CANDIDATES = 2
@@ -54,9 +55,6 @@ class DecisionSampleProcessor(SampleProcessor):
         del config
         self._tokenizer = context.tokenizer
         self._max_context_length = context.max_context_length
-        self._candidate_token_ids = [
-            self._single_token(f" {letter}") for letter in LETTERS
-        ]
         self._readout_token_id = self._single_token("\n")
 
     def _single_token(self, text: str) -> int:
@@ -110,8 +108,9 @@ class DecisionSampleProcessor(SampleProcessor):
             return None
 
         labels = np.full(len(input_ids), IGNORE_INDEX, dtype=np.int64)
-        labels[-2] = -num_candidates
-        labels[-1] = self._candidate_token_ids[target_index]
+        # One supervised position per question. The loss decodes the option count
+        # and the sampled option from this class ID.
+        labels[-1] = (num_candidates - MIN_CANDIDATES) * MAX_CANDIDATES + target_index
         return TextSequence(input_ids=input_ids, labels=labels)
 
 
@@ -130,12 +129,18 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         candidate_token_ids = config.candidate_token_ids
         if candidate_token_ids is None:
             tokenizer = HuggingFaceTokenizer(tokenizer_path=config.tokenizer_path)
-            encoded = [tokenizer.encode(f" {letter}", add_bos=False, add_eos=False) for letter in LETTERS]
+            encoded = [
+                tokenizer.encode(f" {letter}", add_bos=False, add_eos=False)
+                for letter in LETTERS
+            ]
             if any(len(ids) != 1 for ids in encoded):
                 raise ValueError("Each answer letter must encode as one token")
             candidate_token_ids = [ids[0] for ids in encoded]
-        if len(candidate_token_ids) != MAX_CANDIDATES:
-            raise ValueError("candidate_token_ids must contain IDs for A through Z")
+        if (
+            len(candidate_token_ids) != MAX_CANDIDATES
+            or len(set(candidate_token_ids)) != MAX_CANDIDATES
+        ):
+            raise ValueError("Expected distinct token IDs for A through Z")
         self.candidate_token_ids = candidate_token_ids
         self.brier_weight = config.brier_weight
         self._candidate_ids_by_device: dict[str, torch.Tensor] = {}
@@ -146,8 +151,6 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         pred: torch.Tensor,
         labels: torch.Tensor,
         global_loss_token_counts: torch.Tensor | None = None,
-        *,
-        candidate_counts: torch.Tensor,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
@@ -159,29 +162,26 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
             positions = torch.arange(MAX_CANDIDATES, device=pred.device)
             self._candidate_ids_by_device[device_key] = candidate_ids
             self._candidate_positions_by_device[device_key] = positions
-        logits = pred.float().index_select(-1, candidate_ids)
+        logits = pred.index_select(-1, candidate_ids).float()
         valid = labels != IGNORE_INDEX
-        candidate_counts = candidate_counts.to(device=pred.device, dtype=torch.long)
-        candidate_mask = (
-            positions < candidate_counts[:, None]
+        class_ids = labels.masked_fill(~valid, 0)
+        candidate_counts = class_ids // MAX_CANDIDATES + MIN_CANDIDATES
+        target_indices = class_ids % MAX_CANDIDATES
+        logits = logits.masked_fill(
+            positions >= candidate_counts[:, None], float("-inf")
         )
-        logits = logits.masked_fill(~candidate_mask, float("-inf"))
         log_probs = F.log_softmax(logits, dim=-1)
         probs = log_probs.exp()
-        targets = labels[:, None] == candidate_ids[None, :]
-        target_indices = targets.to(torch.long).argmax(dim=-1)
-        target_is_valid = targets.any(dim=-1) & (target_indices < candidate_counts)
-        torch._assert_async(
-            (target_is_valid | ~valid).all(),
-            "Answer token must be one of the valid candidate slots",
-        )
-
         target_log_probs = log_probs.gather(1, target_indices[:, None]).squeeze(1)
         target_probs = probs.gather(1, target_indices[:, None]).squeeze(1)
-        nll = -target_log_probs[valid].sum()
-        brier = (probs.square().sum(dim=-1) + 1 - 2 * target_probs)[valid].sum()
+        nll = -target_log_probs.masked_fill(~valid, 0).sum()
+        brier = (
+            (probs.square().sum(dim=-1) + 1 - 2 * target_probs)
+            .masked_fill(~valid, 0)
+            .sum()
+        )
         denominator = (
-            global_loss_token_counts / 2
+            global_loss_token_counts
             if global_loss_token_counts is not None
             else valid.sum()
         )
@@ -192,54 +192,6 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         }
 
 
-class DecisionLoss(ChunkedLossWrapper):
-    """Project decision positions and carry option counts through packed labels."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ChunkedLossWrapper.Config):
-        max_num_supervised: int
-        """Maximum number of questions in one packed microbatch."""
-        num_chunks: int = 1
-
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-        self.max_num_supervised = config.max_num_supervised
-
-    def __call__(
-        self,
-        pred: torch.Tensor,
-        labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
-        **loss_inputs: Any,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        count_markers = (labels <= -MIN_CANDIDATES) & (labels >= -MAX_CANDIDATES)
-        torch._assert_async(
-            count_markers.sum() <= self.max_num_supervised,
-            "more decision questions than max_num_supervised",
-        )
-        marker_indices = torch.nonzero_static(
-            count_markers, size=self.max_num_supervised, fill_value=-1
-        ).squeeze(-1)
-        valid = marker_indices >= 0
-        safe_marker_indices = marker_indices.clamp(min=0)
-        answer_indices = safe_marker_indices + 1
-        torch._assert_async(
-            (~valid | (answer_indices < labels.numel())).all(),
-            "decision count marker must be followed by an answer label",
-        )
-        answer_labels = labels[answer_indices].masked_fill(~valid, IGNORE_INDEX)
-        candidate_counts = (-labels[safe_marker_indices]).clamp(
-            min=MIN_CANDIDATES, max=MAX_CANDIDATES
-        )
-        return super().__call__(
-            pred[answer_indices],
-            answer_labels,
-            global_loss_token_counts,
-            candidate_counts=candidate_counts,
-            **loss_inputs,
-        )
-
-
 def qwen3_5_distribution(
     model_size: str = "0.8B",
     *,
@@ -248,22 +200,22 @@ def qwen3_5_distribution(
 ) -> Trainer.Config:
     """Fine-tune a Qwen3.5 base model on GS1-format candidate distributions."""
     max_num_questions, steps = 256, 600
-    hf_assets_path = f"./assets/hf/Qwen3.5-{model_size}"
+    hf_assets_path = f"./assets/hf/Qwen3.5-{model_size}-Base"
     data_path = "./assets/hf/gs1-distribution/train.jsonl"
     parallelism = parallelism or ParallelismConfig()
-    if not math.isfinite(brier_weight) or brier_weight < 0:
-        raise ValueError("brier_weight must be finite and nonnegative")
     if (
         parallelism.tensor_parallel_degree > 1
         or parallelism.pipeline_parallel_degree > 1
         or parallelism.context_parallel_degree > 1
         or parallelism.expert_parallel_degree > 1
     ):
-        raise ValueError("This decision recipe currently supports data parallelism only")
+        raise ValueError(
+            "This decision recipe currently supports data parallelism only"
+        )
     model_config = build_model_config(model_size, seq_len=8192, parallelism=parallelism)
     max_context_length = model_config.max_context_length
     return Trainer.Config(
-        loss=DecisionLoss.Config(
+        loss=AnswerTokenLoss.Config(
             loss_fn=CandidateDistributionLoss.Config(
                 tokenizer_path=hf_assets_path,
                 brier_weight=brier_weight,
