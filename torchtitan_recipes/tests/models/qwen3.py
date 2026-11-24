@@ -31,7 +31,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    NVFP4LinearConverter,
+    NVFP4LinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import (
@@ -113,17 +113,7 @@ def qwen3_debugmodel_nvfp4(
 ) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
     # Convert every decoder-layer Linear while leaving the lm_head in bf16.
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=["layers"],
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=["layers"])])
 
 
 def qwen3_debugmodel_first_85_pct_layers_nvfp4(
@@ -138,17 +128,7 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,
     )
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def qwen3_debugmodel_moe_param_groups(
@@ -365,16 +345,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,
     )
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
+    config = apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),

@@ -28,7 +28,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
-    MXFP8LinearConverter,
+    MXFP8LinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import (
@@ -69,9 +69,9 @@ _MUSE_SPARK_MXFP8_LINEAR_FQNS = [
 ]
 
 
-def _muse_spark_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
+def _muse_spark_mxfp8_linear_transform() -> MXFP8LinearTransform:
     """Quantize debug-model attention and compressed-MoE projections."""
-    return MXFP8LinearConverter.Config(
+    return MXFP8LinearTransform(
         fqns=list(_MUSE_SPARK_MXFP8_LINEAR_FQNS),
     )
 
@@ -194,13 +194,8 @@ def muse_spark_debugmodel_dist_moe_mxfp8(
     seq_len: int | None = None,
 ) -> Trainer.Config:
     """Configure the Muse debug model with asynchronous MXFP8 Dist-MoE experts."""
-    config = muse_spark_debugmodel(seq_len)
-    config.model = build_model_config(
-        "debugmodel",
-        parallelism=config.parallelism,
-        seq_len=seq_len,
-        attn_backend="flex",
-        converters=[_muse_spark_mxfp8_linear_converter_config()],
+    config = apply_transforms(
+        muse_spark_debugmodel(seq_len), [_muse_spark_mxfp8_linear_transform()]
     )
     return _with_dist_moe(
         config,

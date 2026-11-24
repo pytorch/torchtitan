@@ -202,8 +202,9 @@ class Trainer(Configurable):
             return
 
         # Capture the dependency when weights become final: the push must wait
-        # for optimizer updates, but not for next-step forward/backward kernels
-        # that may be queued before the concurrent push starts.
+        # for the optimizer updates. optim_step syncs the host before the push
+        # starts, so the stream saves nothing today; it is kept for the TODO in
+        # `Controller._trainer_loop` that overlaps the push with forward/backward.
         self._push_model_state_dict_stream.wait_stream(
             torch.accelerator.current_stream(self.engine.device)
         )
@@ -271,8 +272,8 @@ class Trainer(Configurable):
         Args:
             microbatch_groups: This rank's column of the batcher's
                 `[num_groups][num_microbatches_per_group][dp_degree]` grid. Under PP, each group runs
-                as one pipeline step. `RDMAMicrobatch`es when `rdma_min_tensor_bytes` is set,
-                read a few ahead of training.
+                as one pipeline step. `RDMAMicrobatch`es unless `rdma_min_tensor_bytes` is None. With
+                `preprocess_microbatch_groups_lazily`, they are read a few ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -451,18 +452,15 @@ class Trainer(Configurable):
         TorchStore copies (and casts) each tensor straight into StorageVolume
         memory; other transports make a GPU cast copy of each batch first.
 
-        The controller overlaps this push with the next forward/backward (see
-        `Controller._trainer_loop`), which is safe because:
+        Ordering (see `Controller._trainer_loop`):
         - The worker synchronizes the push stream and runs the put with it
-          current, so TorchStore reads weights after the last optimizer step
-          without waiting on later forward/backward work, and forward/backward
-          does not mutate persistent model state.
+          current, so TorchStore reads weights after the last optimizer step.
         - The TorchStore put runs in an `asyncio.to_thread` worker, so it
-          progresses while a synchronous forward/backward blocks this actor's
-          event loop.
-        - The controller awaits this push before the next optimizer step mutates
-          the model, and awaits the generators' pull of it before the next push
-          overwrites the TorchStore key.
+          doesn't block this actor's event loop.
+        - The controller awaits this push before the next forward/backward,
+          which blocks this actor's event loop and would delay the push's reply.
+        - The controller awaits the generators' pull of this push before the
+          next push overwrites the TorchStore key.
 
         Every push carries the trainable parameters and the buffers. Generators load the
         frozen parameters from `generator.checkpointer`: for LoRA the base, so a push

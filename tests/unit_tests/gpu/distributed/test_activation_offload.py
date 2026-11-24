@@ -288,10 +288,9 @@ class _Model(Module):
 def _apply(
     remat_config: ActivationRematConfig,
     model: _Model,
-    module: Module | None = None,
     **kwargs,
 ) -> None:
-    """Run ``remat_config.apply`` on ``module`` (default: ``model``) and keep
+    """Run ``remat_config.apply`` on ``model`` and keep
     the offloader it installs, if any, on ``model.offloader`` for the
     assertions: ``apply`` returns nothing, since its hooks keep it alive."""
     init = ActivationOffloader.__init__
@@ -302,7 +301,7 @@ def _apply(
         created.append(offloader)
 
     with unittest.mock.patch.object(ActivationOffloader, "__init__", record):
-        remat_config.apply(model if module is None else module, **kwargs)
+        remat_config.apply(model, **kwargs)
     if created:
         (model.offloader,) = created
 
@@ -338,8 +337,9 @@ def _build_encoder_decoder(
 ) -> _EncoderDecoderModel:
     """Apply ``remat_config`` as multimodal parallelize does."""
     model = deepcopy(reference)
-    _apply(remat_config, model)
-    _apply(remat_config, model, model.vision_encoder, module_fqn="vision_encoder")
+    _apply(
+        remat_config, model, block_container_fqns=["vision_encoder.layers", "layers"]
+    )
     return model.cuda()
 
 
