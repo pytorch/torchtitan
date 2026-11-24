@@ -811,6 +811,52 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
         )
 
 
+def test_batch_invariant_rejects_fp8_kv_cache(tmp_path):
+    with pytest.raises(ValueError, match="batch_invariant needs kv_cache_dtype='auto'"):
+        VLLMEngine.Config(kv_cache_dtype="fp8").build(
+            model=_MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            model_path="unused",
+            max_num_seqs=8,
+            precision=PrecisionConfig(),
+            gpu_memory_limit=0.9,
+            max_num_batched_tokens=None,
+            checkpointer=None,
+            dist_moe_runtime=None,
+            debug=DebugConfig(batch_invariant=True),
+            reset_kv_cache_on_model_state_dict_load=True,
+            model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
+            mooncake_master_address=None,
+            rank=0,
+            generator_name="generator",
+            output_dir=str(tmp_path),
+        )
+
+
+def test_fp8_kv_cache_rejects_drafts(tmp_path):
+    with pytest.raises(ValueError, match="does not support num_speculative_tokens=3"):
+        VLLMEngine.Config(kv_cache_dtype="fp8", num_speculative_tokens=3).build(
+            model=_MODEL_CONFIG,
+            parallelism=_PARALLELISM,
+            model_path="unused",
+            max_num_seqs=8,
+            precision=PrecisionConfig(),
+            gpu_memory_limit=0.9,
+            max_num_batched_tokens=None,
+            checkpointer=None,
+            dist_moe_runtime=None,
+            debug=DebugConfig(),
+            reset_kv_cache_on_model_state_dict_load=True,
+            model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
+            mooncake_master_address=None,
+            rank=0,
+            generator_name="generator",
+            output_dir=str(tmp_path),
+        )
+
+
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -891,6 +937,7 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
         ("watermark", r"use VLLMEngine\.Config\.watermark"),
+        ("kv_cache_dtype", r"use VLLMEngine\.Config\.kv_cache_dtype"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):

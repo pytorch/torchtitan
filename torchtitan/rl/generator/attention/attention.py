@@ -6,7 +6,8 @@
 
 """Paged-KV varlen attention through PyTorch's FlashAttention, the kernel the trainer's
 ``VarlenInnerAttention`` runs. Every engine's TorchTitan attention backend calls it, so
-the generator computes attention with the trainer's kernel whatever the engine."""
+the generator computes attention with the trainer's kernel whatever the engine. An fp8 KV
+cache instead calls FA4's fp8 forward, which the trainer does not run."""
 
 from typing import Any
 
@@ -32,6 +33,7 @@ def paged_varlen_attention_out(
     window_size: tuple[int, int],
     enable_gqa: bool,
     return_lse: bool,
+    descales: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Causal varlen attention of new query tokens over a paged KV cache, written into ``out``.
 
@@ -49,10 +51,50 @@ def paged_varlen_attention_out(
         window_size: ``(left, right)`` attention window; ``(-1, 0)`` is full causal.
         enable_gqa: Whether ``num_heads`` is a multiple of ``num_kv_heads`` > 1.
         return_lse: Also return the ``(num_heads, num_tokens)`` logsumexp.
+        descales: With fp8 e4m3 ``query`` and caches: their ``(batch, num_kv_heads)`` fp32
+            dequantization scales (q, k, v). Runs FA4's fp8 forward (SM100 family only).
 
     Returns:
         The written ``out[:num_tokens]``, and the logsumexp with ``return_lse``.
     """
+    if descales is not None:
+        # TODO: call torch's varlen attention once it takes fp8 inputs with descales. Until then,
+        # fp8 calls FA4's private `_flash_attn_fwd` with the arguments torch's FA4 bridge passes
+        # (torch/nn/attention/_fa4.py). FA4's public `flash_attn_varlen_func` takes descales
+        # but has no `out=` to write into vLLM's output buffer.
+        # TODO: FA4's SwapAB decode kernel takes only fp16/bf16 (SwapABPolicy.rejection in
+        # flash_attn/cute/config.py), so fp8 decode runs FA4's standard kernel. On GB300 that is
+        # 1.5x faster than bf16 SwapAB on unique contexts, but 1.2x slower when requests share
+        # prefix pages, which SwapAB reuses from L2. An fp8 SwapAB kernel in FA4 would win both.
+        from flash_attn.cute.interface import _flash_attn_fwd, TensorwiseScales
+
+        window_left, window_right = window_size
+        out, lse, *_ = _flash_attn_fwd(
+            query,
+            key_cache,
+            value_cache,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            seqused_k=seqused_k.contiguous(),
+            page_table=block_table,
+            softmax_scale=scale,
+            causal=window_size == (-1, 0),
+            window_size_left=None if window_left == -1 else window_left,
+            window_size_right=None if window_right == -1 else window_right,
+            # 0: FA4 picks the KV splits; 1: no splits, deterministic.
+            num_splits=(
+                1
+                if is_in_batch_invariant_mode()
+                or torch.are_deterministic_algorithms_enabled()
+                else 0
+            ),
+            return_lse=return_lse,
+            out=out,
+            scales=TensorwiseScales(*descales),
+        )
+        return (out, lse) if return_lse else out
+
     # FA3 and FA4 infer key lengths from block_table + seqused_k for paged
     # KV. FA4 explicitly rejects page_table together with cu_seqlens_k.
     # FA2 requires cu_seqlens_k to be explicitly set.

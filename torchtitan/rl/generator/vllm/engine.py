@@ -12,7 +12,7 @@ import logging
 import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import torch
 from vllm import EngineArgs, LLMEngine, SamplingParams
@@ -80,6 +80,7 @@ def add_extra_vllm_engine_args(
     config_field_by_engine_arg = {
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
+        "kv_cache_dtype": "VLLMEngine.Config.kv_cache_dtype",
         "seed": "Generator.Config.debug.seed",
         "watermark": "VLLMEngine.Config.watermark",
         "speculative_config": "VLLMEngine.Config.num_speculative_tokens",
@@ -199,6 +200,28 @@ class VLLMEngine(GenerationEngine):
             no request running: admitted at any watermark
         """
 
+        kv_cache_dtype: Literal["auto", "fp8"] = "auto"
+        """KV cache element type:
+
+            "auto"   the model dtype (bf16); attention runs the trainer's kernel
+            "fp8"    e4m3 with scale 1; the query is quantized to e4m3 too, and attention
+                     runs FA4's fp8 forward (SM100 family only)
+
+        fp8 vs auto:
+
+            KV cache full, or long unique contexts   fp8: 2x tokens fit, decode reads half the bytes
+            many requests sharing long prompts       auto: fp8 decode can be slower
+                                                     (see `paged_varlen_attention_out`)
+            trainer-vs-generator logprob gap         fp8: ~2.3x auto's mean abs diff, ~3.5x k3 KL
+            tokens outside IcePop's (0.2, 5) mask    fp8: ~5x auto's
+            a hybrid model's KV block                fp8: grows (896 -> 1,664 tokens), so
+                                                     prefix-cache hits are coarser
+
+        The gap ratios come from an offline rescoring: the trainer scored tokens the generator
+        sampled with the same weights (Qwen3.8-27B, GB300, temperature 1, 27k-78k-token
+        contexts). A run's step-1 `bit_wise/logprob_diff/mean` gives its own fp8 floor.
+        """
+
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
         options without a dedicated field (e.g. ``{"long_prefill_token_threshold": 4096}``).
@@ -269,12 +292,26 @@ class VLLMEngine(GenerationEngine):
                 "session_kv_holder needs reset_kv_cache_on_model_state_dict_load=False: vLLM "
                 "cannot reset the prefix cache while blocks are held"
             )
+        if debug.batch_invariant and config.kv_cache_dtype != "auto":
+            raise ValueError(
+                f"debug.batch_invariant needs kv_cache_dtype='auto', got "
+                f"{config.kv_cache_dtype!r}: fp8 attention runs FA4's fp8 forward, which the "
+                "trainer does not run, so generator logprobs can't match the trainer's bitwise"
+            )
         if config.num_speculative_tokens > 0 and debug.batch_invariant:
             # TODO: support it once the verify step runs the trainer's kernels.
             raise ValueError(
                 f"num_speculative_tokens={config.num_speculative_tokens} needs "
                 "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
                 "with kernels the trainer does not run"
+            )
+        if config.kv_cache_dtype == "fp8" and config.num_speculative_tokens > 0:
+            # TODO: support MTP drafts with fp8: `_verify_rows_as_decode` doesn't pass the
+            # fp8 descales to FA4 yet.
+            raise ValueError(
+                f"kv_cache_dtype='fp8' does not support num_speculative_tokens="
+                f"{config.num_speculative_tokens} yet: MTP verify rows don't pass the fp8 "
+                "descales to FA4"
             )
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
             _enable_breakable_cuda_graphs()
@@ -443,6 +480,11 @@ class VLLMEngine(GenerationEngine):
         if max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         engine_kwargs["watermark"] = self.config.watermark
+        # TODO: fp8 grows a hybrid model's KV block (Qwen3.8-27B: 896 -> 1,664 tokens), and a
+        # prefix-cache hit ends on a block boundary, so each agent turn recomputes ~400 more
+        # prompt tokens (GB300: 2,053 vs 1,679 per turn). Not measured: whether vLLM's
+        # `prefix_match_unit` or a smaller `mamba_block_size` wins them back.
+        engine_kwargs["kv_cache_dtype"] = self.config.kv_cache_dtype
         # Smaller `priority` runs first and is preempted last; we pass `EngineRequest.group_id`
         # (-1 for all validation), so older groups have higher priority (see its docstring).
         # TODO: validation requests (priority -1) are admitted before training requests, also while a
