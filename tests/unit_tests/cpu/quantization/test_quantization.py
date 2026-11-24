@@ -642,6 +642,34 @@ def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
     )
 
 
+@pytest.mark.parametrize("output_dtype", [torch.bfloat16, torch.float32])
+def test_mxfp8_linear_output_dtype_config_and_checkpoint(output_dtype):
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    source = MXFP8Linear.Config(in_features=128, out_features=128).build()
+    target = MXFP8Linear.Config(
+        in_features=128, out_features=128, output_dtype=output_dtype
+    ).build()
+    target.load_state_dict(source.state_dict())
+    assert target.output_dtype == output_dtype
+    assert torch.equal(target.weight._tensor, source.weight._tensor)
+
+
+def test_mxfp8_linear_rejects_unsupported_output_dtype_and_fp32_bias():
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    with pytest.raises(ValueError, match="output_dtype must be BF16 or FP32"):
+        MXFP8Linear.Config(
+            in_features=128, out_features=128, output_dtype=torch.float16
+        )
+    with pytest.raises(ValueError, match="FP32 outputs require bias=False"):
+        MXFP8Linear.Config(
+            in_features=128, out_features=128, output_dtype=torch.float32, bias=True
+        )
+
+
 def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
