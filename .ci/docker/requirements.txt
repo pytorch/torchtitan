@@ -20,4 +20,6 @@ attn-gym[linear] @ git+https://github.com/meta-pytorch/attention-gym.git@755691f
 # TODO: pin a release once torch_remat publishes one with SavedTensorInfo.region
 # (meta-pytorch/remat 6c05e8d), which per-region activation offload needs.
 torch_remat @ git+https://github.com/meta-pytorch/remat.git@6c05e8d8d6895a60dcc02674af0774b28155b5af
-torch_checkpointing == 0.1.1
+# TODO: pin a release once torch_checkpointing publishes one with the
+# fsspec storage backend (meta-pytorch/torch_checkpointing#13).
+torch_checkpointing @ git+https://github.com/meta-pytorch/torch_checkpointing.git@5c45dc320441d62feb319ed752cdab982bef843c
