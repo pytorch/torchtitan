@@ -188,6 +188,9 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             {"routing_session_id": "group=7/rollout=1"},
         ]
 
+        # Setup started this process's metrics, and `run_group` added them to the training group.
+        assert "rollout_worker/ram_gib" in [metric.key for metric in group.metrics]
+
     asyncio.run(run())
 
 

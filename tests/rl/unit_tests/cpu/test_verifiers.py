@@ -247,6 +247,9 @@ def test_verifiers_worker_sends_muse_glimmer_renderer_config(monkeypatch) -> Non
         )
     )
 
+    # Raises AttributeError if setup didn't start the metrics.
+    worker.flush_process_metrics(group_id=0)
+
     sent = worker._verifiers_train_client_config
     # The worker's agents call its own generation server.
     assert sent.base_url == "http://127.0.0.1:2/v1"
@@ -287,7 +290,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
     )
     rollouter = object.__new__(VerifiersRollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker, num_threads_per_worker=3, rollouts_per_worker=12
+        worker=worker, rollouts_per_worker=12, rollouts_per_thread=4
     )
     # 24 training rollouts in flight / 12 per worker -> 2 workers
     rollouter._max_rollouts_in_flight = 24
@@ -596,7 +599,13 @@ def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
     assert "rollout=3" not in caplog.text
 
 
+# Over aiohttp's default 1 MiB request limit even as compact JSON: 7 bytes per 6-digit id.
+_LONG_PROMPT = [151644] * 160_000
+
+
 def test_generation_server_forwards_token_request() -> None:
+    """Two calls of one session; the second prompt is over 1 MiB of JSON."""
+
     async def run_test() -> None:
         received = []
 
@@ -631,7 +640,7 @@ def test_generation_server_forwards_token_request() -> None:
                 ],
             )
 
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server = GenerationServer.Config(max_rollout_tokens=262144).build()
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
@@ -646,16 +655,16 @@ def test_generation_server_forwards_token_request() -> None:
                             "object": "model",
                             "created": 0,
                             "owned_by": "torchtitan",
-                            "max_model_len": 40960,
+                            "max_model_len": 262144,
                         }
                     ],
                 }
-                for _ in range(2):
+                for token_ids in ([10, 11], _LONG_PROMPT):
                     response = await session.post(
                         f"http://{server.host}:{server.port}/inference/v1/generate",
                         headers={"X-Session-ID": "group=1/rollout=2"},
                         json={
-                            "token_ids": [10, 11],
+                            "token_ids": token_ids,
                             "sampling_params": {
                                 "temperature": 1.0,
                                 "top_p": 1.0,
@@ -677,7 +686,10 @@ def test_generation_server_forwards_token_request() -> None:
             "group=1/rollout=2/request=0",
             "group=1/rollout=2/request=1",
         ]
-        assert all(request["prompt_token_ids"] == [10, 11] for request in received)
+        assert [len(request["prompt_token_ids"]) for request in received] == [
+            2,
+            len(_LONG_PROMPT),
+        ]
         assert all(request["group_id"] == 1 for request in received)
         assert all(
             request["routing_session_id"] == "group=1/rollout=2" for request in received
@@ -1464,6 +1476,36 @@ def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
             _parse_sampling_config(
                 {key: value for key, value in sampling_params.items() if key != name}
             )
+
+
+@pytest.mark.parametrize(
+    "update, error",
+    [
+        ({}, None),
+        # What Verifiers 0.4.1 sends on every call: values that filter nothing.
+        ({"top_k": -1, "min_p": 0.0}, None),
+        ({"top_k": 0}, None),
+        ({"top_k": 20}, r"must not filter .* got top_k=20, min_p=0.0"),
+        ({"min_p": 0.05}, r"must not filter .* got top_k=-1, min_p=0.05"),
+    ],
+)
+def test_parse_sampling_config_accepts_only_full_vocabulary_top_k_and_min_p(
+    update, error
+) -> None:
+    sampling_params = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_tokens": 2,
+        "stop_token_ids": [99],
+        **update,
+    }
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            _parse_sampling_config(sampling_params)
+        return
+    assert _parse_sampling_config(sampling_params) == SamplingConfig(
+        temperature=1.0, top_p=1.0, max_tokens=2, stop_token_ids=[99]
+    )
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

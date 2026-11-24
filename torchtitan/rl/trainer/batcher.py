@@ -28,7 +28,7 @@ from torchtitan.components.data.padding import append_padded_segment
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
+from torchtitan.models.common.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import PromptImage, RolloutGroup
@@ -142,7 +142,7 @@ class TrainerStepBatch:
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
-    # pipeline step. RDMAMicrobatches when `rdma_min_tensor_bytes` is set.
+    # pipeline step. RDMAMicrobatches unless `rdma_min_tensor_bytes` is None.
     microbatch_groups: (
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
@@ -238,13 +238,14 @@ class Batcher(Configurable):
             dp_degree=2,
             pad_id=0,
             temperature=1.0,
+            register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
         pending, _ = batcher.add_training_samples(training_sample_group=group0)
         batch, _ = batcher.add_training_samples(training_sample_group=group1)
         # pending is None; batch.microbatch_groups: [num_groups][1][2 ranks];
-        # each TrainingMicrobatch.input: [256 tokens]
+        # each RDMAMicrobatch reads back a TrainingMicrobatch with input: [256 tokens]
 
-    With `rdma_min_tensor_bytes` set, it returns `RDMAMicrobatch`es registered with
+    Unless `rdma_min_tensor_bytes` is None, it returns `RDMAMicrobatch`es registered with
     `register_rdma_microbatch`, the actor system's RDMA registration (e.g.
     `MonarchRDMAMicrobatch.register`), which is then required.
 
@@ -267,14 +268,16 @@ class Batcher(Configurable):
         When unset, the trainer uses the microbatch token capacity as the
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
-        rdma_min_tensor_bytes: int | None = None
+        rdma_min_tensor_bytes: int | None = 1024
         """Send microbatch tensors of at least this many bytes as RDMA buffers (the actor system's
         `RDMAMicrobatch`), not in the RPC message:
-            None (default): every tensor in the message.
-            e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
-        The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable
-        ibverbs devices fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync
-        included."""
+            None: every tensor in the message.
+            1024 (default): tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty
+            tensors go in the message.
+        1 KiB because registering a buffer costs far more than sending a few bytes.
+        Monarch uses ibverbs where the host has it, else TCP. With neither, spawning the batcher raises.
+        A host that lists ibverbs devices it can't use fails at the first batch: set None, or
+        MONARCH_RDMA_DISABLE_IBVERBS=1 (TCP in every process, weight sync included)."""
         build_mrope_positions: bool = False
         """Give microbatches with images 3D M-RoPE positions (``mrope_positions``), as SFT's
         ``MultiModalCollator.Config.build_mrope_positions`` does: True for models whose image
@@ -320,8 +323,9 @@ class Batcher(Configurable):
             and register_rdma_microbatch is None
         ):
             raise ValueError(
-                "rdma_min_tensor_bytes is set, but no register_rdma_microbatch was given: "
-                "the batcher must run in an actor system that provides RDMA."
+                f"rdma_min_tensor_bytes={config.rdma_min_tensor_bytes} needs register_rdma_microbatch, "
+                "which only an actor system provides. Set rdma_min_tensor_bytes=None for an "
+                "in-process batcher."
             )
         self._training_sample_builder = config.training_sample_builder.build()
         self.seq_len = max_context_length
@@ -420,6 +424,7 @@ class Batcher(Configurable):
                 dp_degree=1,
                 pad_id=0,
                 temperature=1.0,
+                register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             )
             batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
             batcher.add_training_samples(training_sample_group=group1)  # -> (TrainerStepBatch, True)

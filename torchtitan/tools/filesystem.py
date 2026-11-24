@@ -91,17 +91,16 @@ def listdir(path: str | os.PathLike) -> list[str]:
 
 
 def rmtree(path: str | os.PathLike) -> None:
-    if is_remote(path):
-        fs, p = _resolve(path)
-        # Mirror ``shutil.rmtree(..., ignore_errors=True)`` for the common
-        # already-deleted case. Other errors (permissions, transient backend
-        # failures) propagate so the caller can decide how to handle them.
-        try:
+    # A missing path is a no-op. Other errors (permissions, transient backend
+    # failures) propagate so the caller can decide how to handle them.
+    try:
+        if is_remote(path):
+            fs, p = _resolve(path)
             fs.rm(p, recursive=True)
-        except FileNotFoundError:
-            pass
-    else:
-        shutil.rmtree(path, ignore_errors=True)
+        else:
+            shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
 
 
 def join(base: str | os.PathLike, name: str) -> str:

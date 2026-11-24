@@ -93,6 +93,11 @@ def _validate_declared_parallel_axes(
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.moe import MoE
 
+    # Configs that build their layouts at parallelize time declare none yet.
+    layouts = _collect_model_layouts(model)
+    if not layouts:
+        return
+
     p = parallelism
     model_name = type(model).__qualname__
     # degree != 1 also covers dp_shard == -1.
@@ -125,7 +130,7 @@ def _validate_declared_parallel_axes(
         if p.data_parallel_replicate_degree > 1:
             sparse_required.append(MeshAxisName.DP_REPLICATE)
 
-    for fqn, field, axes in _collect_model_layouts(model):
+    for fqn, field, axes in layouts:
         if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
             required = sparse_required
         else:
@@ -267,6 +272,8 @@ def validate_context_parallel(
         Ulysses,
         UlyssesInnerAttention,
     )
+    from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+    from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.common.attention.gdn import GDN
     from torchtitan.models.common.decoder import Decoder
 
@@ -321,6 +328,23 @@ def validate_context_parallel(
                     "n_kv_heads that divides tensor_parallel_degree * "
                     "context_parallel_degree and is divisible by "
                     "tensor_parallel_degree."
+                )
+
+        if isinstance(
+            inner_attention,
+            (ContextParallelInnerGDN.Config, ContextParallelInnerKDA.Config),
+        ):
+            num_key_heads = (
+                attention.n_key_heads
+                if isinstance(attention, GDN.Config)
+                else attention.n_heads
+            )
+            local_key_heads = num_key_heads // parallelism.tensor_parallel_degree
+            if local_key_heads % inner_attention.num_head_chunks != 0:
+                raise ValueError(
+                    f"{fqn}.inner_attention num_head_chunks "
+                    f"({inner_attention.num_head_chunks}) must divide the "
+                    f"{local_key_heads} key heads per tensor parallel rank."
                 )
 
         load_balancer_config = parallelism.context_parallel_load_balancer

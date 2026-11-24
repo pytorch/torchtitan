@@ -43,7 +43,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
+from torchtitan.models.common.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 

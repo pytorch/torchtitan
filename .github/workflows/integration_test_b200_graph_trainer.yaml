@@ -50,12 +50,12 @@ jobs:
           echo "CUDA driver version: ${DRIVER_VERSION}"
 
           uv pip install --pre torch torchvision \
-            --index-url https://download.pytorch.org/whl/nightly/cu130
+            --index-url https://download.pytorch.org/whl/nightly/cu132
           uv pip install -r requirements.txt "pytest==7.3.2" "expecttest>=0.2.0"
           uv pip install -r .ci/docker/requirements-vlm.txt
 
           USE_CPP=0 uv pip install --pre -r .github/requirements-torchao.txt \
-            --index-url https://download.pytorch.org/whl/nightly/cu130
+            --index-url https://download.pytorch.org/whl/nightly/cu132
           uv pip install "flash-attn-4[cu13]>=4.0.0b31"
           uv pip install \
             "git+https://github.com/meta-pytorch/dist_moe.git@main"

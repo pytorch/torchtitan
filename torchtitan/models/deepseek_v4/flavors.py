@@ -64,7 +64,7 @@ from .compressor import Compressor, Indexer, InnerIndexer, SparseIndexerLoss
 from .mhc import HcHead, HcPost, HcPre
 from .model import DeepSeekV4Model, DeepSeekV4TransformerBlock
 from .moe import DeepSeekV4Router
-from .mtp import MTPBlock
+from .mtp import DeepSeekV4MTPBlock
 from .sharding import (
     attention_sharding_config,
     attn_sink_sharding_config,
@@ -652,7 +652,7 @@ def _build_mtp_layers(
     norm_eps: float = 1e-6,
     hc_eps: float = 1e-6,
     rope: RoPE.Config,
-) -> list[MTPBlock.Config]:
+) -> list[DeepSeekV4MTPBlock.Config]:
     mtp_layers = []
     for depth in range(num_mtp_layers):
         layer_id = n_main_layers + depth
@@ -679,7 +679,7 @@ def _build_mtp_layers(
                     fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT)
                 )
         mtp_layers.append(
-            MTPBlock.Config(
+            DeepSeekV4MTPBlock.Config(
                 attention=block_cfg.attention,
                 attention_norm=block_cfg.attention_norm,
                 ffn_norm=block_cfg.ffn_norm,
@@ -870,7 +870,7 @@ def _debugmodel(
                 rope=rope,
             )
             if n_mtp_layers > 0
-            else None
+            else []
         ),
     )
 
@@ -1013,7 +1013,7 @@ def _deepseek_v4_flash(
                 rope=rope,
             )
             if n_mtp_layers > 0
-            else None
+            else []
         ),
     )
 
@@ -1156,7 +1156,7 @@ def _deepseek_v4_pro(
                 rope=rope,
             )
             if n_mtp_layers > 0
-            else None
+            else []
         ),
     )
 
