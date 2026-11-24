@@ -48,6 +48,11 @@ from torchtitan.tools.utils import (
     set_default_dtype,
 )
 
+# Verify steps with fewer rows than this keep FA4's varlen call: `_verify_rows_as_decode`'s fp32 tail
+# adds ~60 us per layer, more than SwapAB saves unless 8+ rows share long prompts (Qwen3.5, head dim
+# 256, GB300). A FULL graph fixes the row count, so the check is graph-safe.
+_MIN_VERIFY_ROWS_ON_DECODE_KERNEL = 8
+
 
 class _FA4PageSize:
     """Pick the KV kernel page size for FA4 on SM100/SM103: 128 tokens, or 16 if batch-invariant.
@@ -381,6 +386,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         )
         if (
             is_uniform_verify
+            and seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
             and current_flash_attention_impl() == "FA4"
             and sliding_window_size == (-1, 0)
             and self.out_transform is None
@@ -454,7 +460,8 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         """Attention of a verify step, every row ``n`` query tokens, on FA4's decode kernel.
 
         FA4 sends rows of ``n`` > 1 tokens to its prefill kernel: 25.5 ms of attention per
-        Qwen3.8-27B verify step (26 rows, GB300), 14.9 ms this way. Row with ``seq_len`` L, n = 4:
+        Qwen3.8-27B verify step (26 rows sharing 3 prompts, GB300), 14.9 ms this way.
+        Row with ``seq_len`` L, n = 4:
 
             tokens at positions          L-4, L-3, L-2, L-1
             FA4 decode, 4 x heads        keys 0 .. L-4             every token
@@ -549,8 +556,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         )
 
         # ======== The last n - 1 keys, causal among the row's tokens ========
-        # TODO: one Triton kernel for this tail and the merge. These ~15 small kernels per
-        # layer add 1.2 ms per Qwen3.8-27B verify step (26 rows, GB300), ~3% of the step.
+        # TODO: one Triton kernel for this tail and the merge. These ~15 small kernels add 53-71 us
+        # per layer at 1-4 rows and 1.2 ms per Qwen3.8-27B verify step at 26 rows (GB300), which keeps
+        # steps under _MIN_VERIFY_ROWS_ON_DECODE_KERNEL rows off this path.
         # vLLM's merge_attn_states takes token-major outputs of one dtype: here that costs
         # three layout copies and a bf16 tail, for ~5 fewer kernels.
         positions = num_shared_keys[:, None] + torch.arange(
