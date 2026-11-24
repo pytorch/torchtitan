@@ -60,7 +60,7 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable
 
 
-def attention_cost(segment_lengths: Sequence[int]) -> int:
+def _attention_cost(segment_lengths: Sequence[int]) -> int:
     """Document-masked attention cost: ``sum(L ** 2)`` over attention segments.
 
     Each token attends only to earlier tokens of its own segment, so this is
@@ -71,7 +71,7 @@ def attention_cost(segment_lengths: Sequence[int]) -> int:
     return sum(length * length for length in segment_lengths)
 
 
-def padding_segment_lengths(num_padding: int, max_context_length: int) -> list[int]:
+def _padding_segment_lengths(num_padding: int, max_context_length: int) -> list[int]:
     """Segments of a padding tail whose positions reset every ``max_context_length``.
 
     Collators and packers give padding positions ``arange(n) % max_context_length``,
@@ -82,7 +82,7 @@ def padding_segment_lengths(num_padding: int, max_context_length: int) -> list[i
     return [max_context_length] * num_full + ([rest] if rest else [])
 
 
-def positions_segment_lengths(positions: torch.Tensor) -> list[int]:
+def _positions_segment_lengths(positions: torch.Tensor) -> list[int]:
     """Attention segments of a microbatch, read from its ``positions``.
 
     A segment starts at every ``positions == 0``, padding included, exactly as
@@ -102,20 +102,22 @@ def positions_segment_lengths(positions: torch.Tensor) -> list[int]:
 def packed_attention_cost(
     document_lengths: Sequence[int], *, num_tokens: int, max_context_length: int
 ) -> int:
-    """``attention_cost`` of documents packed into ``num_tokens``, then padding.
+    """Attention cost of documents packed into ``num_tokens``, then padding.
 
-    For packing decisions made from lengths, before a microbatch exists (RL's
-    batcher): the segments are the documents plus the padding tail.
+    The sum of squared attention segment lengths, with the segments built from
+    lengths: the documents plus a padding tail cut every ``max_context_length``.
+    For packing decisions made before a microbatch exists (RL's batcher).
     """
-    tail = padding_segment_lengths(
+    tail = _padding_segment_lengths(
         num_tokens - sum(document_lengths), max_context_length
     )
-    return attention_cost([*document_lengths, *tail])
+    return _attention_cost([*document_lengths, *tail])
 
 
 def document_attention_cost(microbatch: TrainingMicrobatch) -> float:
-    """``attention_cost`` of a collated token microbatch, from its ``positions``.
+    """Attention cost of a collated token microbatch, from its ``positions``.
 
+    The sum of squared attention segment lengths, like ``packed_attention_cost``.
     A microbatch carries no document lengths, so the segments come from
     ``positions``. That also counts per-document padding
     (``per_sample_pad_multiple``) inside its document's segment, as the
@@ -127,7 +129,7 @@ def document_attention_cost(microbatch: TrainingMicrobatch) -> float:
             "document_attention_cost requires TokenizedTrainingMicrobatch, got "
             f"{type(microbatch).__name__}"
         )
-    return float(attention_cost(positions_segment_lengths(microbatch.positions)))
+    return float(_attention_cost(_positions_segment_lengths(microbatch.positions)))
 
 
 class MicrobatchBalancer(Configurable, ABC):
