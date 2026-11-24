@@ -345,13 +345,12 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
-        transforms=[BatchInvariantFlexTransform()],
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[BatchInvariantFlexTransform(), FullPrecisionLinearTransform()],
     )
-    # Local compile regions do not support batch-invariant mode; nor does
-    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
+    # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
-        FullPrecisionLinearTransform().transform(model_config)
     inner_attention = config.trainer.model.layers[0].attention.inner_attention
     assert isinstance(inner_attention, FlexInnerAttention.Config)
     block_size = inner_attention.block_size
@@ -722,12 +721,12 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[FullPrecisionLinearTransform()],
     )
-    # Local compile regions do not support batch-invariant mode; nor does
-    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
+    # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
-        FullPrecisionLinearTransform().transform(model_config)
     return Controller.Config(
         hf_assets_path="./assets/hf/Qwen3-0.6B",
         num_generators=3,
@@ -795,6 +794,7 @@ def _qwen3_5_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
+    transforms: Sequence[ModelConfigTransform] = (),
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -802,6 +802,7 @@ def _qwen3_5_rl_model_configs(
         flavor,
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        transforms=transforms,
         seq_len=seq_len,
         attn_backend=attn_backend,
     )
@@ -904,12 +905,12 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
         seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[FullPrecisionLinearTransform()],
     )
-    # Local compile regions do not support batch-invariant mode; nor does
-    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
+    # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
-        FullPrecisionLinearTransform().transform(model_config)
     return config
 
 

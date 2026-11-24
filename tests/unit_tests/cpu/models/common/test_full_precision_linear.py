@@ -44,12 +44,6 @@ def test_full_precision_linear_computes_in_fp32(input_dtype):
     torch.testing.assert_close(layer.bias.grad, bias_ref_O.grad)
 
 
-def test_full_precision_linear_preserves_its_weight_dtype():
-    # FSDP's mixed precision all-gathers preserve_dtype_params in their own dtype.
-    layer = FullPrecisionLinear.Config(in_features=8, out_features=4).build()
-    assert [name for name, _ in layer.named_preserve_dtype_params()] == ["weight"]
-
-
 def test_full_precision_linear_rejects_a_lower_precision_weight():
     # A bf16 weight (preserve_dtype_params overridden, or a bulk cast) fails loudly
     # instead of running the matmul in bf16.

@@ -103,7 +103,26 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         input and passes the backward's fp32 grad_input through unrounded.
         """
         weight_OD = weight.flatten(0, -2)
-        _check_bf16_gemm_operands(input_TD, weight_OD)
+        reason = None
+        # aten::mm.dtype (bf16 inputs, fp32 output) is only implemented for CUDA/ROCm.
+        if not input_TD.is_cuda:
+            reason = f"its input is on {input_TD.device.type}, not CUDA"
+        elif weight_OD.dtype != torch.bfloat16:
+            reason = (
+                f"its weight is {weight_OD.dtype}, not bf16 (set a bf16 param_dtype in "
+                "mixed precision)"
+            )
+        elif input_TD.dtype not in (torch.bfloat16, torch.float32):
+            reason = f"its input is {input_TD.dtype}, not bf16 or fp32"
+        # TODO: cuBLAS's out_dtype GEMM isn't batch-invariant. A bf16-input, fp32-output matmul
+        # in batch_invariant_ops would let batch-invariant mode use HiMidLoLinear too.
+        elif is_in_batch_invariant_mode():
+            reason = "batch-invariant mode is on"
+        if reason is not None:
+            raise ValueError(
+                f"HiMidLoLinear runs bf16 GEMMs, but {reason}. Use FullPrecisionLinear for "
+                "fp32 matmuls."
+            )
         ctx.weight_shape = weight.shape
         # The dtype grad_input is returned in: autograd casts a gradient to its input's dtype.
         ctx.input_dtype = input_TD.dtype
@@ -238,31 +257,6 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         if grad_weight_OD is not None and grad_weight_OD.shape != ctx.weight_shape:
             grad_weight_OD = grad_weight_OD.view(ctx.weight_shape)
         return grad_input_TD, grad_weight_OD, None, None
-
-
-def _check_bf16_gemm_operands(input_TD: torch.Tensor, weight_OD: torch.Tensor) -> None:
-    """Raise unless the bf16 GEMMs apply: CUDA, a bf16 weight, a bf16 or fp32 input, and no
-    batch-invariant mode."""
-    # aten::mm.dtype (bf16 inputs, fp32 output) is only implemented for CUDA/ROCm.
-    if not input_TD.is_cuda:
-        reason = f"its input is on {input_TD.device.type}, not CUDA"
-    elif weight_OD.dtype != torch.bfloat16:
-        reason = (
-            f"its weight is {weight_OD.dtype}, not bf16 (set a bf16 param_dtype in mixed "
-            "precision)"
-        )
-    elif input_TD.dtype not in (torch.bfloat16, torch.float32):
-        reason = f"its input is {input_TD.dtype}, not bf16 or fp32"
-    # TODO: cuBLAS's out_dtype GEMM isn't batch-invariant. A bf16-input, fp32-output matmul
-    # in batch_invariant_ops would let batch-invariant mode use HiMidLoLinear too.
-    elif is_in_batch_invariant_mode():
-        reason = "batch-invariant mode is on"
-    else:
-        return
-    raise ValueError(
-        f"HiMidLoLinear runs bf16 GEMMs, but {reason}. Use FullPrecisionLinear for fp32 "
-        "matmuls."
-    )
 
 
 def _wide_backward(
