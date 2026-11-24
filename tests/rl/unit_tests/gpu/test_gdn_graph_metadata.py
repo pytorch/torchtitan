@@ -24,6 +24,7 @@ from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
 )
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -734,6 +735,64 @@ def test_speculative_step_matches_step_without_drafts(kinds) -> None:
             drafts_layer.kv_cache[0][slots[index][0], last_column : last_column + 3],
             plain_layer.kv_cache[0][index + 1],
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_speculative_step_replays_in_breakable_graph(monkeypatch) -> None:
+    """A breakable piecewise graph captured without metadata runs the GDN layer eagerly at
+    replay, with the replay step's metadata (vLLM captures piecewise graphs without any).
+
+        capture:  piece 1 | eager GDN (no metadata: zeros) | piece 2: output * 2
+        replay:   piece 1 | eager GDN (decode + verify + prefill step) | piece 2
+    """
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    weights = _random_gdn_weights(device)
+    conv_weight, A_log, dt_bias = weights
+    query_lens, context_lens = [1, 4, 13], [40, 40, 0]
+    slots = [[4 * index + column for column in range(1, 5)] for index in range(3)]
+    metadata = _speculative_metadata(
+        query_lens=query_lens,
+        context_lens=context_lens,
+        slots=slots,
+        num_draft_tokens=[-1, 3, -1],
+        num_accepted_tokens=[1, 2, 1],
+    )
+    tokens = _random_tokens(sum(query_lens), device)
+    eager_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=13)
+    graph_layer = _qwen3_5_gdn_layer(num_speculative_tokens=3, num_slots=13)
+    graph_layer.kv_cache = tuple(state.clone() for state in eager_layer.kv_cache)
+    static_tokens = tuple(torch.zeros_like(tensor) for tensor in tokens)
+
+    no_metadata = ForwardContext(
+        no_compile_layers={}, attn_metadata=None, slot_mapping={}
+    )
+    capture = BreakableCUDAGraphCapture()
+    with (
+        torch.inference_mode(),
+        override_forward_context(no_metadata),
+        torch.cuda.stream(torch.cuda.Stream()),
+    ):
+        with capture:
+            doubled = 2 * graph_layer._forward(
+                *static_tokens, conv_weight, None, A_log, dt_bias
+            )
+    assert capture.num_eager_breaks == 1
+
+    for static, tensor in zip(static_tokens, tokens):
+        static.copy_(tensor)
+    step = ForwardContext(
+        no_compile_layers={}, attn_metadata={"gdn": metadata}, slot_mapping={}
+    )
+    with torch.inference_mode(), override_forward_context(step):
+        capture.replay()
+    torch.cuda.synchronize()
+
+    expected = _run(eager_layer, metadata, tokens, weights)
+    _assert_close(doubled.float() / 2, expected)
+    for graph_state, eager_state in zip(graph_layer.kv_cache, eager_layer.kv_cache):
+        assert torch.equal(graph_state, eager_state)
 
 
 def _qwen3_5_gdn_layer(num_speculative_tokens: int, num_slots: int) -> gdn.VLLMInnerGDN:

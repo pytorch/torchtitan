@@ -148,6 +148,27 @@ def _validate_platform(
         )
 
 
+def _enable_breakable_cuda_graphs() -> None:
+    """Turn on vLLM's breakable CUDA graphs: piecewise graphs that run attention eagerly.
+
+    vLLM makes its attention op a graph break when it imports the op, and only if this
+    variable is set then. Raises if the op was imported before.
+    """
+    os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+    from vllm.compilation import breakable_cudagraph
+    from vllm.model_executor.layers.attention import attention as vllm_attention
+
+    attention_op = vllm_attention.unified_attention_with_output
+    # The wrapper that `eager_break_during_capture` returns is defined in breakable_cudagraph.py.
+    # If vLLM moves it, this check raises on a wrapped op.
+    if attention_op.__code__.co_filename != breakable_cudagraph.__file__:
+        raise RuntimeError(
+            "num_speculative_tokens > 0 with cuda_graph.mode='FULL' needs vLLM's attention "
+            "op to be a graph break, but vLLM imported it before VLLM_USE_BREAKABLE_CUDAGRAPH "
+            "was set: set VLLM_USE_BREAKABLE_CUDAGRAPH=1 at process start"
+        )
+
+
 class VLLMEngine(GenerationEngine):
     """The generator's vLLM ``LLMEngine``, behind the calls the engine loop makes.
 
@@ -204,20 +225,16 @@ class VLLMEngine(GenerationEngine):
           acceptance can fall as the policy drifts.
         - With `session_kv_holder`, prefix hits keep the last block that vLLM drops by
           default for drafts (see `_build_engine_args`).
-        - Not supported with `cuda_graph.mode="FULL"` (use FULL_DECODE_ONLY),
-          `debug.batch_invariant`, models with a vision encoder or non-CUDA devices."""
+        - With `cuda_graph.mode="FULL"`, steps with prefill replay piecewise graphs
+          (`VLLMCudaGraphConfig.mode`).
+        - Not supported with `debug.batch_invariant`, models with a vision encoder or
+          non-CUDA devices."""
 
         def __post_init__(self) -> None:
             GenerationEngine.Config.__post_init__(self)
             if self.num_speculative_tokens < 0:
                 raise ValueError(
                     f"num_speculative_tokens must be >= 0, got {self.num_speculative_tokens}"
-                )
-            if self.num_speculative_tokens > 0 and self.cuda_graph.mode == "FULL":
-                raise ValueError(
-                    f"num_speculative_tokens={self.num_speculative_tokens} needs "
-                    'cuda_graph.mode="FULL_DECODE_ONLY" or "NONE": with drafts, vLLM\'s GDN '
-                    "metadata builder supports CUDA graphs for decode steps only"
                 )
 
     def __init__(
@@ -259,6 +276,8 @@ class VLLMEngine(GenerationEngine):
                 "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
                 "with kernels the trainer does not run"
             )
+        if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
+            _enable_breakable_cuda_graphs()
         if config.num_speculative_tokens > 0 and vision_processor is not None:
             # TODO: vLLM's drafter reads the image token id from the target's config
             # (SpecDecodeBaseProposer.load_model); support vision models once tested.

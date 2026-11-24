@@ -1126,16 +1126,23 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
     assert sizes[-1] == 500  # a full decode batch has its own graph
 
 
-def test_cuda_graph_decode_capture_sizes_cover_draft_tokens():
-    # With 3 drafts, a decode step verifies 1 + 3 tokens per sequence.
-    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
+def test_cuda_graph_config_with_draft_tokens():
+    kwargs = dict(
         max_num_seqs=64,
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
         num_speculative_tokens=3,
     )
+    # With 3 drafts, a decode step verifies 1 + 3 tokens per sequence.
+    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
+        **kwargs
+    )
     assert cfg.cudagraph_capture_sizes[-1] == 256
+    # vLLM's GDN builder graphs only uniform verify steps: steps with prefill replay
+    # piecewise graphs.
+    cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
+    assert cfg.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
