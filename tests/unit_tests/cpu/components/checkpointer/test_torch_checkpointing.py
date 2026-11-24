@@ -249,6 +249,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         for kwargs in (
             {"folder": "gs://bucket/run//checkpoint"},
             {"folder": "gs://bucket/run/./checkpoint"},
+            {"folder": "gs://bucket/run/checkpoint//"},
             {"initial_load_path": "gs://bucket//seed/step-5"},
         ):
             with self.subTest(**kwargs):

@@ -94,6 +94,9 @@ checkpointer=TorchCheckpointingManager.Config(
 ),
 ```
 
+Only `gs://` is verified. A URI that carries a host or port, such as
+`hdfs://host:8020/path`, is not supported: the host would be read as part of the path.
+
 Interval saves, the final save, resume, `keep_latest_k` retention, Hugging Face export
 (`last_save_in_hf`), and Hugging Face load (`initial_load_in_hf`) all go through the
 remote store. `initial_load_path` may be on other storage than `folder`, and a local

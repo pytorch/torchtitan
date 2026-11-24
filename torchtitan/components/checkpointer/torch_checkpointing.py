@@ -82,8 +82,9 @@ CHECKPOINTING_LOGGER_NAME = "torch_checkpointing"
 # TODO: torch_checkpointing wraps checkpoint ids in Path(), which collapses the
 # "//" of a URI, and a backend manager takes a single StorageConfig. So a path
 # reaches it without its scheme, on a storage built from its protocol. Delete
-# _split_uri, _backend_path and _storage_config once torch_checkpointing settles
-# on scheme-preserving paths or per-path storage:
+# _split_uri, _backend_path, _storage_config and the path-segment check in
+# __init__ once torch_checkpointing settles on scheme-preserving paths or
+# per-path storage:
 # https://github.com/meta-pytorch/torch_checkpointing/issues/12#issuecomment-6967273963
 def _split_uri(path: str) -> tuple[str | None, str]:
     """Split a checkpoint path into its protocol and the path the backend uses.
@@ -261,7 +262,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             ("checkpointer.initial_load_path", config.initial_load_path),
         ):
             if path and filesystem.is_remote(path):
-                backend_path = _backend_path(path).rstrip("/")
+                backend_path = _backend_path(path).removesuffix("/")
                 if str(Path(backend_path)) != backend_path:
                     raise ValueError(
                         f"{label} ({path!r}) must not contain empty or '.' "
