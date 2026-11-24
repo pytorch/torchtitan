@@ -420,7 +420,7 @@ def _load_initial_weights(
     # caching allocator, so the later CUDA-graph capture (which needs its own private
     # pool) has room. Without this, large models (e.g. 235B) OOM capture even though
     # the live weights fit.
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
 
 class ModelStateDictLoader:

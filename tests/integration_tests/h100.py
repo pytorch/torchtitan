@@ -20,6 +20,7 @@ from torchtitan_recipes.tests.models.llama3 import (
 )
 from torchtitan_recipes.tests.models.qwen3_5 import (
     qwen35_debugmodel_moe_lora as _qwen35_debugmodel_moe_lora,
+    qwen35_debugmodel_moe_lora_shared_outer as _qwen35_debugmodel_moe_lora_shared_outer,
 )
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -74,6 +75,10 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
 
 def qwen35_debugmodel_moe_lora() -> Trainer.Config:
     return _qwen35_debugmodel_moe_lora(seq_len=512)
+
+
+def qwen35_debugmodel_moe_lora_shared_outer() -> Trainer.Config:
+    return _qwen35_debugmodel_moe_lora_shared_outer(seq_len=512)
 
 
 def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
@@ -162,7 +167,7 @@ def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     )
 
 
-def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
+def qwen35_debugmodel_mm_ulysses_tp2_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
     from torchtitan.models.common.attention import FlexInnerAttention
     from torchtitan.models.common.attention.cp_attention import (
@@ -176,6 +181,8 @@ def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     config = qwen35_debugmodel(attn_backend="flex")
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 1
+    # 1 TP-local KV head on 2 CP ranks exercises Ulysses KV head copies.
+    config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
     config.training.disable_accelerator_graphs = True
@@ -204,7 +211,6 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="FSDP symmetric memory",
             test_name="fsdp_symm_mem",
             ngpu=2,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[
@@ -215,8 +221,6 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             "(FSDP2, TP2 with SP, EP2)",
             test_name="fsdp+hybridep",
             ngpu=4,
-            # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_dist_gemm_tp2],
@@ -224,20 +228,24 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             "and FFN projections (FSDP2 + TP2)",
             test_name="dist_gemm",
             ngpu=4,
-            # symmetric memory is CUDA-only.
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[qwen3_moe_deepep_fsdp4_ep4],
             test_descr="Qwen3 FSDP+DeepEP",
             test_name="qwen3_fsdp+deepep",
             ngpu=4,
-            skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
             configs=[qwen35_debugmodel_moe_lora],
             test_descr="Qwen3.5 MoE LoRA",
             test_name="qwen3_5_moe_lora",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen35_debugmodel_moe_lora_shared_outer],
+            test_descr="Qwen3.5 MoE LoRA, shared-outer expert adapters",
+            test_name="qwen3_5_moe_lora_shared_outer",
             ngpu=8,
             use_real_pg=True,
         ),
@@ -260,9 +268,9 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=2,
         ),
         IntegrationTestDefinition(
-            configs=[qwen35_debugmodel_mm_ulysses_cp2],
+            configs=[qwen35_debugmodel_mm_ulysses_tp2_cp2],
             test_descr="Qwen3.5 multimodal Ulysses context parallelism",
             test_name="qwen3_5_mm_ulysses_cp",
-            ngpu=2,
+            ngpu=4,
         ),
     ]

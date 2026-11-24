@@ -27,7 +27,7 @@ from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
     causal_conv1d,
     chunk_gdn,
-    ChunkGdnCudnnPacked,
+    ChunkGdnWarpdrivePacked,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -47,7 +47,7 @@ from .linear_attention import (
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
+for _kernel_function in (_ChunkGDN, ChunkGdnWarpdrivePacked):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -603,6 +603,11 @@ class GDN(LinearAttention):
 
         def __post_init__(self):
             LinearAttention.Config.__post_init__(self)
+            # Before the modulo: 0 raises ZeroDivisionError, and 4 % -2 == 0.
+            if self.n_key_heads < 1:
+                raise ValueError(
+                    f"n_key_heads must be positive, got {self.n_key_heads}"
+                )
             if self.n_heads % self.n_key_heads != 0:
                 raise ValueError(
                     f"n_heads ({self.n_heads}) must be divisible by "
@@ -615,10 +620,11 @@ class GDN(LinearAttention):
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
+        def flops(self, positions: torch.Tensor) -> int:
             from torchtitan.models.common.flops import delta_rule_flops_per_token
 
-            return delta_rule_flops_per_token(
+            # The recurrent state has a fixed size, so every query costs the same.
+            return positions.numel() * delta_rule_flops_per_token(
                 num_heads=self.n_heads,
                 key_head_dim=self.key_head_dim,
                 v_head_dim=self.value_head_dim,

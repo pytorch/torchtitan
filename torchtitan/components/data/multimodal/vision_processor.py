@@ -88,6 +88,12 @@ class PixelBudgetResize(ResizeRule):
         max_pixels: int
         """Upper pixel budget."""
 
+        def __post_init__(self) -> None:
+            if self.max_pixels < 1:
+                raise ValueError(
+                    f"max_pixels must be at least 1, got {self.max_pixels}."
+                )
+
     def __init__(self, config: Config) -> None:
         self.min_pixels = config.min_pixels
         self.max_pixels = config.max_pixels
@@ -258,6 +264,10 @@ class VisionProcessor(Configurable):
                     "patch_order must be 'block' or 'raster', got "
                     f"{self.patch_order!r}."
                 )
+            for name in ("patch_size", "temporal_patch_size", "spatial_merge_size"):
+                value = getattr(self, name)
+                if value < 1:
+                    raise ValueError(f"{name} must be at least 1, got {value}.")
 
     def __init__(self, config: Config) -> None:
         self.config = config

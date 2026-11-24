@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
@@ -29,7 +30,11 @@ from tests.integration_tests.features import (
 )
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
-from tests.integration_tests.run_tests import _parse_test_suites, run_single_test
+from tests.integration_tests.run_tests import (
+    _parse_test_suites,
+    run_single_test,
+    run_tests,
+)
 
 
 def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
@@ -72,6 +77,72 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
     assert captured_env["TORCHTITAN_TEST_OUTPUT_DIR"] == str(
         tmp_path / "output_dir_test"
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "num_devices",
+        "ngpu_arg",
+        "test_ngpu",
+        "execution_mode",
+        "entrypoints",
+        "parallel",
+        "should_raise",
+    ),
+    [
+        (7, 8, 8, "real_pg", (), True, True),
+        (8, 8, 8, "real_pg", (), True, False),
+        (7, 8, 8, "real_pg", (), False, True),
+        (4, 8, 4, "real_pg", (), False, False),
+        (4, 8, 4, "real_pg", ("torchtitan.rl.train",), True, False),
+        (2, 8, 8, "fake_pg", (), True, True),
+        (1, 1, 8, "fake_pg", (), True, False),
+        (1, 8, 8, "fake_pg", (), False, False),
+        (0, 8, 8, "fake_pg", (), False, True),
+    ],
+)
+def test_run_tests_requires_visible_devices(
+    monkeypatch,
+    tmp_path: Path,
+    num_devices,
+    ngpu_arg,
+    test_ngpu,
+    execution_mode,
+    entrypoints,
+    parallel,
+    should_raise,
+) -> None:
+    monkeypatch.setattr(torch.accelerator, "device_count", lambda: num_devices)
+    started = []
+
+    def record_run(*args, **kwargs):
+        started.append(kwargs)
+
+    monkeypatch.setattr("tests.integration_tests.run_tests.run_single_test", record_run)
+    test = IntegrationTestDefinition(
+        configs=[llama3_debugmodel],
+        test_name="device_check_test",
+        ngpu=test_ngpu,
+        entrypoints=list(entrypoints),
+    )
+    args = SimpleNamespace(
+        test_name="all",
+        ngpu=ngpu_arg,
+        output_dir=str(tmp_path),
+        execution_mode=execution_mode,
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match=f"only {num_devices} accelerator"):
+            run_tests(args, [test], parallel=parallel)
+        assert not started
+    else:
+        run_tests(args, [test], parallel=parallel)
+        assert len(started) == 1
+        if not parallel or entrypoints:
+            assert "gpu_ids" not in started[0]
+        else:
+            assert all(gpu_id < num_devices for gpu_id in started[0]["gpu_ids"])
 
 
 def test_config_module_resolves_python_m_entrypoint(monkeypatch) -> None:

@@ -116,7 +116,7 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
             # row is its own sequence, as SGLang's offsets leave the rows padding a
             # batch to a CUDA graph's size out; their null slot zeroes them.
             num_rows = mixed_qkv.shape[0]
-            return paged_gdn(
+            output = paged_gdn(
                 conv_output_TC,
                 a,
                 b,
@@ -133,16 +133,27 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
                 num_v_heads=layer.num_v_heads,
                 head_v_dim=layer.head_v_dim,
             ).unsqueeze(0)
-        return recurrent_gdn_decode(
-            conv_output_TC,
-            a.unsqueeze(0),
-            b.unsqueeze(0),
-            A_log_H,
-            dt_bias_H,
+        else:
+            output = recurrent_gdn_decode(
+                conv_output_TC,
+                a.unsqueeze(0),
+                b.unsqueeze(0),
+                A_log_H,
+                dt_bias_H,
+                layer_cache.temporal,
+                state_indices,
+                scale=layer.head_k_dim**-0.5,
+            )
+        # SGLang's extra_buffer prefix cache: copy the states of the requests at a
+        # tracked position into their track slots, once, after the last layer.
+        self._track_mamba_state_decode(
+            forward_batch,
+            layer_cache.conv[0],
             layer_cache.temporal,
-            state_indices,
-            scale=layer.head_k_dim**-0.5,
+            self.forward_metadata.mamba_cache_indices,
+            layer_id=layer.layer_id,
         )
+        return output
 
     def forward_extend(
         self,
@@ -157,6 +168,9 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
         ``(1, T, H, V)``."""
         conv_weight_CW, A_log_H, dt_bias_H = linear_attention_weights(layer)
         layer_cache = self.state_layer_cache(layer.layer_id)
+        checkpoints = self.track_extend_states(
+            forward_batch, mixed_qkv, layer_cache.conv[0]
+        )
         (
             conv_output_1TC,
             state_indices,
@@ -179,6 +193,7 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
             head_k_dim=layer.head_k_dim,
             num_v_heads=layer.num_v_heads,
             head_v_dim=layer.head_v_dim,
+            **checkpoints,
         ).unsqueeze(0)
 
 
@@ -202,7 +217,9 @@ class SGLangInnerGDN(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        tp_size = get_parallel().tp_size
+        # SGLang's attention TP is torchtitan's TP; under attention DP, SGLang's
+        # tp_size is DP x TP.
+        tp_size = get_parallel().attn_tp_size
         for name in ("num_k_heads", "num_v_heads"):
             if getattr(config, name) % tp_size != 0:
                 raise ValueError(

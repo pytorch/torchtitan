@@ -50,10 +50,3 @@ def navit_encoder_sharding_config() -> ShardingConfig:
         state_shardings={"positional_embedding_vlm": parameter_invariant},
         output_shardings=activation_invariant,
     )
-
-
-def vision_rope_freq_sharding_config() -> ShardingConfig:
-    return ShardingConfig(
-        # TP-replicated like the decoder RoPE cache.
-        state_shardings={"inv_freq": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.R})},
-    )

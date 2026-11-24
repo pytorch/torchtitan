@@ -17,10 +17,6 @@ import torch.nn as nn
 
 from torchtitan.components.data.multimodal.vision_processor import NaViTPatchGridResize
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ColumnParallelLinear,
@@ -61,6 +57,7 @@ from torchtitan.models.common.moe.sharding import (
     router_sharding_config,
 )
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
+from torchtitan.models.common.rope import ComplexVisionRoPE
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -72,14 +69,13 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from torchtitan.models.kimi_k2_7.sharding import (
     moonvit_encoder_sharding_config,
     moonvit_projector_sharding_config,
-    moonvit_rotary_sharding_config,
 )
-from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .attention import KimiMLAAttention
 from .model import (
     AttentionResidual,
@@ -126,13 +122,17 @@ KIMI_K3_SPECIAL_TOKENS = {
 # are not in the Hugging Face config: ``resize`` reimplements the NaViT
 # patch-grid resize in the processor's code, and ``patch_order`` is the raster
 # layout MoonViT3d expects.
+_MAX_PATCHES_PER_SIDE = 512
+
 KIMI_K3_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "patch_size": 14,
     "temporal_patch_size": 1,
     "spatial_merge_size": 2,
     "image_mean": (0.5, 0.5, 0.5),
     "image_std": (0.5, 0.5, 0.5),
-    "resize": NaViTPatchGridResize.Config(max_patches=65_536, max_patches_per_side=512),
+    "resize": NaViTPatchGridResize.Config(
+        max_patches=65_536, max_patches_per_side=_MAX_PATCHES_PER_SIDE
+    ),
     "patch_order": "raster",
 }
 
@@ -484,6 +484,7 @@ def _vision_encoder_config(
     init_pos_emb_height: int = 16,
     init_pos_emb_width: int = 16,
     max_num_frames: int = 4,
+    max_rope_positions: int = _MAX_PATCHES_PER_SIDE,
 ) -> KimiK3VisionEncoder.Config:
     patch_dim = in_channels * patch_size * patch_size
     head_dim = qkv_dim // num_heads
@@ -500,6 +501,12 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
+            rope=ComplexVisionRoPE.Config(
+                dim=head_dim,
+                max_context_length=max_rope_positions,
+                pair_layout="interleaved",
+                sharding_config=vision_rope_sharding_config(),
+            ),
             wq=_linear(
                 dim,
                 qkv_dim,
@@ -519,7 +526,7 @@ def _vision_encoder_config(
             inner_attention=FlexInnerAttention.Config(
                 sharding_config=vision_inner_attention_sharding_config()
             ),
-            sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+            sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
             fc1=_vision_column_parallel_linear(
@@ -543,9 +550,6 @@ def _vision_encoder_config(
         interpolation_mode="bilinear",
         patch_embed_proj=_linear(
             patch_dim, dim, sharding_config=vision_invariant_linear_sharding_config()
-        ),
-        rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim, sharding_config=moonvit_rotary_sharding_config()
         ),
         block=block,
         final_norm=vision_norm,
@@ -820,7 +824,6 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
     *,
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
@@ -837,8 +840,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for converter in converters:
-            config = converter.build().convert(config)
     return config

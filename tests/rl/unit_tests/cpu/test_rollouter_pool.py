@@ -9,6 +9,8 @@
 import asyncio
 import functools
 import gc
+import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 from torchtitan.observability import structured_logger as sl
@@ -18,9 +20,14 @@ from torchtitan.rl.actors.monarch import (
 )
 from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
+from torchtitan.rl.observability import metrics as m
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
-from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
+from torchtitan.rl.rollout.rollouter import (
+    BaseRolloutWorker,
+    MessageEnvRolloutWorker,
+    Rollouter,
+)
 
 
 class _ChooseRunGroupEndpoint:
@@ -76,6 +83,98 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
     asyncio.run(run())
 
 
+# A tokenizer or renderer config for fake workers: the base `setup_async` builds None from it.
+_NO_OP_CONFIG = SimpleNamespace(build=lambda **kwargs: None)
+
+
+class _LoopBlockingWorker(BaseRolloutWorker):
+    """Holds its event loop for 0.3 s in setup and for `sample` seconds in each group, as a slow
+    tokenizer build or render would. Then holds its one thread for `sample` seconds, as a
+    blocking sandbox removal would."""
+
+    def __init__(self) -> None:
+        # No rubric or advantage estimator: this worker never scores.
+        pass
+
+    async def setup_async(self, **kwargs) -> None:
+        # Yield first: a lag tracker started before setup would run now, then record the 0.3 s hold.
+        await asyncio.sleep(0.1)
+        time.sleep(0.3)
+        await super().setup_async(**kwargs)
+
+    async def run_group(
+        self, *, sample: float, group_id: int, **kwargs
+    ) -> RolloutGroup:
+        time.sleep(sample)
+        await asyncio.to_thread(time.sleep, sample)
+        # Yield, so the lag task wakes up late and records the delay before the group returns.
+        await asyncio.sleep(0.1)
+        group = RolloutGroup(group_id=group_id, rollouts=[])
+        group.metrics += self.flush_process_metrics(group_id)
+        return group
+
+
+def test_rollout_worker_reports_its_metrics() -> None:
+    """A training group gets the worker's metrics since its previous training group. A validation
+    group gets none:
+        setup holds the loop for 0.3 s                    not counted
+        training group                                    lag and thread wait < 250 ms
+        validation group holds the loop, then the thread,
+            for 0.3 s each                                no metrics
+        training group                                    lag and thread wait >= 250 ms
+    """
+
+    async def run() -> list[RolloutGroup]:
+        # One thread, so a group's 0.3 s call in a thread delays the thread-pool lag check.
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
+        )
+        worker = _LoopBlockingWorker()
+        freeze_count_before_setup = gc.get_freeze_count()
+        await worker.setup_async(
+            tokenizer_config=_NO_OP_CONFIG,
+            renderer_config=_NO_OP_CONFIG,
+            hf_assets_path="",
+        )
+        # Setup moved the objects built so far out of garbage collection.
+        assert gc.get_freeze_count() > freeze_count_before_setup
+        kwargs = dict(
+            generate_fn=None, release_session_fn=None, group_size=1, sampling=None
+        )
+        groups = [
+            await worker.run_group(sample=0.0, group_id=0, **kwargs),
+            await worker.run_group(sample=0.3, group_id=-1, **kwargs),
+            await worker.run_group(sample=0.0, group_id=1, **kwargs),
+        ]
+        worker._event_loop_lag.close()
+        worker._thread_pool_lag.close()
+        return groups
+
+    try:
+        first_training, validation, second_training = asyncio.run(run())
+    finally:
+        # Give the frozen objects back to the collector, for the tests that run after this one.
+        gc.unfreeze()
+    assert validation.metrics == []
+    first_metrics = m.MetricsProcessor._aggregate_metrics(first_training.metrics)
+    second_metrics = m.MetricsProcessor._aggregate_metrics(second_training.metrics)
+    lag_mean = next(
+        metric.value
+        for metric in second_training.metrics
+        if metric.key == "rollout_worker/event_loop_lag_ms_per_s"
+    )
+    # The lag task checks every 0.05 s, so the 0.3 s hold reads at least 0.25 s.
+    assert first_metrics["rollout_worker/event_loop_lag_ms/max"] < 250.0
+    assert second_metrics["rollout_worker/event_loop_lag_ms/max"] >= 250.0
+    # `Mean.value` is the total ms late. The 0.3 s hold adds at least 250 ms.
+    assert lag_mean.value >= 250.0
+    assert first_metrics["rollout_worker/thread_pool_lag_ms/max"] < 250.0
+    # The lag task checks every 0.05 s, so the thread's 0.3 s hold reads at least 0.25 s.
+    assert second_metrics["rollout_worker/thread_pool_lag_ms/max"] >= 250.0
+    assert second_metrics["rollout_worker/ram_gib/max"] > 0.0
+    assert second_metrics["rollout_worker/peak_ram_gib/max"] > 0.0
+
+
 class _SetupEndpoint:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -126,10 +225,10 @@ def _rollouter_without_datasets() -> Rollouter:
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker_config,
-        worker_pool_size=3,
-        num_threads_per_worker=2,
+        worker=worker_config, rollouts_per_worker=7, rollouts_per_thread=4
     )
+    # 20 training rollouts in flight / 7 per worker -> 3 workers
+    rollouter._max_rollouts_in_flight = 20
     rollouter._worker_actors = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()

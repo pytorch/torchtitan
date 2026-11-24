@@ -22,6 +22,7 @@ from monarch.actor import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl._env import apply_env_defaults
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import get_visible_devices_env_var
 
 logger = logging.getLogger(__name__)
 
@@ -73,13 +74,17 @@ class PerHostProvisioner:
     On the same host, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
     call to `allocate(n)` reserves the next *n* GPUs and returns the launch
-    env (`CUDA_VISIBLE_DEVICES`) for those GPUs. The
+    env (the visible-devices mask) for those GPUs. The
     returned env vars are applied to the spawned process via ``bootstrap_command``.
+    The mask's variable comes from this (the controller's) device type, so the
+    controller runs on a node with the same accelerator as the workers, as the
+    Monarch launchers do.
     """
 
     def __init__(self, total_gpus: int = 8):
         self.total_gpus = total_gpus
         self.next_gpu = 0
+        self.env_var = get_visible_devices_env_var()
 
     @property
     def available(self) -> int:
@@ -94,7 +99,7 @@ class PerHostProvisioner:
         gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
         self.next_gpu += num_gpus
 
-        return {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpu_ids)}
+        return {self.env_var: ",".join(str(g) for g in gpu_ids)}
 
 
 @dataclass
@@ -264,7 +269,7 @@ def spawn_proc_mesh(
         ]
     else:
         # Single-node mode: partition GPUs on this_host() via
-        # CUDA_VISIBLE_DEVICES
+        # the visible-devices mask
         host_mesh = this_host()
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
         trainer_mesh = host_mesh.spawn_procs(

@@ -25,6 +25,7 @@ from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
 from torchtitan.config.configs import PrecisionConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
@@ -69,7 +70,9 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
     )
 
 
-def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
+def _lora_dist_moe_config(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts.Config:
     stock = _stock_config()
     base_config = cast(
         DistMoeRoutedExperts.Config,
@@ -77,12 +80,16 @@ def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
     )
     return cast(
         DistMoeRoutedExperts.Config,
-        LoRATransform(rank=8, alpha=16.0).transform(base_config),
+        LoRATransform(
+            rank=8, alpha=16.0, expert_adapter_layout=expert_adapter_layout
+        ).transform(base_config),
     )
 
 
-def _build_lora_dist_moe() -> DistMoeRoutedExperts:
-    module = _lora_dist_moe_config().build()
+def _build_lora_dist_moe(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts:
+    module = _lora_dist_moe_config(expert_adapter_layout).build()
     module.init_states()
     return cast(DistMoeRoutedExperts, module)
 
@@ -445,6 +452,26 @@ def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
 
     assert actual_w13_EFD.shape == (4, 128, 32)
     assert actual_w2_EDF.shape == (4, 32, 64)
+    torch.testing.assert_close(actual_w13_EFD, expected_w13_EFD)
+    torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
+
+
+def test_shared_outer_lora_dist_moe_weight_operands_broadcast_the_shared_factor() -> None:
+    """W13 shares A and W2 shares B; the materialized operands expand them over the experts."""
+    module = _build_lora_dist_moe("shared_outer")
+    _fill_lora_dist_moe_operands(module)
+    assert module.w13.lora_a.weight.shape == (8, 32)
+    assert module.w13.lora_b.weight.shape == (4, 2, 64, 8)
+    assert module.w2.lora_a.weight.shape == (4, 8, 64)
+    assert module.w2.lora_b.weight.shape == (32, 8)
+
+    actual_w13_EFD, actual_w2_EDF = module._weight_operands()
+    expected_w13_EFD = module.w13.weight.flatten(1, 2) + 2.0 * torch.einsum(
+        "efl,li->efi", module.w13.lora_b.weight.flatten(1, 2), module.w13.lora_a.weight
+    )
+    expected_w2_EDF = module.w2.weight + 2.0 * torch.einsum(
+        "dl,elf->edf", module.w2.lora_b.weight, module.w2.lora_a.weight
+    )
     torch.testing.assert_close(actual_w13_EFD, expected_w13_EFD)
     torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
 
@@ -1026,12 +1053,15 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
 
 def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
-    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
-    config.parallelism.expert_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-
-    config.__post_init__()
+    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(
+        seq_len=128,
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=2,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+        ),
+    )
+    assert not config.training.disable_accelerator_graphs
 
 
 @pytest.mark.parametrize(
