@@ -225,17 +225,23 @@ class GlobalBalancer(MicrobatchBalancer):
     trainer). Every rank must fill full windows, which the loader guarantees by
     requiring ``repeat`` with DP > 1.
 
-    With pipeline parallelism, ranks synchronize once per step of M
-    microbatches, so what matters is each rank's sum over the step. This
-    balancer balances each microbatch slot, not those sums, and can add
-    pipeline bubbles.
-
     Any picklable microbatch can move, including ``model_kwargs`` with image
-    tensors; received tensors are pinned like the collators' output. The gloo
-    groups time out after 30 minutes, which also covers loader startup on the
-    first window; on timeout the loader raises rather than falling back, since
-    a rank that kept its own microbatches would train different data than its
-    CP and TP peers.
+    tensors; received tensors are pinned like the collators' output.
+
+    Failure handling: if a peer stops producing microbatches (it crashed or
+    hung), the exchange waits up to 30 minutes, which also covers loader
+    startup on the first window, then the loader raises. It does not fall back
+    to training the rank's own microbatches: CP and TP peers must train the
+    same microbatch at every step, and each balances in its own gloo group, so
+    a rank that fell back while its peers did not would silently train
+    different data than them.
+
+    Limitations:
+        - Pipeline parallelism is not balanced per step. Ranks synchronize
+          once per step of M microbatches, so what matters is each rank's sum
+          over the step; this balancer balances each microbatch slot instead
+          and can add pipeline bubbles.
+        - A row that is one full-length document stays as heavy as it is.
     """
 
     @dataclass(kw_only=True, slots=True)

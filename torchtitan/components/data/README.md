@@ -522,9 +522,14 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors; received tensors are pinned like the collators' output. Ranks that share a data-parallel rank (CP, TP, PP stages) read the same microbatches and compute the same plan; each exchanges over a gloo group with the same ranks as its data-parallel process group, which the trainer passes to the loader. A peer that stops producing microbatches for 30 minutes makes the loader raise rather than fall back, since a rank that kept its own microbatches would train different data than its CP and TP peers.
+It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors; received tensors are pinned like the collators' output. Ranks that share a data-parallel rank (CP, TP, PP stages) read the same microbatches and compute the same plan; each exchanges over a gloo group with the same ranks as its data-parallel process group, which the trainer passes to the loader.
 
-With pipeline parallelism, ranks synchronize once per step of several microbatches, so what matters is each rank's sum over the step. `GlobalBalancer` balances each microbatch slot instead, which can add pipeline bubbles.
+If a peer stops producing microbatches (it crashed or hung), the exchange waits up to 30 minutes and then the loader raises. It does not fall back to training the rank's own microbatches: CP and TP peers must train the same microbatch at every step, and each balances in its own gloo group, so a rank that fell back while its peers did not would silently train different data than them.
+
+Limitations:
+
+- Pipeline parallelism is not balanced per step. Ranks synchronize once per step of several microbatches, so what matters is each rank's sum over the step; `GlobalBalancer` balances each microbatch slot instead, which can add pipeline bubbles.
+- A row that is one full-length document stays as heavy as it is: no plan can split a document.
 
 Measured with a prototype of this design that sent int32 tensors instead of pickled microbatches (4 GB300 nodes, Qwen3.5-9B, 1M-token rows of up to 4 documents, DP 8 x CP 2, Ulysses, window 8): 82.0 s per step against 87.1 s for `LocalBalancer` (1.06x); planning took 0.1 ms and the exchange about 50 ms per window, overlapped with training. Pickling keeps the original dtypes, so this implementation sends about twice the bytes.
 
