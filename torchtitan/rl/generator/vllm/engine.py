@@ -324,7 +324,9 @@ class VLLMEngine(GenerationEngine):
                 raise RuntimeError(
                     f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
                     "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "
-                    f"flash_attn.cute comes from {flash_attn.cute.__file__}"
+                    f"flash_attn.cute comes from {flash_attn.cute.__file__}. Install an FA4 with "
+                    "query_len_in_heads (Dao-AILab/flash-attention#3217), or set "
+                    "num_speculative_tokens=0 or kv_cache_dtype='auto'"
                 )
 
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):

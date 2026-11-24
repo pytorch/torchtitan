@@ -461,9 +461,11 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
             merge                        logsumexp of the two parts
 
-        With fp8 ``descales`` (q, k, v), the decode call applies them and the tail dequantizes.
-        An FA4 whose SwapAB kernel takes ``query_len_in_heads`` runs fp8 rows as one call over
-        keys 0 .. L-1 instead; the kernel hides key L-4+i from tokens before token i.
+        With fp8 ``descales`` (q, k, v):
+
+            FA4 takes query_len_in_heads   one decode call over keys 0 .. L-1; FA4 hides
+                                           key L-4+i from the tokens before token i
+            otherwise                      the decode call applies them; the tail dequantizes
         """
         num_rows = attn_metadata.seq_lens.shape[0]
         num_tokens, num_heads, head_dim = query.shape
