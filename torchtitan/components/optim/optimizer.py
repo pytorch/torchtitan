@@ -29,6 +29,7 @@ from torchtitan.distributed.flex_shard import (
 )
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
+from .offloading import init_cpu_offloaded_moments
 from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -58,19 +59,38 @@ class BaseOptimizer(Optimizer, Configurable):
         """Regex matched against parameter fully qualified names."""
 
 
-def _validate_moment_dtype(
+def _validate_adam_moments(
     *,
     moment_dtype: MomentDType,
+    moment_cpu_offload_fraction: float,
     fused: bool | None,
 ) -> None:
     if moment_dtype not in ("parameter", "bfloat16"):
         raise ValueError(f"Unsupported Adam moment dtype {moment_dtype!r}")
     if moment_dtype == "bfloat16" and fused is not True:
         raise ValueError("bfloat16 Adam moments require fused=True")
+    if not 0.0 <= moment_cpu_offload_fraction <= 1.0:
+        raise ValueError(
+            "moment_cpu_offload_fraction must be in [0, 1], got "
+            f"{moment_cpu_offload_fraction}"
+        )
+    if moment_cpu_offload_fraction == 0.0:
+        return
+    if fused is not True:
+        raise ValueError("CPU-offloaded Adam moments require fused=True")
+    accelerator = torch.accelerator.current_accelerator()
+    # A host without an accelerator only builds configs, e.g. CPU recipe tests.
+    if accelerator is not None and (
+        accelerator.type != "cuda" or torch.version.hip is not None
+    ):
+        raise ValueError(
+            "CPU-offloaded Adam moments require CUDA. "
+            "Set moment_cpu_offload_fraction=0."
+        )
 
 
 def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
-    """Create and restore Adam moment tensors in bfloat16."""
+    """Create Adam moment tensors in bfloat16."""
 
     def initialize_moments(
         optimizer: torch.optim.Optimizer, args: tuple, kwargs: dict
@@ -100,16 +120,7 @@ def _register_bfloat16_moment_hooks(optimizer: torch.optim.Optimizer) -> None:
                         memory_format=torch.preserve_format,
                     )
 
-    def restore_moment_dtype(optimizer: torch.optim.Optimizer) -> None:
-        for group in optimizer.param_groups:
-            for param in group["params"]:
-                state = optimizer.state.get(param, {})
-                for key in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
-                    if key in state:
-                        state[key] = state[key].to(dtype=torch.bfloat16)
-
     optimizer.register_step_pre_hook(initialize_moments)
-    optimizer.register_load_state_dict_post_hook(restore_moment_dtype)
 
 
 class Adam(torch.optim.Adam, BaseOptimizer):
@@ -123,10 +134,15 @@ class Adam(torch.optim.Adam, BaseOptimizer):
         weight_decay: float = 0.0
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        moment_cpu_offload_fraction: float = 0.0
+        """Share of local moment bytes kept in pinned CPU memory, where the fused
+        kernel reads and writes them in place. 0 keeps all moments on the device,
+        1 offloads all. See ``CPU_OFFLOADED_MOMENTS.md``."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_moments(
                 moment_dtype=self.moment_dtype,
+                moment_cpu_offload_fraction=self.moment_cpu_offload_fraction,
                 fused=self.fused,
             )
 
@@ -144,6 +160,14 @@ class Adam(torch.optim.Adam, BaseOptimizer):
             weight_decay=config.weight_decay,
             fused=config.fused,
         )
+        if config.moment_cpu_offload_fraction > 0:
+            init_cpu_offloaded_moments(
+                self,
+                fraction=config.moment_cpu_offload_fraction,
+                moment_dtype=(
+                    torch.bfloat16 if config.moment_dtype == "bfloat16" else None
+                ),
+            )
         if config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
 
@@ -160,10 +184,15 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
         foreach: bool | None = None
         fused: bool | None = True
         moment_dtype: MomentDType = "parameter"
+        moment_cpu_offload_fraction: float = 0.0
+        """Share of local moment bytes kept in pinned CPU memory, where the fused
+        kernel reads and writes them in place. 0 keeps all moments on the device,
+        1 offloads all. See ``CPU_OFFLOADED_MOMENTS.md``."""
 
         def __post_init__(self) -> None:
-            _validate_moment_dtype(
+            _validate_adam_moments(
                 moment_dtype=self.moment_dtype,
+                moment_cpu_offload_fraction=self.moment_cpu_offload_fraction,
                 fused=self.fused,
             )
 
@@ -182,6 +211,14 @@ class AdamW(torch.optim.AdamW, BaseOptimizer):
             foreach=config.foreach,
             fused=config.fused,
         )
+        if config.moment_cpu_offload_fraction > 0:
+            init_cpu_offloaded_moments(
+                self,
+                fraction=config.moment_cpu_offload_fraction,
+                moment_dtype=(
+                    torch.bfloat16 if config.moment_dtype == "bfloat16" else None
+                ),
+            )
         if config.moment_dtype == "bfloat16":
             _register_bfloat16_moment_hooks(self)
 

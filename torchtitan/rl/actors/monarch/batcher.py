@@ -84,7 +84,7 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
         batcher = this_host().spawn_procs(per_host={"cpus": 1}).spawn(
             "batcher",
             BatcherActor,
-            Batcher.Config(rdma_min_tensor_bytes=1024),
+            Batcher.Config(),
             num_prompts_per_train_step=2,
             **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
         )

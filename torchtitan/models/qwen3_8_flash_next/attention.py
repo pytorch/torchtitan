@@ -688,21 +688,21 @@ class QSAAttention(Qwen35Attention):
             ):
                 raise ValueError("Flash-Next QSA requires compress_ratio=4")
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
-            attended_tokens = min(
-                seq_len, self.indexer.token_budget + self.indexer.compress_ratio - 1
-            )
-            return quadratic_attention_flops_per_token(
+            # A causal query at document position p can see p + 1 keys.
+            num_keys = positions + 1
+            num_compressed_keys = num_keys // self.indexer.compress_ratio
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.head_dim,
                 v_head_dim=self.head_dim,
-                seq_len=attended_tokens,
-            ) + 6 * self.indexer.num_heads * self.indexer.head_dim * (
-                seq_len // self.indexer.compress_ratio
+                num_keys=num_keys.clamp(
+                    max=self.indexer.token_budget + self.indexer.compress_ratio - 1
+                ),
+            ) + 6 * self.indexer.num_heads * self.indexer.head_dim * int(
+                num_compressed_keys.sum()
             )
 
     def __init__(self, config: Config):

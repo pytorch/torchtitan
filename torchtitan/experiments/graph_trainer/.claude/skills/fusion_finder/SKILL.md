@@ -72,7 +72,7 @@ def problems():
         register_kernel_problems(OUT, f"{OUT}/problems"),
     ]
     config.training.steps = 1
-    config.profiler.enable_profiling = False
+    config.profiler.trace = None
     return config
 ```
 

@@ -55,6 +55,7 @@ from torchtitan.models.common.attention.cp_attention import (
 )
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.observability.metrics import TensorBoardLogger
+from torchtitan.observability.profiler import KinetoTraceProfiler
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
@@ -195,7 +196,7 @@ def llama3_debugmodel_sdc_replay_accelerator_graph() -> Trainer.Config:
 def llama3_debugmodel_default() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
-    config.profiler.enable_profiling = True
+    config.profiler.trace = KinetoTraceProfiler.Config()
     config.metrics.loggers = [TensorBoardLogger.Config()]
     return config
 
@@ -395,6 +396,9 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
+    # Resume device moments into half pinned host, half device moments.
+    optimizers = config.optim.optimizer.optimizers
+    optimizers[0] = replace(optimizers[0], moment_cpu_offload_fraction=0.5)
     return config
 
 
