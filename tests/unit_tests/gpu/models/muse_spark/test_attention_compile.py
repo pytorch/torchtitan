@@ -137,3 +137,32 @@ def test_norm_region_under_activation_checkpoint(region, norm_name, layer1_token
 
     for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
         torch.testing.assert_close(actual_tensor, expected_tensor, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("softcap", [None, 20.0])
+def test_muse_softcap_ce_region_forward_and_backward(softcap):
+    from torchtitan_recipes.overrides.muse_spark_mxfp8_head import (
+        _MuseSparkSoftcapCrossEntropy,
+    )
+
+    torch.manual_seed(42)
+    logits_TV = torch.randn(128, 256, device="cuda")
+    labels_T = torch.arange(128, device="cuda")
+    labels_T[-1] = -100
+    counts = torch.tensor(256, device="cuda")
+    loss_fn = _MuseSparkSoftcapCrossEntropy.Config(
+        global_vocab_size=256,
+        output_multiplier=0.1767766952966369,
+        output_soft_cap_temp=softcap,
+    ).build()
+    results = []
+    try:
+        for regions in ([], ["muse_softcap_ce"]):
+            LocalCompileConfig(regions=regions).apply()
+            pred_TV = logits_TV.clone().requires_grad_()
+            loss, _ = loss_fn(pred_TV, labels_T, counts)
+            results.append((loss.detach(), torch.autograd.grad(loss, pred_TV)[0]))
+    finally:
+        LocalCompileConfig().apply()
+    for actual, expected in zip(results[1], results[0], strict=True):
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)

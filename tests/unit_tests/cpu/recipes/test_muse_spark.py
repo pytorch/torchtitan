@@ -95,3 +95,45 @@ def test_debug_recipe_tokenizer(recipe):
     config.__post_init__()
     tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)
     assert tokenizer.encode("Hello, world!")
+
+
+@pytest.mark.parametrize("fuse_softcap_loss", [False, True])
+def test_mxfp8_head_override_preserves_config_and_checkpoint(fuse_softcap_loss):
+    import torch
+    from torchtitan.models.muse_spark.model import MuseSparkLMHead
+    from torchtitan_recipes.overrides.muse_spark_mxfp8_head import (
+        _MuseSparkSoftcapCrossEntropy,
+        _MXFP8MuseSparkLMHead,
+        mxfp8_lm_head,
+    )
+
+    config = muse_spark_debugmodel()
+    original_head = config.model.lm_head
+    result = mxfp8_lm_head(config, fuse_softcap_loss=fuse_softcap_loss)
+    assert config.model.lm_head is original_head
+    assert isinstance(result.model.lm_head, _MXFP8MuseSparkLMHead.Config)
+    assert result.model.lm_head.output_dtype == torch.float32
+    assert result.model.lm_head.apply_logit_postprocess == (not fuse_softcap_loss)
+    assert (
+        isinstance(result.loss.loss_fn, _MuseSparkSoftcapCrossEntropy.Config)
+        == fuse_softcap_loss
+    )
+    source = MuseSparkLMHead.Config(in_features=128, out_features=128).build()
+    target = _MXFP8MuseSparkLMHead.Config(in_features=128, out_features=128).build()
+    target.load_state_dict(source.state_dict(), strict=True)
+    assert set(target.state_dict()) == set(source.state_dict())
+    assert torch.equal(target.weight._tensor, source.weight)
+
+
+def test_mxfp8_head_override_rejects_incompatible_model_and_loss():
+    from dataclasses import replace
+
+    from torchtitan.components.loss import CrossEntropyLoss
+    from torchtitan_recipes.overrides.muse_spark_mxfp8_head import mxfp8_lm_head
+    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
+
+    with pytest.raises(ValueError, match="requires MuseSparkModel"):
+        mxfp8_lm_head(llama3_debugmodel())
+    config = muse_spark_debugmodel()
+    with pytest.raises(ValueError, match="requires chunked CrossEntropyLoss"):
+        mxfp8_lm_head(replace(config, loss=CrossEntropyLoss.Config()))

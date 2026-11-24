@@ -397,6 +397,19 @@ class MuseSparkEmbeddingWithNorm(Module):
         return output_TD * self.multiplier
 
 
+def _postprocess_logits(
+    logits_TV: torch.Tensor,
+    *,
+    output_multiplier: float,
+    output_soft_cap_temp: float | None,
+) -> torch.Tensor:
+    """Apply the FP32 Muse logit scale and optional smooth cap."""
+    scaled_logits_TV = logits_TV * output_multiplier
+    if output_soft_cap_temp is None:
+        return scaled_logits_TV
+    return output_soft_cap_temp * torch.tanh(scaled_logits_TV / output_soft_cap_temp)
+
+
 class MuseSparkLMHead(HiMidLoLinear):
     @dataclass(kw_only=True, slots=True)
     class Config(HiMidLoLinear.Config):
@@ -415,11 +428,10 @@ class MuseSparkLMHead(HiMidLoLinear):
     @local_compile("muse_spark_logit_postprocess", batch_invariant=True)
     def postprocess_logits(self, logits_TV: torch.Tensor) -> torch.Tensor:
         """Apply Muse Spark Open's output scaling and smooth logit cap."""
-        scaled_logits_TV = logits_TV * self.output_multiplier
-        if self.output_soft_cap_temp is None:
-            return scaled_logits_TV
-        return self.output_soft_cap_temp * torch.tanh(
-            scaled_logits_TV / self.output_soft_cap_temp
+        return _postprocess_logits(
+            logits_TV,
+            output_multiplier=self.output_multiplier,
+            output_soft_cap_temp=self.output_soft_cap_temp,
         )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
