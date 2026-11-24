@@ -109,10 +109,12 @@ def _validate_platform(
     """Reject what TorchTitan's vLLM path supports only on CUDA (and ROCm)."""
     if device_type == "cuda":
         return
+
     if config.cuda_graph.mode != "NONE":
         raise ValueError(
             f"vLLM CUDA graphs need CUDA; set cuda_graph.mode='NONE' on {device_type}."
         )
+
     # Off CUDA only flex attention runs: TorchTitan's CUSTOM backend and the
     # compressed-MLA prefill call varlen_attn -> aten::_flash_attention_forward,
     # which is CUDA-only (e.g. not implemented on XPU).
@@ -122,10 +124,20 @@ def _validate_platform(
             f"Only flex attention (FlexInnerAttention) is supported on {device_type}; "
             "varlen attention and MLA with a compressed cache need CUDA."
         )
+
     if batch_invariant:
         raise ValueError(
             f"debug.batch_invariant is only verified on CUDA, got {device_type}."
         )
+
+    # Only TorchTitanGPUWorker installs TorchTitanEagleProposer. vLLM's own drafter
+    # looks up HF names (`model.embed_tokens`) that TorchTitan's model doesn't have.
+    if config.num_speculative_tokens > 0:
+        raise ValueError(
+            f"num_speculative_tokens={config.num_speculative_tokens} needs CUDA, "
+            f"got {device_type}."
+        )
+
     # TorchTitan's GDN/KDA backend runs Attention Gym's paged linear-attention
     # kernels, which are only verified on CUDA.
     if any(
@@ -193,7 +205,7 @@ class VLLMEngine(GenerationEngine):
         - With `session_kv_holder`, prefix hits keep the last block that vLLM drops by
           default for drafts (see `_build_engine_args`).
         - Not supported with `cuda_graph.mode="FULL"` (use FULL_DECODE_ONLY),
-          `debug.batch_invariant` or models with a vision encoder."""
+          `debug.batch_invariant`, models with a vision encoder or non-CUDA devices."""
 
         def __post_init__(self) -> None:
             GenerationEngine.Config.__post_init__(self)
@@ -633,8 +645,8 @@ class VLLMEngine(GenerationEngine):
         """Fetch the model state dict into the model's weights one FSDP group at a time, and
         reset the KV cache (and, for image prompts, vLLM's encoder cache) when configured."""
         # TODO: with num_speculative_tokens > 0, also load a trained MTP head (`mtp.*`)
-        # into the drafter, once Qwen3.5 has an MTP module and loss, as DeepSeek-V3's
-        # MTPDecoder does.
+        # into the drafter, once Qwen3.5 has an MTP module and loss, e.g. by inheriting
+        # `MTPDecoder` (torchtitan/models/common/mtp.py) as DeepSeek-V3 and V4 do.
         self._get_model().model_state_dict_loader.load(fetch)
         if self._reset_kv_cache_on_model_state_dict_load:
             # Always reset running requests too: the only reason to reset is a strict

@@ -327,7 +327,8 @@ if device_type == "xpu":
                 raise ValueError(
                     "TorchTitan's vLLM integration requires the V1 model runner"
                 )
-            # Same substitution as TorchTitanGPUWorker.init_device.
+            # TorchTitanGPUWorker.init_device's runner swap. No drafter swap: drafts
+            # need CUDA (`_validate_platform`).
             original_runner_cls = vllm_xpu_worker.XPUModelRunner
             vllm_xpu_worker.XPUModelRunner = TorchTitanXPUModelRunner
             try:

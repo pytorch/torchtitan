@@ -754,6 +754,14 @@ def test_generator_dp_can_supply_expert_parallelism():
             "batch_invariant",
         ),
         (
+            _FLEX_MODEL_CONFIG,
+            VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="NONE"), num_speculative_tokens=3
+            ),
+            False,
+            "num_speculative_tokens=3 needs CUDA",
+        ),
+        (
             _GDN_MODEL_CONFIG,
             VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             False,
