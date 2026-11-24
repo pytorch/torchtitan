@@ -56,26 +56,20 @@ class DecisionSampleProcessor(SampleProcessor):
         del config
         self._tokenizer = context.tokenizer
         self._max_context_length = context.max_context_length
-        self._readout_token_id = self._single_token("\n")
-
-    def _single_token(self, text: str) -> int:
-        token_ids = self._tokenizer.encode(text, add_bos=False, add_eos=False)
-        if len(token_ids) != 1:
-            raise ValueError(
-                f"Expected {text!r} to encode as one token, got {token_ids}"
-            )
-        return token_ids[0]
+        readout = self._tokenizer.encode("\n", add_bos=False, add_eos=False)
+        if len(readout) != 1:
+            raise ValueError(f"Expected a one-token newline, got {readout}")
+        self._readout_token_id = readout[0]
 
     def __call__(
         self, sample: dict[str, Any], rng: np.random.Generator
     ) -> TextSequence | None:
-        candidate_ids = sample["candidate_ids"]
         options = sample["options"]
-        target_probs = np.asarray(sample["target_probs"], dtype=np.float64)
-        num_candidates = len(candidate_ids)
+        probs = np.asarray(sample["target_probs"], dtype=np.float64)
+        num_candidates = len(sample["candidate_ids"])
         if not MIN_CANDIDATES <= num_candidates <= MAX_CANDIDATES:
             raise ValueError(f"Expected 2 to 26 options, got {num_candidates}")
-        if len(options) != num_candidates or target_probs.shape != (num_candidates,):
+        if len(options) != num_candidates or probs.shape != (num_candidates,):
             raise ValueError(
                 "Options, candidate IDs, and target probabilities must align"
             )
@@ -83,20 +77,19 @@ class DecisionSampleProcessor(SampleProcessor):
         order = np.arange(num_candidates)
         if sample["kind"] != "score":
             rng.shuffle(order)
-        ordered_options = [options[index] for index in order]
-        ordered_probs = target_probs[order]
+        probs = probs[order]
+        total_prob = probs.sum()
         if (
-            not np.isfinite(ordered_probs).all()
-            or (ordered_probs < 0).any()
-            or not np.isclose(ordered_probs.sum(), 1.0, atol=1e-6, rtol=0)
+            not np.isfinite(probs).all()
+            or (probs < 0).any()
+            or not np.isclose(total_prob, 1.0, atol=1e-6, rtol=0)
         ):
             raise ValueError("target_probs must be finite, nonnegative, and sum to one")
-        ordered_probs /= ordered_probs.sum()
 
-        target_index = rng.choice(num_candidates, p=ordered_probs)
+        probs /= total_prob
+        target_index = rng.choice(num_candidates, p=probs)
         option_text = "\n".join(
-            f"{LETTERS[index]}) {description}"
-            for index, description in enumerate(ordered_options)
+            f"{LETTERS[slot]}) {options[index]}" for slot, index in enumerate(order)
         )
         prompt = (
             f"State:\n{sample['state']}\n\n"
@@ -205,7 +198,7 @@ def qwen3_5_distribution(
     brier_weight: float = 1.0,
 ) -> Trainer.Config:
     """Fine-tune a Qwen3.5 base model on GS1-format candidate distributions."""
-    max_num_questions, steps = 256, 600
+    max_num_questions = 256
     hf_assets_path = f"./assets/hf/Qwen3.5-{model_size}-Base"
     data_path = "./assets/hf/gs1-distribution/train.jsonl"
     parallelism = parallelism or ParallelismConfig()
@@ -219,7 +212,6 @@ def qwen3_5_distribution(
             "This decision recipe currently supports data parallelism only"
         )
     model_config = build_model_config(model_size, seq_len=8192, parallelism=parallelism)
-    max_context_length = model_config.max_context_length
     return Trainer.Config(
         loss=AnswerTokenLoss.Config(
             loss_fn=CandidateDistributionLoss.Config(
@@ -243,8 +235,8 @@ def qwen3_5_distribution(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * max_context_length,
-            steps=steps,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
+            steps=600,
         ),
         dataloader=GrainDataLoader.Config(
             dataset=FirstFitPackingConfig(

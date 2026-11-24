@@ -8,6 +8,7 @@ import json
 
 import grain.python as grain
 import numpy as np
+import pytest
 import torch
 
 from torchtitan.components.data.types import DatasetBuildContext
@@ -69,66 +70,48 @@ def test_native_distribution_record_flattens_by_candidate_identity() -> None:
     assert json.loads(rows[0]["state"]) == {"balance": 18}
 
 
-def test_preparation_skips_multimodal_states() -> None:
+@pytest.mark.parametrize(
+    ("state", "eligible"),
+    [
+        ([{"type": "image", "path": "image.png"}], False),
+        ({"metadata": {"type": "image"}}, True),
+        ({"frames": [{"type": "image", "path": "frame.png"}]}, False),
+    ],
+    ids=["media", "metadata", "nested-media"],
+)
+def test_preparation_filters_media_state(state, eligible: bool) -> None:
     record = {
         "request": {
-            "state": [{"type": "image", "path": "image.png"}],
-            "questions": {},
-        },
-        "targets": {},
-    }
-    assert flatten_record(record) == []
-
-
-def test_structured_type_metadata_is_text() -> None:
-    record = {
-        "request": {
-            "state": {"metadata": {"type": "image"}},
+            "state": state,
             "questions": {"q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}},
         },
         "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
     }
-    assert len(flatten_record(record)) == 1
+    assert len(flatten_record(record)) == int(eligible)
 
 
-def test_nested_media_content_is_filtered() -> None:
-    record = {
-        "request": {
-            "state": {"frames": [{"type": "image", "path": "frame.png"}]},
-            "questions": {"q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}},
-        },
-        "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
-    }
-    assert flatten_record(record) == []
+def _processor(max_context_length: int) -> DecisionSampleProcessor:
+    return DecisionSampleProcessor(
+        DecisionSampleProcessor.Config(),
+        context=DatasetBuildContext(
+            tokenizer=_Tokenizer(),
+            max_context_length=max_context_length,
+            num_tokens_per_microbatch=max_context_length,
+            read_options=grain.ReadOptions(num_threads=1),
+        ),
+    )
 
 
 def test_processor_carries_candidate_count_and_samples_target_label() -> None:
-    context = DatasetBuildContext(
-        tokenizer=_Tokenizer(),
-        max_context_length=64,
-        num_tokens_per_microbatch=64,
-        read_options=grain.ReadOptions(num_threads=1),
-    )
-    processor = DecisionSampleProcessor(
-        DecisionSampleProcessor.Config(), context=context
-    )
-    sequence = processor(_sample(), np.random.default_rng(3))
+    sequence = _processor(64)(_sample(), np.random.default_rng(3))
+    assert sequence is not None
     assert (sequence.labels != -100).sum() == 1
     assert sequence.labels[-1] in {26, 27, 28}
     assert sequence.input_ids[-1] == 40
 
 
 def test_processor_drops_overlength_rows() -> None:
-    context = DatasetBuildContext(
-        tokenizer=_Tokenizer(),
-        max_context_length=2,
-        num_tokens_per_microbatch=2,
-        read_options=grain.ReadOptions(num_threads=1),
-    )
-    processor = DecisionSampleProcessor(
-        DecisionSampleProcessor.Config(), context=context
-    )
-    assert processor(_sample(), np.random.default_rng(0)) is None
+    assert _processor(2)(_sample(), np.random.default_rng(0)) is None
 
 
 def test_sampled_nll_brier_has_soft_target_expectation() -> None:

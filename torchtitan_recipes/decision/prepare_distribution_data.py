@@ -43,21 +43,21 @@ def flatten_record(row: dict[str, Any]) -> list[dict[str, Any]]:
     if set(questions) != set(targets):
         raise ValueError("GS1 question IDs must match target IDs")
 
-    rows = []
     if _contains_media(request["state"]):
-        return rows
+        return []
     state_text = _text(request["state"])
     if len(state_text) > MAX_STATE_CHARS:
-        return rows
+        return []
+    rows = []
     for question_id, question in questions.items():
         kind = question["type"]
         criteria = question.get("criteria") or {}
         if kind == "choice":
-            candidate_ids = list(criteria)
             options = [
-                _text(criteria[key] if criteria[key] is not None else key)
-                for key in candidate_ids
+                _text(value if value is not None else key)
+                for key, value in criteria.items()
             ]
+            candidate_ids = list(criteria)
         elif kind == "noul":
             candidate_ids = ["false", "true"]
             options = [_text(criteria.get(key) or key) for key in candidate_ids]
@@ -70,7 +70,7 @@ def flatten_record(row: dict[str, Any]) -> list[dict[str, Any]]:
         target = targets[question_id]
         target_ids = target["candidate_ids"]
         distribution = target["distribution"]
-        if len(candidate_ids) < 2 or len(candidate_ids) > 26:
+        if not 2 <= len(candidate_ids) <= 26:
             continue
         if len(target_ids) != len(candidate_ids) or set(target_ids) != set(
             candidate_ids
@@ -113,15 +113,14 @@ def main() -> None:
     rows = []
     num_seen = 0
     with args.input.open() as source:
-        for line in source:
-            for row in flatten_record(json.loads(line)):
-                num_seen += 1
-                if len(rows) < args.num_samples:
-                    rows.append(row)
-                else:
-                    index = rng.randrange(num_seen)
-                    if index < args.num_samples:
-                        rows[index] = row
+        questions = (row for line in source for row in flatten_record(json.loads(line)))
+        for num_seen, row in enumerate(questions, start=1):
+            if num_seen <= args.num_samples:
+                rows.append(row)
+            else:
+                index = rng.randrange(num_seen)
+                if index < args.num_samples:
+                    rows[index] = row
     if num_seen < args.num_samples:
         raise ValueError(
             f"Found {num_seen} eligible questions, requested {args.num_samples}"
