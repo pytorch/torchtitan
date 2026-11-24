@@ -19,10 +19,7 @@ from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleList
-from torchtitan.models.common.attention import (
-    AttentionMetadataMap,
-    VarlenAttentionMetadata,
-)
+from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import (
@@ -34,7 +31,10 @@ from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import DeepSeekV4Attention
+    from .attention import (
+        DeepSeekV4Attention,
+        DeepSeekV4CompressedSparseAttentionMetadata,
+    )
     from .mtp import MTPBlock
 
 
@@ -65,7 +65,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self,
         x: torch.Tensor,
         input_ids_T: torch.Tensor | None,
-        attention_metadata: VarlenAttentionMetadata | None,
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata | None",
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -153,6 +153,9 @@ class DeepSeekV4Model(Decoder):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
         register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
+    def _remat_block_container_fqns(self) -> list[str]:
+        return [*super()._remat_block_container_fqns(), "mtp_layers"]
+
     def _apply_fsdp(
         self,
         *,
@@ -234,7 +237,8 @@ class DeepSeekV4Model(Decoder):
             )
             return lambda input_dict: (
                 decoder_estimate(input_dict)
-                + repeated_mtp_flops_per_token * input_dict["input"].numel()
+                + repeated_mtp_flops_per_token
+                * int((~input_dict["padding_mask"]).sum())
             )
 
     def __init__(self, config: Config):
@@ -297,6 +301,8 @@ class DeepSeekV4Model(Decoder):
         On a later PP stage, ``tokens`` is the previous stage's ``[T, M, D]``
         hidden state and ``input_ids_T`` carries the token IDs.
         """
+        if attention_metadata is None:
+            raise ValueError("DeepSeek V4 requires attention metadata.")
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
         if len(self.mtp_layers) > 0 and self._skip_lm_head:

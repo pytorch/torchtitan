@@ -94,6 +94,8 @@ class Generator(Configurable):
             disabled.
         vision_processor: How the model turns an image into vision tokens; the engine
             preprocesses image prompts' files with it. None: text only.
+        mooncake_master_address: ``host:port`` of the Mooncake Store master the controller
+            started, passed to the engine. None without a Mooncake Store.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -225,6 +227,7 @@ class Generator(Configurable):
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
         vision_processor: VisionProcessor.Config | None = None,
+        mooncake_master_address: str | None = None,
     ):
         init_logger()
         # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -269,6 +272,7 @@ class Generator(Configurable):
                     ),
                     model_state_dict_load_mode=config.model_state_dict_load_mode,
                     vision_processor=vision_processor,
+                    mooncake_master_address=mooncake_master_address,
                     rank=self._rank,
                     generator_name=generator_name,
                     output_dir=output_dir,
@@ -535,6 +539,8 @@ class Generator(Configurable):
 
         Called on the engine loop thread during a load.
         """
+        if self._model_state_dict_transport is not None:
+            return self._model_state_dict_transport.copy_prefetched_(state_dict)
         with torch.no_grad():
             for key, tensor in state_dict.items():
                 tensor.copy_(self._prefetched_model_state_dict[key])

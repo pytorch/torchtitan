@@ -14,7 +14,7 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -136,19 +136,7 @@ class CheckpointManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
-        """DCP save mode: synchronous, threaded async, or pinned-memory async."""
-
-        def __post_init__(self) -> None:
-            BaseCheckpointManager.Config.__post_init__(self)
-            async_lowered = self.async_mode.lower()
-            if async_lowered not in (
-                "disabled",
-                "async",
-                "async_with_pinned_mem",
-            ):
-                raise ValueError(f"Invalid async_mode: {async_lowered}")
-            self.async_mode = async_lowered
+        pass
 
     def __init__(
         self,

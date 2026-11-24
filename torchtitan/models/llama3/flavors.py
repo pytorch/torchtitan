@@ -12,10 +12,6 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 
 from torchtitan.models.common import (
     ComplexRoPE,
@@ -37,6 +33,7 @@ from torchtitan.models.common.decoder_sharding import (
     token_embedding_sharding_config,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
+from torchtitan.models.common.rope import Llama3ScalingConfig
 
 from .model import Llama3Model, Llama3TransformerBlock
 
@@ -164,7 +161,7 @@ def _debugmodel(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -221,9 +218,8 @@ def _1b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
                 # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
-                scaling_factor=32.0,
+                scaling=Llama3ScalingConfig(factor=32.0),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -280,9 +276,8 @@ def _3b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
                 # Llama 3.2 extends context with a 32x factor (Llama 3.1 uses 8x).
-                scaling_factor=32.0,
+                scaling=Llama3ScalingConfig(factor=32.0),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -338,7 +333,7 @@ def _8b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -394,7 +389,7 @@ def _70b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -450,7 +445,7 @@ def _405b(
                 dim=dim // n_heads,
                 max_context_length=seq_len,
                 theta=500000,
-                scaling="llama",
+                scaling=Llama3ScalingConfig(),
             ),
             attn_backend=attn_backend,
             enable_sp=parallelism.enable_sequence_parallel,
@@ -477,7 +472,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Llama3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -491,8 +485,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config
