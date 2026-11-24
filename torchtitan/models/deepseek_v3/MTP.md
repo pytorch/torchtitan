@@ -176,7 +176,7 @@ In other words, SP handling does not call `redistribute` explicitly in the forwa
 
 ### 3.1 FSDP
 
-The current implementation integrates FSDP through `apply_fsdp_to_mtp_decoder()`. It temporarily inserts `mtp_layers` into `model.layers` and reuses the normal decoder `apply_fsdp_to_decoder()` path. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
+`MTPDecoder._apply_fsdp()` temporarily inserts `mtp_layers` into `model.layers` and calls `Decoder._apply_fsdp()`. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
 
 The benefit is that MTP reuses the existing DeepSeek-V3 FSDP policy instead of duplicating the full wrapper logic. The drawback is that the implementation is indirect. A future cleanup can factor the common FSDP apply logic into a helper shared by normal decoder layers and MTP layers.
 

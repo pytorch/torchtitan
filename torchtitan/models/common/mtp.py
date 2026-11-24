@@ -11,13 +11,10 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
-from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX, Loss
-from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
-from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
+from torchtitan.config import PrecisionConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.base.model import FlopsEstimator
@@ -157,28 +154,30 @@ class MTPDecoder(Decoder):
                 precision=precision,
                 parallelism=parallelism,
             )
-        from torchtitan.distributed.fsdp import (
-            resolve_fsdp_mesh,
-            resolve_sparse_fsdp_mesh,
-        )
-
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
-        apply_fsdp_to_mtp_decoder(
-            self,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
-            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
-            pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallelism_context.ep,
-            edp_mesh=edp_mesh,
-            dp_mesh_dims=dp_mesh_dims,
-            edp_mesh_dims=edp_mesh_dims,
-            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
-        )
+        if parallelism.fsdp_unshard_in_current_stream:
+            # tok_embeddings runs once per MTP depth, which the explicit
+            # prefetching chain in apply_fsdp_to_decoder does not model.
+            raise ValueError(
+                "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+                "with MTP layers."
+            )
+        # Wrap the MTP layers like decoder layers by appending them to
+        # self.layers for the duration of the Decoder FSDP pass.
+        mtp_layer_keys = []
+        try:
+            first_mtp_layer_id = len(self.layers)
+            for i, layer in enumerate(self.mtp_layers):
+                key = str(first_mtp_layer_id + i)
+                self.layers[key] = layer
+                mtp_layer_keys.append(key)
+            super()._apply_fsdp(
+                parallelism_context=parallelism_context,
+                precision=precision,
+                parallelism=parallelism,
+            )
+        finally:
+            for key in mtp_layer_keys:
+                del self.layers[key]
 
     def preprocess_inputs(
         self,
@@ -277,57 +276,6 @@ class MTPDecoder(Decoder):
             input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
         return input_tokens, loss_labels, input_dict, loss_kwargs
-
-
-def apply_fsdp_to_mtp_decoder(
-    model: MTPDecoder,
-    dp_mesh: DeviceMesh,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    pp_enabled: bool,
-    cpu_offload: bool = False,
-    reshard_after_forward_policy: str = "default",
-    ep_degree: int = 1,
-    edp_mesh: DeviceMesh | None = None,
-    dp_mesh_dims: DataParallelMeshDims | None = None,
-    edp_mesh_dims: DataParallelMeshDims | None = None,
-    symm_mem_scope: FSDPSymmMemScope = None,
-    *,
-    unshard_in_current_stream: bool = False,
-) -> None:
-    if unshard_in_current_stream:
-        # tok_embeddings runs once per MTP depth, which the explicit
-        # prefetching chain in apply_fsdp_to_decoder does not model.
-        raise ValueError(
-            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
-            "with MTP layers."
-        )
-    mtp_layer_keys = []
-    try:
-        first_mtp_layer_id = len(model.layers)
-        for i, layer in enumerate(model.mtp_layers):
-            key = str(first_mtp_layer_id + i)
-            model.layers[key] = layer
-            mtp_layer_keys.append(key)
-
-        apply_fsdp_to_decoder(
-            model,
-            dp_mesh,
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            pp_enabled=pp_enabled,
-            cpu_offload=cpu_offload,
-            reshard_after_forward_policy=reshard_after_forward_policy,
-            ep_degree=ep_degree,
-            edp_mesh=edp_mesh,
-            dp_mesh_dims=dp_mesh_dims,
-            edp_mesh_dims=edp_mesh_dims,
-            symm_mem_scope=symm_mem_scope,
-            unshard_in_current_stream=unshard_in_current_stream,
-        )
-    finally:
-        for key in mtp_layer_keys:
-            del model.layers[key]
 
 
 class MTPCrossEntropyLoss(Loss[tuple[torch.Tensor, ...]]):
