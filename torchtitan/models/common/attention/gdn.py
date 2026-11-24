@@ -620,10 +620,11 @@ class GDN(LinearAttention):
                     f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
+        def flops(self, positions: torch.Tensor) -> int:
             from torchtitan.models.common.flops import delta_rule_flops_per_token
 
-            return delta_rule_flops_per_token(
+            # The recurrent state has a fixed size, so every query costs the same.
+            return positions.numel() * delta_rule_flops_per_token(
                 num_heads=self.n_heads,
                 key_head_dim=self.key_head_dim,
                 v_head_dim=self.value_head_dim,

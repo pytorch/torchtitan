@@ -76,16 +76,15 @@ class KimiMLAAttention(Attention):
             """Attention softmax scale."""
             return (self.qk_nope_head_dim + self.qk_rope_head_dim) ** -0.5
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
-            return quadratic_attention_flops_per_token(
+            # A causal query at document position p attends to p + 1 keys.
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
-                seq_len=seq_len,
+                num_keys=positions + 1,
             )
 
     def __init__(self, config: Config):
