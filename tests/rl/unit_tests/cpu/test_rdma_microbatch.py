@@ -151,7 +151,7 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
 
 
 def test_batcher_rejects_rdma_without_a_registration() -> None:
-    with pytest.raises(ValueError, match="no register_rdma_microbatch"):
+    with pytest.raises(ValueError, match="needs register_rdma_microbatch"):
         Batcher.Config(rdma_min_tensor_bytes=1024).build(
             num_tokens_per_microbatch_per_dp_rank=256,
             max_context_length=256,
@@ -345,7 +345,9 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
     rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
         **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register
     )
-    by_value_batcher = Batcher.Config().build(**batcher_kwargs)
+    by_value_batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
+        **batcher_kwargs
+    )
 
     async def run() -> None:
         mesh = this_host().spawn_procs(per_host={"procs": 4})

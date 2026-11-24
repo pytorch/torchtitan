@@ -179,6 +179,7 @@ def _qwen3_4b_dapo_math_config(
             # A minimum factor of 1 keeps the learning rate constant.
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
@@ -330,6 +331,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
@@ -473,6 +475,7 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 # Pack two rollouts per microbatch (a multiple of
                 # max_total_tokens). With FP32 parameters and optimizer
                 # states, four run out of memory on the four trainer GPUs.
