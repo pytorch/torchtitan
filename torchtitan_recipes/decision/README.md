@@ -72,8 +72,8 @@ questions come from the same source datasets as training.
 
 ## GS1 distribution recipe
 
-`base.py` contains the GS1 candidate-distribution processor, loss, and trainer
-config builder. `gs1.py` supplies the model config and GS1-format data.
+`base.py` contains the compact GS1 candidate-distribution processor, loss, and
+trainer config. There is no single-use model-family base class.
 The preparation script selects 3,000 eligible questions by default.
 
 Training estimates candidate probabilities with
@@ -91,7 +91,7 @@ python -m torchtitan_recipes.decision.prepare_gs1_data \
   --input /path/to/distribution-v4.5/train.jsonl
 python scripts/download_hf_assets.py \
   --repo_id bigai/GS1-0.8B --assets tokenizer safetensors config
-NGPU=8 MODULE=torchtitan_recipes.decision.gs1 \
+NGPU=8 MODULE=torchtitan_recipes.decision.base \
   CONFIG=gs1_decision ./run_train.sh --output-dir outputs/gs1-decision
 ```
 

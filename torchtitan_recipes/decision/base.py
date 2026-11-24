@@ -34,6 +34,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
@@ -315,4 +316,23 @@ def build_candidate_distribution_config(
             last_save_in_hf=True,
             export_dtype="bfloat16",
         ),
+    )
+
+
+def gs1_decision(
+    model_size: str = "0.8B",
+    *,
+    parallelism: ParallelismConfig | None = None,
+    brier_weight: float = 1.0,
+) -> Trainer.Config:
+    """Build the GS1 distribution recipe using TorchTitan's current backbone."""
+    parallelism = parallelism or ParallelismConfig()
+    model_config = build_model_config(model_size, seq_len=8192, parallelism=parallelism)
+    return build_candidate_distribution_config(
+        model_config=model_config,
+        hf_assets_path=f"./assets/hf/GS1-{model_size}",
+        data_path="./assets/hf/gs1-distribution/train.jsonl",
+        parallelism=parallelism,
+        brier_weight=brier_weight,
+        max_context_length=model_config.max_context_length,
     )
