@@ -118,8 +118,12 @@ def load_flat_optim_state_dict(
     first. Keys in ``flat_sd`` that this optimizer does not own are ignored, so a
     single flat dict covering several optimizers can be passed to each of them.
     A saved ``capturable`` value is ignored because the runtime selects it.
+    State tensors keep their dtype instead of being cast to the parameter dtype.
+    DCP loads into the live state, so bfloat16 moments stay bfloat16 and stay in
+    their existing buffers.
     """
-    optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
+    with torch.optim.preserve_state_dtype_on_load():
+        optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
 
 
 def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:

@@ -141,6 +141,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -288,6 +289,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             # TODO: Tune the trainer token budget and maximum context length.
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -419,6 +421,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=4096,
             ),
             activation_remat=FullActivationRematConfig(),

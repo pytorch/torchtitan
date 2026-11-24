@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Monarch's RDMA microbatch for the opt-in RDMA path (`Batcher.Config.rdma_min_tensor_bytes`): the
+"""Monarch's RDMA microbatch for the default RDMA path (`Batcher.Config.rdma_min_tensor_bytes`): the
 batcher registers each microbatch's large tensors as Monarch RDMA buffers, and each trainer rank reads its own
 column.
 """
