@@ -43,7 +43,7 @@ from torchtitan.rl.generator.vllm.attention.query_positions import vllm_query_po
 # T = packed tokens, S = requests, P = pages, N = tokens or states per page,
 # Q = query heads, H = KV heads (query heads in the indexer), K = head dimension,
 # V = value head dimension, D = model dimension, C = projection channels,
-# B = selected blocks, J = selected indices.
+# B = selected blocks, R = tokens per block, J = selected indices.
 
 
 @dataclass
@@ -238,16 +238,35 @@ class _QSACandidateCache(PagedCache):
 
 
 class _QSARawKeyRing(PagedCache):
-    """One key-only state ring per request, with at least 16 slots, managed by vLLM."""
+    """One state ring per request, with at least 16 slots, managed by vLLM: the raw
+    indexer key of each token of the request's unfinished block and, with
+    ``num_position_coordinates=3`` (M-RoPE), the token's position.
+
+    A position's int32 coordinates are stored bit for bit after the key, two 16-bit
+    lanes each (``PagedCache`` requires a 16-bit cache dtype).
+    """
+
+    def __init__(self, *, num_position_coordinates: int, **kwargs):
+        super().__init__(**kwargs)
+        self.num_position_coordinates = num_position_coordinates
 
     def get_kv_cache_spec(self, vllm_config):
         return CircularBufferSpec(
             block_size=16,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_dim,
-            head_size_v=0,
+            head_size_v=2 * self.num_position_coordinates,
             dtype=self.dtype,
         )
+
+    def views(self):
+        """Return the raw keys ``(P, N, 1, K)`` and the int32 positions ``(P, N, 3)``,
+        None without M-RoPE."""
+        states_PNHC = self.kv_cache.transpose(1, 2)
+        keys_PNHK = states_PNHC[..., : self.head_dim]
+        if not self.num_position_coordinates:
+            return keys_PNHK, None
+        return keys_PNHK, states_PNHC[..., 0, self.head_dim :].view(torch.int32)
 
 
 class VLLMQSAIndexer(QSAIndexer):
@@ -265,11 +284,24 @@ class VLLMQSAIndexer(QSAIndexer):
             head_dim=config.head_dim,
             compress_ratio=self.compress_ratio,
         )
+        # A completed block's key rotates at its first token's position. Under M-RoPE
+        # (image prompts) that position does not follow from the token's index in the
+        # request, and the token can come from an earlier step, so the ring keeps it.
+        uses_mrope = get_current_vllm_config().model_config.uses_mrope
         self.raw_cache = _QSARawKeyRing(
             prefix=f"model.layers.{config.layer_idx}.attention.indexer.raw_cache",
             num_kv_heads=1,
             head_dim=config.head_dim,
+            num_position_coordinates=3 if uses_mrope else 0,
         )
+
+    def request_positions(self, num_tokens: int) -> torch.Tensor | None:
+        """Each of the step's ``num_tokens`` rows' position in its request, 0 on padding
+        rows; None in steps without requests (vLLM's profiling and dummy runs)."""
+        metadata = self.cache.metadata()
+        if metadata is None or metadata.seq_lens.numel() == 0:
+            return None
+        return metadata.query_positions(num_tokens)[1]
 
     @inference_local_compile(batch_invariant=False)
     def _decode_prep(
@@ -284,6 +316,7 @@ class VLLMQSAIndexer(QSAIndexer):
         candidate_table,
         raw_table,
         raw_cache_PNHK,
+        raw_positions_PN3,
         candidate_page_size: int,
     ):
         num_tokens = qk_TC.shape[0]
@@ -316,12 +349,28 @@ class VLLMQSAIndexer(QSAIndexer):
             .mean(1)
             .to(raw_key_TK.dtype)
         )
-        pooled_TK = self._rotate(
-            self.k_layernorm(pooled_TK)[:, None],
-            (position_T - self.compress_ratio + 1).clamp_min(0),
-        )[:, 0]
         candidate_T = position_T // self.compress_ratio
         skip_candidate_T = ~valid_T | ((position_T + 1) % self.compress_ratio != 0)
+        # The trainer rotates a block's key at the block's first token's position.
+        first_position_T = position_T - self.compress_ratio + 1
+        if raw_positions_PN3 is None:
+            # 1D positions are the tokens' positions in their requests.
+            key_positions = first_position_T.clamp_min(0)
+        else:
+            # M-RoPE (T, 3) positions: the first token's, from this step or, if it
+            # arrived in an earlier one, from the ring. Only the rows that complete a
+            # block read the ring; the other rows' slots can hold stale bytes, so they
+            # take an in-step position and their keys are discarded below.
+            first_row_T = rows_T - self.compress_ratio + 1
+            key_positions = torch.where(
+                ((first_row_T < starts_T) & ~skip_candidate_T)[:, None],
+                raw_positions_PN3[ring_pages_T, first_position_T % ring_capacity].to(
+                    positions.dtype
+                ),
+                positions[first_row_T.clamp_min(0)],
+            )
+        normed_T1K = self.k_layernorm(pooled_TK)[:, None]
+        pooled_TK = self._rotate(normed_T1K, key_positions)[:, 0]
         candidate_pages_T = (
             candidate_table[request_T, candidate_T // candidate_page_size]
             .long()
@@ -359,7 +408,7 @@ class VLLMQSAIndexer(QSAIndexer):
         num_tokens = x_TD.shape[0]
         qk_TC = self.index_qk_proj(x_TD)
         raw_metadata = self.raw_cache.metadata()
-        (raw_cache_PNHK,) = self.raw_cache.views()
+        raw_cache_PNHK, raw_positions_PN3 = self.raw_cache.views()
         (pooled_cache_PNHK,) = self.cache.views()
         request_T, position_T, valid_T = step_metadata.query_positions(num_tokens)
         (
@@ -381,10 +430,13 @@ class VLLMQSAIndexer(QSAIndexer):
             step_metadata.block_table,
             raw_metadata.block_table,
             raw_cache_PNHK,
+            raw_positions_PN3,
             pooled_cache_PNHK.shape[1],
         )
         pooled_cache_PNHK[candidate_pages_T, candidate_offsets_T] = pooled_TK[:, None]
         raw_cache_PNHK[ring_pages_T, ring_offsets_T] = raw_key_TK[:, None]
+        if raw_positions_PN3 is not None:
+            raw_positions_PN3[ring_pages_T, ring_offsets_T] = positions.to(torch.int32)
         blocks_TB = paged_lightning_indexer(
             query_THK,
             pooled_cache_PNHK[:, :, 0],
@@ -417,6 +469,8 @@ class VLLMQSAInnerAttention(QSAInnerAttention):
     def __init__(self, config: Config):
         Module.__init__(self)
         self.indexer_loss = None
+        self.compress_ratio = config.compress_ratio
+        self.chunk_size = config.chunk_size
         tp_degree = get_current_vllm_config().parallel_config.tensor_parallel_size
         if config.num_kv_heads % tp_degree:
             raise ValueError("QSA KV heads must be divisible by generator TP")
@@ -425,6 +479,27 @@ class VLLMQSAInnerAttention(QSAInnerAttention):
             num_kv_heads=config.num_kv_heads // tp_degree,
             head_dim=config.head_dim,
         )
+
+    def _request_token_indices(self, blocks_TB, metadata: QSAPagedMetadata):
+        """Each row's selected positions in its request, laid out as the trainer's
+        ``QSAIndexer.forward`` lays out its indices: each selected block's tokens in
+        block order, then the incomplete tail that ends at the row's position. -1
+        marks an empty slot; padding rows have only empty slots.
+        """
+        ratio = self.compress_ratio
+        _, position_T, valid_T = metadata.query_positions(blocks_TB.shape[0])
+        offsets_R = torch.arange(ratio, device=blocks_TB.device)
+        blocks_TB1 = blocks_TB.long()[..., None]
+        block_tokens_TBR = (blocks_TB1 * ratio + offsets_R).masked_fill(
+            blocks_TB1 < 0, -1
+        )
+        # A row's own block is complete when tail_count is 0, and then selectable.
+        tail_count_T1 = ((position_T + 1) % ratio)[:, None]
+        tail_offsets_R = offsets_R[: ratio - 1]
+        tail_tokens_TR = (
+            position_T[:, None] + 1 - tail_count_T1 + tail_offsets_R
+        ).masked_fill(~valid_T[:, None] | (tail_offsets_R >= tail_count_T1), -1)
+        return torch.cat((block_tokens_TBR.flatten(-2), tail_tokens_TR), -1)
 
     def forward(
         self,
@@ -438,10 +513,54 @@ class VLLMQSAInnerAttention(QSAInnerAttention):
         aux_loss_denominator=None,
     ):
         # VLLMQSAIndexer supplies logical block IDs through the shared signature.
-        return self.cache.attend(
-            query_THK,
-            key_THK,
-            value_THV,
-            selected_indices_TJ,
-            scale=scale,
-        )
+        blocks_TB = selected_indices_TJ
+        if not is_in_batch_invariant_mode():
+            return self.cache.attend(
+                query_THK, key_THK, value_THV, blocks_TB, scale=scale
+            )
+        # paged_sparse_decode reads a row's selected blocks and its tail in separate
+        # tiles, or in separate splits merged afterwards, chosen by the row's position
+        # and the step's batch. Its rounding then differs from the trainer's
+        # gather_attn, which reads all of a row's indices in one tile, and from itself
+        # between prefill and decode. So gather each row's keys and values from the
+        # cache in the trainer's layout and run the trainer's attention on them:
+        # gather_attn's result for a row depends on neither the row count nor the key
+        # buffer.
+        metadata = self.cache.metadata()
+        if metadata is None or metadata.seq_lens.numel() == 0:
+            return torch.zeros_like(query_THK)
+        self.cache.write(key_THK, value_THV, metadata)
+        key_PNHK, value_PNHV = self.cache.views()
+        page_size = key_PNHK.shape[1]
+        num_tokens = query_THK.shape[0]
+        request_T = metadata.query_positions(num_tokens)[0]
+        tokens_TJ = self._request_token_indices(blocks_TB, metadata)
+        outputs = []
+        # Each chunk gathers chunk_size x J keys and values, as the trainer's
+        # indexer teacher gathers keys.
+        for start in range(0, num_tokens, self.chunk_size):
+            rows = slice(start, start + self.chunk_size)
+            chunk_tokens_TJ = tokens_TJ[rows]
+            num_rows, num_selected = chunk_tokens_TJ.shape
+            safe_tokens_TJ = chunk_tokens_TJ.clamp_min(0)
+            pages_TJ = metadata.block_table[
+                request_T[rows, None], safe_tokens_TJ // page_size
+            ].long()
+            offsets_TJ = safe_tokens_TJ % page_size
+            gathered_indices_TJ = (
+                torch.arange(num_rows * num_selected, device=query_THK.device)
+                .view(num_rows, num_selected)
+                .masked_fill(chunk_tokens_TJ < 0, -1)
+                .int()
+            )
+            outputs.append(
+                super().forward(
+                    query_THK[rows],
+                    key_PNHK[pages_TJ, offsets_TJ].flatten(0, 1),
+                    value_PNHV[pages_TJ, offsets_TJ].flatten(0, 1),
+                    selected_indices_TJ=gathered_indices_TJ,
+                    scores_TB=scores_TB[rows],
+                    scale=scale,
+                )
+            )
+        return torch.cat(outputs)

@@ -82,7 +82,7 @@ def test_vllm_replacement_preserves_indexer_trainability(monkeypatch, train_inde
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=16),
         model_config=SimpleNamespace(
-            dtype=torch.bfloat16, enforce_eager=True, max_model_len=64
+            dtype=torch.bfloat16, enforce_eager=True, max_model_len=64, uses_mrope=False
         ),
         speculative_config=None,
         parallel_config=SimpleNamespace(

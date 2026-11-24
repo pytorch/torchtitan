@@ -33,6 +33,7 @@ Run each backend in a separate torchrun invocation:
 import copy
 import dataclasses
 import gc
+import io
 import logging
 import os
 import shutil
@@ -41,10 +42,13 @@ import unittest
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from PIL import Image
+from renderers import PlaceholderRange
 from torch.distributed.checkpoint.state_dict import (
     set_model_state_dict,
     StateDictOptions,
@@ -52,8 +56,17 @@ from torch.distributed.checkpoint.state_dict import (
 from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.data.multimodal.mrope import get_mrope_positions
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
-from torchtitan.config import apply_overrides, CommConfig, TORCH_DTYPE_MAP
+from torchtitan.components.renderer import hash_image_file
+from torchtitan.config import (
+    apply_overrides,
+    CommConfig,
+    PrecisionConfig,
+    TORCH_DTYPE_MAP,
+)
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
@@ -61,14 +74,22 @@ from torchtitan.distributed.batch_invariant import (
 )
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.qwen3_8.flavors import (
+    QWEN3_8_SPECIAL_TOKENS,
+    QWEN3_8_VISION_PROCESSOR_KWARGS,
+)
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args
+from torchtitan.rl.generator.vllm.multimodal_wrapper import image_prompt_to_engine_input
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
     TORCHTITAN_WORKER_CLS,
     VLLM_MODEL_NAME,
 )
+from torchtitan.rl.rollout.types import Prompt, PromptImage
 from torchtitan.tools import utils
 from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
@@ -247,10 +268,13 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     engine_kwargs["max_model_len"] = gen_config.model.max_context_length
     max_num_seqs = config.max_num_seqs_per_generator_dp_rank
     engine_kwargs["max_num_seqs"] = max_num_seqs
+    if gen_config.max_num_batched_tokens is not None:
+        engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = gen_config.engine.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
         max_model_len=gen_config.model.max_context_length,
+        max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
     )
@@ -258,6 +282,10 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
         engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.debug.seed is not None:
         engine_kwargs["seed"] = gen_config.debug.seed
+    if config.vision_processor is not None:
+        # As `VLLMEngine._build_engine_args`: image prompts bypass vLLM's processor.
+        engine_kwargs["mm_processor_cache_gb"] = 0
+    add_extra_vllm_engine_args(engine_kwargs, gen_config.engine.extra_engine_args)
 
     return LLMEngine.from_engine_args(EngineArgs(**engine_kwargs))
 
@@ -476,30 +504,47 @@ _PREFILL_PARAMS = SamplingParams(
 )
 
 
-def _run_engine(engine, request_prefix, batched_ids, sampling_params):
+def _engine_input(prompt: Prompt, vision_processor: VisionProcessor | None):
+    """vLLM's input for ``prompt``: its token ids, and for an image prompt its images'
+    pixel values, preprocessed as `VLLMEngine._preprocess_images` does."""
+    if not prompt.images:
+        return {"prompt_token_ids": prompt.token_ids}
+    assert vision_processor is not None
+    pixel_values = [
+        vision_processor.patchify(vision_processor.resize_and_normalize(image.data)[0])[
+            0
+        ]
+        for image in prompt.images
+    ]
+    return image_prompt_to_engine_input(prompt, pixel_values)
+
+
+def _run_engine(engine, request_prefix, prompts, sampling_params, vision_processor):
     """Submit requests to vLLM, run to completion, return outputs sorted by ID."""
-    for i, ids in enumerate(batched_ids):
+    for i, prompt in enumerate(prompts):
         engine.add_request(
-            f"{request_prefix}_{i}", {"prompt_token_ids": ids}, sampling_params
+            f"{request_prefix}_{i}",
+            _engine_input(prompt, vision_processor),
+            sampling_params,
         )
     outputs = []
     while engine.has_unfinished_requests():
         outputs.extend(engine.step())
     outputs.sort(key=lambda o: o.request_id)
-    assert len(outputs) == len(batched_ids)
+    assert len(outputs) == len(prompts)
     return outputs
 
 
-def vllm_prefill(engine, all_prompt_ids):
+def vllm_prefill(engine, prompts, vision_processor=None):
     """Run vLLM prefill and extract prompt logprobs for each sequence."""
-    outputs = _run_engine(engine, "prefill", all_prompt_ids, _PREFILL_PARAMS)
+    outputs = _run_engine(engine, "prefill", prompts, _PREFILL_PARAMS, vision_processor)
     return [
-        _extract_logprobs_from_prompt(out, ids)
-        for out, ids in zip(outputs, all_prompt_ids, strict=True)
+        _extract_logprobs_from_prompt(out, prompt.token_ids)
+        for out, prompt in zip(outputs, prompts, strict=True)
     ]
 
 
-def vllm_generate(engine, all_prompt_ids, max_tokens):
+def vllm_generate(engine, prompts, max_tokens, vision_processor=None):
     """Generate tokens and return (generated_ids, decode_logprobs) per sequence."""
     params = SamplingParams(
         temperature=0.0,
@@ -508,7 +553,7 @@ def vllm_generate(engine, all_prompt_ids, max_tokens):
         logprobs=1,
         output_kind=RequestOutputKind.FINAL_ONLY,
     )
-    outputs = _run_engine(engine, "generate", all_prompt_ids, params)
+    outputs = _run_engine(engine, "generate", prompts, params, vision_processor)
     all_ids, all_lps = [], []
     for out in outputs:
         sample = out.outputs[0]
@@ -517,15 +562,20 @@ def vllm_generate(engine, all_prompt_ids, max_tokens):
     return all_ids, all_lps
 
 
-def vllm_2nd_pass_prefill(engine, all_prompt_ids, all_gen_ids):
+def vllm_2nd_pass_prefill(engine, prompts, all_gen_ids, vision_processor=None):
     """Re-prefill [prompt + generated] and extract logprobs for generated positions."""
     all_combined = [
-        list(p) + list(g) for p, g in zip(all_prompt_ids, all_gen_ids, strict=True)
+        dataclasses.replace(prompt, token_ids=prompt.token_ids + list(gen_ids))
+        for prompt, gen_ids in zip(prompts, all_gen_ids, strict=True)
     ]
-    outputs = _run_engine(engine, "2nd_prefill", all_combined, _PREFILL_PARAMS)
+    outputs = _run_engine(
+        engine, "2nd_prefill", all_combined, _PREFILL_PARAMS, vision_processor
+    )
     return [
-        _extract_logprobs_from_prompt(out, combined, start_pos=len(p))
-        for out, combined, p in zip(outputs, all_combined, all_prompt_ids, strict=True)
+        _extract_logprobs_from_prompt(
+            out, combined.token_ids, start_pos=len(prompt.token_ids)
+        )
+        for out, combined, prompt in zip(outputs, all_combined, prompts, strict=True)
     ]
 
 
@@ -546,13 +596,13 @@ _FILLER_TEXT = (
 )
 
 
-def make_prompt_tokens(batch_size, prompt_length, tokenizer):
-    """Create token ID sequences of the given prompt_length.
+def make_prompts(batch_size, prompt_length, tokenizer) -> list[Prompt]:
+    """Create text prompts of the given prompt_length.
 
     For batch_size > 1, varies lengths across the batch (first seq at max,
     last seq ~40% of max) to test batch invariance with mixed lengths.
     """
-    all_sequences = []
+    prompts = []
     for idx in range(batch_size):
         frac = 1.0 - (idx * 0.6 / max(batch_size - 1, 1))
         target_len = max(16, int(prompt_length * frac))
@@ -563,9 +613,158 @@ def make_prompt_tokens(batch_size, prompt_length, tokenizer):
             tokens = tokenizer.encode(text)
             if len(tokens) >= target_len:
                 break
-        all_sequences.append(tokens[:target_len])
+        prompts.append(Prompt(token_ids=tokens[:target_len]))
 
-    return all_sequences
+    return prompts
+
+
+def _synthetic_image(
+    height: int, width: int, seed: int, vision_processor: VisionProcessor
+) -> PromptImage:
+    """A PNG of smooth random colors, ``height`` x ``width`` pixels."""
+    rng = np.random.default_rng(seed)
+    pixels = rng.integers(0, 256, size=(height // 32, width // 32, 3), dtype=np.uint8)
+    buffer = io.BytesIO()
+    Image.fromarray(pixels).resize((width, height), Image.BILINEAR).save(buffer, "PNG")
+    data = buffer.getvalue()
+    return PromptImage(
+        hash_value=hash_image_file(data),
+        source_path=f"synthetic_{seed}.png",
+        grid_thw=vision_processor.grid_thw(height, width),
+        data=data,
+    )
+
+
+def make_image_prompt(
+    parts: list[int | PromptImage],
+    *,
+    seed: int,
+    tokenizer,
+    special_tokens: dict[str, str],
+    vision_processor: VisionProcessor,
+) -> Prompt:
+    """A prompt of ``parts`` in order: an int is that many random text tokens, an image
+    is ``<|vision_start|>``, its placeholder run and ``<|vision_end|>``.
+
+    ``tokenizer`` is the engine's Hugging Face tokenizer and ``special_tokens`` the
+    model's token strings (e.g. ``QWEN3_8_SPECIAL_TOKENS``). Text tokens exclude the
+    tokenizer's added tokens.
+    """
+    rng = np.random.default_rng(seed)
+    added_vocab = tokenizer.get_added_vocab()
+    image_id = added_vocab[special_tokens["image_token"]]
+    vision_start_id = added_vocab[special_tokens["vision_start_token"]]
+    vision_end_id = added_vocab[special_tokens["vision_end_token"]]
+    text_ids = sorted(set(range(len(tokenizer))) - set(added_vocab.values()))
+    token_ids, images, placeholders = [], [], []
+    for part in parts:
+        if isinstance(part, int):
+            token_ids += rng.choice(text_ids, size=part).tolist()
+            continue
+        num_tokens = vision_processor.num_placeholder_tokens(part.grid_thw)
+        token_ids.append(vision_start_id)
+        placeholders.append(PlaceholderRange(offset=len(token_ids), length=num_tokens))
+        token_ids += [image_id] * num_tokens + [vision_end_id]
+        images.append(part)
+    return Prompt(
+        token_ids=token_ids,
+        images=tuple(images),
+        image_placeholders=tuple(placeholders),
+    )
+
+
+def compute_trainer_image_prefill_logprobs(
+    model,
+    prompts: list[Prompt],
+    device: torch.device,
+    *,
+    vision_processor: VisionProcessor,
+    parallelism_context: ParallelismContext,
+    parallelism: ParallelismConfig,
+) -> list[torch.Tensor]:
+    """Next-token logprobs of each prompt from the trainer model, the prompts packed into
+    one microbatch the way the RL batcher packs image samples.
+
+    Each distinct image is encoded once and every placeholder token takes its row of the
+    image embeddings (``image_vision_bank_indices_T``); M-RoPE positions restart per
+    prompt. The model then takes the trainer's path: `preprocess_inputs`, then `forward`.
+    """
+    merge = vision_processor.config.spatial_merge_size
+    bank_rows, mrope_positions, distinct_images = [], [], {}
+    num_bank_rows = 0
+    for prompt in prompts:
+        rows = np.full(len(prompt.token_ids), -1, dtype=np.int64)
+        for image, placeholder in zip(
+            prompt.images, prompt.image_placeholders, strict=True
+        ):
+            if image.hash_value not in distinct_images:
+                distinct_images[image.hash_value] = (image, num_bank_rows)
+                num_bank_rows += placeholder.length
+            bank_start = distinct_images[image.hash_value][1]
+            rows[
+                placeholder.offset : placeholder.offset + placeholder.length
+            ] = np.arange(bank_start, bank_start + placeholder.length)
+        bank_rows.append(rows)
+        mrope_positions.append(
+            get_mrope_positions(
+                len(prompt.token_ids),
+                [
+                    (placeholder.offset, (t, h // merge, w // merge))
+                    for (t, h, w), placeholder in zip(
+                        (image.grid_thw for image in prompt.images),
+                        prompt.image_placeholders,
+                        strict=True,
+                    )
+                ],
+            )
+        )
+    input_tensors = [
+        torch.tensor(prompt.token_ids, dtype=torch.long, device=device)
+        for prompt in prompts
+    ]
+    packed_ids = torch.cat(input_tensors)
+    labels = torch.full_like(packed_ids, IGNORE_INDEX)
+    offset = 0
+    for t in input_tensors:
+        labels[offset : offset + len(t) - 1] = t[1:]
+        offset += len(t)
+    pixel_values, grid_thw = vision_processor.patchify_all(
+        [
+            vision_processor.resize_and_normalize(image.data)[0]
+            for image, _ in distinct_images.values()
+        ]
+    )
+    input_dict = {
+        "input": packed_ids,
+        "labels": labels,
+        "positions": torch.cat(
+            [torch.arange(len(t), device=device) for t in input_tensors]
+        ),
+        "mrope_positions": torch.cat(mrope_positions).to(device),
+        "pixel_values": pixel_values.to(device),
+        "grid_thw": grid_thw.to(device),
+        "image_vision_bank_indices_T": torch.from_numpy(np.concatenate(bank_rows)).to(
+            device
+        ),
+    }
+    inputs, labels, model_kwargs, _ = model.preprocess_inputs(
+        input_dict,
+        parallelism_context=parallelism_context,
+        parallelism=parallelism,
+    )
+    logits = model(inputs, **model_kwargs)
+    logprobs = compute_logprobs(
+        logits,
+        labels,
+        vocab_parallel_group=spmd_mesh_group("tp"),
+        global_vocab_size=model.config.lm_head.out_features,
+    )
+    results = []
+    offset = 0
+    for t in input_tensors:
+        results.append(logprobs[offset : offset + len(t) - 1])
+        offset += len(t)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +801,10 @@ class BitwiseParityTestBase(unittest.TestCase):
     # Shared across all tests in the class (built once in setUpClass)
     model: torch.nn.Module
     engine: LLMEngine
-    prompt_ids: list[list[int]]
+    config: Controller.Config
+    prompts: list[Prompt]
+    # Built from ``config.vision_processor`` for image prompts; None for text models.
+    vision_processor: VisionProcessor | None = None
 
     @classmethod
     def setUpClass(cls):
@@ -663,7 +865,11 @@ class BitwiseParityTestBase(unittest.TestCase):
             precision=config.precision,
             checkpointer_config=generator_checkpointer,
             model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=config.vision_processor,
         )
+        cls.config = config
+        if config.vision_processor is not None:
+            cls.vision_processor = config.vision_processor.build()
 
         # Test runs trainer and generator in the same process, so limit
         # GPU memory for vLLM to leave room for the trainer model.
@@ -686,10 +892,25 @@ class BitwiseParityTestBase(unittest.TestCase):
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)
 
-        tokenizer = cls.engine.get_tokenizer()
-        cls.prompt_ids = make_prompt_tokens(
-            cls.BATCH_SIZE, cls.PROMPT_LENGTH, tokenizer
+        cls.prompts = cls.make_prompts()
+
+    @classmethod
+    def make_prompts(cls) -> list[Prompt]:
+        """The prompts every test of the class runs."""
+        return make_prompts(
+            cls.BATCH_SIZE, cls.PROMPT_LENGTH, cls.engine.get_tokenizer()
         )
+
+    def trainer_prefill_logprobs(self, prompts: list[Prompt]) -> list[torch.Tensor]:
+        """Next-token logprobs of each prompt from the trainer model, the prompts packed
+        into one microbatch."""
+        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+            return compute_trainer_prefill_logprobs(
+                self.model,
+                [prompt.token_ids for prompt in prompts],
+                self.device,
+                attn_backend=self.attn_backend,
+            )
 
     @classmethod
     def tearDownClass(cls):
@@ -728,17 +949,20 @@ class BitwiseParityTestBase(unittest.TestCase):
 
         max_delta = (a - b).abs().max().item() if n > 0 else 0.0
         num_diff = (a != b).sum().item()
+        first_diff = int((a != b).nonzero()[0]) if num_diff else None
         print(
             f"  {name}: max_delta={max_delta:.2e}, "
-            f"num_diff={num_diff}/{n}, "
+            f"num_diff={num_diff}/{n}, first_diff={first_diff}, "
             f"bitwise_equal={torch.equal(a, b)}"
         )
-        self.assertTrue(
-            torch.equal(a, b),
-            f"{name}: NOT bitwise identical (max_delta={max_delta:.2e})\n"
-            f"  {label_a}[:5]: {a[:5].tolist()}\n"
-            f"  {label_b}[:5]: {b[:5].tolist()}",
-        )
+        # A subtest, so one sequence's mismatch does not hide the others'.
+        with self.subTest(name):
+            self.assertTrue(
+                torch.equal(a, b),
+                f"{name}: NOT bitwise identical (max_delta={max_delta:.2e})\n"
+                f"  {label_a}[:5]: {a[:5].tolist()}\n"
+                f"  {label_b}[:5]: {b[:5].tolist()}",
+            )
 
     def test_batch_invariance(self):
         """Trainer prefill(bsz=m) == Trainer prefill(bsz=n) for shared sequences.
@@ -747,30 +971,17 @@ class BitwiseParityTestBase(unittest.TestCase):
         produce bit-identical logits regardless of what other sequences are
         in the batch.
         """
-        model = self.model
-        n = len(self.prompt_ids)
+        n = len(self.prompts)
         mid = max(1, n // 2)
 
-        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
-            lps_partial = compute_trainer_prefill_logprobs(
-                model,
-                self.prompt_ids[:mid],
-                self.device,
-                attn_backend=self.attn_backend,
-            )
-            lps_full = compute_trainer_prefill_logprobs(
-                model, self.prompt_ids, self.device, attn_backend=self.attn_backend
-            )
+        lps_partial = self.trainer_prefill_logprobs(self.prompts[:mid])
+        lps_full = self.trainer_prefill_logprobs(self.prompts)
 
         if dist.get_rank() == 0:
             for i in range(mid):
-                # ``prompt_ids[:mid]`` is a list of sequences, so
-                # ``compute_trainer_prefill_logprobs`` always returns a list
-                # (even for mid==1) -> index per-sequence.
-                partial_lp = lps_partial[i]
                 self._assert_logprobs_equal(
                     f"seq {i}: prefill(bsz={mid}) vs prefill(bsz={n})",
-                    partial_lp,
+                    lps_partial[i],
                     lps_full[i],
                     f"bsz={mid}",
                     f"bsz={n}",
@@ -782,18 +993,11 @@ class BitwiseParityTestBase(unittest.TestCase):
         Ensures the trainer model forward and generator model forward produce
         bitwise identical logprobs.
         """
-        model = self.model
-        engine = self.engine
-
-        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
-            trainer_lps = compute_trainer_prefill_logprobs(
-                model, self.prompt_ids, self.device, attn_backend=self.attn_backend
-            )
-
-        vllm_lps = vllm_prefill(engine, self.prompt_ids)
+        trainer_lps = self.trainer_prefill_logprobs(self.prompts)
+        vllm_lps = vllm_prefill(self.engine, self.prompts, self.vision_processor)
 
         if dist.get_rank() == 0:
-            for i in range(len(self.prompt_ids)):
+            for i in range(len(self.prompts)):
                 self._assert_logprobs_equal(
                     f"seq {i}: Trainer prefill vs vLLM prefill",
                     trainer_lps[i],
@@ -811,12 +1015,14 @@ class BitwiseParityTestBase(unittest.TestCase):
         engine = self.engine
 
         gen_ids, decode_lps = vllm_generate(
-            engine, self.prompt_ids, self.MAX_GEN_TOKENS
+            engine, self.prompts, self.MAX_GEN_TOKENS, self.vision_processor
         )
-        prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompt_ids, gen_ids)
+        prefill_2nd_lps = vllm_2nd_pass_prefill(
+            engine, self.prompts, gen_ids, self.vision_processor
+        )
 
         if dist.get_rank() == 0:
-            for i in range(len(self.prompt_ids)):
+            for i in range(len(self.prompts)):
                 self._assert_logprobs_equal(
                     f"seq {i}: vLLM decode vs vLLM 2nd-pass prefill",
                     decode_lps[i],
@@ -827,16 +1033,20 @@ class BitwiseParityTestBase(unittest.TestCase):
 
     def _check_vllm_prefill_and_decode_batch_invariance(self):
         """Check that vLLM prefill and decode do not depend on batch composition."""
-        single_prompt = self.prompt_ids[:1]
+        single_prompt = self.prompts[:1]
 
-        single_prefill_lps = vllm_prefill(self.engine, single_prompt)
-        batched_prefill_lps = vllm_prefill(self.engine, self.prompt_ids)
+        single_prefill_lps = vllm_prefill(
+            self.engine, single_prompt, self.vision_processor
+        )
+        batched_prefill_lps = vllm_prefill(
+            self.engine, self.prompts, self.vision_processor
+        )
 
         single_gen_ids, single_decode_lps = vllm_generate(
-            self.engine, single_prompt, self.MAX_GEN_TOKENS
+            self.engine, single_prompt, self.MAX_GEN_TOKENS, self.vision_processor
         )
         batched_gen_ids, batched_decode_lps = vllm_generate(
-            self.engine, self.prompt_ids, self.MAX_GEN_TOKENS
+            self.engine, self.prompts, self.MAX_GEN_TOKENS, self.vision_processor
         )
 
         if dist.get_rank() == 0:
@@ -924,8 +1134,8 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
             # As the generator does after a load: drop KV computed with the old weights.
             engine.reset_prefix_cache(reset_running_requests=True)
 
-        vllm_generate(engine, self.prompt_ids, self.MAX_GEN_TOKENS)
-        before_lps = vllm_prefill(engine, self.prompt_ids)
+        vllm_generate(engine, self.prompts, self.MAX_GEN_TOKENS)
+        before_lps = vllm_prefill(engine, self.prompts)
         params = list(self.model.parameters())
         originals = [p.detach().clone() for p in params]
         # Every rank runs every collective before rank 0 asserts, so a mismatch
@@ -935,18 +1145,12 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
                 for p in params:
                     p.mul_(0.5)
             reload()
-            with type(self).parallelism_context.activate_spmd(), torch.no_grad():
-                trainer_lps = compute_trainer_prefill_logprobs(
-                    self.model,
-                    self.prompt_ids,
-                    self.device,
-                    attn_backend=self.attn_backend,
-                )
-            vllm_lps = vllm_prefill(engine, self.prompt_ids)
+            trainer_lps = self.trainer_prefill_logprobs(self.prompts)
+            vllm_lps = vllm_prefill(engine, self.prompts)
             gen_ids, decode_lps = vllm_generate(
-                engine, self.prompt_ids, self.MAX_GEN_TOKENS
+                engine, self.prompts, self.MAX_GEN_TOKENS
             )
-            prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompt_ids, gen_ids)
+            prefill_2nd_lps = vllm_2nd_pass_prefill(engine, self.prompts, gen_ids)
         finally:
             with torch.no_grad():
                 for p, original in zip(params, originals):
@@ -955,7 +1159,7 @@ class TestBitwiseParityQwen35DebugVarlen(BitwiseParityTestBase):
 
         if dist.get_rank() == 0:
             self.assertNotEqual(before_lps[0], vllm_lps[0])
-            for i in range(len(self.prompt_ids)):
+            for i in range(len(self.prompts)):
                 self._assert_logprobs_equal(
                     f"seq {i}: Trainer prefill vs vLLM prefill after reload",
                     trainer_lps[i],
@@ -1012,6 +1216,169 @@ class TestBitwiseParityKimiK3DebugVarlen(KimiK3BitwiseParityTestBase):
     BATCH_SIZE = 3
     PROMPT_LENGTH = 64
     MAX_GEN_TOKENS = 128
+
+    def test_vllm_prefill_and_decode_batch_invariance(self):
+        """vLLM prefill and decode must not depend on batch composition."""
+        self._check_vllm_prefill_and_decode_batch_invariance()
+
+
+def flash_next_mm_debug_bitwise_config() -> Controller.Config:
+    """One-GPU random-weight Flash-Next with the vision encoder, batch-invariant.
+
+    Trainer and generator are unsharded and route experts without Dist-MoE. 64-token
+    prefill steps make vLLM split every image of `TestBitwiseParityFlashNextImages`
+    across steps.
+    """
+    from torchtitan.models.qwen3_8_flash_next import (
+        build_model_config as build_flash_next_model_config,
+    )
+    from torchtitan.models.qwen3_8_flash_next.attention import QSAIndexerLoss
+    from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+
+    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant(seq_len=1024)
+    trainer_parallelism = ParallelismConfig()
+    generator_parallelism = InferenceParallelismConfig()
+    config.trainer.model, config.generator.model = build_rl_model_configs(
+        build_flash_next_model_config,
+        "debugmodel_mm",
+        seq_len=1024,
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+        # Without an indexer loss the indexer is frozen, and the generator, which
+        # gets weights only from the trainer here, would never receive it.
+        indexer_loss=QSAIndexerLoss.Config(coeff=1.0, reduce_mesh="loss"),
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile.regions = []
+    config.trainer = dataclasses.replace(
+        config.trainer, parallelism=trainer_parallelism
+    )
+    config.generator = dataclasses.replace(
+        config.generator,
+        parallelism=generator_parallelism,
+        max_num_batched_tokens=64,
+    )
+    config.generator.engine.cuda_graph.mode = "FULL_DECODE_ONLY"
+    # Flash-Next's cached PLE keeps each request's token history, which a prefix
+    # cache hit would skip.
+    config.generator.engine.extra_engine_args = {"enable_prefix_caching": False}
+    config.precision = PrecisionConfig(dtype="bfloat16")
+    config.vision_processor = VisionProcessor.Config(**QWEN3_8_VISION_PROCESSOR_KWARGS)
+    return config
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available()
+    and torch.version.hip is None
+    and torch.cuda.get_device_capability() >= (10, 0),
+    "Flash-Next QSA attention (Attention Gym gather_attn) needs SM100+",
+)
+class TestBitwiseParityFlashNextImages(BitwiseParityTestBase):
+    """Flash-Next with image prompts: random weights, one GPU, matched TP=1.
+
+    The prompts cover what M-RoPE changes in the generator's QSA indexer, whose
+    compressed keys take the M-RoPE position of their 4-token block's first token:
+
+        prompt 0  4 text | image A (70 tokens) | 21 text | image B (70) | 7 text
+        prompt 1  3 text | image A | 40 text           (A again: vLLM's encoder cache)
+        prompt 2  90 text                              (M-RoPE text positions)
+        prompt 3  9 text | image C (120)               (ends in C's last block)
+
+    Image A spans tokens 5..74 of prompt 0, so blocks 4..7 and 72..75 hold text and
+    image tokens. With 64-token prefill steps vLLM splits every image across steps.
+    Prompt 3's last block, 128..131, starts with an image token and completes at the
+    first decode step, so its key's position comes from the raw-key ring.
+    """
+
+    __test__ = True
+    config_fn = staticmethod(flash_next_mm_debug_bitwise_config)
+    sync_weights_from_trainer = True
+    MAX_GEN_TOKENS = 32
+
+    @classmethod
+    def make_prompts(cls) -> list[Prompt]:
+        processor = cls.vision_processor
+        assert processor is not None
+        image_a, image_b, image_c = (
+            _synthetic_image(height, width, seed, processor)
+            for seed, (height, width) in enumerate([(64, 96), (224, 160), (384, 320)])
+        )
+        prompt_parts = [
+            [4, image_a, 21, image_b, 7],
+            [3, image_a, 40],
+            [90],
+            [9, image_c],
+        ]
+        return [
+            make_image_prompt(
+                parts,
+                seed=seed,
+                tokenizer=cls.engine.get_tokenizer(),
+                special_tokens=QWEN3_8_SPECIAL_TOKENS,
+                vision_processor=processor,
+            )
+            for seed, parts in enumerate(prompt_parts)
+        ]
+
+    def trainer_prefill_logprobs(self, prompts: list[Prompt]) -> list[torch.Tensor]:
+        assert self.vision_processor is not None
+        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+            return compute_trainer_image_prefill_logprobs(
+                self.model,
+                prompts,
+                self.device,
+                vision_processor=self.vision_processor,
+                parallelism_context=type(self).parallelism_context,
+                parallelism=self.config.trainer.parallelism,
+            )
+
+    def test_prompt_layout(self):
+        """The prompts have the layout the class docstring describes."""
+        image_runs = [
+            [(p.offset, p.length) for p in prompt.image_placeholders]
+            for prompt in self.prompts
+        ]
+        self.assertEqual(image_runs, [[(5, 70), (98, 70)], [(4, 70)], [], [(10, 120)]])
+        self.assertEqual(len(self.prompts[3].token_ids), 131)
+
+    def test_vision_encoder_batch_invariance(self):
+        """An image's embeddings do not depend on the images encoded with it.
+
+        The trainer encodes a microbatch's distinct images together, vLLM the images of
+        each scheduled step, so the two group them differently.
+        """
+        processor = self.vision_processor
+        assert processor is not None
+        images = list(
+            {
+                image.hash_value: image
+                for prompt in self.prompts
+                for image in prompt.images
+            }.values()
+        )
+        pixels = [processor.resize_and_normalize(image.data)[0] for image in images]
+
+        def encode(group: list[torch.Tensor]) -> list[torch.Tensor]:
+            pixel_values, grid_thw = processor.patchify_all(group)
+            embeds, num_tokens = self.model.get_vision_embeds(
+                pixel_values.to(self.device), grid_thw=grid_thw.to(self.device)
+            )
+            return list(embeds.split(num_tokens.tolist()))
+
+        with type(self).parallelism_context.activate_spmd(), torch.no_grad():
+            together = encode(pixels)
+            alone = [encode([image_pixels])[0] for image_pixels in pixels]
+
+        if dist.get_rank() == 0:
+            for i, (a, b) in enumerate(zip(alone, together, strict=True)):
+                self._assert_logprobs_equal(
+                    f"image {i}: encoded alone vs with all images",
+                    a.flatten(),
+                    b.flatten(),
+                    "alone",
+                    "together",
+                )
 
     def test_vllm_prefill_and_decode_batch_invariance(self):
         """vLLM prefill and decode must not depend on batch composition."""

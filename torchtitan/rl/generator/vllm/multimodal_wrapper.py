@@ -32,17 +32,19 @@ there is no salt; the engine resets both caches on every weight load instead:
       -> embed_multimodal: the vision encoder, once per mm hash while cached
                            (vLLM copies pixel_values to the GPU)
       -> embed_input_ids: token embeddings with image embeddings at the placeholders
-      -> forward(inputs_embeds, positions: 3D M-RoPE for Qwen3.5, 1D for Muse Spark)
+      -> forward(inputs_embeds, positions: 3D M-RoPE for Qwen3.5 and Flash-Next, 1D for
+                 Muse Spark; Flash-Next's PLE also reads the token IDs)
 
 vLLM requires a registered processor for a multimodal model (`register_multimodal_processor`);
 it serves only vLLM's startup: the vision processor's largest image (`_largest_patch_grid`)
 sizes the encoder budget, and a dummy image of that size profiles the encoder's memory.
 
 Supported models: a `MultimodalModel` with a ``vision_encoder`` behind ``get_vision_embeds``
-(``Qwen35MultimodalModel``, ``MuseSparkMultimodalModel``) and merged patches as placeholder
-tokens; image tokens take 3D positions with ``MRoPE.Config`` attention (Qwen3.5) and 1D
-positions otherwise (Muse Spark). Before the engine is built, the controller checks that the
-model is a `MultimodalModel` with a vision encoder.
+(``Qwen35MultimodalModel``, ``Qwen38FlashNextMultimodalModel``, ``MuseSparkMultimodalModel``)
+and merged patches as placeholder tokens; image tokens take 3D positions with
+``MRoPE.Config`` attention (Qwen3.5, Flash-Next) and 1D positions otherwise (Muse Spark).
+Before the engine is built, the controller checks that the model is a `MultimodalModel` with
+a vision encoder.
 """
 
 from __future__ import annotations
@@ -75,6 +77,7 @@ from vllm.multimodal.processing import (
 from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.models.qwen3_8_flash_next.model import Qwen38FlashNextModel
 from torchtitan.rl.generator.vllm.model_wrapper import VLLMModelWrapper
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 
@@ -359,15 +362,30 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
     Implements vLLM's multimodal (`embed_multimodal`, `embed_input_ids`) and M-RoPE
     (`get_mrope_input_positions`) interfaces for models with a ``vision_encoder`` reached
     through the model's ``get_vision_embeds`` and merged patches as placeholder tokens:
-    Qwen3.5, whose image tokens take 3D M-RoPE positions, and Muse Spark, whose take 1D
-    positions like text (vLLM then never calls `get_mrope_input_positions`). vLLM feeds
-    multimodal models embeddings, also for text-only steps.
-
+    Qwen3.5 and Qwen3.8-Flash-Next, whose image tokens take 3D M-RoPE positions, and Muse
+    Spark, whose take 1D positions like text (vLLM then never calls
+    `get_mrope_input_positions`). vLLM feeds multimodal models embeddings, also for
+    text-only steps.
     """
+
+    # vLLM passes the token IDs to `forward` next to the embeddings: Flash-Next's PLE
+    # hashes them.
+    requires_raw_input_tokens: ClassVar[bool] = True
 
     def __init__(self, *, vision_processor: VisionProcessor, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._vision_processor = vision_processor
+        # Flash-Next's PLE needs each token's 1D position in its request, which M-RoPE
+        # positions do not give back; the QSA indexer's step metadata does.
+        self._flash_next_indexer = None
+        if isinstance(self.model, Qwen38FlashNextModel):
+            from torchtitan.rl.generator.vllm.attention.qsa import VLLMQSAIndexer
+
+            self._flash_next_indexer = next(
+                module
+                for module in self.model.modules()
+                if isinstance(module, VLLMQSAIndexer)
+            )
         # FSDP makes the first module that runs forward its root. This wrapper calls
         # the embeddings, the vision encoder and the layers directly, never the root
         # model, so make the root the whole model before any of them runs. Otherwise
@@ -431,21 +449,32 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
         """vLLM required API. The decoder on precomputed embeddings.
 
         Args:
-            input_ids: Unused; vLLM passes embeddings to multimodal models.
-            positions: ``(3, num_tokens)`` M-RoPE positions (Qwen3.5), or ``(num_tokens,)``
-                for a model whose image tokens take 1D positions (Muse Spark).
+            input_ids: ``(num_tokens,)`` token IDs, image placeholders included (see
+                ``requires_raw_input_tokens``). Only Flash-Next reads them.
+            positions: ``(3, num_tokens)`` M-RoPE positions (Qwen3.5, Flash-Next), or
+                ``(num_tokens,)`` for a model whose image tokens take 1D positions (Muse
+                Spark).
             inputs_embeds: ``(num_tokens, dim)`` from `embed_input_ids`.
         """
         assert inputs_embeds is not None and positions is not None
+        num_tokens = inputs_embeds.shape[0]
+        model_kwargs = self._prepare_step_kwargs(num_tokens)
+        if self._flash_next_indexer is not None:
+            assert input_ids is not None
+            # PLE hashes the token IDs by each token's 1D position in its request, as
+            # the trainer does (``Qwen38FlashNextModel.preprocess_inputs``). vLLM's
+            # profiling runs build no attention metadata, and PLE ignores the
+            # positions' values there.
+            document_positions = self._flash_next_indexer.request_positions(num_tokens)
+            model_kwargs["ple_input_ids"] = input_ids
+            model_kwargs["document_positions"] = (
+                positions[0] if document_positions is None else document_positions
+            )
         if positions.ndim == 2:
             # TorchTitan's MRoPE takes (num_tokens, 3).
             positions = positions.transpose(0, 1)
         with self.parallelism_context.activate_spmd():
-            h = self.model.forward_embeddings(
-                inputs_embeds,
-                positions,
-                **self._prepare_step_kwargs(inputs_embeds.shape[0]),
-            )
+            h = self.model.forward_embeddings(inputs_embeds, positions, **model_kwargs)
         return h
 
     def get_mrope_input_positions(

@@ -6,11 +6,13 @@
 
 """Cache addressing, causal tails and request isolation for Flash-Next generation."""
 
+import random
 from dataclasses import fields
 from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.testing._internal.common_utils import DeterministicGuard
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 pytest.importorskip(
@@ -18,11 +20,16 @@ pytest.importorskip(
     reason="Paged QSA tests require the Attention Gym decode indexer",
 )
 
+from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_8_flash_next import build_model_config
 from torchtitan.models.qwen3_8_flash_next.attention import QSAIndexMetadata
 from torchtitan.rl.generator.vllm.attention import qsa
-from torchtitan.rl.generator.vllm.attention.qsa import VLLMQSAIndexer
+from torchtitan.rl.generator.vllm.attention.qsa import (
+    VLLMQSAIndexer,
+    VLLMQSAInnerAttention,
+)
+from torchtitan.tools.utils import has_cuda_capability
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Paged QSA requires a GPU"
@@ -34,7 +41,10 @@ def make_cache(monkeypatch):
     config = SimpleNamespace(
         cache_config=SimpleNamespace(cache_dtype="auto", block_size=16),
         model_config=SimpleNamespace(
-            dtype=torch.bfloat16, enforce_eager=False, max_model_len=64
+            dtype=torch.bfloat16,
+            enforce_eager=False,
+            max_model_len=64,
+            uses_mrope=False,
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64, max_num_seqs=4),
         num_speculative_tokens=0,
@@ -148,9 +158,157 @@ def test_paged_qsa_mixed_queries_tail_and_padding(make_cache):
     assert torch.count_nonzero(output[11:]) == 0
 
 
-def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
-    """Chunked cache pooling and selected blocks must match the trainer."""
+@pytest.mark.skipif(
+    not has_cuda_capability(10, 0),
+    reason="gather_attn with grouped KV heads and separate values needs SM100",
+)
+def test_batch_invariant_attention_matches_trainer(make_cache, monkeypatch):
+    """In batch-invariant mode, QSA attention matches the trainer's bitwise in a
+    150-token prefill step, in 64-row chunks, and in one-token decode steps.
+
+    paged_sparse_decode reads a row's selected blocks and its tail in separate tiles
+    from position 64 of a prefill and in separate splits in decode, so outside
+    batch-invariant mode rows with a tail differ from the trainer.
+    """
+    monkeypatch.setattr(qsa, "is_in_batch_invariant_mode", lambda: True)
+    vllm_config = qsa.get_current_vllm_config()
+    vllm_config.model_config.max_model_len = 256
+    vllm_config.parallel_config.tensor_parallel_size = 1
+    length, num_kv_heads, head_dim, topk, ratio = 150, 2, 64, 4, 4
+    trainer_attention = (
+        build_model_config("debugmodel", seq_len=256, parallelism=ParallelismConfig())
+        .layers[3]
+        .attention.inner_attention.build()
+        .cuda()
+        .eval()
+    )
+    attention = (
+        VLLMQSAInnerAttention.Config(
+            compress_ratio=ratio,
+            chunk_size=64,
+            layer_idx=3,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+        )
+        .build()
+        .cuda()
+        .eval()
+    )
+    num_pages = 16
+    attention.cache.bind_kv_cache(
+        torch.zeros(
+            num_pages,
+            num_kv_heads,
+            16,
+            2 * head_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+    )
+    torch.manual_seed(0)
+    block_table = torch.randperm(num_pages, device="cuda").int()[None]
+    query = torch.randn(length + 1, 4, head_dim, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(
+        length + 1, num_kv_heads, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    value = torch.randn_like(key)
+    # Up to topk random complete blocks per row, ascending, as the batch-invariant
+    # indexer returns them, and the trainer's indices for the same selection: each
+    # block's tokens, then the tail ending at the row.
+    rng = random.Random(0)
+    blocks, tokens = [], []
+    for position in range(length):
+        num_complete = (position + 1) // ratio
+        chosen = sorted(rng.sample(range(num_complete), min(topk, num_complete)))
+        chosen += [-1] * (topk - len(chosen))
+        tail = list(range(num_complete * ratio, position + 1))
+        blocks.append(chosen)
+        tokens.append(
+            [
+                block * ratio + j if block >= 0 else -1
+                for block in chosen
+                for j in range(ratio)
+            ]
+            + tail
+            + [-1] * (ratio - 1 - len(tail))
+        )
+    # The padding row selects nothing.
+    blocks = torch.tensor(blocks + [[-1] * topk], device="cuda", dtype=torch.int32)
+    tokens = torch.tensor(tokens, device="cuda", dtype=torch.int32)
+    scale = head_dim**-0.5
+    context = qsa.get_forward_context().attn_metadata
+    builder = _metadata_builder(attention.cache)
+
+    def step(start, num_rows):
+        """Rows start..start + num_rows of one request, then a padding row."""
+        positions = torch.arange(start, start + num_rows, device="cuda")
+        context[attention.cache.prefix] = builder.build(
+            0,
+            _common_metadata(
+                block_table=block_table,
+                slot_mapping=(
+                    block_table[0, positions // 16].long() * 16 + positions % 16
+                ),
+                query_start_loc=torch.tensor(
+                    [0, num_rows], device="cuda", dtype=torch.int32
+                ),
+                seq_lens=torch.tensor(
+                    [start + num_rows], device="cuda", dtype=torch.int32
+                ),
+                num_tokens=num_rows,
+            ),
+        )
+        rows = torch.cat((positions, torch.tensor([length], device="cuda")))
+        output = attention(
+            query[rows],
+            key[rows],
+            value[rows],
+            selected_indices_TJ=blocks[rows],
+            scores_TB=query.new_empty(num_rows + 1, 0),
+            scale=scale,
+        )
+        assert torch.count_nonzero(output[-1]) == 0
+        return output[:-1]
+
+    with torch.no_grad():
+        expected = trainer_attention(
+            query[:length],
+            key[:length],
+            value[:length],
+            selected_indices_TJ=tokens,
+            scores_TB=query.new_empty(length, 0),
+            scale=scale,
+        )
+        prefill = step(0, length)
+        decode = torch.cat([step(position, 1) for position in range(length)])
+    torch.testing.assert_close(prefill, expected, atol=0, rtol=0)
+    torch.testing.assert_close(decode, expected, atol=0, rtol=0)
+
+
+@pytest.fixture
+def deterministic_algorithms(monkeypatch):
+    # cuBLAS needs a fixed workspace for deterministic algorithms.
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    with DeterministicGuard(True):
+        yield
+
+
+@pytest.mark.parametrize("mrope", [False, True], ids=["1d", "mrope"])
+def test_indexer_completed_blocks_across_prefill_and_decode(
+    make_cache, deterministic_algorithms, mrope
+):
+    """Chunked cache pooling and selected blocks must match the trainer.
+
+    With M-RoPE (image prompts) a completed block's key rotates at its first token's 3D
+    position. Here an image's placeholders take positions 5-12, so the block of
+    positions 12-15 starts on an image token that an earlier step held, and the ring
+    must return its position.
+
+    ReLU scores tie often. On SM100 both indexers default to the CuTe selector, which
+    resolves ties toward earlier blocks only under deterministic algorithms.
+    """
     torch.manual_seed(42)
+    qsa.get_current_vllm_config().model_config.uses_mrope = mrope
     config = (
         build_model_config("debugmodel", seq_len=64, parallelism=ParallelismConfig())
         .layers[3]
@@ -179,11 +337,19 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
             :, :, :4
         ]
     )
+    # M-RoPE positions take three int32 coordinates, two 16-bit lanes each.
+    ring_width = config.head_dim + (6 if mrope else 0)
     indexer.raw_cache.bind_kv_cache(
-        torch.randn(2, 1, 16, config.head_dim, device="cuda", dtype=torch.bfloat16)[
-            :, :, :4
-        ]
+        torch.randn(2, 1, 16, ring_width, device="cuda", dtype=torch.bfloat16)[:, :, :4]
     )
+    step_lengths = (3, 1, 9, 6, 1)
+    total_length = sum(step_lengths)
+    if mrope:
+        # A 1 x 2 x 4 grid of merged patches at token 5: positions 5-12 are image tokens.
+        rope_positions = get_mrope_positions(total_length, [(5, (1, 2, 4))]).cuda()
+        assert rope_positions[12].tolist() == [5, 6, 8]
+    else:
+        rope_positions = torch.arange(total_length, device="cuda")
     context = qsa.get_forward_context().attn_metadata
     candidate_builder = _metadata_builder(indexer.cache)
     raw_builder = _metadata_builder(indexer.raw_cache)
@@ -191,11 +357,13 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
     inputs = []
     offset = 0
     block_table = torch.tensor([[2, 1]], device="cuda", dtype=torch.int32)
-    for length in (3, 1, 9, 6, 1):
-        positions = torch.cat(
+    for length in step_lengths:
+        positions = torch.arange(offset, offset + length, device="cuda")
+        # vLLM pads the step with a row at position 0.
+        step_rope_positions = torch.cat(
             (
-                torch.arange(offset, offset + length, device="cuda"),
-                torch.zeros(1, device="cuda", dtype=torch.int64),
+                rope_positions[offset : offset + length],
+                torch.zeros_like(rope_positions[:1]),
             )
         )
         x = torch.randn(
@@ -208,10 +376,7 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
         raw_keys.append(indexer.index_qk_proj(x)[:length, -config.head_dim :])
         common = _common_metadata(
             block_table=block_table,
-            slot_mapping=(
-                block_table[0, positions[:length] // 16].long() * 16
-                + positions[:length] % 16
-            ),
+            slot_mapping=(block_table[0, positions // 16].long() * 16 + positions % 16),
             query_start_loc=torch.tensor([0, length], device="cuda", dtype=torch.int32),
             seq_lens=torch.tensor([offset + length], device="cuda", dtype=torch.int32),
             num_tokens=length,
@@ -220,7 +385,7 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
         context[indexer.cache.prefix] = metadata
         common.block_table_tensor = torch.ones(1, 1, device="cuda", dtype=torch.int32)
         context[indexer.raw_cache.prefix] = raw_builder.build(0, common)
-        selected, _ = indexer(x, positions=positions)
+        selected, _ = indexer(x, positions=step_rope_positions)
         offset += length
         count = offset // 4
         if count:
@@ -233,7 +398,7 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
             )
             expected = indexer._rotate(
                 indexer.k_layernorm(pooled)[:, None],
-                torch.arange(count, device="cuda") * 4,
+                rope_positions[torch.arange(count, device="cuda") * 4],
             )[:, 0]
             (cache,) = indexer.cache.views()
             blocks = torch.arange(count, device="cuda")
@@ -242,7 +407,7 @@ def test_indexer_completed_blocks_across_prefill_and_decode(make_cache):
         prefix_positions = torch.arange(offset, device="cuda")
         token_indices, _ = trainer_indexer(
             torch.cat(inputs),
-            positions=prefix_positions,
+            positions=rope_positions[:offset],
             metadata=QSAIndexMetadata.from_inputs(
                 prefix_positions,
                 padding_mask_T=None,
