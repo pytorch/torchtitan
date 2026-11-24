@@ -57,6 +57,10 @@ __all__ = [
 
 _NSCoefficients = tuple[float, float, float]
 _NSCoefficientSchedule = _NSCoefficients | tuple[_NSCoefficients, ...]
+# (batch shape, dtype, device, ns_coefficients, ns_steps, eps)
+_NSGraphKey = tuple[
+    tuple[int, ...], torch.dtype, torch.device, _NSCoefficientSchedule, int, float
+]
 # Newton-Schulz on at most this many elements (4 MiB in BF16) is launch-bound on
 # H100: a CUDA-graph replay is 3-8x faster. From about 4M elements the GEMMs
 # dominate and a replay gains nothing.
@@ -2032,8 +2036,9 @@ class _NewtonSchulzGraphs:
     """
 
     def __init__(self) -> None:
-        self._seen_keys: set[tuple[Any, ...]] = set()
-        self._graphs: dict[tuple[Any, ...], tuple[torch.cuda.CUDAGraph, Tensor]] = {}
+        self._seen_keys: set[_NSGraphKey] = set()
+        self._graphs: dict[_NSGraphKey, tuple[torch.cuda.CUDAGraph, Tensor]] = {}
+        # graph.pool()'s handle type is private to torch.cuda.graphs.
         self._pool: Any = None
         self._capture_stream: torch.cuda.Stream | None = None
 
@@ -2051,17 +2056,24 @@ class _NewtonSchulzGraphs:
         ns_steps: int,
         eps: float,
     ) -> None:
-        settings = {
-            "ns_coefficients": ns_coefficients,
-            "ns_steps": ns_steps,
-            "eps": eps,
-        }
+        """Replace a matrix batch with its Newton-Schulz polar factor, replaying a
+        captured CUDA graph for small CUDA batches.
+
+        Args:
+            matrices: Matrix batch to orthogonalize in place.
+            ns_coefficients: Newton-Schulz polynomial coefficients.
+            ns_steps: Number of Newton-Schulz iterations.
+            eps: Norm floor before the first iteration.
+        """
         # TODO: Use torch.accelerator.Graph once it supports CUDA, so other
         # accelerators replay too; until then they run eagerly.
+        # https://github.com/pytorch/pytorch/issues/158827
         if not matrices.is_cuda or matrices.numel() > _NS_CUDA_GRAPH_MAX_NUMEL:
-            _orthogonalize_(matrices, **settings)
+            _orthogonalize_(
+                matrices, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps
+            )
             return
-        key = (
+        key: _NSGraphKey = (
             tuple(matrices.shape),
             matrices.dtype,
             matrices.device,
@@ -2073,31 +2085,63 @@ class _NewtonSchulzGraphs:
             if key not in self._seen_keys:
                 # The eager call also initializes cuBLAS before capture.
                 self._seen_keys.add(key)
-                _orthogonalize_(matrices, **settings)
+                _orthogonalize_(
+                    matrices,
+                    ns_coefficients=ns_coefficients,
+                    ns_steps=ns_steps,
+                    eps=eps,
+                )
                 return
-            self._graphs[key] = self._capture(matrices, settings)
+            self._graphs[key] = self._capture(
+                matrices, ns_coefficients=ns_coefficients, ns_steps=ns_steps, eps=eps
+            )
         graph, static_matrices = self._graphs[key]
         static_matrices.copy_(matrices)
         graph.replay()
         matrices.copy_(static_matrices)
 
     def _capture(
-        self, matrices: Tensor, settings: dict[str, Any]
+        self,
+        matrices: Tensor,
+        *,
+        ns_coefficients: _NSCoefficientSchedule,
+        ns_steps: int,
+        eps: float,
     ) -> tuple[torch.cuda.CUDAGraph, Tensor]:
+        # Capture records kernels without running them, so the buffer needs no
+        # values yet: every replay copies the batch in first.
         static_matrices = torch.empty(
             matrices.shape, dtype=matrices.dtype, device=matrices.device
         )
         if self._capture_stream is None:
             self._capture_stream = torch.cuda.Stream(matrices.device)
+        current_stream = torch.cuda.current_stream(matrices.device)
         graph = torch.cuda.CUDAGraph()
         # torch.cuda.graph() would synchronize and empty the allocator cache
-        # before every capture, so drive the capture directly.
+        # before every capture, so drive the capture directly, with the same
+        # stream ordering: the capture stream waits for pending work, warms up
+        # once (cuBLAS sets up its per-stream workspace outside the capture),
+        # and the current stream waits for it before the first replay.
+        self._capture_stream.wait_stream(current_stream)
         with torch.cuda.stream(self._capture_stream):
+            static_matrices.copy_(matrices)
+            _orthogonalize_(
+                static_matrices,
+                ns_coefficients=ns_coefficients,
+                ns_steps=ns_steps,
+                eps=eps,
+            )
             graph.capture_begin(pool=self._pool, capture_error_mode="thread_local")
             try:
-                _orthogonalize_(static_matrices, **settings)
+                _orthogonalize_(
+                    static_matrices,
+                    ns_coefficients=ns_coefficients,
+                    ns_steps=ns_steps,
+                    eps=eps,
+                )
             finally:
                 graph.capture_end()
+        current_stream.wait_stream(self._capture_stream)
         if self._pool is None:
             self._pool = graph.pool()
         return graph, static_matrices

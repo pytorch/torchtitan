@@ -401,18 +401,14 @@ class TestDistMuon(DTensorTestBase):
             for eager_param, graph_param in zip(
                 eager_params, graph_params, strict=True
             ):
-                self.assertTrue(
-                    torch.equal(eager_param.to_local(), graph_param.to_local())
+                torch.testing.assert_close(
+                    graph_param.to_local(), eager_param.to_local(), rtol=0, atol=0
                 )
-                self.assertTrue(
-                    torch.equal(
-                        eager_optimizer.state[eager_param][
-                            "momentum_buffer"
-                        ].to_local(),
-                        graph_optimizer.state[graph_param][
-                            "momentum_buffer"
-                        ].to_local(),
-                    )
+                torch.testing.assert_close(
+                    graph_optimizer.state[graph_param]["momentum_buffer"].to_local(),
+                    eager_optimizer.state[eager_param]["momentum_buffer"].to_local(),
+                    rtol=0,
+                    atol=0,
                 )
 
         # Step 0 runs eagerly, step 1 captures, step 2 replays.
