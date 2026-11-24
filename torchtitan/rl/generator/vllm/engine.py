@@ -215,7 +215,6 @@ class VLLMEngine(GenerationEngine):
             many requests sharing long prompts       auto: fp8 decode can be slower
                                                      (see `paged_varlen_attention_out`)
             trainer-vs-generator logprob gap         fp8: ~2.3x auto's mean abs diff, ~3.5x k3 KL
-            tokens outside IcePop's (0.2, 5) mask    fp8: ~5x auto's
             a hybrid model's KV block                fp8: grows (896 -> 1,664 tokens), so
                                                      prefix-cache hits are coarser
 
@@ -313,7 +312,7 @@ class VLLMEngine(GenerationEngine):
             raise ValueError(
                 f"kv_cache_dtype='fp8' does not support num_speculative_tokens="
                 f"{config.num_speculative_tokens} yet: MTP verify rows don't pass the fp8 "
-                "descales to FA4"
+                "descales to FA4. Set num_speculative_tokens=0 or kv_cache_dtype='auto'"
             )
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
             _enable_breakable_cuda_graphs()
