@@ -93,6 +93,11 @@ def _validate_declared_parallel_axes(
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.moe import MoE
 
+    # Configs that build their layouts at parallelize time declare none yet.
+    layouts = _collect_model_layouts(model)
+    if not layouts:
+        return
+
     p = parallelism
     model_name = type(model).__qualname__
     # degree != 1 also covers dp_shard == -1.
@@ -125,7 +130,7 @@ def _validate_declared_parallel_axes(
         if p.data_parallel_replicate_degree > 1:
             sparse_required.append(MeshAxisName.DP_REPLICATE)
 
-    for fqn, field, axes in _collect_model_layouts(model):
+    for fqn, field, axes in layouts:
         if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
             required = sparse_required
         else:

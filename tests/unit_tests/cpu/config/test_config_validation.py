@@ -205,6 +205,28 @@ def test_ep_off_built_moe_rejects_ep_gt1() -> None:
         )
 
 
+def test_hf_moe_config_accepts_ep_gt1(tmp_path) -> None:
+    """HFTransformerModel builds its MoE and layouts at parallelize time, so its
+    config declares no layouts at validation time."""
+    from torchtitan.experiments.transformers_modeling_backend.flavors import (
+        build_model_config as build_hf_model_config,
+    )
+    from transformers import Qwen3MoeConfig
+
+    Qwen3MoeConfig(architectures=["Qwen3MoeForCausalLM"]).save_pretrained(tmp_path)
+    model_config = build_hf_model_config(
+        "debugmodel_moe", seq_len=2048, hf_model=str(tmp_path)
+    )
+    validate_model_training_config(
+        model_config,
+        parallelism=ParallelismConfig(expert_parallel_degree=2),
+        training=TrainingConfig(),
+        debug=DebugConfig(),
+        activation_remat=None,
+        max_num_documents=None,
+    )
+
+
 def test_ep_off_routed_experts_checked_as_dense() -> None:
     # When EP is off, routed-expert weights live on the dense mesh, so a
     # layout under <moe>.routed_experts. that omits an active dense axis
