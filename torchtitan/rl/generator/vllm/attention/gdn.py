@@ -212,6 +212,7 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         ), "Attention Gym convolution kernels do not support bias"
         num_tokens = mixed_qkv.shape[0]
         output_shape = (num_tokens, self.local_num_v_heads, self.head_v_dim)
+
         if self.num_speculative_tokens:
             # Allocated inside the graph piece, so the next piece reads it. Before the
             # metadata check: a piecewise capture has no metadata; replays run this call eagerly.
