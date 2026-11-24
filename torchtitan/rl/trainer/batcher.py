@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from torchtitan.components.data.balancing import packed_attention_cost
 from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -715,26 +716,16 @@ class Batcher(Configurable):
     def _attention_workload(self, training_samples: list[TrainingSample]) -> int:
         """Estimate document and tail-padding attention as squared lengths.
 
-        For packed sample lengths L and token capacity T, let
-        ``q, r = divmod(T - sum(L), seq_len)``. The estimate is
-        ``sum(L**2) + q * seq_len**2 + r**2``. Padding positions reset at
-        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2 + (T % seq_len)**2``.
-        This models the existing padding segments without increasing their
-        number or changing fixed-size varlen metadata.
+        ``packed_attention_cost`` of the bin's samples: padding positions reset
+        at ``seq_len``, so even an empty bin costs
+        ``(T // seq_len) * seq_len**2 + (T % seq_len)**2``.
         """
         # TODO(rl): Account for hybrid sliding-window or linear-attention layers, and for
         #   vision encoder work (distinct images per bin), which image affinity concentrates.
-        sample_lengths = [
-            self.num_tokens_to_pack(sample) for sample in training_samples
-        ]
-        num_tokens_per_bin = self._num_tokens_per_microbatch
-        num_full_padding_segments, remaining_padding = divmod(
-            num_tokens_per_bin - sum(sample_lengths), self.seq_len
-        )
-        return (
-            sum(length**2 for length in sample_lengths)
-            + num_full_padding_segments * self.seq_len**2
-            + remaining_padding**2
+        return packed_attention_cost(
+            [self.num_tokens_to_pack(sample) for sample in training_samples],
+            num_tokens=self._num_tokens_per_microbatch,
+            max_context_length=self.seq_len,
         )
 
     def _pack_with_lpt(
