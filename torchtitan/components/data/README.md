@@ -500,9 +500,11 @@ config.dataloader = GrainDataLoader.Config(
 
 The default cost, `document_attention_cost`, is the sum of squared attention segment lengths, read from `positions` as the varlen attention metadata does: documents plus the padding tail, which attention computes as segments of `max_context_length`. RL's batcher uses the same model (`packed_attention_cost`).
 
-Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, and gradient accumulation when FSDP synchronizes every microbatch (the default). It does not help when ranks synchronize once per several microbatches (pipeline parallelism, `defer_fsdp_gradient_reduction`): there each rank's sum over the step matters, and reordering within a window does not balance it. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
+Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, and gradient accumulation when FSDP synchronizes every microbatch (the default). It does not help when ranks synchronize once per several microbatches (pipeline parallelism, `defer_fsdp_gradient_reduction`): there each rank's sum over the step matters, and reordering within a window does not balance it.
 
-Datasets whose rows already cost about the same (C4, short chat SFT) gain little.
+Costs: each rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window from the parent iterator.
+
+The gain depends on how much row costs vary. Long-context datasets that mix many short documents with some full-length ones (for example ProLong, OBELICS, or long-context code corpora) gain the most. Datasets whose rows already cost about the same (C4, short chat SFT) gain little, and so do datasets where most rows are a single full-length document, since no order can split a document.
 
 `LocalBalancer` cannot fix a window in which one rank holds several heavy microbatches. `GlobalBalancer` plans the window across all data-parallel ranks and moves microbatches between them:
 
@@ -520,9 +522,11 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors. CP and TP peers read the same microbatches and exchange with the ranks in the same position of other data-parallel ranks. It assumes the data-parallel mesh dimensions come before CP and TP and no pipeline parallelism, and checks this at startup. A peer that stops producing microbatches for 30 minutes makes the loader raise rather than fall back, since a rank that kept its own microbatches would train different data than its CP peers.
+It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors; received tensors are pinned like the collators' output. Ranks that share a data-parallel rank (CP, TP, PP stages) read the same microbatches and compute the same plan; each exchanges over a gloo group with the same ranks as its data-parallel process group, which the trainer passes to the loader. A peer that stops producing microbatches for 30 minutes makes the loader raise rather than fall back, since a rank that kept its own microbatches would train different data than its CP and TP peers.
 
-Measured on 4 GB300 nodes (Qwen3.5-9B, 1M-token rows of up to 4 documents, DP 8 x CP 2, Ulysses, window 8): `GlobalBalancer` ran 82.0 s per step against 87.1 s for `LocalBalancer` (1.06x). Planning takes 0.1 ms and the exchange about 0.1 s per window, overlapped with training.
+With pipeline parallelism, ranks synchronize once per step of several microbatches, so what matters is each rank's sum over the step. `GlobalBalancer` balances each microbatch slot instead, which can add pipeline bubbles.
+
+Measured with a prototype of this design that sent int32 tensors instead of pickled microbatches (4 GB300 nodes, Qwen3.5-9B, 1M-token rows of up to 4 documents, DP 8 x CP 2, Ulysses, window 8): 82.0 s per step against 87.1 s for `LocalBalancer` (1.06x); planning took 0.1 ms and the exchange about 50 ms per window, overlapped with training. Pickling keeps the original dtypes, so this implementation sends about twice the bytes.
 
 # Distributed and checkpoint behavior
 

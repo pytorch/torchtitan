@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
+import torch.distributed as dist
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 from torchtitan.components.data.balancing import (
@@ -122,6 +123,7 @@ class GrainDataLoader(BaseDataLoader):
         max_context_length: int,
         num_tokens_per_microbatch: int,
         vision_processor: VisionProcessor | None = None,
+        dp_group: dist.ProcessGroup | None = None,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -184,11 +186,12 @@ class GrainDataLoader(BaseDataLoader):
             batch_fn=collator,
         )
 
+        self._balancer: MicrobatchBalancer | None = None
         if config.balancer is not None:
             # Built on every rank's main thread: balancers that communicate
             # create their process groups here.
-            balancer = config.balancer.build(
-                dp_rank=dp_rank, dp_world_size=dp_world_size
+            balancer = self._balancer = config.balancer.build(
+                dp_rank=dp_rank, dp_world_size=dp_world_size, dp_group=dp_group
             )
             dataset = MicrobatchBalancingIterDataset(dataset, balancer=balancer)
 
@@ -230,4 +233,6 @@ class GrainDataLoader(BaseDataLoader):
             raise
 
     def close(self) -> None:
+        if self._balancer is not None:
+            self._balancer.close()  # unblock the prefetch thread first
         self._iterator.close()
