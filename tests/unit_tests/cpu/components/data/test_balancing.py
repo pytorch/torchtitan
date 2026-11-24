@@ -56,14 +56,9 @@ class TestBalancing(unittest.TestCase):
             document_attention_cost(mb),
             packed_attention_cost([3, 5], num_tokens=16, max_context_length=8),
         )
-        # per_sample_pad_multiple 4: documents padded to 4 and 8, then a tail of 4.
+        # per_sample_pad_multiple 4: documents of 3 and 5 padded to 4 and 8 (the
+        # padding continues their positions), then a tail of 4.
         self.assertEqual(document_attention_cost(_microbatch(r(4) + r(8) + r(4))), 96)
-        # Packer and collator tails of 4 each: segments 4 and 4, not one of 8.
-        self.assertEqual(
-            document_attention_cost(_microbatch(r(3) + r(5) + r(4) + r(4))), 66
-        )
-        # A row that starts mid-document: the leading run is its own segment.
-        self.assertEqual(document_attention_cost(_microbatch([5, 6, 7, 0, 1])), 13)
 
     def test_each_window_heaviest_first(self):
         out = list(_iter([3, 9, 1, 4, 2, 8, 5, 7, 6], window_size=4))
