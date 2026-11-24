@@ -103,3 +103,20 @@ by setting `config.debug.seed` in a recipe function. Fit temperature on 500
 calibration questions and evaluate on 500 final-test questions. Accuracy
 and ECE use the target probability of the predicted option as its expected
 correctness.
+
+Each training run used one A800 and exported its step-600 checkpoint.
+
+| Objective | Seed | Expected accuracy ↑ | Expected Brier ↓ | ECE ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-0.8B-Base | – | 0.4315 | 0.6455 | 0.0555 |
+| Full-vocabulary CE | 42 | 0.3258 | 0.6922 | 0.1152 |
+| Full-vocabulary CE | 43 | 0.3409 | 0.6910 | 0.1028 |
+| Candidate NLL + Brier | 42 | 0.3513 | 0.6752 | 0.0770 |
+| Candidate NLL + Brier | 43 | 0.3753 | 0.6648 | 0.0552 |
+
+Candidate NLL + Brier lowered expected Brier relative to CE in both seeds.
+The mean paired difference was −0.0216, with a 95% interval of
+[−0.0360, −0.0072] from 10,000 bootstrap resamples of held-out states.
+The interval describes test-set uncertainty conditional on these two runs.
+The base checkpoint had the best expected accuracy and Brier. All four
+fine-tuned models hit the upper edge of the shared temperature grid.
