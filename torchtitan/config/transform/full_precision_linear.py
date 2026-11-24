@@ -44,8 +44,12 @@ class FullPrecisionLinearTransform(ModelConfigTransform):
                 dict.fromkeys((*config.preserve_dtype_params, "weight"))
             )
             new_config = FullPrecisionLinear.Config(**kwargs)
-            if isinstance(parent, list):
+            if parent is None:
+                model = new_config
+            elif isinstance(parent, list):
+                assert isinstance(attr, int)
                 parent[attr] = new_config
             else:
+                assert isinstance(attr, str)
                 setattr(parent, attr, new_config)
         return model
