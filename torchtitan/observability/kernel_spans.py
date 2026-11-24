@@ -152,7 +152,7 @@ class KernelSpanRecorder(Configurable):
         # this module for the config.
         # TODO: these are private torch APIs; move to a public per-step span
         # observer once torch exposes one.
-        from cupti.cupti import ActivityKind
+        from cupti.cupti import ActivityKind  # pyrefly: ignore[missing-import]
         from torch.profiler._cuspy.observers.node_timer import NodeTimerObserver
 
         from torchtitan.observability.profiler import (
