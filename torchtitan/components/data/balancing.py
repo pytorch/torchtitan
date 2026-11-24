@@ -36,13 +36,18 @@ The set of microbatches per window is unchanged; each moves at most
 ``window_size - 1`` steps (like the packer's own bin shuffling). Local
 balancing does not depend on the mesh, so it applies unchanged to
 dp_replicate, dp_shard, CP (CP peers read the same data and order it the same
-way), gradient accumulation, and pipeline-parallel microbatches. No order can
+way), and gradient accumulation when FSDP synchronizes every microbatch (the
+default). It does not help when ranks synchronize once per several
+microbatches: with pipeline parallelism, or with
+``defer_fsdp_gradient_reduction``, what matters is each rank's sum over the
+step's microbatches, which reordering within a window does not balance. No
+order can
 split a single document: a row that is one full-length document stays as
 heavy as it is.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,46 +61,75 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable
 
 
-def document_attention_cost(
-    microbatch: TrainingMicrobatch, *, token_weight: float = 0.0
-) -> float:
-    """Relative compute cost of a token microbatch with document masking.
+def attention_cost(segment_lengths: Sequence[int]) -> int:
+    """Document-masked attention cost: ``sum(L ** 2)`` over attention segments.
 
-    ``cost = sum(document_length ** 2) + token_weight * num_non_padding_tokens``
+    Each token attends only to earlier tokens of its own segment, so this is
+    proportional to attention FLOPs. Linear layers cost the same for every
+    microbatch of a fixed size, padding included, so they do not change the
+    order.
+    """
+    return sum(length * length for length in segment_lengths)
 
-    Documents are maximal runs of consecutive positions over non-padding
-    tokens, so a position reset starts a new document::
 
-        positions     0 1 2 3 0 1 0 1 2 . .      (. = padding)
-        documents     [ 4   ] [2] [ 3 ]
-        cost          16 + 4 + 9 = 29
+def padding_segment_lengths(num_padding: int, max_context_length: int) -> list[int]:
+    """Segments of a padding tail whose positions reset every ``max_context_length``.
 
-    The squared term is proportional to document-masked attention FLOPs. The
-    token term covers linear layers; it only changes the order when rows hold
-    different numbers of non-padding tokens. Set ``token_weight`` to the
-    ratio of per-token linear cost to per-token-pair attention cost, about
-    the non-embedding parameters per layer divided by the hidden size. A fit
-    of Llama-3-8B step times on GB300 gives 57,220.
+    Collators and packers give padding positions ``arange(n) % max_context_length``,
+    so attention computes 10 padding tokens with ``max_context_length`` 4 as
+    segments ``[4, 4, 2]``.
+    """
+    num_full, rest = divmod(num_padding, max_context_length)
+    return [max_context_length] * num_full + ([rest] if rest else [])
+
+
+def positions_segment_lengths(positions: torch.Tensor) -> list[int]:
+    """Segments as the varlen attention metadata sees them.
+
+    ``create_varlen_metadata_for_document`` starts a segment at every
+    ``positions == 0``, padding included; the first token always starts one
+    (a row may begin mid-document)::
+
+        positions     5 6 7 0 1 0 1 2 | 0 1 2 3 4 0 1
+        segments      [ 3 ] [2] [ 3 ]   [   5   ] [2]
+
+    (``|``: padding starts; ``max_context_length`` = 5.)
+    """
+    positions = positions.reshape(-1)
+    if positions.numel() == 0:
+        return []
+    starts = positions == 0
+    starts[0] = True
+    return torch.bincount(torch.cumsum(starts, dim=0))[1:].tolist()
+
+
+def packed_attention_cost(
+    document_lengths: Sequence[int], *, num_tokens: int, max_context_length: int
+) -> int:
+    """``attention_cost`` of documents packed into ``num_tokens``, then padding.
+
+    For packing decisions made from lengths, before a microbatch exists (RL's
+    batcher): the segments are the documents plus the padding tail.
+    """
+    tail = padding_segment_lengths(
+        num_tokens - sum(document_lengths), max_context_length
+    )
+    return attention_cost([*document_lengths, *tail])
+
+
+def document_attention_cost(microbatch: TrainingMicrobatch) -> float:
+    """``attention_cost`` of a collated token microbatch, from its ``positions``.
+
+    Reading segments from ``positions`` matches the kernel exactly, including
+    per-document padding (``per_sample_pad_multiple``) and padding added by
+    both the packer and the collator.
     """
     if not isinstance(microbatch, TokenizedTrainingMicrobatch):
         raise ValueError(
             "document_attention_cost requires TokenizedTrainingMicrobatch, got "
             f"{type(microbatch).__name__}"
         )
-    positions = microbatch.positions.reshape(-1)
-    valid = ~microbatch.padding_mask.reshape(-1)
-    if positions.numel() == 0:
-        return 0.0
-    # A token starts a document if it is valid and does not continue the
-    # previous valid token's position run.
-    prev = torch.cat([positions.new_full((1,), -2), positions[:-1]])
-    prev_valid = torch.cat([valid.new_zeros(1), valid[:-1]])
-    starts = valid & ~(prev_valid & (positions == prev + 1))
-    doc_ids = torch.cumsum(starts.to(torch.int64), dim=0)[valid]
-    if doc_ids.numel() == 0:
-        return 0.0
-    lengths = torch.bincount(doc_ids).to(torch.float64)
-    return float(torch.dot(lengths, lengths)) + token_weight * doc_ids.numel()
+    return float(attention_cost(positions_segment_lengths(microbatch.positions)))
 
 
 class MicrobatchBalancer(Configurable, ABC):
@@ -108,8 +142,7 @@ class MicrobatchBalancer(Configurable, ABC):
         better but hold more collated microbatches in host memory and move
         microbatches further from their packed order."""
         cost_fn: Callable[[TrainingMicrobatch], float] = document_attention_cost
-        """Relative cost of one microbatch; use ``functools.partial`` to set the
-        weights of a cost function."""
+        """Relative cost of one microbatch."""
 
         def __post_init__(self) -> None:
             if self.window_size < 1:
