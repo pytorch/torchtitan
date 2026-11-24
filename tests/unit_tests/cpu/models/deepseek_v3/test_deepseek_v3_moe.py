@@ -24,7 +24,7 @@ from torchtitan.models.common.linear.async_linear import AsyncRowParallelLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
-from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
+from torchtitan.models.deepseek_v3.mtp import DeepSeekV3MTPBlock
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         )
 
     def test_mtp_valid_mask_is_explicitly_sharded(self):
-        mtp = MTPTransformerBlock.__new__(MTPTransformerBlock)
+        mtp = DeepSeekV3MTPBlock.__new__(DeepSeekV3MTPBlock)
         valid_mask_T = torch.ones(4, dtype=torch.bool)
         tp_group = object()
 
