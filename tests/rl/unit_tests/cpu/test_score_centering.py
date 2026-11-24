@@ -133,6 +133,11 @@ def test_score_centering_matches_reference_implementation(config_kwargs) -> None
 
     torch.testing.assert_close(loss, reference_loss)
     torch.testing.assert_close(grad, reference_grad)
+    sampled_ratio = _ratios_by_kind(logits, labels, loss_inputs, temperature)["sampled"]
+    log_ratio = sampled_ratio.log()
+    torch.testing.assert_close(
+        metrics["loss/mismatch_kl/mean"], (torch.expm1(log_ratio) - log_ratio).mean()
+    )
 
 
 @pytest.mark.parametrize(

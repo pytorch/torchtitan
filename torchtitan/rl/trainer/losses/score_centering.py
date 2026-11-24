@@ -184,9 +184,8 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
             masked_log_ratio = torch.where(
                 effective_loss_mask, trainer_logprobs - generator_logprobs, 0.0
             )
-            ratio = torch.exp(
-                torch.clamp(masked_log_ratio, -MAX_LOG_RATIO, MAX_LOG_RATIO)
-            )
+            log_ratio = torch.clamp(masked_log_ratio, -MAX_LOG_RATIO, MAX_LOG_RATIO)
+            ratio = torch.exp(log_ratio)
             trainer_topk_probs = torch.exp(trainer_topk_logprobs)
             generator_topk_probs = torch.exp(generator_topk_logprobs)
             trainer_topk_mass = trainer_topk_probs.sum(-1)
@@ -253,6 +252,12 @@ class ScoreCenteringLoss(Loss[torch.Tensor]):
                 # estimate of -KL(generator || trainer).
                 "bit_wise/logprob_diff/mean": normalize(
                     masked_log_ratio.float().sum(), global_loss_token_counts
+                ),
+                # Mean of exp(r) - 1 - r over the same tokens, r = log_ratio: the k3 estimate of
+                # KL(generator || trainer). Never negative: mismatches of opposite sign don't cancel.
+                "loss/mismatch_kl/mean": normalize(
+                    (torch.expm1(log_ratio) - log_ratio).float().sum(),
+                    global_loss_token_counts,
                 ),
                 "bit_wise/ratio_tokens_different/mean": normalize(
                     (masked_log_ratio.abs() > 1e-6).float().sum(),
