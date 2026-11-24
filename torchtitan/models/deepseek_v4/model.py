@@ -237,7 +237,8 @@ class DeepSeekV4Model(Decoder):
             )
             return lambda input_dict: (
                 decoder_estimate(input_dict)
-                + repeated_mtp_flops_per_token * input_dict["input"].numel()
+                + repeated_mtp_flops_per_token
+                * int((~input_dict["padding_mask"]).sum())
             )
 
     def __init__(self, config: Config):
