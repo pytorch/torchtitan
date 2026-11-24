@@ -223,6 +223,8 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch.global_loss_token_counts[0] > 0
     assert batch.global_routing_token_counts.shape == (1,)
     assert batch.group_ids == [0, 1]
+    # Only group 1 trains; the controller released group 0 when the batcher reported it untrainable.
+    assert batch.trainable_group_ids == [1]
 
 
 def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
@@ -650,7 +652,7 @@ def test_take_finalized_does_not_release_active_slot() -> None:
         await asyncio.sleep(0)
         assert not waiter.done()
 
-        await buffer.release_active_groups(1, reason="trained")
+        await buffer.release_slots([0], reason="trained")
         assert await waiter
 
     asyncio.run(run())
@@ -677,7 +679,7 @@ def test_untrainable_group_releases_before_training() -> None:
         training_sample_group = TrainingSampleGroup(
             group_id=0, training_samples=[], metrics=[]
         )
-        await buffer.release_active_groups(1, reason="untrainable_group")
+        await buffer.release_slots([0], reason="untrainable_group")
         assert batcher.add_training_samples(
             training_sample_group=training_sample_group
         ) == (
@@ -821,6 +823,28 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
         assert taker.result().group_id == 6
 
     asyncio.run(run())
+
+
+def test_release_slots_frees_only_the_named_groups_slots() -> None:
+    async def run() -> list[m.Metric]:
+        buffer = _buffer(capacity=3, window_size=None)
+        await _admit(buffer, 0)
+        await _admit(buffer, 1)
+        # Each failure is a caller bug that would otherwise free or keep the wrong slots.
+        with pytest.raises(RuntimeError, match="already holds an active slot"):
+            await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
+        with pytest.raises(RuntimeError, match=r"without a slot: \[5\]"):
+            await buffer.release_slots([5], reason="trained")
+        with pytest.raises(RuntimeError, match=r"repeated: \[1\]"):
+            await buffer.release_slots([1, 1], reason="trained")
+        await buffer.release_slots([1], reason="untrainable_group")
+        with pytest.raises(RuntimeError, match=r"without a slot: \[1\]"):
+            await buffer.release_slots([1], reason="trained")
+        return buffer.metrics()
+
+    metrics = {metric.key: metric.value.value for metric in asyncio.run(run())}
+    # Group 0 still holds its slot.
+    assert metrics["rollout_buffer/available_active_slots"] == 2
 
 
 async def _block_forever(*args, **kwargs) -> None:

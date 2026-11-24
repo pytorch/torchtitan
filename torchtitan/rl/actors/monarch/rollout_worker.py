@@ -79,14 +79,17 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
     ) -> RolloutGroup:
-        return await self._worker.run_group(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
-        )
+        # The worker's time in the call. The controller's `rollout_group` span times the whole
+        # call, so the difference is the hop's transfer time.
+        with sl.log_trace_span("run_group"):
+            return await self._worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=group_size,
+                sampling=sampling,
+            )
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

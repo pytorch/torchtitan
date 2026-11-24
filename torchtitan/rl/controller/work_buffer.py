@@ -54,22 +54,22 @@ class RolloutGroupWork:
 class RolloutGroupWorkBuffer(Configurable):
     """Buffer of `RolloutGroupWork` shared between the data-input, rollout, and batcher loops.
 
-    Each entry is a RolloutGroupWork moving WAITING -> CLAIMED -> FINALIZED. An active-slot budget caps
-    the pipeline at `max_active_rollout_groups` active slots. With `window_size=None`, the batcher takes
-    the oldest finalized group anywhere in the buffer. A finite `window_size` restricts it to a look-ahead
-    range anchored at the oldest entry.
+    Each entry is a RolloutGroupWork moving WAITING -> CLAIMED -> FINALIZED. Active slots, keyed by
+    group id, cap the pipeline at `max_active_rollout_groups` groups. With `window_size=None`, the
+    batcher takes the oldest finalized group anywhere in the buffer. A finite `window_size` restricts it
+    to a look-ahead range anchored at the oldest entry.
 
     For details on the buffer's callers, check the diagram in the controller.py file.
 
-    NOTE: a work slot is **NOT** released when marked as FINALIZED or taken by the batcher.
-    Instead, it is only released on `release_active_groups` calls by the trainer
-    or data filtering. This is done this way so that we can guarantee we never have more
-    than `max_active_rollout_groups` in the entire pipeline (buffer+queue+training).
-    Otherwise, we would produce born-stale examples.
+    NOTE: a group keeps its active slot after it is FINALIZED and taken by the batcher. Only
+    `release_slots(group_ids)` frees it: the trainer releases the groups it trained, and the batcher
+    loop releases a group with no trainable samples. This way the entire pipeline (buffer+queue+training)
+    never holds more than `max_active_rollout_groups` groups. Otherwise, we would produce born-stale
+    examples.
 
     Entry lifecycle vs active slot:
         entry:        WAITING -> CLAIMED -> FINALIZED -> removed by take_finalized()
-        active slot:  charged by add_work() ............ freed by release_active_groups()
+        active slot:  taken by add_work() .............. freed by release_slots([group_id])
 
     Example:
         # target_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
@@ -79,7 +79,7 @@ class RolloutGroupWorkBuffer(Configurable):
         g1 = await buffer.take_finalized()                     # g1 leaves the dict; still 4/4 active
         slot_task = asyncio.create_task(buffer.wait_for_slot())  # waits: take_finalized did not free a slot
         assert not slot_task.done()
-        await buffer.release_active_groups(2, reason="trained")  # trainer pulled -> a slot frees
+        await buffer.release_slots([0, 1], reason="trained")   # trainer pulled -> two slots free
         assert await slot_task                                   # wait_for_slot now returns
     """
 
@@ -92,7 +92,8 @@ class RolloutGroupWorkBuffer(Configurable):
     ) -> None:
         self._max_active_rollout_groups = max_active_rollout_groups
         self._window_size = window_size
-        self._active_rollout_groups = 0
+        # Group ids holding an active slot, from add_work() until release_slots().
+        self._active_group_ids: set[int] = set()
         # metric: Per-flush peak active slots; reset on `.metrics()` call.
         self._active_rollout_groups_peak_since_flush = 0
         self._work_by_group_id: collections.OrderedDict[
@@ -109,7 +110,7 @@ class RolloutGroupWorkBuffer(Configurable):
         # batcher consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
 
     def _has_active_slot_available(self) -> bool:
-        return self._active_rollout_groups < self._max_active_rollout_groups
+        return len(self._active_group_ids) < self._max_active_rollout_groups
 
     async def wait_for_slot(self) -> bool:
         """Wait until one more rollout group may enter the active buffer.
@@ -128,16 +129,21 @@ class RolloutGroupWorkBuffer(Configurable):
             return not self._closed
 
     async def add_work(self, work: RolloutGroupWork) -> None:
-        """Admit one rollout group as WAITING and charge one active slot."""
+        """Admit one rollout group as WAITING under an active slot keyed by its group id."""
         async with self._condition:
             if not self._has_active_slot_available():
                 raise RuntimeError(
                     "RolloutGroupWorkBuffer.add_work called without an active slot"
                 )
-            self._active_rollout_groups += 1
+            # A repeated id would share one slot, and a slot would never be freed.
+            if work.group_id in self._active_group_ids:
+                raise RuntimeError(
+                    f"Group {work.group_id} already holds an active slot"
+                )
+            self._active_group_ids.add(work.group_id)
             self._active_rollout_groups_peak_since_flush = max(
                 self._active_rollout_groups_peak_since_flush,
-                self._active_rollout_groups,
+                len(self._active_group_ids),
             )
             self._work_by_group_id[work.group_id] = work
             self._condition.notify_all()
@@ -205,38 +211,47 @@ class RolloutGroupWorkBuffer(Configurable):
                         return work.rollout_group
                 await self._condition.wait()  # nothing finalized inside the window -> stall
 
-    async def release_active_groups(self, count: int, *, reason: str) -> None:
-        """Free active slots: the trainer releases trained slots after its model state dict pull; the batcher
-        releases untrainable/filtered slots immediately.
+    async def release_slots(self, group_ids: list[int], *, reason: str) -> None:
+        """Free the active slots of `group_ids`: the trainer releases the groups it trained after
+        its model state dict pull; the batcher loop releases a group with no trainable samples
+        immediately.
 
         Args:
-            count:  Number of rollout groups leaving the active slots.
+            group_ids: Groups leaving the active slots. Each must hold one; naming a group that
+                does not is a caller bug and raises.
             reason: Metric suffix such as `"trained"` or `"untrainable_group"`.
 
         Example:
-            # trainer pulled weights after a step over 8 groups -> free their 8 slots
-            await buffer.release_active_groups(8, reason="trained")
-            # batcher dropped one zero-std group -> free its single slot
-            await buffer.release_active_groups(1, reason="untrainable_group")
+            # trainer pulled weights after a step over groups 8..15 -> free their 8 slots
+            await buffer.release_slots(list(range(8, 16)), reason="trained")
+            # batcher loop got no training samples from group 17 -> free its slot
+            await buffer.release_slots([17], reason="untrainable_group")
         """
-        if count < 0:
-            raise ValueError(f"count must be non-negative, got {count}")
-        if count == 0:
-            return
         async with self._condition:
-            if count > self._active_rollout_groups:
-                raise RuntimeError(
-                    f"release_active_groups({count}) exceeds active count {self._active_rollout_groups}"
+            released_group_ids = set(group_ids)
+            not_active = released_group_ids - self._active_group_ids
+            if not_active or len(released_group_ids) < len(group_ids):
+                repeated = sorted(
+                    group_id
+                    for group_id, count in collections.Counter(group_ids).items()
+                    if count > 1
                 )
-            self._active_rollout_groups -= count
-            sl.log_trace_scalar({f"rollout_buffer/released/{reason}": float(count)})
+                raise RuntimeError(
+                    f"release_slots({group_ids}) must name each group once, and only groups that "
+                    f"hold an active slot; repeated: {repeated}, without a slot: {sorted(not_active)}"
+                )
+            self._active_group_ids -= released_group_ids
+            sl.log_trace_scalar(
+                {f"rollout_buffer/released/{reason}": float(len(group_ids))}
+            )
             self._condition.notify_all()
 
     async def close(self) -> None:
         """run() shutdown calls this once. Sets `_closed`, drops buffered work, and wakes every waiter.
 
         After this, all four waiters unblock and exit their loops: wait_for_slot() returns False, and
-        claim_next()/take_finalized() return None.
+        claim_next()/take_finalized() return None. Active slots stay, so a model state dict pull
+        that ends after close can still release its groups.
         """
         async with self._condition:
             self._closed = True
@@ -267,10 +282,10 @@ class RolloutGroupWorkBuffer(Configurable):
             m.Metric(
                 "rollout_buffer/available_active_slots",
                 m.NoReduce(
-                    float(self._max_active_rollout_groups - self._active_rollout_groups)
+                    float(self._max_active_rollout_groups - len(self._active_group_ids))
                 ),
             ),
         ]
         # Next interval starts from the current gauge, not 0: slots stay occupied across a flush.
-        self._active_rollout_groups_peak_since_flush = self._active_rollout_groups
+        self._active_rollout_groups_peak_since_flush = len(self._active_group_ids)
         return out

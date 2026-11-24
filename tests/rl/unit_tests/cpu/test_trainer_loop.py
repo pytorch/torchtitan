@@ -76,8 +76,8 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         if on_pull is not None:
             await on_pull()
 
-    async def release_active_groups(count, *, reason):
-        events.append(f"release {count} {reason}")
+    async def release_slots(group_ids, *, reason):
+        events.append(f"release_slots {group_ids} {reason}")
 
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
@@ -119,7 +119,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         state_dict=lambda: {},
     )
     controller._group_buffer = SimpleNamespace(
-        metrics=lambda: [], release_active_groups=release_active_groups
+        metrics=lambda: [], release_slots=release_slots
     )
     controller.logged_metrics = []
     controller.metrics_processor = SimpleNamespace(
@@ -131,14 +131,17 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
 
 
 def _batch_queue(num_batches: int) -> asyncio.Queue:
+    """Batch `i` trains groups 5i..5i+4 (num_prompts_per_train_step=5), plus one untrainable group."""
     queue: asyncio.Queue = asyncio.Queue()
-    for _ in range(num_batches):
+    for batch_index in range(num_batches):
+        trainable_group_ids = list(range(5 * batch_index, 5 * batch_index + 5))
         queue.put_nowait(
             SimpleNamespace(
                 microbatch_groups=[],
                 global_loss_token_counts=[1],
                 global_routing_token_counts=None,
-                group_ids=[],
+                group_ids=[*trainable_group_ids, 100 + batch_index],
+                trainable_group_ids=trainable_group_ids,
                 min_policy_versions=[0],
                 metrics=[],
             )
@@ -167,13 +170,14 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
         # Step 1's pull -> release runs in the background. The per-DP-rank forward_backward
         # calls run as tasks, so with these instant fakes the pull finishes first.
         "pull 1",
-        "release 5 trained",
+        # Only the trained groups: the batcher loop released the untrainable one already.
+        "release_slots [0, 1, 2, 3, 4] trained",
         "fwd_bwd 2",
         "optim 2",
         "push start",
         "push end",
         "pull 2",
-        "release 5 trained",
+        "release_slots [5, 6, 7, 8, 9] trained",
     ]
 
 
@@ -199,14 +203,18 @@ def test_next_push_waits_for_the_previous_pull() -> None:
 
     # Push 2 must not overwrite the TorchStore key while pull 1 reads it.
     second_push = [i for i, event in enumerate(events) if event == "push start"][1]
-    assert events.index("release 5 trained") < second_push
+    assert events.index("release_slots [0, 1, 2, 3, 4] trained") < second_push
 
 
 def test_last_push_and_pull_finish_before_the_loop_returns() -> None:
     events: list[str] = []
     _run(_controller(events), num_training_steps=1)
 
-    assert events[-3:] == ["push end", "pull 1", "release 5 trained"]
+    assert events[-3:] == [
+        "push end",
+        "pull 1",
+        "release_slots [0, 1, 2, 3, 4] trained",
+    ]
 
 
 def test_push_time_is_logged_at_its_step_and_pull_time_one_step_late() -> None:
