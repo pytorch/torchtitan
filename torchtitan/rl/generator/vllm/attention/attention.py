@@ -372,10 +372,11 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         cu_seqlens_q = attn_metadata.query_start_loc
         max_seqlen_q = attn_metadata.max_query_len
         seqused_k = attn_metadata.seq_lens
+
         # A verify step: every row holds one token plus its drafts (FULL graphs pad with whole rows).
         # TODO: drop _verify_rows_as_decode once FA4's SwapAB decode kernel takes 1 + k query
-        # tokens per row; it needs max_seqlen_q == 1 (flash_attn/cute/config.py:1280). FA4
-        # issue to file.
+        # tokens per row; it needs max_seqlen_q == 1 (SwapABPolicy.rejection in
+        # flash_attn/cute/config.py). FA4 issue to file.
         is_uniform_verify = (
             max_seqlen_q == self.verify_query_len
             and num_actual_tokens == max_seqlen_q * seqused_k.shape[0]
@@ -395,6 +396,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
                 attn_metadata,
                 descales=descales,
             )
+
         if (
             current_flash_attention_impl() == "FA4"
             and max_seqlen_q > 1
