@@ -117,18 +117,15 @@ class Qwen35Attention(Attention):
         q_norm: OffsetRMSNorm.Config
         k_norm: OffsetRMSNorm.Config
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
-            head_dim = self.head_dim
-            return quadratic_attention_flops_per_token(
+            # A causal query at document position p attends to p + 1 keys.
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
-                qk_head_dim=head_dim,
-                v_head_dim=head_dim,
-                seq_len=seq_len,
-                sliding_window_size=None,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                num_keys=positions + 1,
             )
 
     def __init__(self, config: Config):

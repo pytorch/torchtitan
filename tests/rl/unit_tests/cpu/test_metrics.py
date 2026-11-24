@@ -8,8 +8,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
@@ -874,3 +878,61 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def test_event_loop_lag_measures_a_blocked_loop() -> None:
+    async def run() -> tuple[list[m.Metric], list[m.Metric]]:
+        lag = m.EventLoopLag("controller", interval_s=0.01)
+        # Let the lag task start its first sleep.
+        await asyncio.sleep(0.02)
+        time.sleep(0.3)
+        # Yield, so the lag task wakes up late and records the block.
+        await asyncio.sleep(0.05)
+        after_block = lag.flush()
+        await asyncio.sleep(0.05)
+        after_no_block = lag.flush()
+        lag.close()
+        return after_block, after_no_block
+
+    after_block, after_no_block = asyncio.run(run())
+    blocked = {type(metric.value): metric.value for metric in after_block}
+    assert [metric.key for metric in after_block] == [
+        "controller/event_loop_lag_ms",
+        "controller/event_loop_lag_ms_per_s",
+    ]
+    assert blocked[m.Max].value >= 250.0
+    # The Mean holds the late ms over the seconds the flush covers, which include the 0.3 s block.
+    assert blocked[m.Mean].value >= 250.0
+    assert blocked[m.Mean].count >= 0.3
+    # The flush started over: no block since, so only small scheduling delays count.
+    not_blocked = {type(metric.value): metric.value for metric in after_no_block}
+    assert not_blocked[m.Max].value < 200.0
+    assert not_blocked[m.Mean].value < 200.0
+
+
+def test_thread_pool_lag_counts_a_stuck_pool(caplog) -> None:
+    """One thread, held until the release: the flush reads the waiting check's wait so far, and a
+    check that waits past `warn_after_s` logs a warning."""
+
+    async def run() -> list[m.Metric]:
+        release = threading.Event()
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
+        )
+        lag = m.ThreadPoolLag("rollout_worker", warn_after_s=0.1)
+        blocking_call = asyncio.ensure_future(asyncio.to_thread(release.wait))
+        await asyncio.sleep(0.3)
+        metrics = lag.flush()
+        release.set()
+        await blocking_call
+        lag.close()
+        return metrics
+
+    with caplog.at_level(logging.WARNING):
+        metrics = asyncio.run(run())
+    values = {metric.key: metric.value.value for metric in metrics}
+    # The first check starts 0.05 s in, so it has waited about 0.25 s at the flush.
+    assert values["rollout_worker/thread_pool_lag_ms"] >= 200.0
+    # `Mean.value` is the total ms late, the wait so far included.
+    assert values["rollout_worker/thread_pool_lag_ms_per_s"] >= 200.0
+    assert "No free thread" in caplog.text
