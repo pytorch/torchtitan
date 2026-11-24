@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
@@ -150,8 +149,6 @@ class Trainer(Configurable):
     gradient_accumulation_steps: int
     num_pp_microbatches: int
 
-    # Enable debug tracing on failure: https://pytorch.org/docs/stable/elastic/errors.html
-    @record
     def __init__(self, config: Config):
         self.config = config
         config.model = copy.deepcopy(config.model)
@@ -495,7 +492,6 @@ class Trainer(Configurable):
             num_flops=mean_num_flops,
         )
 
-    @record
     def train(self):
         config = self.config
         engine = self.engine

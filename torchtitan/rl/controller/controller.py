@@ -645,6 +645,8 @@ class Controller(Configurable):
         # One task per validation that runs beside training (all its prompts), from its start until
         # `_log_ended_validations` logs its metrics once or drops it.
         self._validation_tasks: list[asyncio.Task[list[m.Metric]]] = []
+        # `_trainer_loop`'s in-flight pull task, which `run()` cancels at teardown.
+        self._model_state_dict_pull_tasks: list[asyncio.Task[float]] = []
         # A validation that came due but hasn't started: it waits for the running one
         # (`defer_new_if_not_finished`).
         self._has_pending_validation = False
@@ -1072,9 +1074,9 @@ class Controller(Configurable):
         )
 
         # training_batch_queue
-        training_batch_queue: asyncio.Queue[TrainerStepBatch | None] = asyncio.Queue(
-            maxsize=1
-        )
+        training_batch_queue: asyncio.Queue[
+            TrainerStepBatch | Exception | None
+        ] = asyncio.Queue(maxsize=1)
 
         # rollout_loop
         generate_fn = self._make_generate_fn()
@@ -1156,12 +1158,20 @@ class Controller(Configurable):
             # TODO: abort a cancelled validation's rollouts and release its groups. The generators have no abort
             # path yet.
             await self._group_buffer.close()
-            for task in (*background_tasks, trainer_task, *self._validation_tasks):
+            # TODO: cancelling stops only the controller's waits. The remote pull can still run
+            # while close() tears down the actors.
+            for task in (
+                *background_tasks,
+                trainer_task,
+                *self._validation_tasks,
+                *self._model_state_dict_pull_tasks,
+            ):
                 task.cancel()
             await asyncio.gather(
                 *background_tasks,
                 trainer_task,
                 *self._validation_tasks,
+                *self._model_state_dict_pull_tasks,
                 return_exceptions=True,
             )
             self._event_loop_lag.close()
@@ -1316,7 +1326,7 @@ class Controller(Configurable):
     async def _batcher_loop(
         self,
         *,
-        training_batch_queue: "asyncio.Queue[TrainerStepBatch | None]",
+        training_batch_queue: "asyncio.Queue[TrainerStepBatch | Exception | None]",
     ) -> None:
         """Send finalized groups to the batcher actor and queue each training batch it returns.
 
@@ -1353,7 +1363,7 @@ class Controller(Configurable):
 
     async def _trainer_loop(
         self,
-        training_batch_queue: "asyncio.Queue[TrainerStepBatch | None]",
+        training_batch_queue: "asyncio.Queue[TrainerStepBatch | Exception | None]",
         *,
         num_training_steps: int,
     ) -> None:
@@ -1374,6 +1384,10 @@ class Controller(Configurable):
 
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
+
+        A failed pull puts its error into `training_batch_queue`, so this loop raises it at
+        its next wait for a batch instead of waiting forever. If that batch is already queued, the
+        error is raised where this loop awaits the pull instead.
 
         consumes: a TrainerStepBatch (training_batch_queue.get)
             waits for:    a TrainerStepBatch in the queue
@@ -1402,6 +1416,9 @@ class Controller(Configurable):
                 ):
                     packed = await training_batch_queue.get()
 
+                # A failed pull put its error here (`_pull_model_state_dict_and_release_groups`).
+                if isinstance(packed, Exception):
+                    raise packed
                 if packed is None:
                     logger.info("Batcher closed and drained; stopping training")
                     break
@@ -1505,9 +1522,11 @@ class Controller(Configurable):
                 # Overlap this step's pull -> group release with the next step's fwd/bwd.
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
-                        optimizer_result.policy_version
+                        optimizer_result.policy_version,
+                        training_batch_queue=training_batch_queue,
                     )
                 )
+                self._model_state_dict_pull_tasks = [pull_task]
 
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
@@ -1551,21 +1570,30 @@ class Controller(Configurable):
 
             self._maybe_start_validation(step=step)
 
-        # TODO: if this loop raises (e.g. a failed forward/backward, optimizer step or validation), the pull
-        # still in flight keeps running while run() tears down, and nobody reads its error ("Task exception was
-        # never retrieved"). Cancel or await it in a `finally`.
         # Finish the last pull so generators hold the final weights for the validation after training
         # (`validate_after_training`).
         if pull_task is not None:
             await pull_task
 
-    async def _pull_model_state_dict_and_release_groups(self, version: int) -> float:
+    async def _pull_model_state_dict_and_release_groups(
+        self,
+        version: int,
+        *,
+        training_batch_queue: "asyncio.Queue[TrainerStepBatch | Exception | None]",
+    ) -> float:
         """Load policy ``version`` into every generator, then admit the next rollout groups; returns
         the pull's wall time in seconds."""
-        with sl.log_trace_span("generator_pull_model_state_dict"):
-            start = time.perf_counter()
-            await self.generator_router.pull_model_state_dict.call_one(version)
-            pull_s = time.perf_counter() - start
+        try:
+            with sl.log_trace_span("generator_pull_model_state_dict"):
+                start = time.perf_counter()
+                await self.generator_router.pull_model_state_dict.call_one(version)
+                pull_s = time.perf_counter() - start
+        except Exception as error:
+            # No groups get admitted, so no batch follows: hand the error to `_trainer_loop`, which waits for one.
+            # A full queue means `_trainer_loop` already has its batch and raises when it awaits this task.
+            if not training_batch_queue.full():
+                training_batch_queue.put_nowait(error)
+            raise
         # TODO(perf): pull_model_state_dict awaits ALL generators before we release any buffer slots,
         #   so a generator that finishes its pull early idles until the slowest one. Investigate
         #   per-generator release (router surfaces each pull's completion -> release that generator's

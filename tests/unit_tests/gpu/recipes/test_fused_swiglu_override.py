@@ -5,19 +5,27 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.feed_forward import DenseFeedForward
+from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.moe.token_dispatcher import LocalTokenDispatcher
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.tools.utils import device_type
 from torchtitan_recipes.overrides.fused_swiglu import (
     FusedSwiGLU,
-    silu_and_mul_backward_kernel,
+    silu_and_mul_backward_kernel_,
     silu_and_mul_forward_kernel,
     silu_and_mul_op,
 )
 
 
+_DIM = 16
+_HIDDEN = 32
 _DEVICE = torch.accelerator.current_accelerator()
 # The ops register for torchtitan's detected device type, which can differ from
 # torch.accelerator (e.g. MPS), so skip unless the two agree.
@@ -38,12 +46,84 @@ class TestFusedSwiGLUNumerics(unittest.TestCase):
         gate_up_fused = gate_up.detach().clone().requires_grad_()
 
         out_reference = reference(gate_up_reference, offsets=offsets)
-        out_fused = fused(gate_up_fused, offsets=offsets)
+        # Backward overwrites its input, so pass a non-leaf.
+        out_fused = fused(gate_up_fused.clone(), offsets=offsets)
         torch.testing.assert_close(out_fused, out_reference)
 
         out_reference.sum().backward()
         out_fused.sum().backward()
         torch.testing.assert_close(gate_up_fused.grad, gate_up_reference.grad)
+
+    def test_only_the_activation_saves_gate_up(self):
+        """FusedSwiGLU's backward overwrites gate_up, so no other op may save it.
+
+        Saved-tensor hooks (remat, activation offload) skip autograd's version
+        check, so a second saver would silently read the gradient.
+        """
+
+        def routed_experts(w13_cls):
+            return RoutedExperts.Config(
+                w13=w13_cls.Config(
+                    group_size=1, in_features=_DIM, out_features=_HIDDEN, num_linears=2
+                ),
+                w2=w13_cls.Config(group_size=1, in_features=_HIDDEN, out_features=_DIM),
+                token_dispatcher=LocalTokenDispatcher.Config(num_experts=1, top_k=1),
+                activation_fn=FusedSwiGLU.Config(),
+            )
+
+        original_call = FusedSwiGLU.__call__
+        dense = DenseFeedForward.Config(
+            w13=Linear.Config(in_features=_DIM, out_features=_HIDDEN, num_linears=2),
+            w2=Linear.Config(in_features=_HIDDEN, out_features=_DIM),
+            activation_fn=FusedSwiGLU.Config(),
+        )
+        num_tokens = 8
+        routing = (
+            torch.ones(num_tokens, 1, device=_DEVICE),
+            torch.zeros(num_tokens, 1, device=_DEVICE, dtype=torch.long),
+            torch.ones(num_tokens, 1, device=_DEVICE, dtype=torch.bool),
+        )
+        for config, extra_args in (
+            (dense, ()),
+            (routed_experts(GroupedLinear), routing),
+            (routed_experts(GptOssGroupedLinear), routing),
+        ):
+            module = config.build().to(device=_DEVICE, dtype=torch.bfloat16)
+            for parameter in module.parameters():
+                torch.nn.init.normal_(parameter)
+            gate_up_storages = []
+            saved_storages = []
+
+            def capture(activation, gate_up, **kwargs):
+                gate_up_storages.append(gate_up.untyped_storage().data_ptr())
+                return original_call(activation, gate_up, **kwargs)
+
+            def pack(t):
+                saved_storages.append(t.untyped_storage().data_ptr())
+                return t
+
+            x = torch.randn(
+                num_tokens,
+                _DIM,
+                device=_DEVICE,
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            with (
+                patch.object(FusedSwiGLU, "__call__", capture),
+                torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t),
+            ):
+                module(x, *extra_args).sum().backward()
+            with self.subTest(
+                module=type(module).__name__, w13=type(module.w13).__name__
+            ):
+                (gate_up_storage,) = gate_up_storages
+                self.assertEqual(saved_storages.count(gate_up_storage), 1)
+
+    def test_rejects_leaf_gate_up(self):
+        leaf = torch.randn(4, 2, 8, device=_DEVICE, requires_grad=True)
+        with self.assertRaisesRegex(ValueError, "not a leaf tensor"):
+            silu_and_mul_op(leaf)
 
 
 @unittest.skipUnless(_HAS_OP_DEVICE, f"requires a {device_type} accelerator")
@@ -54,7 +134,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         gate_up = torch.stack((gate, up), dim=1).requires_grad_()
         offsets = torch.tensor([1, 2], device=_DEVICE, dtype=torch.int32)
 
-        out = silu_and_mul_op(gate_up, offsets)
+        # Backward overwrites its input, so pass a non-leaf.
+        out = silu_and_mul_op(gate_up.clone(), offsets)
         out[:2].sum().backward()
 
         ref_gate_up = gate_up.detach().clone().requires_grad_()
@@ -71,7 +152,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         up = torch.randn(3, 2, device=_DEVICE)
         gate_up = torch.stack((gate, up), dim=1).requires_grad_()
 
-        out = silu_and_mul_op(gate_up)
+        # Backward overwrites its input, so pass a non-leaf.
+        out = silu_and_mul_op(gate_up.clone())
         out.sum().backward()
 
         ref_gate_up = gate_up.detach().clone().requires_grad_()
@@ -117,7 +199,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
             ],
             device=_DEVICE,
         )
-        grad_gate_up = silu_and_mul_backward_kernel(grad_out, gate_up, offsets)
+        silu_and_mul_backward_kernel_(grad_out, gate_up, offsets)
+        grad_gate_up = gate_up
         expected[:2].backward(grad_out[:2])
         assert gate.grad is not None
         assert up.grad is not None
@@ -145,7 +228,8 @@ class TestFusedSwiGLUOverrideKernels(unittest.TestCase):
         out = silu_and_mul_forward_kernel(gate_up, offsets)
         grad_out = torch.zeros_like(out)
         grad_out[row] = 3.0
-        grad_gate_up = silu_and_mul_backward_kernel(grad_out, gate_up, offsets)
+        silu_and_mul_backward_kernel_(grad_out, gate_up, offsets)
+        grad_gate_up = gate_up
         torch.accelerator.synchronize()
 
         ref_gate = torch.tensor(
