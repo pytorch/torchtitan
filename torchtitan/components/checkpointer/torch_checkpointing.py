@@ -267,6 +267,14 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                         f"{label} ({path!r}) must not contain empty or '.' "
                         "path segments, such as '//' or '/./'."
                     )
+        # fsspec expands glob characters in the path of a recursive delete, so
+        # retention would delete what the pattern matches instead of the stale
+        # checkpoint. The backend also refuses to commit a save to such a path.
+        if filesystem.is_remote(self.folder) and any(c in self.folder for c in "*?["):
+            raise ValueError(
+                f"checkpointer.folder ({self.folder!r}) must not contain the "
+                "glob characters '*', '?' or '['."
+            )
         self._storage = FilesystemCheckpointStorage()
         self.interval = config.interval
         self._validate_extra_state_keys(extra_states)

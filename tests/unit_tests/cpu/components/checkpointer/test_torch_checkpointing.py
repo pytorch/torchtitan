@@ -257,6 +257,28 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                         TorchCheckpointingManager.Config(keep_latest_k=0, **kwargs)
                     )
 
+        # fsspec expands glob characters in the path of a recursive delete, so
+        # retention would delete what the pattern matches, e.g. another run's
+        # checkpoints. A local folder and a load path are never globbed.
+        for folder in (
+            "gs://bucket/run[1]/checkpoint",
+            "gs://bucket/run*/checkpoint",
+            "gs://bucket/run?/checkpoint",
+        ):
+            with self.subTest(folder=folder):
+                with self.assertRaisesRegex(ValueError, "glob characters"):
+                    self._build_manager(
+                        TorchCheckpointingManager.Config(keep_latest_k=0, folder=folder)
+                    )
+        manager, _ = self._build_manager(
+            TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                folder="run[1]/checkpoint",
+                initial_load_path="gs://bucket/seed[1]/step-5",
+            )
+        )
+        manager.close()
+
     def test_remote_folder_round_trip(self) -> None:
         """Save with retention and resume through a URI folder, real backend."""
         with tempfile.TemporaryDirectory() as base_folder:
