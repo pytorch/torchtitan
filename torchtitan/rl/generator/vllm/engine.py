@@ -156,6 +156,8 @@ def _enable_breakable_cuda_graphs() -> None:
     vLLM makes its attention op a graph break when it imports the op, and only if this
     variable is set then. Raises if the op was imported before.
     """
+    # TODO: drop the variable and the import check once vLLM takes breakable CUDA graphs as a
+    # CompilationConfig field (no vLLM issue filed yet).
     os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
     from vllm.compilation import breakable_cudagraph
     from vllm.model_executor.layers.attention import attention as vllm_attention
@@ -214,7 +216,6 @@ class VLLMEngine(GenerationEngine):
             many requests sharing long prompts       auto: fp8 decode can be slower
                                                      (see `paged_varlen_attention_out`)
             trainer-vs-generator logprob gap         fp8: ~2.3x auto's mean abs diff, ~3.5x k3 KL
-            tokens outside IcePop's (0.2, 5) mask    fp8: ~5x auto's
             a hybrid model's KV block                fp8: grows (896 -> 1,664 tokens), so
                                                      prefix-cache hits are coarser
 

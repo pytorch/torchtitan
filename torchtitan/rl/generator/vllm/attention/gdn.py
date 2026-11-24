@@ -152,8 +152,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             # TODO: a TorchTitanLinearAttentionMetadataBuilder subclass of it that stages
             # verify rows in fixed buffers would give steps with prefill FULL graphs, not
             # piecewise ones (VLLMCudaGraphConfig): up to +13% tok/s at a prefill-heavy load
-            # (Qwen3.8-27B, 26 multi-turn sessions, GB300).
-            # Not done yet for size: the staging and its graph-vs-eager tests, ~2 days.
+            # (Qwen3.8-27B, 26 multi-turn sessions, GB300). Not done yet for size: the staging
+            # and its graph-vs-eager tests.
             # TODO: vLLM's GDN builder has no update_block_table with drafts, so it builds
             # once per GDN cache group (3 on Qwen3.8-27B, ~1.3 ms of CPU each). A subclass
             # with update_block_table would build once per step; ~1%, mixed steps only.
@@ -218,7 +218,13 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             # metadata check: a piecewise capture has no metadata; replays run this call eagerly.
             output = mixed_qkv.new_empty(output_shape)
             self._forward_speculative_eager(
-                mixed_qkv, a, b, conv_weight, A_log, dt_bias, output
+                mixed_qkv=mixed_qkv,
+                a=a,
+                b=b,
+                conv_weight=conv_weight,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                output=output,
             )
             return output
 
