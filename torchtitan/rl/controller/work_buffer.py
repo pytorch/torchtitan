@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Active work buffer shared between the data-input, rollout, and batcher loops.
-NOTE: The buffer holds work slots, and not the finalized RolloutGroups necessarily.
+NOTE: The buffer holds work slots, and not the finalized groups' summaries necessarily.
 
 """
 
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.rollout.types import RolloutGroupSummary
 
 
 class _RolloutGroupWorkState(enum.Enum):
@@ -32,7 +32,7 @@ class _RolloutGroupWorkState(enum.Enum):
 class RolloutGroupWork:
     """One prompt group's work, tracked through _RolloutGroupWorkState.
 
-    The input loop sets `group_id` + `sample`; the buffer owns `state` and `rollout_group`
+    The input loop sets `group_id` + `sample`; the buffer owns `state` and `summary`
     (`init=False`, so the input loop can't set them).
     """
 
@@ -43,7 +43,7 @@ class RolloutGroupWork:
     state: _RolloutGroupWorkState = field(
         default=_RolloutGroupWorkState.WAITING, init=False
     )
-    rollout_group: RolloutGroup | None = field(
+    summary: RolloutGroupSummary | None = field(
         default=None, init=False
     )  # set once FINALIZED
     # TODO(async-rl): emit JSON lifecycle logging per RolloutGroupWork keyed by group_id:
@@ -154,19 +154,19 @@ class RolloutGroupWorkBuffer(Configurable):
                         return work
                 await self._condition.wait()
 
-    async def finalize_work(self, rollout_group: RolloutGroup) -> None:
-        """Rollout loop: store the produced RolloutGroup on its work entry (CLAIMED -> FINALIZED) and wake the batcher."""
+    async def finalize_work(self, summary: RolloutGroupSummary) -> None:
+        """Rollout loop: store the finished group's summary on its work entry (CLAIMED -> FINALIZED) and wake the batcher."""
         async with self._condition:
-            work = self._work_by_group_id.get(rollout_group.group_id)
+            work = self._work_by_group_id.get(summary.group.group_id)
             if work is None:
                 # run()'s shutdown called close(); drop the result.
                 return
-            work.rollout_group = rollout_group
+            work.summary = summary
             work.state = _RolloutGroupWorkState.FINALIZED
             self._condition.notify_all()
 
     @sl.log_trace_span("take_finalized")
-    async def take_finalized(self) -> RolloutGroup | None:
+    async def take_finalized(self) -> RolloutGroupSummary | None:
         """Batcher loop: return the oldest FINALIZED group the window allows.
 
         Cases:
@@ -202,7 +202,7 @@ class RolloutGroupWorkBuffer(Configurable):
                             continue
                         del self._work_by_group_id[group_id]
                         self._condition.notify_all()
-                        return work.rollout_group
+                        return work.summary
                 await self._condition.wait()  # nothing finalized inside the window -> stall
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:

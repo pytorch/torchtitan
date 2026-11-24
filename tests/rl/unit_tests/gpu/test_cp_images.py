@@ -6,12 +6,15 @@
 
 """Context parallelism with image inputs on the RL trainer path.
 
-Packs image microbatches with the batcher's packer (each distinct image once per microbatch, every
-placeholder token pointing at its row of the image embeddings), then trains them through
-`Trainer.forward_backward` with Qwen3.5-0.8B: once without CP (FSDP=2, each rank the same
-microbatch) and once per CP layout. CP shards the tokens, their embedding rows and their
-M-RoPE positions with one permutation, while every CP rank encodes all of the
-microbatch's images. So the decoder's input embeddings and positions must equal the
+Trains image microbatches through the trainer's own path with Qwen3.5-0.8B: each DP replica's
+leader gets a column of one microbatch (`Trainer.receive_replica_column`), packs it (each
+distinct image once per microbatch, every placeholder token pointing at its row of the image
+embeddings) and broadcasts it to the replica's other ranks, and `Trainer.forward_backward`
+trains it: once without CP (FSDP=2, two one-rank replicas, each the same microbatch) and once
+per CP layout (one replica of the two CP ranks, so the packed microbatch group crosses the gloo
+broadcast).
+CP shards the tokens, their embedding rows and their M-RoPE positions with one permutation,
+while every CP rank encodes all of the microbatch's images. So the decoder's input embeddings and positions must equal the
 reference's bit for bit, and the vision encoder's gradient, summed over the CP ranks, must
 match the reference up to bf16 noise (a missing sum would halve it at CP=2).
 
@@ -65,11 +68,20 @@ from torchtitan.models.qwen3_5 import (
     QWEN3_5_VISION_PROCESSOR_KWARGS,
 )
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
+from torchtitan.rl.rollout.packed_group import pack_rollout_group
+from torchtitan.rl.rollout.types import (
+    PromptImage,
+    Rollout,
+    RolloutGroup,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 from torchtitan.rl.trainer.batcher import MicrobatchPacker
 from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.microbatch_group_reader import ReplicaColumn
 from torchtitan.rl.trainer.trainer import Trainer
-from torchtitan.rl.trainer.training_sample_builder import TrainingSample
+from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 pytestmark = pytest.mark.multi_gpu
@@ -78,6 +90,9 @@ HF_PATH = os.environ.get("TORCHTITAN_QWEN3_5_0_8B_HF_PATH")
 SEQ_LEN = 1024
 IMAGE_PAD, VISION_START, VISION_END, EOS = 248056, 248053, 248054, 248046
 VISION_PROCESSOR = VisionProcessor.Config(**QWEN3_5_VISION_PROCESSOR_KWARGS)
+PACKER = MicrobatchPacker.Config(per_sample_pad_multiple=1, build_mrope_positions=True)
+# Keep every rollout: the cases' rewards are arbitrary.
+BUILDER = TrainingSampleBuilder.Config(drop_zero_std_reward_groups=False)
 
 # name -> (FSDP degree, CP degree, CP inner attention, head-tail load balancing)
 LAYOUTS = {
@@ -101,8 +116,9 @@ def _image(height: int, width: int, seed: int) -> PromptImage:
     )
 
 
-def _sample(index: int, prompt: list, completion: list[int] | int) -> TrainingSample:
-    """``prompt``: ints (that many text tokens) and images, in order."""
+def _rollout(index: int, prompt: list, completion: list[int] | int) -> Rollout:
+    """A one-turn rollout: ``prompt`` is ints (that many text tokens) and images, in order.
+    Its training sample masks out the prompt and trains the completion."""
     rng = np.random.default_rng(index)
     processor = VISION_PROCESSOR.build()
     token_ids, images, placeholders = [], [], []
@@ -115,27 +131,33 @@ def _sample(index: int, prompt: list, completion: list[int] | int) -> TrainingSa
         placeholders.append(PlaceholderRange(offset=len(token_ids), length=num_tokens))
         token_ids += [IMAGE_PAD] * num_tokens + [VISION_END]
         images.append(part)
-    prompt_len = len(token_ids)
     if isinstance(completion, int):
         completion = rng.integers(1000, 50000, size=completion).tolist()
-    token_ids += completion
-    loss_mask = np.arange(len(token_ids)) >= prompt_len
-    return TrainingSample(
-        min_policy_version=0,
-        max_policy_version=0,
-        rollout_id=RolloutTurnID(group_id=0, rollout_id=index, turn_id=0),
-        token_ids=np.asarray(token_ids, dtype=np.int64),
-        loss_mask=loss_mask,
-        logprobs=np.where(loss_mask, -1.5, 0.0).astype(np.float32),
+    return Rollout(
+        group_id=0,
+        rollout_id=index,
+        turns=[
+            RolloutTurn(
+                rollout_id=RolloutTurnID(group_id=0, rollout_id=index, turn_id=0),
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=np.asarray(token_ids, dtype=np.int64),
+                prompt_delta_images=tuple(images),
+                prompt_delta_image_placeholders=tuple(placeholders),
+                completion_token_ids=np.asarray(completion, dtype=np.int32),
+                completion_logprobs=np.full(len(completion), -1.5, dtype=np.float32),
+                min_policy_version=0,
+                max_policy_version=0,
+            )
+        ],
+        status=RolloutStatus.COMPLETED,
+        reward=float(index),
         # Positive: with ratio << 1 on random tokens, PPO clipping would zero the
         # gradient of negative-advantage tokens.
-        advantage=np.where(loss_mask, 1.0 + 0.25 * index, 0.0).astype(np.float32),
-        images=tuple(images),
-        image_placeholders=tuple(placeholders),
+        advantage=1.0 + 0.25 * index,
     )
 
 
-def _cases() -> dict[str, list[TrainingSample]]:
+def _cases() -> dict[str, list[Rollout]]:
     """Token ranges are in the 1024-token microbatch. CP=2 shards at 512 contiguously
     (Ulysses), or into rank 0: [0, 256) + [768, 1024) and rank 1: [256, 768) (head-tail)."""
     small = _image(256, 256, seed=1)  # 64 placeholder tokens
@@ -147,19 +169,19 @@ def _cases() -> dict[str, list[TrainingSample]]:
         # One image, encoded once, in two samples: [11, 75) on rank 0 and [727, 791) on
         # rank 1 (Ulysses) or split between ranks 1 and 0 at 768 (head-tail).
         "shared_image_on_both_ranks": [
-            _sample(0, [10, small, 20], completion=30),
-            _sample(1, [600, small, 20], completion=40),
+            _rollout(0, [10, small, 20], completion=30),
+            _rollout(1, [600, small, 20], completion=40),
         ],
         # [301, 685) splits at 512 (Ulysses), a sampled placeholder run, a text sample.
         "long_image_and_sampled_placeholder": [
-            _sample(
+            _rollout(
                 2,
                 [300, large, 20],
                 completion=rng.integers(1000, 50000, size=10).tolist()
                 + sampled_placeholders
                 + rng.integers(1000, 50000, size=20).tolist(),
             ),
-            _sample(3, [40], completion=100),
+            _rollout(3, [40], completion=100),
         ],
     }
 
@@ -225,6 +247,11 @@ def _build_trainer(layout: str) -> Trainer:
         max_num_documents=None,
         hf_assets_path=HF_PATH,
         output_dir=tempfile.mkdtemp(prefix=f"test_cp_images_{layout}_"),
+        training_sample_builder=BUILDER,
+        microbatch_packer=PACKER,
+        pad_id=EOS,
+        temperature=1.0,
+        vision_processor=VISION_PROCESSOR,
     )
 
 
@@ -246,24 +273,11 @@ def _global_token_index(trainer: Trainer, layout: str) -> torch.Tensor:
     return order[cp_rank * local : (cp_rank + 1) * local]
 
 
-def _packer() -> MicrobatchPacker:
-    return MicrobatchPacker(
-        num_tokens_per_microbatch_per_dp_rank=SEQ_LEN,
-        max_context_length=SEQ_LEN,
-        pad_id=EOS,
-        temperature=1.0,
-        per_sample_pad_multiple=1,
-        num_mtp_layers=0,
-        build_mrope_positions=True,
-        vision_processor=VISION_PROCESSOR,
-    )
-
-
 def _run(layout: str) -> dict[str, dict]:
     """Per case: the full-microbatch decoder input embeddings and positions (on rank 0),
     and the vision encoder's gradients."""
     trainer = _build_trainer(layout)
-    packer = _packer()
+    builder = BUILDER.build()
     fsdp = LAYOUTS[layout][0]
     model = trainer.engine.model_parts[0]
     captured = {}
@@ -277,14 +291,32 @@ def _run(layout: str) -> dict[str, dict]:
     )
     index = _global_token_index(trainer, layout)
     results = {}
-    for case, samples in _cases().items():
-        microbatch = packer.pack(samples).preprocess_images()
+    for case, rollouts in _cases().items():
+        summary, packed = pack_rollout_group(
+            RolloutGroup(group_id=0, rollouts=rollouts)
+        )
+        specs = builder.decide(
+            rollout_group=summary.group,
+            turn_lengths=summary.turn_lengths,
+            num_mtp_layers=0,
+        ).training_sample_specs
+        assert len(specs) == len(rollouts)
+        # The replica's leader is its first rank: CP rank 0 here (no PP or TP).
+        cp_mesh = trainer.engine.parallelism_context.get_optional_mesh("cp")
+        if cp_mesh is None or cp_mesh.get_local_rank() == 0:
+            # One group of one microbatch: every spec of the case, in rollout order.
+            column = ReplicaColumn(microbatch_groups=[[specs]], rollout_groups=[packed])
+            asyncio.run(trainer.receive_replica_column(column))
         # Without CP, both FSDP ranks train the microbatch: the global counts double.
         asyncio.run(
             trainer.forward_backward(
-                [[microbatch]],
-                microbatch.loss_token_counts * fsdp,
-                microbatch.routing_token_counts * fsdp,
+                num_microbatch_groups=1,
+                global_loss_token_counts=torch.tensor(
+                    [sum(spec.loss_token_counts[0] for spec in specs) * fsdp]
+                ),
+                global_routing_token_counts=torch.tensor(
+                    [sum(spec.routing_token_counts[0] for spec in specs) * fsdp]
+                ),
             )
         )
         parts = [None] * dist.get_world_size()

@@ -272,7 +272,9 @@ def _service(actor) -> ServiceHandle:
 
 def _trainer(actor) -> TrainerHandle:
     """A single-rank trainer: every handle is the same actor."""
-    return TrainerHandle(all_ranks=actor, rank0=actor, by_dp_rank=[actor])
+    return TrainerHandle(
+        all_ranks=actor, rank0=actor, by_dp_rank=[actor], leader_by_dp_rank=[actor]
+    )
 
 
 def _actor_system(*mesh_names, events, batcher_mesh_name=None) -> MonarchActorSystem:
@@ -551,11 +553,14 @@ class _FakeTrainerRanks:
         self.dp_degree = dp
         return self
 
-    def slice(self, *, rank=None, dp=None):
+    def slice(self, *, rank=None, pp=None, dp=None, cp_tp=None):
         if rank is not None:
             return _FakeTrainerRanks(self.reported_dp_ranks, [self.ranks[rank]])
         num_ranks_per_stage = len(self.ranks) // self.pp_degree
         num_ranks_per_dp_rank = num_ranks_per_stage // self.dp_degree
+        if pp is not None:
+            index = pp * num_ranks_per_stage + dp * num_ranks_per_dp_rank + cp_tp
+            return _FakeTrainerRanks(self.reported_dp_ranks, [self.ranks[index]])
         ranks_at_dp_rank = []
         for stage in range(self.pp_degree):
             start = stage * num_ranks_per_stage + dp * num_ranks_per_dp_rank
@@ -581,6 +586,7 @@ def test_monarch_actor_system_groups_trainer_ranks_by_dp_rank():
     trainer = _spawn_trainer(_FakeTrainerRanks([0, 0, 1, 1]), dp_degree=2)
 
     assert [handle.ranks for handle in trainer.by_dp_rank] == [[0, 1], [2, 3]]
+    assert [handle.ranks for handle in trainer.leader_by_dp_rank] == [[0], [2]]
     assert trainer.rank0.ranks == [0]
 
 
@@ -590,6 +596,8 @@ def test_monarch_actor_system_spans_pipeline_stages_per_dp_rank():
     trainer = _spawn_trainer(_FakeTrainerRanks([0, 1, 0, 1]), dp_degree=2, pp_degree=2)
 
     assert [handle.ranks for handle in trainer.by_dp_rank] == [[0, 2], [1, 3]]
+    # Each DP rank's leader is in pipeline stage 0.
+    assert [handle.ranks for handle in trainer.leader_by_dp_rank] == [[0], [1]]
 
 
 def test_monarch_actor_system_rejects_a_trainer_not_laid_out_as_dp_cp_tp():

@@ -19,9 +19,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rdma_object import RDMAMicrobatch
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-
+from torchtitan.rl.trainer.microbatch_group_reader import ReplicaColumn
 from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
 
@@ -62,18 +60,21 @@ class _TrainerActorEndpoints:
         await super().sync_log_step(step, relative_step)
 
     @concurrent_endpoint
+    async def receive_replica_column(self, column: ReplicaColumn) -> None:
+        await super().receive_replica_column(column)
+
+    @concurrent_endpoint
     async def forward_backward(
         self,
-        microbatch_groups: (
-            list[list[TrainingMicrobatch]] | list[list[RDMAMicrobatch]]
-        ),
+        *,
+        num_microbatch_groups: int,
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float] | None:
         return await super().forward_backward(
-            microbatch_groups,
-            global_loss_token_counts,
-            global_routing_token_counts,
+            num_microbatch_groups=num_microbatch_groups,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
         )
 
     @concurrent_endpoint

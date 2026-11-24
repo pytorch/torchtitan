@@ -24,9 +24,10 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.monarch.rdma_object import MonarchRDMAObject
 from torchtitan.rl.rollout.finished_group import finish_rollout_group
+from torchtitan.rl.rollout.packed_group import pack_rollout_group, PackedRolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
-from torchtitan.rl.rollout.types import RolloutGroup
+from torchtitan.rl.rollout.types import RolloutGroupSummary
 
 
 class RolloutWorkerActor(Actor):
@@ -83,20 +84,26 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
         is_validation: bool,
-    ) -> RolloutGroup:
-        """Returns the scored group with its rollout metrics and recorder lines (see
-        `finish_rollout_group`)."""
-        group = await self._worker.run_group(
-            generate_fn=generate_fn,
-            release_session_fn=release_session_fn,
-            sample=sample,
-            group_id=group_id,
-            group_size=group_size,
-            sampling=sampling,
-        )
-        return finish_rollout_group(
-            group, is_validation=is_validation, encoder=self._encoder
-        )
+    ) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
+        """Returns the scored group, with its rollout metrics and recorder lines
+        (`finish_rollout_group`), packed (`pack_rollout_group`): its summary for the batcher and
+        its bytes for the trainer."""
+        # The worker's time in the call. The controller's `rollout_group` span times the whole
+        # call, so the difference is the hop's transfer, serialization and dispatch time.
+        with sl.log_trace_span("run_group"):
+            group = await self._worker.run_group(
+                generate_fn=generate_fn,
+                release_session_fn=release_session_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=group_size,
+                sampling=sampling,
+            )
+            return pack_rollout_group(
+                finish_rollout_group(
+                    group, is_validation=is_validation, encoder=self._encoder
+                )
+            )
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

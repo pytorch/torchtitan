@@ -32,17 +32,25 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.finished_group import finish_rollout_group
+from torchtitan.rl.rollout.packed_group import pack_rollout_group, PackedRolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.types import (
     Prompt,
     Rollout,
     rollout_turn_lengths,
+    RolloutGroupSummary,
     RolloutStatus,
     RolloutTurn,
     RolloutTurnID,
 )
 
-from torchtitan.rl.trainer.batcher import Batcher
+from torchtitan.rl.trainer.batcher import (
+    Batcher,
+    MicrobatchPacker,
+    StepPlan,
+    TrainingMicrobatch,
+)
+from torchtitan.rl.trainer.microbatch_group_reader import MicrobatchGroupReader
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleSpec
 
 
@@ -151,6 +159,64 @@ def _variable_length_group(group_id: int, *, token_lengths: list[int]) -> Rollou
     )
 
 
+def _add_group(batcher: Batcher, group: RolloutGroup) -> tuple[StepPlan | None, bool]:
+    """`Batcher.add_group` with `group`'s summary, as the rollout worker packs it."""
+    summary, _ = pack_rollout_group(group)
+    return batcher.add_group(summary=summary)
+
+
+def _leader_microbatch_groups(
+    plan: StepPlan,
+    groups: list[RolloutGroup],
+    *,
+    config: Batcher.Config,
+    dp_degree: int,
+    num_tokens_per_microbatch_per_dp_rank: int,
+    max_context_length: int,
+) -> list[list[list[TrainingMicrobatch]]]:
+    """What the trainer DP replicas train on for `plan`: the controller's columns
+    (`Controller._replica_columns`) of the packed `groups`, each packed by its leader's
+    `MicrobatchGroupReader` with no peers. [num_groups][num_microbatches_per_group][dp_degree]."""
+    controller = SimpleNamespace(
+        trainer_dp_degree=dp_degree,
+        _packed_groups_by_id={
+            group.group_id: pack_rollout_group(group)[1] for group in groups
+        },
+    )
+    packer = config.microbatch_packer.build(
+        num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
+        max_context_length=max_context_length,
+        pad_id=0,
+        temperature=1.0,
+        vision_processor=None,
+    )
+    columns = [
+        list(
+            MicrobatchGroupReader(
+                num_microbatch_groups=len(column.microbatch_groups),
+                replica_group=None,
+                column=column,
+                training_sample_builder=config.training_sample_builder.build(),
+                microbatch_packer=packer,
+            )
+        )
+        for column in Controller._replica_columns(controller, plan)
+    ]
+    return [
+        [
+            [column[group_index][row_index] for column in columns]
+            for row_index in range(len(group))
+        ]
+        for group_index, group in enumerate(plan.microbatch_groups)
+    ]
+
+
+def _num_input_tokens(specs: list[TrainingSampleSpec]) -> int:
+    """The non-padding positions the specs' samples fill in a packed microbatch: each sample's
+    tokens but the last."""
+    return sum(spec.num_tokens - 1 for spec in specs)
+
+
 def _specs(batcher: Batcher, group: RolloutGroup) -> list[TrainingSampleSpec]:
     """The training sample specs the batcher plans `group` with."""
     return batcher._training_sample_builder.decide(
@@ -174,15 +240,14 @@ def _untrainable_group(group_id: int) -> RolloutGroup:
 def _build_batcher(
     *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
 ) -> Batcher:
-    config = Batcher.Config()
-    config.num_mtp_layers = num_mtp_layers
+    config = Batcher.Config(
+        microbatch_packer=MicrobatchPacker.Config(num_mtp_layers=num_mtp_layers)
+    )
     return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
         max_context_length=2048,
         num_prompts_per_train_step=num_prompts_per_train_step,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
 
 
@@ -190,14 +255,10 @@ def test_batcher_counts_trainable_groups_not_rollouts() -> None:
     # Target is 2 GROUPS. A single group with many rollouts is not a full batch; two groups are,
     # regardless of how many rollouts each contributes.
     batcher = _build_batcher(num_prompts_per_train_step=2)
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_trainable_group(0, num_samples=8)
-    )
+    batch, group_is_trainable = _add_group(batcher, _trainable_group(0, num_samples=8))
     assert batch is None
     assert group_is_trainable
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_trainable_group(1, num_samples=1)
-    )
+    batch, group_is_trainable = _add_group(batcher, _trainable_group(1, num_samples=1))
     assert batch is not None
     assert group_is_trainable
 
@@ -210,8 +271,8 @@ def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
     early_group.rollouts[0].turns[0].min_policy_version = 3
 
     # g7 finishes first; the packed batch still lists g3 before g7.
-    batcher.add_group(rollout_group=late_group)
-    batch, _ = batcher.add_group(rollout_group=early_group)
+    _add_group(batcher, late_group)
+    batch, _ = _add_group(batcher, early_group)
 
     assert batch is not None
     assert batch.min_policy_versions == [3, 7]
@@ -223,13 +284,11 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     # they ride along until a trainable group completes the batch.
     batcher = _build_batcher(num_prompts_per_train_step=1)
     metric_only = _untrainable_group(0)
-    assert batcher.add_group(rollout_group=metric_only) == (
+    assert _add_group(batcher, metric_only) == (
         None,
         False,
     )
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_trainable_group(1, num_samples=2)
-    )
+    batch, group_is_trainable = _add_group(batcher, _trainable_group(1, num_samples=2))
     assert batch is not None
     assert group_is_trainable
     assert batch.global_loss_token_counts[0] > 0
@@ -239,7 +298,7 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
 
 def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
-    batch, _ = batcher.add_group(rollout_group=_trainable_group(1, num_samples=2))
+    batch, _ = _add_group(batcher, _trainable_group(1, num_samples=2))
 
     assert batch is not None
     assert batch.global_loss_token_counts.shape == (3,)
@@ -252,8 +311,8 @@ def test_batcher_warns_after_each_batch_of_untrainable_groups(
     batcher = _build_batcher(num_prompts_per_train_step=2)
 
     with caplog.at_level(logging.WARNING):
-        batcher.add_group(rollout_group=_untrainable_group(0))
-        batcher.add_group(rollout_group=_untrainable_group(1))
+        _add_group(batcher, _untrainable_group(0))
+        _add_group(batcher, _untrainable_group(1))
 
     assert (
         "Consecutive untrainable batches: 1/10 "
@@ -267,11 +326,11 @@ def test_batcher_resets_no_progress_count_on_trainable_group(
     batcher = _build_batcher(num_prompts_per_train_step=2)
 
     with caplog.at_level(logging.WARNING):
-        batcher.add_group(rollout_group=_untrainable_group(0))
-        batcher.add_group(rollout_group=_untrainable_group(1))
-        batcher.add_group(rollout_group=_trainable_group(2, num_samples=1))
+        _add_group(batcher, _untrainable_group(0))
+        _add_group(batcher, _untrainable_group(1))
+        _add_group(batcher, _trainable_group(2, num_samples=1))
         caplog.clear()
-        batcher.add_group(rollout_group=_untrainable_group(3))
+        _add_group(batcher, _untrainable_group(3))
 
     assert "zero-output batch equivalents" not in caplog.text
 
@@ -280,10 +339,10 @@ def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
     batcher = _build_batcher(num_prompts_per_train_step=2)
 
     for group_id in range(19):
-        batcher.add_group(rollout_group=_untrainable_group(group_id))
+        _add_group(batcher, _untrainable_group(group_id))
 
     with pytest.raises(RuntimeError, match="10 consecutive untrainable batches"):
-        batcher.add_group(rollout_group=_untrainable_group(19))
+        _add_group(batcher, _untrainable_group(19))
 
 
 def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
@@ -294,25 +353,17 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         max_context_length=2,
         num_prompts_per_train_step=1,
         dp_degree=2,
-        pad_id=0,
-        temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_trainable_group(0, num_samples=5)
-    )
-    assert batch is not None
+    plan, group_is_trainable = _add_group(batcher, _trainable_group(0, num_samples=5))
+    assert plan is not None
     assert group_is_trainable
     cells = [
-        microbatch
-        for group in batch.microbatch_groups
-        for ranks in group
-        for microbatch in ranks
+        specs for group in plan.microbatch_groups for row in group for specs in row
     ]
     assert len(cells) == 4  # 2 microbatches x 2 ranks
-    for cell in cells:
-        assert cell.loss_mask.any()
-        assert cell.padding_mask.shape == cell.input.shape
-        assert not cell.padding_mask[cell.loss_mask].any()
+    assert sum(map(len, cells)) == 5
+    for specs in cells:
+        assert sum(spec.loss_token_counts[0] for spec in specs) > 0
 
 
 def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
@@ -321,41 +372,36 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
         max_context_length=4,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_variable_length_group(
-            0,
-            token_lengths=[4, 4, 3],
-        )
+    plan, group_is_trainable = _add_group(
+        batcher, _variable_length_group(0, token_lengths=[4, 4, 3])
     )
 
-    assert batch is not None
+    assert plan is not None
     assert group_is_trainable
-    assert len(batch.microbatch_groups) == 1
-    microbatch = batch.microbatch_groups[0][0][0]
-    assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
-    assert not microbatch.padding_mask.any()
-    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([8]))
-    assert _metric_value(batch, "train_batch/padding_frac") == 0.0
+    # 3 + 3 + 2 input tokens fill the rank's 8 in one microbatch; rows of 4 would need two.
+    [[[specs]]] = plan.microbatch_groups
+    assert sorted(spec.num_tokens for spec in specs) == [3, 4, 4]
+    assert _num_input_tokens(specs) == 8
+    torch.testing.assert_close(plan.global_loss_token_counts, torch.tensor([8]))
+    assert _metric_value(plan, "train_batch/padding_frac") == 0.0
 
 
 def test_flat_rank_packing_preserves_padding_mask() -> None:
-    batcher = Batcher.Config(per_sample_pad_multiple=4).build(
-        num_tokens_per_microbatch_per_dp_rank=8,
-        max_context_length=4,
-        num_prompts_per_train_step=1,
-        dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
+    config = Batcher.Config(
+        microbatch_packer=MicrobatchPacker.Config(per_sample_pad_multiple=4)
     )
-    batch, _ = batcher.add_group(
-        rollout_group=_variable_length_group(0, token_lengths=[4])
+    batcher_kwargs = dict(
+        num_tokens_per_microbatch_per_dp_rank=8, max_context_length=4, dp_degree=1
     )
+    batcher = config.build(num_prompts_per_train_step=1, **batcher_kwargs)
+    group = _variable_length_group(0, token_lengths=[4])
+    plan, _ = _add_group(batcher, group)
 
-    assert batch is not None
-    microbatch = batch.microbatch_groups[0][0][0]
+    assert plan is not None
+    [[[microbatch]]] = _leader_microbatch_groups(
+        plan, [group], config=config, **batcher_kwargs
+    )
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
     torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([3]))
     assert microbatch.padding_mask.tolist() == [
@@ -376,21 +422,15 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
         max_context_length=8,
         num_prompts_per_train_step=1,
         dp_degree=2,
-        pad_id=0,
-        temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_variable_length_group(
-            0,
-            token_lengths=[5, 4, 4, 3],
-        )
+    plan, group_is_trainable = _add_group(
+        batcher, _variable_length_group(0, token_lengths=[5, 4, 4, 3])
     )
 
-    assert batch is not None
+    assert plan is not None
     assert group_is_trainable
     assert [
-        [int((~rank.padding_mask).sum().item()) for rank in microbatch]
-        for (microbatch,) in batch.microbatch_groups
+        [_num_input_tokens(specs) for specs in row] for (row,) in plan.microbatch_groups
     ] == [[6, 6]]
 
 
@@ -400,8 +440,6 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
         max_context_length=40,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
     samples = _specs(batcher, _variable_length_group(0, token_lengths=[11] * 12))
     bins = [samples[:4], samples[4:8], samples[8:]]
@@ -418,8 +456,6 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
         max_context_length=10,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
     samples = _specs(batcher, _variable_length_group(0, token_lengths=[6, 6]))
     bins = [[samples[0]], [samples[1]]]
@@ -435,8 +471,6 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
         max_context_length=10,
         num_prompts_per_train_step=1,
         dp_degree=2,
-        pad_id=0,
-        temperature=1.0,
     )
     samples = _specs(
         batcher,
@@ -465,8 +499,6 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
         max_context_length=10,
         num_prompts_per_train_step=1,
         dp_degree=2,
-        pad_id=0,
-        temperature=1.0,
     )
     samples = _specs(
         batcher,
@@ -494,23 +526,16 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
         max_context_length=3,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
-    batch, _ = batcher.add_group(
-        rollout_group=_variable_length_group(
-            0,
-            token_lengths=[2, 2, 4, 2, 2, 4],
-        )
+    plan, _ = _add_group(
+        batcher, _variable_length_group(0, token_lengths=[2, 2, 4, 2, 2, 4])
     )
 
-    assert batch is not None
-    assert len(batch.microbatch_groups) == 3
-    assert all(
-        microbatch.padding_mask.numel() == 6
-        for ((microbatch,),) in batch.microbatch_groups
-    )
-    assert _metric_value(batch, "train_batch/padding_frac") == pytest.approx(4 / 9)
+    assert plan is not None
+    assert len(plan.microbatch_groups) == 3
+    assert all(len(specs) <= 3 for ((specs,),) in plan.microbatch_groups)
+    # 10 input tokens in 3 microbatches of 6.
+    assert _metric_value(plan, "train_batch/padding_frac") == pytest.approx(4 / 9)
 
 
 def test_document_limit_applies_to_each_local_microbatch() -> None:
@@ -521,22 +546,12 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
         max_context_length=4,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
-    batch, group_is_trainable = batcher.add_group(
-        rollout_group=_trainable_group(0, num_samples=5)
-    )
+    plan, group_is_trainable = _add_group(batcher, _trainable_group(0, num_samples=5))
 
-    assert batch is not None
+    assert plan is not None
     assert group_is_trainable
-    assert len(batch.microbatch_groups) == 2
-    num_documents = []
-    for ((microbatch,),) in batch.microbatch_groups:
-        real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
-        num_documents.append(int(real_document_starts.sum().item()))
-    assert sorted(num_documents) == [2, 3]
-    assert sum(num_documents) == 5
+    assert sorted(len(specs) for ((specs,),) in plan.microbatch_groups) == [2, 3]
 
 
 def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
@@ -545,16 +560,11 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
         max_context_length=2,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
-    batch, _ = batcher.add_group(rollout_group=_trainable_group(0, num_samples=2))
+    plan, _ = _add_group(batcher, _trainable_group(0, num_samples=2))
 
-    assert batch is not None
-    assert len(batch.microbatch_groups) == 2
-    for ((microbatch,),) in batch.microbatch_groups:
-        real_document_starts = (microbatch.positions == 0) & ~microbatch.padding_mask
-        assert int(real_document_starts.sum().item()) == 1
+    assert plan is not None
+    assert [len(specs) for ((specs,),) in plan.microbatch_groups] == [1, 1]
 
 
 def test_batcher_filters_training_samples_longer_than_context() -> None:
@@ -563,16 +573,14 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         max_context_length=4,
         num_prompts_per_train_step=1,
         dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
     )
-    pending, group_is_trainable = batcher.add_group(
-        rollout_group=_variable_length_group(0, token_lengths=[6])
+    pending, group_is_trainable = _add_group(
+        batcher, _variable_length_group(0, token_lengths=[6])
     )
     assert pending is None
     assert not group_is_trainable
 
-    batch, _ = batcher.add_group(rollout_group=_trainable_group(1, num_samples=1))
+    batch, _ = _add_group(batcher, _trainable_group(1, num_samples=1))
     assert batch is not None
     assert batch.group_ids == [0, 1]
     dropped_metric = next(
@@ -586,8 +594,18 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     time_metrics = [
         m.Metric("timing/step/total", m.Mean.from_list([2.0])),
+        m.Metric("timing/step/wait_for_training_batch", m.Mean.from_list([0.25])),
+        m.Metric("timing/step/send_replica_columns", m.Mean.from_list([0.25])),
         m.Metric("timing/step/forward_backward", m.Mean.from_list([0.5])),
         m.Metric("timing/step/optimizer", m.Mean.from_list([0.5])),
+        m.Metric(
+            "timing/step/blocking_trainer_push_model_state_dict",
+            m.Mean.from_list([0.0]),
+        ),
+        m.Metric(
+            "timing/step/blocking_generator_pull_model_state_dict",
+            m.Mean.from_list([0.25]),
+        ),
     ]
     ratios = {
         metric.key: metric.value.value
@@ -598,6 +616,9 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     assert ratios["perf/trainer/tokens_per_second_full_step"] == 50.0
     assert ratios["perf/trainer/step_time_ratio/fwd_bwd"] == 0.5
     assert ratios["perf/trainer/tokens_per_second_fwd_bwd"] == 100.0
+    assert ratios["perf/trainer/step_time_ratio/send_replica_columns"] == 0.125
+    # 2.0 s - (0.25 + 0.25 + 0.5 + 0.5 + 0.0 + 0.25) s: the column send is accounted for.
+    assert ratios["perf/trainer/step_time_ratio/unaccounted"] == 0.125
 
 
 def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
@@ -640,7 +661,7 @@ def test_take_finalized_does_not_release_active_slot() -> None:
         if not await buffer.wait_for_slot():
             raise RuntimeError("buffer closed unexpectedly")
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
-        await buffer.finalize_work(RolloutGroup(group_id=0, rollouts=[]))
+        await buffer.finalize_work(_finished_group(0)[0])
         await buffer.take_finalized()
 
         waiter = asyncio.create_task(buffer.wait_for_slot())
@@ -663,8 +684,6 @@ def test_untrainable_group_releases_before_training() -> None:
             max_context_length=2048,
             num_prompts_per_train_step=1,
             dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
         )
 
         if not await buffer.wait_for_slot():
@@ -672,7 +691,7 @@ def test_untrainable_group_releases_before_training() -> None:
         await buffer.add_work(RolloutGroupWork(group_id=0, sample=object()))
 
         await buffer.release_active_groups(1, reason="untrainable_group")
-        assert batcher.add_group(rollout_group=_untrainable_group(0)) == (
+        assert batcher.add_group(summary=_finished_group(0)[0]) == (
             None,
             False,
         )
@@ -751,8 +770,13 @@ async def _admit(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
     await buffer.add_work(RolloutGroupWork(group_id=group_id, sample=object()))
 
 
+def _finished_group(group_id: int) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
+    """What a rollout worker returns for an empty group: its summary and packed bytes."""
+    return pack_rollout_group(RolloutGroup(group_id=group_id, rollouts=[]))
+
+
 async def _finalize(buffer: RolloutGroupWorkBuffer, group_id: int) -> None:
-    await buffer.finalize_work(RolloutGroup(group_id=group_id, rollouts=[]))
+    await buffer.finalize_work(_finished_group(group_id)[0])
 
 
 def test_windowed_fifo_takes_within_anchored_window() -> None:
@@ -815,10 +839,12 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
     asyncio.run(run())
 
 
-def _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder) -> RolloutGroup:
-    """Run `_rollout_loop` on one admitted group and return the group it finalizes."""
+def _finalize_one_group_with_rollout_loop(
+    run_group_rollouts, recorder
+) -> RolloutGroupSummary:
+    """Run `_rollout_loop` on one admitted group and return the summary it finalizes."""
 
-    async def run() -> RolloutGroup:
+    async def run() -> RolloutGroupSummary:
         buffer = _buffer(capacity=1, window_size=None)
         await _admit(buffer, 0)
         controller = object.__new__(Controller)
@@ -831,15 +857,18 @@ def _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder) -> Rollo
         controller.generator_router = SimpleNamespace(
             release_groups=SimpleNamespace(call_one=AsyncMock())
         )
+        controller._packed_groups_by_id = {}
         loop = asyncio.create_task(
             controller._rollout_loop(
                 group_buffer=buffer, generate_fn=None, release_session_fn=None
             )
         )
-        group = await buffer.take_finalized()
+        summary = await buffer.take_finalized()
         await buffer.close()
         await loop
-        return group
+        # The rollout loop keeps the group's packed bytes for its step.
+        assert list(controller._packed_groups_by_id) == [0]
+        return summary
 
     return asyncio.run(asyncio.wait_for(run(), timeout=10))
 
@@ -849,37 +878,83 @@ def test_rollout_loop_appends_the_worker_lines_and_keeps_the_group_metrics() -> 
     controller appends the lines and passes the group, with its metrics, to the batcher."""
     run_group_kwargs = []
 
-    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+    async def run_group_rollouts(
+        *, group_id: int, **kwargs
+    ) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
         run_group_kwargs.append(kwargs)
-        return RolloutGroup(
-            group_id=group_id,
-            rollouts=[],
-            metrics=[m.Metric("rollout/reward", m.Mean(1.0))],
-            recorder_lines='{"group_id": 0}\n',
+        return pack_rollout_group(
+            RolloutGroup(
+                group_id=group_id,
+                rollouts=[],
+                metrics=[m.Metric("rollout/reward", m.Mean(1.0))],
+                recorder_lines='{"group_id": 0}\n',
+            )
         )
 
     recorder = Mock()
-    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
+    summary = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
 
-    assert [metric.key for metric in group.metrics] == ["rollout/reward"]
+    assert [metric.key for metric in summary.group.metrics] == ["rollout/reward"]
+    # The buffer does not keep the lines the recorder already has.
+    assert summary.group.recorder_lines == ""
     assert [kwargs["is_validation"] for kwargs in run_group_kwargs] == [False]
     recorder.append_lines.assert_called_once_with('{"group_id": 0}\n')
-    # The batcher does not get the lines.
-    assert group.recorder_lines == ""
 
 
 def test_rollout_loop_turns_a_failed_group_into_one_failure_metric() -> None:
-    async def run_group_rollouts(**kwargs) -> RolloutGroup:
+    async def run_group_rollouts(
+        **kwargs,
+    ) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
         raise RuntimeError("scoring failed")
 
     recorder = Mock()
-    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
+    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder).group
 
     assert (group.group_id, group.rollouts) == (0, [])
     assert m.MetricsProcessor._aggregate_metrics(group.metrics) == {
         "rollout/group_failures/sum": 1.0
     }
     recorder.append_lines.assert_not_called()
+
+
+def test_batcher_loop_drops_the_packed_bytes_of_untrainable_groups() -> None:
+    """The rollout loop keeps each finished group's packed bytes; once the batcher finds a
+    group untrainable, the batcher loop drops them, and keeps the trainable ones for its step."""
+    finished_groups = {group_id: _finished_group(group_id) for group_id in (0, 1)}
+
+    async def add_group(*, summary):
+        return None, summary.group.group_id == 0
+
+    async def run() -> dict[int, PackedRolloutGroup]:
+        buffer = _buffer(capacity=2, window_size=None)
+        controller = object.__new__(Controller)
+        controller._packed_groups_by_id = {}
+        for group_id, (summary, packed) in finished_groups.items():
+            await _admit(buffer, group_id)
+            await buffer.claim_next()
+            controller._packed_groups_by_id[group_id] = packed
+            await buffer.finalize_work(summary)
+        controller._group_buffer = buffer
+        controller.batcher = SimpleNamespace(
+            add_group=SimpleNamespace(call_one=add_group)
+        )
+        loop = asyncio.create_task(
+            controller._batcher_loop(training_batch_queue=asyncio.Queue())
+        )
+        await _settle()
+        await buffer.close()
+        await loop
+        return controller._packed_groups_by_id
+
+    packed_groups_by_id = asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+    assert packed_groups_by_id == {0: finished_groups[0][1]}
+
+
+async def _settle() -> None:
+    """Let every ready task run until it blocks again."""
+    for _ in range(10):
+        await asyncio.sleep(0)
 
 
 async def _block_forever(*args, **kwargs) -> None:
@@ -922,6 +997,7 @@ def _run_with_generator_watcher(
     )
     controller.start_step = 0
     controller._validation_tasks = []
+    controller._packed_groups_by_id = {}
     controller._has_pending_validation = False
     controller.metrics_processor = Mock()
     controller.trainer = None
@@ -1156,7 +1232,7 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
             turns=[turn],
         )
         group = RolloutGroup(group_id=group_id, rollouts=[rollout])
-        return _finish_in_worker(group, is_validation=is_validation)
+        return pack_rollout_group(_finish_in_worker(group, is_validation=is_validation))
 
     controller = object.__new__(Controller)
     controller._validation_group_ids = itertools.count(start=-1, step=-1)

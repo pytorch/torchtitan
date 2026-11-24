@@ -96,6 +96,7 @@ def compute_perf_ratio_metrics(
     }
     step_s = seconds.get("timing/step/total")
     wait_s = seconds.get("timing/step/wait_for_training_batch")
+    send_replica_columns_s = seconds.get("timing/step/send_replica_columns")
     fwd_bwd_s = seconds.get("timing/step/forward_backward")
     optimizer_s = seconds.get("timing/step/optimizer")
 
@@ -125,6 +126,11 @@ def compute_perf_ratio_metrics(
     # Each span's share of the step wall-clock (skip a span that was not recorded).
     if wait_s is not None:
         _add_metric("perf/trainer/step_time_ratio/batch", wait_s / step_s)
+    if send_replica_columns_s is not None:
+        _add_metric(
+            "perf/trainer/step_time_ratio/send_replica_columns",
+            send_replica_columns_s / step_s,
+        )
     if blocking_trainer_push_s is not None:
         _add_metric(
             "perf/trainer/step_time_ratio/blocking_trainer_push_model_state_dict",
@@ -149,6 +155,7 @@ def compute_perf_ratio_metrics(
     # Step time the measured spans don't cover -- only when every span is present, else it misleads.
     if None not in (
         wait_s,
+        send_replica_columns_s,
         fwd_bwd_s,
         optimizer_s,
         blocking_trainer_push_s,
@@ -156,6 +163,7 @@ def compute_perf_ratio_metrics(
     ):
         accounted_s = (
             wait_s
+            + send_replica_columns_s
             + fwd_bwd_s
             + optimizer_s
             + blocking_trainer_push_s
