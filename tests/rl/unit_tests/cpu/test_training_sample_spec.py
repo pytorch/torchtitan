@@ -365,6 +365,18 @@ def test_building_a_rollout_that_breaks_split_prompt_raises(
         builder.rollout_to_training_samples(rollout, training_sample_specs=specs)
 
 
+def test_specs_of_a_rollout_that_reuses_more_tokens_than_there_are_raise() -> None:
+    """A first turn has nothing to reuse; checked from lengths, so the oversize filter can't drop
+    the rollout (its spec would count 2,000 + 4 tokens) before it raises."""
+    rollout = _rollout(0, [([1, 2, 200, 7], [-0.5])])
+    rollout.turns[0].prompt_prefix_len = 2000
+
+    with pytest.raises(ValueError, match="previous turn has only 0"):
+        _builder().rollout_to_training_sample_specs(
+            rollout, rollout_turn_lengths(rollout), num_mtp_layers=0
+        )
+
+
 def test_decide_drops_failed_untrainable_and_zero_std_groups() -> None:
     builder = _builder()
 

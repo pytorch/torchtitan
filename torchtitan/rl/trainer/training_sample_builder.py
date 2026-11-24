@@ -411,8 +411,9 @@ class TrainingSampleBuilder(Configurable):
             #    spec 1: turns 3-4, token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]
             #            rollout_id.turn_id=3, min_policy_version=6, max_policy_version=7
 
-        The prompt prefix checks read token values (`check_prompt_prefixes`), so
-        `rollout_to_training_samples` runs them.
+        A turn that reuses more tokens than the previous turn has raises here. The check that
+        reads token values (a turn that could reuse more, `check_prompt_prefixes`) runs in
+        `rollout_to_training_samples`.
 
         Args:
             rollout: The scored rollout; reads its ids, advantage, policy versions, prompt prefix
@@ -447,6 +448,14 @@ class TrainingSampleBuilder(Configurable):
 
             prompt_prefix_len = rollout_turn.prompt_prefix_len
             num_prompt_tokens = prompt_prefix_len + lengths.num_prompt_delta_tokens
+            # Too many: e.g. prev = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6. Checked here,
+            # from lengths, so the oversize filter can't drop such a rollout before it raises.
+            if prompt_prefix_len > prev_len:
+                raise ValueError(
+                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} "
+                    f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
+                    f"{prev_len}; build it with `split_prompt`"
+                )
             # Delta images sit in the delta, at full-prompt positions; an offset inside the
             # delta (e.g. 1 instead of prefix + 1) would put image embeddings on other tokens.
             for placeholder in rollout_turn.prompt_delta_image_placeholders:

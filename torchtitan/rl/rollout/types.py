@@ -418,6 +418,7 @@ class RolloutGroup:
     """The group's `RolloutSampleRecorder` JSONL lines, encoded by the rollout worker that scored
     it (`finish_rollout_group`); the controller appends them."""
 
+
 @dataclass(frozen=True, slots=True)
 class RolloutTurnLengths:
     """The lengths of a turn's arrays that deciding and planning read instead of the arrays."""
