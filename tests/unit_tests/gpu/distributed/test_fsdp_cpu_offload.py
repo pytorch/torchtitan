@@ -186,12 +186,8 @@ class TestCPUOffloadRandomInit(DTensorTestBase):
     def world_size(self) -> int:
         return 2
 
-    @property
-    def backend(self) -> str:
-        # trunc_normal_'s rejection loop reduces over the CPU shards.
-        return "cpu:gloo,cuda:nccl"
-
-    @with_comms
+    # trunc_normal_'s rejection loop reduces over the CPU shards.
+    @with_comms(backend="cpu:gloo,cuda:nccl")
     def test_random_init_of_cpu_shards_advances_the_generator(self) -> None:
         with torch.device("meta"):
             linear = nn.Linear(32, 64, bias=False)
