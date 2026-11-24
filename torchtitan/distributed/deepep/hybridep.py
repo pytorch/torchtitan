@@ -525,9 +525,9 @@ def combine_tokens(
 ) -> torch.Tensor:
     """Combine expert outputs back to original token order.
 
-    Unpermutes and reduces rows already weighted by their router scores.
-    Combine backward uses only the dispatch handle, not the expert outputs, so
-    saving this region avoids a dependency on W2's output during replay.
+    Unpermutes already-weighted expert outputs via the opaque dispatch handle.
+    Always save this region to avoid retaining or rebuilding W2's output
+    just to replay combine.
 
     Args:
         hidden_states: Weighted expert outputs.

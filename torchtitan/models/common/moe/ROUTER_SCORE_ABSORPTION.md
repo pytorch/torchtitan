@@ -97,9 +97,9 @@ HybridEP also saves its complete combine region; backward uses the forward
 dispatch handle instead of W2's output.
 
 Scores are supplied by replayed dispatch/permutation or retained dispatch
-outputs. Combine does not consume scores. For native BF16 experts without
-output postprocessing or an output dtype conversion, W2 and its GPT-OSS bias
-addition are saved even under FullAC. This skips forward replay without
-retaining W2's output; both gradient GEMMs still run. Quantized and LoRA
-projections, output postprocessing, and dtype conversions retain their
+outputs. Combine does not consume scores. For native experts without output
+postprocessing, W2 and its GPT-OSS bias addition are saved even under FullAC.
+The output dtype cast runs inside the saved projection or bias-add region,
+avoiding a read of W2's output during replay. Both gradient GEMMs still run.
+Quantized and LoRA projections and output postprocessing retain their
 configured remat policy.

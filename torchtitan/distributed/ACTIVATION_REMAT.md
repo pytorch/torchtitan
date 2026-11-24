@@ -342,9 +342,10 @@ communication regions:
   parallelism is disabled. In batch-invariant mode with shared experts, the routed
   output has its own TP all-reduce, `tp_routed_reduction`.
 
-Absorbed native BF16 W2 without output postprocessing or a dtype conversion is
-a model-declared SAVE exception, even if `recompute_regions` matches W2. Its
-scored input is rebuilt during replay rather than retained from forward.
+Absorbed native W2, including its output dtype cast, is a model-declared SAVE
+exception when output postprocessing is absent, even if `recompute_regions`
+matches W2. Its scored input is rebuilt during replay rather than retained
+from forward.
 
 For a common MoE module named `moe`, the corresponding policy is:
 

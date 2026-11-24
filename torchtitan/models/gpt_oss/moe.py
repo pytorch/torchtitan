@@ -36,6 +36,7 @@ class GptOssGroupedLinear(GroupedLinear):
         offsets_E: torch.Tensor,
         *,
         scores_R: torch.Tensor | None = None,
+        output_dtype: torch.dtype | None = None,
         recompute: bool | None = None,
     ) -> torch.Tensor:
         output_RO = super().forward(
@@ -53,12 +54,12 @@ class GptOssGroupedLinear(GroupedLinear):
             bias_RO = (bias_RO * scores_R.reshape(-1, 1).to(torch.float32)).to(
                 output_RO.dtype
             )
-        # Replaying bias addition after saved W2 would retain W2's output.
+        # Add bias before the output cast to preserve the addition's precision.
         return remat.region(
             self._add_grouped_bias,
             self.remat_region_name("bias_add"),
             recompute=recompute,
-        )(output_RO, bias_RO.reshape_as(output_RO))
+        )(output_RO, bias_RO.reshape_as(output_RO), output_dtype)
 
     @staticmethod
     def _expand_grouped_bias(
@@ -80,5 +81,6 @@ class GptOssGroupedLinear(GroupedLinear):
         self,
         output_RO: torch.Tensor,
         bias_RO: torch.Tensor,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        return output_RO + bias_RO.to(output_RO.dtype)
+        return (output_RO + bias_RO.to(output_RO.dtype)).to(dtype=output_dtype)
