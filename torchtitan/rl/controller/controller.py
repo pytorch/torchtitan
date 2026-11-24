@@ -452,6 +452,15 @@ class Controller(Configurable):
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
                 )
+            # The loss scores rollouts under softmax(logits / temperature), which is NaN at
+            # 0, and a greedy group repeats one rollout, so all its advantages are 0.
+            training_temperature = self.generator.sampling.temperature
+            if training_temperature <= 0:
+                raise ValueError(
+                    "generator.sampling.temperature must be positive, got "
+                    f"{training_temperature}: the trainer divides the logits by it. "
+                    "For greedy validation, set async_loop.validation.temperature=0."
+                )
             group_size = self.async_loop.num_samples_per_prompt
             rollouts_per_worker = self.rollouter.rollouts_per_worker
             # TODO: place single rollouts on workers, instead of groups
