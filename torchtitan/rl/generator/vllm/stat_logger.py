@@ -76,6 +76,9 @@ class _StepStats:
     num_prompt_tokens: int
     num_cached_prompt_tokens: int
     num_preempted_reqs: int
+    num_drafts: int
+    num_draft_tokens: int
+    num_accepted_tokens: int
     ttft_ms: list[float] = field(default_factory=list)
     itl_ms: list[float] = field(default_factory=list)
     finished: list[_FinishedRequestStats] = field(default_factory=list)
@@ -91,6 +94,9 @@ def _extract_step_stats(
     num_waiting: int | None = None
     prefix_queries = 0
     prefix_hits = 0
+    num_drafts = 0
+    num_draft_tokens = 0
+    num_accepted_tokens = 0
     if scheduler_stats is not None:
         kv_cache_usage = scheduler_stats.kv_cache_usage
         num_running = scheduler_stats.num_running_reqs
@@ -99,6 +105,11 @@ def _extract_step_stats(
         if prefix is not None:
             prefix_queries = prefix.queries
             prefix_hits = prefix.hits
+        spec_decoding = scheduler_stats.spec_decoding_stats
+        if spec_decoding is not None:
+            num_drafts = spec_decoding.num_drafts
+            num_draft_tokens = spec_decoding.num_draft_tokens
+            num_accepted_tokens = spec_decoding.num_accepted_tokens
 
     gen_tokens = 0
     prompt_tokens = 0
@@ -133,6 +144,9 @@ def _extract_step_stats(
         num_prompt_tokens=prompt_tokens,
         num_cached_prompt_tokens=cached_prompt_tokens,
         num_preempted_reqs=num_preempted,
+        num_drafts=num_drafts,
+        num_draft_tokens=num_draft_tokens,
+        num_accepted_tokens=num_accepted_tokens,
         ttft_ms=ttft_ms,
         itl_ms=itl_ms,
         finished=finished,
@@ -299,6 +313,14 @@ class VllmOtelStatLogger(Configurable, StatLoggerBase):
         # Prefix-cache hit rate = rate(hits) / rate(queries) at query time.
         self._c_prefix_queries = meter.create_counter("vllm.prefix_cache_queries")
         self._c_prefix_hits = meter.create_counter("vllm.prefix_cache_hits")
+        # Speculative decoding: acceptance rate = rate(accepted_tokens) / rate(draft_tokens).
+        self._c_spec_drafts = meter.create_counter("vllm.spec_decode_num_drafts")
+        self._c_spec_draft_tokens = meter.create_counter(
+            "vllm.spec_decode_num_draft_tokens", unit="token"
+        )
+        self._c_spec_accepted_tokens = meter.create_counter(
+            "vllm.spec_decode_num_accepted_tokens", unit="token"
+        )
 
     def _create_histograms(self, meter: Meter) -> None:
         """Latency histograms; the backend computes percentiles (p50/p95/p99)."""
@@ -351,6 +373,10 @@ class VllmOtelStatLogger(Configurable, StatLoggerBase):
                 self._c_prefix_queries.add(step.prefix_queries)
             if step.prefix_hits:
                 self._c_prefix_hits.add(step.prefix_hits)
+            if step.num_drafts:
+                self._c_spec_drafts.add(step.num_drafts)
+                self._c_spec_draft_tokens.add(step.num_draft_tokens)
+                self._c_spec_accepted_tokens.add(step.num_accepted_tokens)
 
             self._c_gen_tokens.add(step.num_generation_tokens)
             self._c_prompt_tokens.add(step.num_prompt_tokens)

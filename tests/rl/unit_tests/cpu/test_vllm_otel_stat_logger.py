@@ -144,6 +144,9 @@ def test_extract_step_stats_populated_converts_seconds_to_ms():
         num_running_reqs=4,
         num_waiting_reqs=2,
         prefix_cache_stats=SimpleNamespace(queries=10, hits=7),
+        spec_decoding_stats=SimpleNamespace(
+            num_drafts=5, num_draft_tokens=15, num_accepted_tokens=9
+        ),
     )
     iteration = SimpleNamespace(
         num_generation_tokens=12,
@@ -167,6 +170,9 @@ def test_extract_step_stats_populated_converts_seconds_to_ms():
     assert step.num_prompt_tokens == 100
     assert step.num_cached_prompt_tokens == 30
     assert step.num_preempted_reqs == 1
+    assert step.num_drafts == 5
+    assert step.num_draft_tokens == 15
+    assert step.num_accepted_tokens == 9
     assert step.ttft_ms == pytest.approx([12.0])
     assert step.itl_ms == pytest.approx([10.0, 20.0])
     assert len(step.finished) == 1
@@ -181,6 +187,7 @@ def test_extract_step_stats_prefix_cache_none():
         num_running_reqs=1,
         num_waiting_reqs=0,
         prefix_cache_stats=None,
+        spec_decoding_stats=None,
     )
 
     step = _extract_step_stats(scheduler, None)
@@ -328,6 +335,9 @@ def test_jsonl_export_writes_recorded_metrics(
         num_running_reqs=4,
         num_waiting_reqs=2,
         prefix_cache_stats=SimpleNamespace(queries=10, hits=7),
+        spec_decoding_stats=SimpleNamespace(
+            num_drafts=5, num_draft_tokens=15, num_accepted_tokens=9
+        ),
     )
     iteration = SimpleNamespace(
         num_generation_tokens=12,
@@ -364,6 +374,9 @@ def test_jsonl_export_writes_recorded_metrics(
         "vllm.finished_requests": 1,
         "vllm.prefix_cache_queries": 10,
         "vllm.prefix_cache_hits": 7,
+        "vllm.spec_decode_num_drafts": 5,
+        "vllm.spec_decode_num_draft_tokens": 15,
+        "vllm.spec_decode_num_accepted_tokens": 9,
         "vllm.kv_cache_usage": 0.5,
         "vllm.num_running_requests": 4,
         "vllm.num_waiting_requests": 2,

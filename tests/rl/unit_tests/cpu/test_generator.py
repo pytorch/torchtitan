@@ -14,6 +14,7 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import inspect
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -51,7 +52,9 @@ from torchtitan.rl.generator.vllm.engine import (
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
 from torchtitan.rl.generator.vllm.worker import (
+    _alias_draft_weight,
     TorchTitanCudagraphDispatcher,
+    TorchTitanEagleProposer,
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
@@ -71,6 +74,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.cache import LRUCache
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 
 class _FakeRenderer:
@@ -750,6 +754,14 @@ def test_generator_dp_can_supply_expert_parallelism():
             "batch_invariant",
         ),
         (
+            _FLEX_MODEL_CONFIG,
+            VLLMEngine.Config(
+                cuda_graph=VLLMCudaGraphConfig(mode="NONE"), num_speculative_tokens=3
+            ),
+            False,
+            "num_speculative_tokens=3 needs CUDA",
+        ),
+        (
             _GDN_MODEL_CONFIG,
             VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             False,
@@ -897,6 +909,7 @@ def test_cuda_graph_none_mode_preserves_sequence_parallel_config():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=True,
+        num_speculative_tokens=0,
     )
 
     assert compilation_config.cudagraph_mode.name == "NONE"
@@ -916,6 +929,7 @@ def test_expert_sequence_parallel_padding_filters_cuda_graph_sizes():
         max_model_len=4096,
         expert_sequence_parallel_size=parallelism.expert_sequence_parallel_size,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
 
     assert cfg.cudagraph_capture_sizes == [4, 8]
@@ -927,6 +941,7 @@ def test_expert_sequence_parallel_padding_keeps_small_cuda_graph_batches():
         max_model_len=4096,
         expert_sequence_parallel_size=8,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
 
     assert cfg.cudagraph_capture_sizes[0] == 8
@@ -942,6 +957,7 @@ def test_expert_sequence_parallel_padding_rejects_no_valid_cuda_graph_sizes():
             max_model_len=4096,
             expert_sequence_parallel_size=4,
             enable_sequence_parallel=False,
+            num_speculative_tokens=0,
         )
 
 
@@ -1044,12 +1060,40 @@ def test_only_weights_use_cumem_allocator(monkeypatch):
         assert value is None
 
 
+def test_eagle_proposer_hooks_match_vllm():
+    # If vLLM renames a hook, its drafter keeps its own lm_head copy, which weight syncs
+    # never update, and nothing else fails.
+    # TODO: a GPU test (an engine with num_speculative_tokens, weight aliases checked after a
+    # model state dict load) needs a small CI checkpoint with an MTP head.
+    for name in (
+        "_create_draft_vllm_config",
+        "_maybe_share_embeddings",
+        "_maybe_share_lm_head",
+    ):
+        vllm_hook = inspect.signature(getattr(SpecDecodeBaseProposer, name))
+        override = inspect.signature(getattr(TorchTitanEagleProposer, name))
+        assert list(override.parameters) == list(vllm_hook.parameters), name
+
+
+def test_alias_draft_weight_shares_storage_and_checks_shape():
+    # A copy instead of an alias would leave the draft's weights stale after a weight sync.
+    target = torch.randn(8, 4)
+    draft = torch.nn.Parameter(torch.zeros(8, 4))
+    _alias_draft_weight(draft_weight=draft, target_weight=target)
+    assert draft.data_ptr() == target.data_ptr()
+    with pytest.raises(ValueError, match="does not match"):
+        _alias_draft_weight(
+            draft_weight=torch.nn.Parameter(torch.zeros(8, 5)), target_weight=target
+        )
+
+
 def test_cuda_graph_default_mode_is_full():
     cfg = VLLMCudaGraphConfig().get_vllm_compilation_config(
         max_num_seqs=256,
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -1062,6 +1106,7 @@ def test_cuda_graph_full_mode_no_compile():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     assert cfg.cudagraph_mode.name == "FULL"
     assert int(cfg.mode) == 0
@@ -1074,10 +1119,23 @@ def test_cuda_graph_decode_only_capture_sizes_cover_max_num_seqs():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     sizes = cfg.cudagraph_capture_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
     assert sizes[-1] == 500  # a full decode batch has its own graph
+
+
+def test_cuda_graph_decode_capture_sizes_cover_draft_tokens():
+    # With 3 drafts, a decode step verifies 1 + 3 tokens per sequence.
+    cfg = VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY").get_vllm_compilation_config(
+        max_num_seqs=64,
+        max_model_len=4096,
+        expert_sequence_parallel_size=1,
+        enable_sequence_parallel=False,
+        num_speculative_tokens=3,
+    )
+    assert cfg.cudagraph_capture_sizes[-1] == 256
 
 
 def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
@@ -1089,6 +1147,7 @@ def test_cuda_graph_full_mode_extends_capture_sizes_to_chunk():
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
         max_num_batched_tokens=16384,
+        num_speculative_tokens=0,
     )
     sizes = cfg.cudagraph_capture_sizes
     assert 40 in sizes  # 34 sequences pad to 40, not 64
@@ -1103,6 +1162,7 @@ def test_cuda_graph_full_mode_caps_sizes_at_the_largest_step():
         max_model_len=1000,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=False,
+        num_speculative_tokens=0,
     )
     # Packed prefills reach the 2048-token budget, so it is graphed.
     cfg = VLLMCudaGraphConfig(mode="FULL").get_vllm_compilation_config(**kwargs)
@@ -1127,6 +1187,7 @@ def test_cuda_graph_rejects_nonpositive_max_num_seqs():
             max_model_len=4096,
             expert_sequence_parallel_size=1,
             enable_sequence_parallel=False,
+            num_speculative_tokens=0,
         )
 
 
@@ -1145,6 +1206,7 @@ def test_inference_parallelism_propagates_dense_sequence_parallelism():
         max_model_len=4096,
         expert_sequence_parallel_size=1,
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
+        num_speculative_tokens=0,
     )
     assert compilation_config.cudagraph_capture_sizes == [1, 4, 5, 8]
     assert compilation_config.pass_config.enable_sp

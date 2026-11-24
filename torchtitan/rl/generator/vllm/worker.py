@@ -8,11 +8,16 @@
 
 from collections.abc import Set
 from contextlib import nullcontext
+from dataclasses import replace
 
-from vllm.config import CUDAGraphMode
+import torch
+from torch import nn
+from torch.distributed.tensor import DTensor
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.utils.math_utils import round_up
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.worker import gpu_model_runner as vllm_gpu_model_runner
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
@@ -220,13 +225,90 @@ class TorchTitanGPUWorker(GPUWorker):
             )
 
         # GPUWorker imports its runner class inside init_device and provides no
-        # runner factory. Scope the class substitution to that construction.
+        # runner factory; the runner builds its MTP drafter the same way. Scope the
+        # class substitutions to that construction.
         original_runner_cls = vllm_gpu_model_runner.GPUModelRunner
+        original_proposer_cls = vllm_gpu_model_runner.EagleProposer
         vllm_gpu_model_runner.GPUModelRunner = TorchTitanGPUModelRunner
+        vllm_gpu_model_runner.EagleProposer = TorchTitanEagleProposer
         try:
             super().init_device()
         finally:
             vllm_gpu_model_runner.GPUModelRunner = original_runner_cls
+            vllm_gpu_model_runner.EagleProposer = original_proposer_cls
+
+
+class TorchTitanEagleProposer(EagleProposer):
+    """vLLM's MTP drafter, built next to a TorchTitan target.
+
+    model config      the draft's own: the target's is TorchTitan's HF-shaped config
+    embed_tokens      shares storage with the target's `tok_embeddings.weight`
+    lm_head           shares storage with the target's `lm_head.weight`
+    mtp.* layers      the checkpoint's weights: model state dict loads leave them alone
+    """
+
+    # TODO: on vLLM's V2 runner (vLLM >= 0.34, pytorch/torchtitan#5956), subclass
+    # MTPSpeculator instead and register it with register_speculative_method.
+
+    # TODO: the drafter's k forward passes per decode step run eagerly. vLLM captures
+    # drafter graphs only in PIECEWISE mode (SpecDecodeBaseProposer.initialize_cudagraph_keys),
+    # which needs CompilationMode.VLLM_COMPILE; TorchTitan builds with CompilationMode.NONE.
+    # Payoff unmeasured: profile a decode step before choosing a fix.
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        runner: GPUModelRunner | None = None,
+    ) -> None:
+        super().__init__(vllm_config=vllm_config, device=device, runner=runner)
+        # The overrides below assume Qwen3.5's draft layout: `model.embed_tokens` and one
+        # top-level `lm_head`. DeepSeek-style drafts keep a head per MTP layer.
+        if self.draft_model_config.architecture not in ("Qwen3_5MTP", "Qwen3_5MoeMTP"):
+            raise ValueError(
+                "num_speculative_tokens supports Qwen3.5-architecture MTP drafts, got "
+                f"{self.draft_model_config.architecture}"
+            )
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        # vLLM's MTP models read their HF config from `vllm_config.model_config`.
+        return replace(
+            super()._create_draft_vllm_config(),
+            model_config=self.draft_model_config,
+        )
+
+    # TODO: drop the two overrides below once vLLM's drafter can ask the target for its
+    # embedding and lm_head, as SGLang's `get_embed_and_head` does. vLLM finds them by HF
+    # attribute names, which TorchTitan's model doesn't have. No vLLM issue filed yet.
+
+    def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
+        _alias_draft_weight(
+            draft_weight=self.model.model.embed_tokens.weight,
+            target_weight=target_language_model.model.tok_embeddings.weight,
+        )
+
+    def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
+        _alias_draft_weight(
+            draft_weight=self.model.lm_head.weight,
+            target_weight=target_language_model.model.lm_head.weight,
+        )
+
+
+def _alias_draft_weight(
+    draft_weight: nn.Parameter, target_weight: torch.Tensor
+) -> None:
+    """Point `draft_weight` at the target's storage, which model state dict loads update in place."""
+    if isinstance(target_weight, DTensor):
+        target_weight = target_weight.to_local()
+    if (
+        target_weight.shape != draft_weight.shape
+        or target_weight.dtype != draft_weight.dtype
+    ):
+        raise ValueError(
+            f"MTP draft weight {tuple(draft_weight.shape)} {draft_weight.dtype} does not "
+            f"match the target's {tuple(target_weight.shape)} {target_weight.dtype}"
+        )
+    draft_weight.data = target_weight.detach()
 
 
 if device_type == "xpu":
@@ -245,7 +327,8 @@ if device_type == "xpu":
                 raise ValueError(
                     "TorchTitan's vLLM integration requires the V1 model runner"
                 )
-            # Same substitution as TorchTitanGPUWorker.init_device.
+            # TorchTitanGPUWorker.init_device's runner swap. No drafter swap: drafts
+            # need CUDA (`_validate_platform`).
             original_runner_cls = vllm_xpu_worker.XPUModelRunner
             vllm_xpu_worker.XPUModelRunner = TorchTitanXPUModelRunner
             try:
