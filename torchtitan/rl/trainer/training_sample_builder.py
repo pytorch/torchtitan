@@ -414,7 +414,7 @@ class TrainingSampleBuilder(Configurable):
 
         A turn that reuses more tokens than the previous turn has raises here. The check that
         reads token values (a turn that could reuse more, `check_prompt_prefixes`) runs in
-        `rollout_to_training_samples`.
+        `rollout_to_training_samples`, on the trainer DP replica leader.
 
         Args:
             rollout: The scored rollout; reads its ids, advantage, policy versions, prompt prefix
@@ -548,7 +548,8 @@ class TrainingSampleBuilder(Configurable):
 
         It first checks the rollout's prompt prefixes (`check_prompt_prefixes`), as sample
         building did before the batcher split. A rollout that breaks the `split_prompt` contract
-        raises `ValueError`, which stops the run.
+        raises `ValueError`; on a trainer DP replica leader that fails the replica, so the run
+        stops.
 
         Args:
             rollout: The full rollout (with arrays).
