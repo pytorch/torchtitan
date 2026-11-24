@@ -7,6 +7,7 @@
 from collections.abc import Iterable
 from fractions import Fraction
 
+import torch
 from torch import nn
 
 from torchtitan.models.common.moe import MoE
@@ -18,9 +19,8 @@ def quadratic_attention_flops_per_token(
     qk_head_dim: int,
     v_head_dim: int,
     seq_len: int,
-    sliding_window_size: int | None = None,
 ) -> int:
-    """Training FLOPs per token for quadratic or windowed attention.
+    """Training FLOPs per token for quadratic attention.
 
     Reasoning behind the factor of 6 for the self-attention part of the formula:
     1. each self-attention has 2 matmul in the forward and 4 (counted as 2)
@@ -35,17 +35,27 @@ def quadratic_attention_flops_per_token(
     3. each matmul performs 1 multiplication and 1 addition                 (*2)
 
     ``seq_len`` is the number of keys one query attends to.
-    ``Decoder.Config.build_flops_estimator`` sums this over each query's
-    position in its document when it is affine in ``seq_len``; sliding-window
-    and compressed attention keep the full-length estimate.
     ``qk_head_dim`` and ``v_head_dim`` describe the two attention
     contractions. The factor of 6 accounts for multiply-adds in forward and
     backward. Backward recomputation is not counted.
     """
-    attended_tokens = (
-        seq_len if sliding_window_size is None else min(seq_len, sliding_window_size)
-    )
-    return 6 * num_heads * (qk_head_dim + v_head_dim) * attended_tokens
+    return 6 * num_heads * (qk_head_dim + v_head_dim) * seq_len
+
+
+def quadratic_attention_flops(
+    *,
+    num_heads: int,
+    qk_head_dim: int,
+    v_head_dim: int,
+    num_keys: torch.Tensor,
+) -> int:
+    """Training FLOPs of softmax attention over a microbatch of queries.
+
+    ``num_keys`` holds the number of keys each query attends to, e.g. a causal
+    query at document position p attends to p + 1 keys. Each query costs
+    ``quadratic_attention_flops_per_token`` at its number of keys.
+    """
+    return 6 * num_heads * (qk_head_dim + v_head_dim) * int(num_keys.sum())
 
 
 def delta_rule_flops_per_token(

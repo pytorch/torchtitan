@@ -178,36 +178,20 @@ class Decoder(BaseModel):
             seq_len: int,
             excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
-            flops_per_token = active_parameter_flops_per_token(
+            # Attention cost comes from each microbatch's document positions.
+            del seq_len
+            parameter_flops_per_token = active_parameter_flops_per_token(
                 model, excluded_submodules=excluded_submodules
             )
-            # A causal query at document position p attends to p + 1 keys. When
-            # attention FLOPs are affine in the number of keys, the batch total
-            # needs only sum(positions + 1).
-            flops_per_key = 0
-            for _, attention, _, _ in self.traverse(Attention.Config):
-                one_key_flops = attention.flops_per_token(1)
-                layer_flops_per_key = attention.flops_per_token(2) - one_key_flops
-                full_length_flops = attention.flops_per_token(seq_len)
-                if (
-                    full_length_flops
-                    == one_key_flops + (seq_len - 1) * layer_flops_per_key
-                ):
-                    flops_per_token += one_key_flops - layer_flops_per_key
-                    flops_per_key += layer_flops_per_key
-                else:
-                    # TODO: sliding-window and compressed attention are not affine
-                    # in the number of keys; they keep the full-length estimate.
-                    flops_per_token += full_length_flops
+            attentions = [
+                attention for _, attention, _, _ in self.traverse(Attention.Config)
+            ]
 
             def estimate(input_dict: Mapping[str, Any]) -> int:
-                # positions restart at 0 at each document start. Padding does
-                # no useful work, so it is not counted.
-                is_real = ~input_dict["padding_mask"]
-                num_attended_keys = int(((input_dict["positions"] + 1) * is_real).sum())
-                return (
-                    flops_per_token * int(is_real.sum())
-                    + flops_per_key * num_attended_keys
+                # Padding does no useful work, so it is not counted.
+                positions = input_dict["positions"][~input_dict["padding_mask"]]
+                return parameter_flops_per_token * positions.numel() + sum(
+                    attention.flops(positions) for attention in attentions
                 )
 
             return estimate

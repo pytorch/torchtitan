@@ -16,8 +16,10 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import Attention
 from torchtitan.models.common.flops import (
     active_parameter_flops_per_token,
+    delta_rule_flops_per_token,
     get_parameter_counts,
 )
+from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.training_engine import TrainingEngine
 
 
@@ -68,20 +70,23 @@ def test_attention_counts_each_query_at_its_document_position():
     # sees, with GatedDeltaNet, whose cost per token is fixed.
     config, model = _build("qwen3_5")
     estimate = config.build_flops_estimator(model, seq_len=128)
-    # Two packed documents of lengths 3 and 2, then one padding token.
-    positions = torch.tensor([0, 1, 2, 0, 1, 2])
-    padding_mask = torch.tensor([False] * 5 + [True])
-    attentions = [attention for _, attention, _, _ in config.traverse(Attention.Config)]
-    expected = 5 * active_parameter_flops_per_token(model) + sum(
-        attention.flops_per_token(position + 1)
-        for position in positions[:5].tolist()
-        for attention in attentions
-    )
+    # Two packed documents of lengths 3 and 2, then one padding token. The five
+    # real queries attend to 1 + 2 + 3 + 1 + 2 = 9 keys in total.
     inputs = {
         "input": torch.empty(6),
-        "positions": positions,
-        "padding_mask": padding_mask,
+        "positions": torch.tensor([0, 1, 2, 0, 1, 2]),
+        "padding_mask": torch.tensor([False] * 5 + [True]),
     }
+    expected = 5 * active_parameter_flops_per_token(model)
+    for _, attention, _, _ in config.traverse(Attention.Config):
+        if isinstance(attention, Qwen35Attention.Config):
+            expected += 9 * 6 * attention.n_heads * 2 * attention.head_dim
+        else:
+            expected += 5 * delta_rule_flops_per_token(
+                num_heads=attention.n_heads,
+                key_head_dim=attention.key_head_dim,
+                v_head_dim=attention.value_head_dim,
+            )
     assert estimate(inputs) == expected
 
 
@@ -112,10 +117,11 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
     mtp_parameter_flops = active_parameter_flops_per_token(model.mtp_layers)
     repeated_head_flops = 2 * active_parameter_flops_per_token(model.lm_head)
     mtp_attention_flops = sum(
-        layer.attention.flops_per_token(128) for layer in config.mtp_layers
+        layer.attention.flops(inputs["positions"]) for layer in config.mtp_layers
     )
-    assert flops - base_flops == 128 * (
-        mtp_parameter_flops + repeated_head_flops + mtp_attention_flops
+    assert (
+        flops - base_flops
+        == 128 * (mtp_parameter_flops + repeated_head_flops) + mtp_attention_flops
     )
     if family == "kimi_k2_7":
         image_inputs = {
