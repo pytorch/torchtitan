@@ -135,6 +135,8 @@ def parallelize_hf_transformers(
         )
         logger.info("Un-tied embedding/lm_head weights for FSDP compatibility")
 
+    # TODO: raise when expert_parallel_degree > 1 and no layer of the full model is MoE:
+    # a dense model trains with EP unused. Under PP, model.layers holds one stage only.
     # 1. Build and swap Titan MoE (sets _sharding_config, does NOT parallelize)
     if any(getattr(b, "moe_enabled", False) for b in model.layers):
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
