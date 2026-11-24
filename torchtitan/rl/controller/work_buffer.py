@@ -71,6 +71,13 @@ class RolloutGroupWorkBuffer(Configurable):
         entry:        WAITING -> CLAIMED -> FINALIZED -> removed by take_finalized()
         active slot:  charged by add_work() ............ freed by release_active_groups()
 
+    Each wait has its own condition, and each event wakes only the waiters it can unblock, so a new
+    group wakes one of the (S+1) x P rollout loops instead of all of them:
+        add_work(work)               -> one claim_next() waiter; claims pop a FIFO of WAITING ids
+        finalize_work()              -> one take_finalized() waiter
+        release_active_groups(count) -> up to count wait_for_slot() waiters
+        close()                      -> every waiter
+
     Example:
         # target_offpolicy_steps=1, num_prompts_per_train_step=2 -> capacity=4
         await buffer.add_work(g0); await buffer.add_work(g1)   # 2/4 active
@@ -98,12 +105,14 @@ class RolloutGroupWorkBuffer(Configurable):
         self._work_by_group_id: collections.OrderedDict[
             int, RolloutGroupWork
         ] = collections.OrderedDict()
-        # TODO(async-rl): Current we use a condition that alerts ALL rollout workers. There is no need to
-        # alert all of them. Consider changing it to an async queue + event.
+        # The WAITING entries' group ids, oldest first.
+        self._waiting_group_ids: collections.deque[int] = collections.deque()
 
-        # One Condition guards all three waits (slot-free / claimable-WAITING / takeable-FINALIZED):
-        # every mutation notify_all()s and waiters re-check their predicate.
-        self._condition = asyncio.Condition()
+        # One lock guards the state above; the three waits each have a condition on it.
+        self._lock = asyncio.Lock()
+        self._slot_freed = asyncio.Condition(self._lock)
+        self._work_added = asyncio.Condition(self._lock)
+        self._work_finalized = asyncio.Condition(self._lock)
         self._closed = False
         # TODO(async-rl): warm start — admit a small number of groups at first and grow the effective cap as the
         # batcher consumes, so a cold start doesn't fill the whole off-policy window at policy version 0.
@@ -121,15 +130,15 @@ class RolloutGroupWorkBuffer(Configurable):
                 await buffer.add_work(RolloutGroupWork(group_id=group_index, sample=sample))
                 group_index += 1
         """
-        async with self._condition:
-            await self._condition.wait_for(
+        async with self._lock:
+            await self._slot_freed.wait_for(
                 lambda: self._closed or self._has_active_slot_available()
             )
             return not self._closed
 
     async def add_work(self, work: RolloutGroupWork) -> None:
         """Admit one rollout group as WAITING and charge one active slot."""
-        async with self._condition:
+        async with self._lock:
             if not self._has_active_slot_available():
                 raise RuntimeError(
                     "RolloutGroupWorkBuffer.add_work called without an active slot"
@@ -140,30 +149,31 @@ class RolloutGroupWorkBuffer(Configurable):
                 self._active_rollout_groups,
             )
             self._work_by_group_id[work.group_id] = work
-            self._condition.notify_all()
+            self._waiting_group_ids.append(work.group_id)
+            self._work_added.notify()
 
     async def claim_next(self) -> RolloutGroupWork | None:
         """Rollout loop: claim the oldest WAITING group (WAITING -> CLAIMED). None once closed."""
-        async with self._condition:
+        async with self._lock:
             while True:
                 if self._closed:
                     return None
-                for work in self._work_by_group_id.values():
-                    if work.state is _RolloutGroupWorkState.WAITING:
-                        work.state = _RolloutGroupWorkState.CLAIMED
-                        return work
-                await self._condition.wait()
+                if self._waiting_group_ids:
+                    work = self._work_by_group_id[self._waiting_group_ids.popleft()]
+                    work.state = _RolloutGroupWorkState.CLAIMED
+                    return work
+                await self._work_added.wait()
 
     async def finalize_work(self, rollout_group: RolloutGroup) -> None:
         """Rollout loop: store the produced RolloutGroup on its work entry (CLAIMED -> FINALIZED) and wake the batcher."""
-        async with self._condition:
+        async with self._lock:
             work = self._work_by_group_id.get(rollout_group.group_id)
             if work is None:
                 # run()'s shutdown called close(); drop the result.
                 return
             work.rollout_group = rollout_group
             work.state = _RolloutGroupWorkState.FINALIZED
-            self._condition.notify_all()
+            self._work_finalized.notify()
 
     @sl.log_trace_span("take_finalized")
     async def take_finalized(self) -> RolloutGroup | None:
@@ -180,13 +190,16 @@ class RolloutGroupWorkBuffer(Configurable):
         This anchored window is inspired by MiniMax's rollout scheduling; see
         Section 6.2.4 of https://arxiv.org/pdf/2605.26494.
 
+        The batcher loop is the only caller: `finalize_work` wakes one waiter, and taking a group
+        wakes none.
+
         Example:
             # window_size=3: g0 CLAIMED, g1 WAITING, g2 and g3 FINALIZED
             group = await buffer.take_finalized()
             assert group.group_id == 2  # g2 is inside [g0, g2].
             # g3 remains blocked. With window_size=None, g3 would be taken next.
         """
-        async with self._condition:
+        async with self._lock:
             while True:
                 if self._closed:
                     return None
@@ -201,9 +214,8 @@ class RolloutGroupWorkBuffer(Configurable):
                         if work.state is not _RolloutGroupWorkState.FINALIZED:
                             continue
                         del self._work_by_group_id[group_id]
-                        self._condition.notify_all()
                         return work.rollout_group
-                await self._condition.wait()  # nothing finalized inside the window -> stall
+                await self._work_finalized.wait()  # nothing finalized inside the window -> stall
 
     async def release_active_groups(self, count: int, *, reason: str) -> None:
         """Free active slots: the trainer releases trained slots after its model state dict pull; the batcher
@@ -223,25 +235,27 @@ class RolloutGroupWorkBuffer(Configurable):
             raise ValueError(f"count must be non-negative, got {count}")
         if count == 0:
             return
-        async with self._condition:
+        async with self._lock:
             if count > self._active_rollout_groups:
                 raise RuntimeError(
                     f"release_active_groups({count}) exceeds active count {self._active_rollout_groups}"
                 )
             self._active_rollout_groups -= count
             sl.log_trace_scalar({f"rollout_buffer/released/{reason}": float(count)})
-            self._condition.notify_all()
+            self._slot_freed.notify(count)
 
     async def close(self) -> None:
         """run() shutdown calls this once. Sets `_closed`, drops buffered work, and wakes every waiter.
 
-        After this, all four waiters unblock and exit their loops: wait_for_slot() returns False, and
+        After this, every waiter unblocks and exits its loop: wait_for_slot() returns False, and
         claim_next()/take_finalized() return None.
         """
-        async with self._condition:
+        async with self._lock:
             self._closed = True
             self._work_by_group_id.clear()
-            self._condition.notify_all()
+            self._waiting_group_ids.clear()
+            for condition in (self._slot_freed, self._work_added, self._work_finalized):
+                condition.notify_all()
 
     def metrics(self) -> list[m.Metric]:
         """Trainer loop: point-in-time buffer gauges for this step; resets the per-flush peak."""
