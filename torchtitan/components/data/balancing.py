@@ -47,9 +47,8 @@ default). It does not help when ranks synchronize once per several
 microbatches: with pipeline parallelism, or with
 ``defer_fsdp_gradient_reduction``, what matters is each rank's sum over the
 step's microbatches, which reordering within a window does not balance. No
-order can
-split a single document: a row that is one full-length document stays as
-heavy as it is.
+order can split a single document: a row that is one full-length document
+stays as heavy as it is.
 """
 
 # TODO: group-local balancing, which plans within blocks of data-parallel ranks
