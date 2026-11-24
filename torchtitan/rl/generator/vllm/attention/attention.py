@@ -226,11 +226,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         self.enable_gqa = self.num_heads > self.num_kv_heads
 
-        # Query tokens of a verify row (the token plus its MTP drafts), when FA4's SwapAB
-        # decode kernel can take them as query heads (_verify_rows_as_decode): SM100/SM103,
-        # K head dim 64/96/128/256, at most 32 query heads per KV head (SwapABPolicy,
-        # flash_attn/cute/config.py). If SwapAB still refuses (a DiffKV layer's V head dim),
-        # FA4's standard kernel runs the rows, slower.
+        # Query tokens of a verify row (the token plus its MTP drafts), where FA4's SwapAB decode
+        # kernel takes them as query heads (limits: SwapABPolicy in flash_attn/cute/config.py).
+        # A DiffKV layer's V head dim can still be refused: FA4's standard kernel runs it, slower.
         speculative_config = get_current_vllm_config().speculative_config
         self.verify_query_len = None
         if speculative_config is not None:
@@ -371,9 +369,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         seqused_k = attn_metadata.seq_lens
 
         # A verify step: every row holds one token plus its drafts (FULL graphs pad with whole rows).
-        # TODO: drop _verify_rows_as_decode once FA4's SwapAB decode kernel takes 1 + k query
-        # tokens per row; it needs max_seqlen_q == 1 (SwapABPolicy.rejection in
-        # flash_attn/cute/config.py). FA4 issue to file.
+        # TODO: run each verify row as one FA4 call, without the fp32 tail, once torch's varlen
+        # API passes FA4's query_len_in_heads (Dao-AILab/flash-attention#3217 adds it to FA4; no
+        # torch issue filed yet).
         is_uniform_verify = (
             max_seqlen_q == self.verify_query_len
             and num_actual_tokens == max_seqlen_q * seqused_k.shape[0]
