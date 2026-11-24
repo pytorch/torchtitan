@@ -51,12 +51,16 @@ class _Endpoint:
         return await self.call(*args, **kwargs)
 
 
-def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
+def _controller(
+    events: list[str], *, on_push=None, on_pull=None, on_forward_backward=None
+) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
     async def forward_backward(*args):
         events.append(f"fwd_bwd {version + 1}")
+        if on_forward_backward is not None:
+            await on_forward_backward(version + 1)
         return _RankValues({"loss/mean": 1.0})
 
     async def optim_step(**kwargs):
@@ -91,6 +95,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     controller.start_step = 0
     controller._trainer_policy_version = 0
     controller._validation_tasks = []
+    controller._model_state_dict_pull_tasks = []
     controller._has_pending_validation = False
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
@@ -147,13 +152,26 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
     return queue
 
 
+async def _teardown(controller: Controller) -> None:
+    """Cancel and gather the pull task as `run()` does, retrieving its error."""
+    tasks = controller._model_state_dict_pull_tasks
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def _run(controller: Controller, *, num_training_steps: int) -> None:
     controller.config.async_loop.num_training_steps = num_training_steps
-    asyncio.run(
-        controller._trainer_loop(
-            _batch_queue(num_training_steps), num_training_steps=num_training_steps
-        )
-    )
+
+    async def run() -> None:
+        try:
+            await controller._trainer_loop(
+                _batch_queue(num_training_steps), num_training_steps=num_training_steps
+            )
+        finally:
+            await _teardown(controller)
+
+    asyncio.run(run())
 
 
 def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
@@ -242,3 +260,54 @@ def test_failed_validation_fails_training() -> None:
     controller.validate = validate
     with pytest.raises(RuntimeError, match="validation failed"):
         _run(controller, num_training_steps=3)
+
+
+def test_pull_failure_fails_the_loop_instead_of_waiting_for_a_batch() -> None:
+    """A failed pull releases no groups, so a lockstep run gets no next batch."""
+
+    async def failing_pull():
+        raise RuntimeError("pull failed")
+
+    controller = _controller([], on_pull=failing_pull)
+    controller.config.async_loop.num_training_steps = 2
+
+    async def run() -> None:
+        try:
+            await asyncio.wait_for(
+                controller._trainer_loop(_batch_queue(1), num_training_steps=2),
+                timeout=10,
+            )
+        finally:
+            await _teardown(controller)
+
+    with pytest.raises(RuntimeError, match="pull failed"):
+        asyncio.run(run())
+
+
+def test_failed_step_hands_its_in_flight_pull_to_run_for_teardown() -> None:
+    pull_started = asyncio.Event()
+
+    async def hanging_pull():
+        pull_started.set()
+        await asyncio.Event().wait()
+
+    async def failing_forward_backward(step):
+        if step == 2:
+            await pull_started.wait()
+            raise RuntimeError("forward/backward failed")
+
+    controller = _controller(
+        [], on_pull=hanging_pull, on_forward_backward=failing_forward_backward
+    )
+    controller.config.async_loop.num_training_steps = 2
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="forward/backward failed"):
+            await asyncio.wait_for(
+                controller._trainer_loop(_batch_queue(2), num_training_steps=2),
+                timeout=10,
+            )
+        (pull,) = controller._model_state_dict_pull_tasks
+        assert not pull.done()
+
+    asyncio.run(run())
