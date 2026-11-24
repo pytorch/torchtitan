@@ -18,21 +18,25 @@ because the solver doesn't support torchtitan's token_dispatcher ops
 layout via duck typing.
 """
 
+import copy
 import logging
 import time
+from dataclasses import fields
+from types import SimpleNamespace
 
 import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor.placement_types import Shard
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.experiments.graph_trainer.autoparallel_api import AutoParallelGraph
 from torchtitan.experiments.graph_trainer.compile import apply_compile
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.models.common.moe import MoE
 from torchtitan.tools.utils import device_type
 
 
@@ -87,16 +91,19 @@ def _preserve_moe_attributes(original_model, parallel_model):
             par_moe.moe_enabled = orig_moe.moe_enabled
         if hasattr(orig_moe, "load_balance_coeff"):
             par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+        # The balancing hooks read this flag; AutoParallel's MoE has no frozen bias.
+        par_moe.freeze_expert_bias = False
 
 
 def parallelize_autoparallel_deepseekv3(
     model,
     *,
     parallelism_context: ParallelismContext,
+    precision: PrecisionConfig,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
     compile_config: GraphTrainerCompileConfig,
-    ac_config: ActivationCheckpointingConfig,
+    activation_remat: ActivationRematConfig | None,
     dump_folder: str,
 ):
     """Apply AutoParallelGraph SPMD sharding to DeepSeek V3.
@@ -132,8 +139,8 @@ def parallelize_autoparallel_deepseekv3(
             f"axes, but got mesh axes {sparse_mesh.mesh_dim_names}"
         )
 
-    param_dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
-    reduce_dtype = TORCH_DTYPE_MAP[training.mixed_precision_reduce]
+    param_dtype = TORCH_DTYPE_MAP[precision.param_dtype]
+    reduce_dtype = TORCH_DTYPE_MAP[precision.reduce_dtype]
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,
@@ -150,11 +157,20 @@ def parallelize_autoparallel_deepseekv3(
 
     # Use AutoParallel's DSv3 model: torchtitan's token_dispatcher uses
     # aten::div.Tensor_mode which the AP solver doesn't support yet.
-    # The AP model accepts torchtitan's config via duck typing (same
-    # hierarchical attribute paths).
+    # AutoParallel's model still expects separate dense and MoE config fields.
+    ap_config = copy.copy(model.config)
+    ap_config.layers = []
+    for layer in model.config.layers:
+        layer_fields = {
+            field.name: getattr(layer, field.name) for field in fields(layer)
+        }
+        is_moe = isinstance(layer.feed_forward, MoE.Config)
+        layer_fields["moe"] = layer.feed_forward if is_moe else None
+        layer_fields["feed_forward"] = None if is_moe else layer.feed_forward
+        ap_config.layers.append(SimpleNamespace(**layer_fields))
     with torch.device("meta"):
         ap_model = APDeepSeekV3Model(
-            model.config,
+            ap_config,
             mesh=sparse_mesh,
             compute_dtype=param_dtype,
         )

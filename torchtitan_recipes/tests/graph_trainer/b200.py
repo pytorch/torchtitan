@@ -8,7 +8,10 @@
 
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.tests.suites.b200 import _configure_dist_moe_fsdp2_ep2
+from torchtitan_recipes.tests.models.deepseek_v3 import (
+    configure_dist_moe_fsdp2_ep2,
+    dist_moe_fsdp2_ep2_parallelism,
+)
 
 
 def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
@@ -17,8 +20,10 @@ def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Co
         graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16,
     )
 
-    return _configure_dist_moe_fsdp2_ep2(
-        graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
+    return configure_dist_moe_fsdp2_ep2(
+        graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16(
+            seq_len=128, parallelism=dist_moe_fsdp2_ep2_parallelism()
+        )
     )
 
 
@@ -30,8 +35,10 @@ def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> (
         graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8,
     )
 
-    config = _configure_dist_moe_fsdp2_ep2(
-        graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=128)
+    config = configure_dist_moe_fsdp2_ep2(
+        graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8(
+            seq_len=128, parallelism=dist_moe_fsdp2_ep2_parallelism()
+        )
     )
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"

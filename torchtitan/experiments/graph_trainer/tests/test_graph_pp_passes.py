@@ -81,10 +81,7 @@ from torchtitan.experiments.graph_trainer.mutation_utils import (
     mutation_deps,
     mutation_target_nodes,
 )
-from torchtitan.experiments.graph_trainer.passes import (
-    apply_graph_passes,
-    construct_mandatory_graph_passes,
-)
+from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
@@ -94,6 +91,8 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
+
+from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 
 
@@ -151,24 +150,23 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
+        parallelism = ParallelismConfig(expert_parallel_degree=2)
         model_config = build_deepseek_v3_model_config(
-            "debugmodel", attn_backend="flex", seq_len=seq_len
+            "debugmodel", attn_backend="flex", seq_len=seq_len, parallelism=parallelism
         )
         trainer_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
-                max_context_length=seq_len,
                 steps=1,
-                disable_cuda_graphs=True,
+                disable_accelerator_graphs=True,
             ),
-            parallelism=ParallelismConfig(expert_parallel_degree=2),
+            parallelism=parallelism,
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=0, deterministic=True),
         )
-        model_config.set_sharding_(trainer_config.parallelism)
         moe_layer_config = model_config.layers[1]
-        if moe_layer_config.moe is None:
+        if not isinstance(moe_layer_config.feed_forward, MoE.Config):
             raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")
 
         with (
@@ -179,20 +177,20 @@ def _trace_dsv3_moe_block_stage(
             torch.device("meta"),
         ):
             model = model_config.build()
-        model.to_empty(device="cuda")
-        with torch.no_grad():
-            model.init_states(buffer_device=None)
         model._apply(
             lambda tensor: tensor.to(dtype=torch.bfloat16)
             if tensor.is_floating_point()
             else tensor
         )
+        model.to_empty(device="cuda")
+        with torch.no_grad():
+            model.init_states(buffer_device=None)
         model.train()
 
         block = model.layers["1"]
-        if not block.moe_enabled:
+        if not isinstance(block.feed_forward, MoE):
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
-        attention_metadata_key = block.attention.attention_metadata_key
+        inner_attention_type = type(block.attention.inner_attention)
         if fsdp_mesh is not None:
             block = data_parallel(
                 block,
@@ -221,7 +219,7 @@ def _trace_dsv3_moe_block_stage(
         ):
             out = block(
                 x,
-                attention_metadata.get(attention_metadata_key),
+                attention_metadata.get(inner_attention_type),
                 positions,
                 aux_loss_denominator=aux_loss_denominator,
             )
@@ -2321,6 +2319,53 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         actual = (compute_outputs[0], *reduced_grads)
         _assert_tensor_sequence_equal(self, actual, expected)
+
+    def test_forward_split_extracts_local_parameter_preparation(self) -> None:
+        gm = _make_forward_graph_with_quantized_unshard()
+        graph = gm.graph
+        param = graph.find_nodes(op="placeholder")[0]
+        (all_gather,) = graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.all_gather_into_tensor.default,
+        )
+        (wait,) = graph.find_nodes(
+            op="call_function", target=torch.ops._c10d_functional.wait_tensor.default
+        )
+        with graph.inserting_before(all_gather):
+            cast = graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(param,),
+                kwargs={"dtype": torch.bfloat16},
+            )
+        cast.meta.update(all_gather.meta)
+        wait.replace_all_uses_with(cast)
+        graph.erase_node(wait)
+        graph.erase_node(all_gather)
+        graph.lint()
+        gm.recompile()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        split = extract_fsdp_unshard_graph(
+            gm,
+            num_params=1,
+            input_names=("sharded_param", "x"),
+            flat_input_indices=(0, 1),
+        )
+        self.assertIsNotNone(split.unshard_module)
+        for target in (
+            torch.ops.aten._to_copy.default,
+            _quantize_weight_for_graph_test,
+        ):
+            self.assertIn(target, _call_targets(split.unshard_module))
+            self.assertNotIn(target, _call_targets(split.compute_module))
+
+        weight = torch.arange(4, dtype=torch.float32) / 7
+        prepared = split.unshard_module(weight)
+        for microbatch in range(240):
+            x = torch.full((4,), microbatch, dtype=torch.bfloat16)
+            expected = gm(weight, x)
+            actual = split.compute_module(*prepared, x)
+            _assert_tensor_sequence_equal(self, actual, expected)
 
     def test_forward_split_keeps_quantization_in_unshard_chain(self) -> None:
         gm = _make_forward_graph_with_quantized_unshard()

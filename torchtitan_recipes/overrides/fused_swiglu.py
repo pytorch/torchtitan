@@ -26,6 +26,7 @@ import triton.language as tl
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
+from torchtitan.tools.utils import device_type
 
 __all__ = [
     "FusedSwiGLU",
@@ -46,7 +47,7 @@ def _silu_and_mul_forward_kernel(
     up,
     out,
     offsets,
-    NUM_ROWS: tl.constexpr,
+    NUM_ROWS,  # Not constexpr: routed row counts change every step.
     NUM_COLS: tl.constexpr,
     NUM_OFFSETS: tl.constexpr,
     HAS_OFFSETS: tl.constexpr,
@@ -97,7 +98,7 @@ def _silu_and_mul_backward_kernel(
     grad_gate,
     grad_up,
     offsets,
-    NUM_ROWS: tl.constexpr,
+    NUM_ROWS,  # Not constexpr: routed row counts change every step.
     NUM_COLS: tl.constexpr,
     NUM_OFFSETS: tl.constexpr,
     HAS_OFFSETS: tl.constexpr,
@@ -247,7 +248,7 @@ def silu_and_mul_backward_kernel(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul",
     mutates_args=(),
-    device_types="cuda",
+    device_types=device_type,
 )
 def silu_and_mul_op(
     gate_up: torch.Tensor,
@@ -268,7 +269,7 @@ def silu_and_mul_op_fake(
 @torch.library.custom_op(
     "torchtitan::silu_and_mul_backward",
     mutates_args=(),
-    device_types="cuda",
+    device_types=device_type,
 )
 def silu_and_mul_backward_op(
     grad_out: torch.Tensor,

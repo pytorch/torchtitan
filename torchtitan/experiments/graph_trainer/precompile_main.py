@@ -29,6 +29,7 @@ import torch.distributed as dist
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -40,7 +41,6 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _register_coor_ops,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
@@ -102,8 +102,8 @@ def _common_setup(config):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-    device = torch.device("cuda:0")
-    torch.cuda.set_device(device)
+    device = torch.device(utils.device_type, 0)
+    torch.accelerator.set_device_index(device.index)
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
@@ -119,9 +119,7 @@ def _common_setup(config):
 
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
-    model_config = copy.deepcopy(config.model)
-    model_config.set_sharding_(config.parallelism)
-    config.model = model_config
+    config.model = copy.deepcopy(config.model)
     if config.override.imports:
         apply_overrides(config.override, config)
     model_config = config.model
@@ -129,18 +127,21 @@ def _common_setup(config):
     with (
         parallelism_context.activate_spmd(),
         torch.device("meta"),
-        utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[config.precision.dtype]),
     ):
         model = model_config.build()
+    # Match the frozen parameter dtypes of TrainingEngine._initialize_model.
+    maybe_store_frozen_params_in_param_dtype_(model, config.precision)
 
     # For aot_fx_trace, apply_compile inside model.parallelize is a no-op
     # (returns model unchanged), so we pass the real compile_config.
     model = model.parallelize(
         parallelism_context=parallelism_context,
+        precision=config.precision,
         training=config.training,
         parallelism=parallelism,
         compile_config=compile_config,
-        ac_config=config.activation_checkpoint,
+        activation_remat=config.activation_remat,
         dump_folder=config.dump_folder,
     )
 
@@ -228,32 +229,24 @@ def _precompile_aot_fx_trace(
     extra_kwargs: dict[str, Any] = {}
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
-        attn_config = model_config.layers[0].attention
-        inner_attention = attn_config.inner_attention
-
         positions = (
             torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
-            % config.training.max_context_length
+            % model_config.max_context_length
         )
         extra_kwargs["positions"] = positions
         extra_kwargs["padding_mask"] = torch.zeros(
             num_tokens, dtype=torch.bool, device=dummy_inputs.device
         )
 
-        if isinstance(
-            inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-        ):
-            extra_kwargs["attention_metadata"] = cast(
-                Decoder, model
-            )._get_attention_metadata(
-                positions=positions,
-            )
+        extra_kwargs["attention_metadata"] = cast(
+            Decoder, model
+        )._get_attention_metadata(
+            positions=positions,
+        )
 
         uses_aux_loss = next(model_config.traverse(AuxLoss.Config), None) is not None
         if not uses_aux_loss:
-            uses_aux_loss = any(
-                getattr(layer, "moe", None) is not None for layer in model_config.layers
-            )
+            uses_aux_loss = model_config.first_moe is not None
         if uses_aux_loss:
             _, routing_token_counts = get_mtp_token_counts(
                 target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
@@ -306,7 +299,7 @@ def _precompile_aot_fx_trace(
 
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
-    # CUDA graph is excluded — it runs at load time on each rank.
+    # Opt-in passes from cuda_graph.py must be applied by the caller at runtime.
     from torchtitan.experiments.graph_trainer.passes import (
         apply_graph_passes,
         compile_time_passes,

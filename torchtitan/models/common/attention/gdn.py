@@ -7,9 +7,9 @@
 """Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, C = projection channels,
+# B = batch, T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
-# S = state slots, W = convolution kernel width.
+# S = state slots, W = convolution kernel width, G = key-head groups.
 
 from dataclasses import dataclass
 
@@ -17,37 +17,39 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
-from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
-from attn_gym.linear.context_parallel import ContextParallelRouting
-from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
-from attn_gym.linear.gdn.ops import _ChunkGDN
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm
-from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import local_compile
+from torchtitan.models.base.module import Module
+
+from torchtitan.models.common.attn_gym import (
+    _ChunkGDN,
+    causal_conv1d,
+    chunk_gdn,
+    ChunkGdnWarpdrivePacked,
+    ContextParallelRouting,
+    is_missing_kernel,
+    l2norm,
+    recurrent_gdn,
+    require_attn_gym,
+)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
-from torchtitan.protocols.module import Module
-from .attention import (
-    create_varlen_metadata_for_document,
-    InnerAttention,
-    local_head_split,
+from .attention import create_varlen_metadata_for_document, InnerAttention
+from .linear_attention import (
+    chunk_kernel_options,
+    LinearAttention,
+    LinearAttentionMetadata,
 )
-from .kda import chunk_kernel_options, LinearAttentionMetadata
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (
-    _ShortConv,
-    _ConfiguredShortConv,
-    _L2Norm,
-    _ChunkGDN,
-    ChunkGdnCudnnPacked,
-):
-    spmd.register_local_autograd_function(_kernel_function)
+for _kernel_function in (_ChunkGDN, ChunkGdnWarpdrivePacked):
+    if not is_missing_kernel(_kernel_function):
+        spmd.register_local_autograd_function(_kernel_function)
 
 
 @spmd.local_map(
@@ -66,7 +68,7 @@ def _causal_conv1d_varlen(
     """Depthwise causal conv with per-document resets (CUDA-only).
 
     A pure-torch per-document reference lives in
-    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py``.
     """
     out_BTD = causal_conv1d(
         x_TD.unsqueeze(0),
@@ -79,9 +81,11 @@ def _causal_conv1d_varlen(
 
 
 @torch.library.custom_op(
-    "torchtitan::recurrent_gdn_fwd", mutates_args=(), device_types="cuda"
+    "torchtitan::batch_invariant_recurrent_gdn_fwd",
+    mutates_args=(),
+    device_types="cuda",
 )
-def _recurrent_gdn_fwd(
+def _batch_invariant_recurrent_gdn_fwd(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -130,13 +134,14 @@ def _recurrent_gdn_fwd(
         scale=q_BTHK.shape[-1] ** -0.5,
         state_indices=state_indices,
         has_initial_state=has_initial_state,
-        autotune=False,
+        # The scan otherwise picks its arithmetic from the batch shape.
+        kernel_options={"batch_invariant": True, "autotune": False},
     )
     return out_BTHV.to(q_BTHK.dtype)
 
 
-@_recurrent_gdn_fwd.register_fake
-def _recurrent_gdn_fwd_fake(
+@_batch_invariant_recurrent_gdn_fwd.register_fake
+def _batch_invariant_recurrent_gdn_fwd_fake(
     q_BTHK: torch.Tensor,
     k_BTHK: torch.Tensor,
     v_BTHV: torch.Tensor,
@@ -161,11 +166,11 @@ def _chunk_gdn_gradients(
         inputs = tuple(
             tensor.detach().requires_grad_(True) for tensor in (q, k, v, g, beta)
         )
-        normalized_q = l2norm(inputs[0], cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(inputs[1], cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(inputs[0], cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(inputs[1], cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             inputs[2],
             inputs[3],
             inputs[4],
@@ -174,16 +179,16 @@ def _chunk_gdn_gradients(
             impl="fused",
         )
         grad_q, grad_k, grad_v, grad_g, grad_beta = torch.autograd.grad(
-            output, inputs, grad_output
+            output_BTHV, inputs, grad_output
         )
         return grad_q, grad_k, grad_v, grad_g, grad_beta
 
 
-def _recurrent_gdn_setup_context(ctx, inputs, output) -> None:
+def _batch_invariant_recurrent_gdn_setup_context(ctx, inputs, output) -> None:
     ctx.save_for_backward(*inputs)
 
 
-def _recurrent_gdn_backward(ctx, grad_output):
+def _batch_invariant_recurrent_gdn_backward(ctx, grad_output):
     q, k, v, g, beta, cu_seqlens = ctx.saved_tensors
     grads = _chunk_gdn_gradients(
         grad_output,
@@ -197,9 +202,96 @@ def _recurrent_gdn_backward(ctx, grad_output):
     return (*grads, None)
 
 
-_recurrent_gdn_fwd.register_autograd(
-    _recurrent_gdn_backward, setup_context=_recurrent_gdn_setup_context
+_batch_invariant_recurrent_gdn_fwd.register_autograd(
+    _batch_invariant_recurrent_gdn_backward,
+    setup_context=_batch_invariant_recurrent_gdn_setup_context,
 )
+
+
+def _split_grouped_in_proj(
+    projected_TC: torch.Tensor,
+    split_sizes: list[int],
+    value_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split ``GDN.in_proj``'s output into ``(mixed_qkv_TC, a_TH, b_TH, gate_THV)``.
+
+    ``in_proj`` rows are grouped by key head, so ``q|k|v`` is copied into one
+    contiguous block for the convolution. Example, 27B at TP4 (4 local key heads,
+    3 value heads per key head, head dims 128):
+
+        projected_TC [T, 4 * 1030]   per key head [q 128 | k 128 | v 384 | z 384 | a 3 | b 3]
+        mixed_qkv_TC [T, 2560]       [q 512 | k 512 | v 1536]
+        a_TH, b_TH   [T, 12]
+        gate_THV     [T, 12, 128]
+    """
+    num_tokens = projected_TC.shape[0]
+    grouped_TGC = projected_TC.unflatten(-1, (-1, sum(split_sizes)))
+    query, key, value, gate, a, b = grouped_TGC.split(split_sizes, dim=-1)
+    mixed_qkv_TC = torch.cat(
+        [query.flatten(1), key.flatten(1), value.flatten(1)], dim=-1
+    )
+    gate_THV = gate.reshape(num_tokens, -1, value_head_dim)
+    # The GDN kernels need contiguous heads. With one value head per key head (0.8B, 2B),
+    # flatten and reshape return strided views instead of copies.
+    return (
+        mixed_qkv_TC,
+        a.flatten(1).contiguous(),
+        b.flatten(1).contiguous(),
+        gate_THV.contiguous(),
+    )
+
+
+# Two compiles of the same split under one region name, with different Inductor options;
+# separate functions, so each gets its own graph cache and recompile limit.
+# Training: the backward cats six gradients (q, k, v, z, a, b) into the grouped layout.
+# Both cat limits at 0 make Inductor copy each piece into its slice, not one kernel that
+# picks a source per element; combo_kernels launches the remaining copies as one kernel.
+@local_compile(
+    "gdn_split_in_proj",
+    batch_invariant=True,
+    options={
+        "max_pointwise_cat_inputs": 0,
+        "max_complex_pointwise_cat_inputs": 0,
+        "combo_kernels": True,
+    },
+)
+def _split_in_proj_with_grad(
+    projected_TC: torch.Tensor, split_sizes: list[int], value_head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _split_grouped_in_proj(projected_TC, split_sizes, value_head_dim)
+
+
+# No backward (generator, no_grad): the q|k|v cat and the a, b, gate copies run as one
+# combo kernel. Per-input cat copies would add launches, which dominate at decode sizes.
+@local_compile(
+    "gdn_split_in_proj", batch_invariant=True, options={"combo_kernels": True}
+)
+def _split_in_proj_no_grad(
+    projected_TC: torch.Tensor, split_sizes: list[int], value_head_dim: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _split_grouped_in_proj(projected_TC, split_sizes, value_head_dim)
+
+
+@spmd.local_map(
+    # split_sizes is a list of six ints.
+    in_types=(spmd.PartitionSpec(("dp", "cp"), "tp"), [None] * 6, None),
+    out_types=(
+        # Nominal tp S(1): each rank holds its own [q | k | v]; never redistribute or gather it.
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # mixed_qkv_TC
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # a_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp"),  # b_TH
+        spmd.PartitionSpec(("dp", "cp"), "tp", None),  # gate_THV
+    ),
+)
+def _split_in_proj(
+    projected_TC: torch.Tensor,
+    split_sizes: list[int],
+    value_head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run ``_split_grouped_in_proj`` compiled for training if a backward will run."""
+    if projected_TC.requires_grad:
+        return _split_in_proj_with_grad(projected_TC, split_sizes, value_head_dim)
+    return _split_in_proj_no_grad(projected_TC, split_sizes, value_head_dim)
 
 
 class GDNKernel(Module):
@@ -207,7 +299,7 @@ class GDNKernel(Module):
 
     This module provides a local SPMD boundary for the sharding code. A
     pure-torch reference implementation lives in
-    ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
+    ``tests/unit_tests/gpu/models/qwen3_5/test_qwen3_5_deltanet.py``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -215,6 +307,8 @@ class GDNKernel(Module):
         pass
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(chunk_gdn, recurrent_gdn, l2norm)
         super().__init__()
 
     def forward(
@@ -234,7 +328,7 @@ class GDNKernel(Module):
         beta_BTH = beta_TH.unsqueeze(0)
 
         if is_in_batch_invariant_mode() and cu_seqlens is not None:
-            return _recurrent_gdn_fwd(
+            return _batch_invariant_recurrent_gdn_fwd(
                 xq_BTHK,
                 xk_BTHK,
                 xv_BTHV,
@@ -243,11 +337,11 @@ class GDNKernel(Module):
                 cu_seqlens,
             ).squeeze(0)
 
-        normalized_q = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
-        normalized_k = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
-        output, _ = chunk_gdn(
-            normalized_q,
-            normalized_k,
+        normalized_q_BTHK = l2norm(xq_BTHK, cu_seqlens=cu_seqlens)
+        normalized_k_BTHK = l2norm(xk_BTHK, cu_seqlens=cu_seqlens)
+        output_BTHV, _ = chunk_gdn(
+            normalized_q_BTHK,
+            normalized_k_BTHK,
             xv_BTHV,
             g_BTH,
             beta_BTH,
@@ -256,15 +350,15 @@ class GDNKernel(Module):
             impl="fused",
             kernel_options=chunk_kernel_options(xq_BTHK),
         )
-        return output.squeeze(0)
+        return output_BTHV.squeeze(0)
 
 
 class InnerGDN(InnerAttention):
     """Dense GDN computation behind the vLLM replacement boundary.
 
-    The trainer keeps Q, K, and V separate, matching the main-branch GDN flow.
-    The vLLM replacement may fuse them internally for its paged convolution
-    cache without changing this dense path.
+    ``mixed_qkv_TC`` holds each rank's ``[q | k | v]`` columns. This dense path
+    convolves the three blocks separately; the vLLM replacement convolves them
+    in one paged call.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -292,14 +386,14 @@ class InnerGDN(InnerAttention):
             )
 
     def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(causal_conv1d)
         super().__init__()
         self.kernel = config.kernel.build()
 
     def forward(
         self,
-        query_TC: torch.Tensor,
-        key_TC: torch.Tensor,
-        value_TC: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
         a_TH: torch.Tensor,
         b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
@@ -312,6 +406,14 @@ class InnerGDN(InnerAttention):
         value_head_dim: int,
         attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
+        query_TC, key_TC, value_TC = mixed_qkv_TC.split(
+            [
+                conv_q_weight_C1W.shape[0],
+                conv_k_weight_C1W.shape[0],
+                conv_v_weight_C1W.shape[0],
+            ],
+            dim=-1,
+        )
         varlen = attention_metadata.varlen if attention_metadata is not None else None
         cu_seqlens = varlen.cu_seq_q if varlen is not None else None
         if cu_seqlens is None and is_in_batch_invariant_mode():
@@ -453,7 +555,7 @@ class InnerGDN(InnerAttention):
         )
 
 
-class GatedDeltaNet(Module):
+class GDN(LinearAttention):
     """Gated DeltaNet linear attention.
 
     Uses recurrent state + gated delta rule instead of softmax attention.
@@ -464,75 +566,110 @@ class GatedDeltaNet(Module):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(LinearAttention.Config):
         key_head_dim: int
         value_head_dim: int
+        # Query/key heads; n_heads counts value heads.
+        n_key_heads: int
         conv_kernel_size: int = 4
+        # The gate reads A_log and dt_bias in float32.
+        preserve_dtype_params: tuple[str, ...] = ("A_log", "dt_bias")
 
         # Sub-module configs
-        in_proj_q: Linear.Config
-        in_proj_k: Linear.Config
-        in_proj_v: Linear.Config
-        in_proj_z: Linear.Config
-        in_proj_a: Linear.Config
-        in_proj_b: Linear.Config
+        # One projection for q, k, v, z, a and b, with rows grouped by key head
+        # (r = n_heads // n_key_heads value heads per key head):
+        #   [q key_head_dim | k key_head_dim | v r*value_head_dim | z r*value_head_dim | a r | b r]
+        # so a TP shard holds whole heads of all six, like QKVLinear's wqkv per KV group.
+        in_proj: Linear.Config
         conv_q: Conv1d.Config
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
-        inner_gated_delta_net: Module.Config
         norm: GatedRMSNorm.Config
         out_proj: Linear.Config
+
+        @property
+        def in_proj_split_sizes(self) -> list[int]:
+            """Rows of q, k, v, z, a, b per key head; 27B: [128, 128, 384, 384, 3, 3]."""
+            heads_per_key = self.n_heads // self.n_key_heads
+            value_dim = heads_per_key * self.value_head_dim
+            return [
+                self.key_head_dim,
+                self.key_head_dim,
+                value_dim,
+                value_dim,
+                heads_per_key,
+                heads_per_key,
+            ]
+
+        def __post_init__(self):
+            LinearAttention.Config.__post_init__(self)
+            # Before the modulo: 0 raises ZeroDivisionError, and 4 % -2 == 0.
+            if self.n_key_heads < 1:
+                raise ValueError(
+                    f"n_key_heads must be positive, got {self.n_key_heads}"
+                )
+            if self.n_heads % self.n_key_heads != 0:
+                raise ValueError(
+                    f"n_heads ({self.n_heads}) must be divisible by "
+                    f"n_key_heads ({self.n_key_heads})"
+                )
+            in_proj_rows = self.n_key_heads * sum(self.in_proj_split_sizes)
+            if self.in_proj.out_features != in_proj_rows:
+                raise ValueError(
+                    f"in_proj.out_features ({self.in_proj.out_features}) must be "
+                    f"n_key_heads * sum(in_proj_split_sizes) ({in_proj_rows})"
+                )
+
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import delta_rule_flops_per_token
+
+            # The recurrent state has a fixed size, so every query costs the same.
+            return positions.numel() * delta_rule_flops_per_token(
+                num_heads=self.n_heads,
+                key_head_dim=self.key_head_dim,
+                v_head_dim=self.value_head_dim,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
         self.key_head_dim = config.key_head_dim
         self.value_head_dim = config.value_head_dim
-        value_dim = config.in_proj_v.out_features
+        self.in_proj_split_sizes = config.in_proj_split_sizes
 
-        self.in_proj_q = config.in_proj_q.build()
-        self.in_proj_k = config.in_proj_k.build()
-        self.in_proj_v = config.in_proj_v.build()
-        self.in_proj_z = config.in_proj_z.build()
-        self.in_proj_a = config.in_proj_a.build()
-        self.in_proj_b = config.in_proj_b.build()
+        self.in_proj = config.in_proj.build()
 
         self.conv_q = config.conv_q.build()
         self.conv_k = config.conv_k.build()
         self.conv_v = config.conv_v.build()
 
-        n_value_heads = value_dim // config.value_head_dim
-        self.A_log = nn.Parameter(torch.empty(n_value_heads))
-        self.dt_bias = nn.Parameter(torch.empty(n_value_heads))
+        self.A_log = nn.Parameter(torch.empty(config.n_heads))
+        self.dt_bias = nn.Parameter(torch.empty(config.n_heads))
 
         self.norm = config.norm.build()
         self.out_proj = config.out_proj.build()
-        self.inner_gated_delta_net = config.inner_gated_delta_net.build()
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
         x_TD: torch.Tensor,
         attention_metadata: LinearAttentionMetadata | None = None,
     ) -> torch.Tensor:
-        # All six input projections consume x, so gather it once before
-        # entering their separate compute paths.
         x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
-        query_TC = self.in_proj_q(x_TD)
-        key_TC = self.in_proj_k(x_TD)
-        value_TC = self.in_proj_v(x_TD)
-        gate_TC = self.in_proj_z(x_TD)
-        a_TH = self.in_proj_a(x_TD)
-        b_TH = self.in_proj_b(x_TD)
+        projected_TC = self.in_proj(x_TD)
+        # The split copies the in_proj output with bare ops.
+        remat.recompute_needs_tensor(projected_TC)
+        mixed_qkv_TC, a_TH, b_TH, gate_THV = _split_in_proj(
+            projected_TC, self.in_proj_split_sizes, self.value_head_dim
+        )
 
         output_THV = remat.region(
-            self.inner_gated_delta_net,
+            self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(
-            query_TC,
-            key_TC,
-            value_TC,
+            mixed_qkv_TC,
             a_TH,
             b_TH,
             self.conv_q.weight,
@@ -544,9 +681,7 @@ class GatedDeltaNet(Module):
             value_head_dim=self.value_head_dim,
             attention_metadata=attention_metadata,
         )
-        gate_THV = local_head_split(gate_TC, self.value_head_dim, cp_shard_dim=0)
-        # The gated norm reads the inner_attention and in_proj_z projection outputs
-        # with bare ops.
+        # The gated norm reads the inner_attention and split outputs with bare ops.
         remat.recompute_needs_tensor(output_THV, gate_THV)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)

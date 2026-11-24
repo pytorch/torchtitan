@@ -9,11 +9,14 @@ from __future__ import annotations
 import logging
 import math
 import os
+import warnings
+from collections import defaultdict
 from collections.abc import Iterable
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import torch
+import torch.cuda.nccl
 import torch.distributed._functional_collectives as funcol
 import torch.distributed.config as dist_config
 import torch.distributed.distributed_c10d as c10d
@@ -24,7 +27,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
 from torchtitan.config import CommConfig, DebugConfig
-from torchtitan.distributed.parallelism_context import DistributedTopology
+from torchtitan.distributed.parallelism_context import DistributedTopology, MeshAxisName
 from torchtitan.tools.utils import device_module, device_type, get_local_device
 
 logger = logging.getLogger(__name__)
@@ -32,11 +35,32 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
+    from torchtitan.models.base.module import Module
 
 
 def get_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a DTensor's local shard without adding an autograd operation."""
     return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
+
+
+def as_dtensor_like(param: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+    """Wrap ``local`` as a DTensor with ``param``'s mesh, placements, and shape.
+
+    Returns ``local`` unchanged if ``param`` is not a DTensor. ``local`` must be
+    on ``param``'s device; ``DTensor.from_local`` copies it there otherwise.
+    ``run_check=False`` skips the cross-rank check of ``Replicate()`` placements,
+    so ``local`` must already match on every replica.
+    """
+    if not isinstance(param, DTensor):
+        return local
+    return DTensor.from_local(
+        local,
+        param.device_mesh,
+        param.placements,
+        run_check=False,
+        shape=param.shape,
+        stride=param.stride(),
+    )
 
 
 def _dist_reduce(
@@ -95,6 +119,22 @@ def dist_sum(
     return _dist_reduce(
         x, reduceOp=c10d.ReduceOp.SUM.name, mesh=mesh, extra_pg=extra_pg
     )
+
+
+def dist_mean(x: torch.Tensor, mesh: DeviceMesh) -> float:
+    """Average a scalar over the mesh.
+
+    Divides by the number of values the all-reduce summed, not by the mesh size.
+    A fake process group's all-reduce changes nothing, so this returns the local
+    value.
+    """
+    total, count = _dist_reduce_tensor(
+        torch.stack((x, torch.ones_like(x))),
+        reduceOp=c10d.ReduceOp.SUM.name,
+        mesh=mesh,
+        extra_pg=None,
+    ).tolist()
+    return total / count
 
 
 def dist_sum_tensor(
@@ -166,11 +206,6 @@ def set_determinism(
             # no options) so the regional-inductor scoop configs are preserved.
             FlexInnerAttention.inductor_configs["max_autotune"] = False
             FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
-            # pyrefly: ignore [no-matching-overload]
-            FlexInnerAttention._compiled_flex_attn = torch.compile(
-                flex_attention, options=FlexInnerAttention.inductor_configs
-            )
-
     if debug_config.detect_anomaly:
         logger.warning(
             "Anomaly detection enabled. This incurs significant overhead "
@@ -367,6 +402,124 @@ def _init_real_pp_fake_spmd(
     )
 
 
+def _warn_overwrite_env(name: str, value: str) -> None:
+    if name in os.environ:
+        logger.warning("%s=%s will be overridden to %s.", name, os.environ[name], value)
+    os.environ[name] = value
+
+
+def configure_nccl_for_ulysses(
+    model: Module.Config, *, device_type: str, comm_backend: str
+) -> None:
+    """Disable graph registration on affected NCCL versions before initialization.
+
+    NCCL < 2.32.3 can reuse partial IPC imports for Ulysses graph buffers.
+    Fix: https://github.com/NVIDIA/nccl/pull/2362 (NCCL 2.32.3).
+    """
+    if device_type != "cuda" or comm_backend in {"fake", "real_pp_fake_spmd"}:
+        return
+
+    from torchtitan.models.common.attention.cp_attention import Ulysses
+
+    # TODO: Remove this workaround once supported PyTorch builds ship
+    # NCCL >= 2.32.3.
+    if not dist.is_nccl_available() or torch.cuda.nccl.version() >= (2, 32, 3):
+        return
+
+    # We could only reproduce this issue with Ulysses. Always turning on
+    # this flag may have performance regressions.
+    if not any(model.traverse(Ulysses.Config)):
+        return
+
+    _warn_overwrite_env("NCCL_GRAPH_REGISTER", "0")
+    logger.info("Using NCCL_GRAPH_REGISTER=0 for Ulysses on NCCL before 2.32.3.")
+
+
+def build_alternative_fsdp_mesh(
+    storage_mesh: DeviceMesh,
+    *,
+    max_ctas: int,
+) -> DeviceMesh:
+    """Build a storage-shaped mesh with NCCL CTA-capped FSDP shard groups.
+
+    The ``dp_shard`` and ``edp_shard`` axes get resource-independent child
+    communicators. Other axis groups, rank order, and mesh shape stay unchanged.
+    Call collectively and reuse the result across buckets: each call creates
+    new communicators rather than looking them up in a persistent cache.
+
+    Requires NCCL on the FSDP shard axes; other backends raise ``ValueError``.
+    The fake backend preserves its groups, with a warning unless a group has one
+    rank. A mesh without FSDP shard axes is returned unchanged with a warning
+    that the cap is not applied.
+    """
+    mesh_axis_names = storage_mesh.mesh_dim_names
+    if mesh_axis_names is None:
+        raise ValueError("Redistribution storage mesh must have named axes")
+    fsdp_shard_axes = {
+        MeshAxisName.DP_SHARD.value,
+        MeshAxisName.EDP_SHARD.value,
+    }
+    if fsdp_shard_axes.isdisjoint(mesh_axis_names):
+        warnings.warn(
+            "The storage mesh has no FSDP shard axes; max_ctas will not be applied",
+            stacklevel=2,
+        )
+        return storage_mesh
+
+    groups = []
+    replaced_group = False
+    for axis_name in mesh_axis_names:
+        parent_group = storage_mesh.get_group(axis_name)
+        if axis_name not in fsdp_shard_axes:
+            groups.append(parent_group)
+            continue
+
+        backend = dist.get_backend(parent_group)
+        if backend == "fake":
+            # A one-rank group, such as a size-1 dp_shard or edp_shard, has
+            # nothing to cap.
+            if storage_mesh[axis_name].size() != 1:
+                warnings.warn(
+                    "Redistribution max_ctas is not modeled by the fake process "
+                    "group; using the storage-mesh process group",
+                    stacklevel=2,
+                )
+            groups.append(parent_group)
+            continue
+        if backend != dist.Backend.NCCL:
+            raise ValueError(
+                "Redistribution max_ctas requires an NCCL process group, "
+                f"got {backend!r} for mesh axis {axis_name!r}"
+            )
+
+        options = dist.ProcessGroupNCCL.Options()
+        options.config.max_ctas = max_ctas
+        # Keep redistribution channels independent from the FSDP parent.
+        options.config.split_share = 0  # pyrefly: ignore [missing-attribute]
+        num_ranks = dist.get_world_size(parent_group)
+        child_group = dist.split_group(
+            parent_pg=parent_group,
+            split_ranks=[list(range(num_ranks))],
+            pg_options=options,
+            group_desc=f"optimizer_redistribution_{axis_name}",
+            backend="nccl",
+        )
+        assert isinstance(child_group, dist.ProcessGroup)
+        groups.append(child_group)
+        replaced_group = True
+
+    return (
+        DeviceMesh.from_group(
+            groups,
+            storage_mesh.device_type,
+            mesh=storage_mesh.mesh,
+            mesh_dim_names=mesh_axis_names,
+        )
+        if replaced_group
+        else storage_mesh
+    )
+
+
 def init_distributed(
     comm_config: CommConfig,
     enable_cpu_backend: bool = False,
@@ -387,11 +540,15 @@ def init_distributed(
     # Directed physical PP edges need independent, preinitialized communicator
     # FIFOs so eager execution and CUDA graph replay use deterministic ordering.
     # Older PyTorch versions do not expose this option.
+    # XCCL cannot split process groups for directed PP edges.
+    # TODO: upstream issue https://github.com/pytorch/pytorch/issues/186548 and
+    # https://github.com/intel/torch-xpu-ops/issues/5742
+    # Remove this gate once per-edge P2P supports XCCL.
+    backend = torch.distributed.Backend.default_device_backend_map.get(device_type)
+    use_per_edge_p2p = pipeline_parallel_degree > 1 and backend != "xccl"
     if hasattr(dist_config, "pipeline_per_edge_p2p"):
-        setattr(  # noqa: B010
-            dist_config, "pipeline_per_edge_p2p", pipeline_parallel_degree > 1
-        )
-    elif pipeline_parallel_degree > 1:
+        setattr(dist_config, "pipeline_per_edge_p2p", use_per_edge_p2p)  # noqa: B010
+    elif use_per_edge_p2p:
         raise RuntimeError(
             "Pipeline parallelism requires a PyTorch version that provides "
             "torch.distributed.distributed_c10d._config.pipeline_per_edge_p2p."
@@ -417,13 +574,6 @@ def init_distributed(
             )
         init_fake_mode(logical_world_size, rank=rank)
         return DistributedTopology(logical_world_size)
-
-    def _warn_overwrite_env(env, val):
-        if env in os.environ:
-            logger.warning(
-                f"ENV[{env}] = {os.environ[env]} will be overridden to {val} based on job config"
-            )
-        os.environ[env] = val
 
     def _get_distributed_backend(enable_cpu_backend):
         backend = "nccl"
@@ -505,7 +655,6 @@ def clip_grad_norm_(
     error_if_nonfinite: bool = False,
     foreach: bool | None = None,
     pp_mesh: DeviceMesh | None = None,
-    ep_enabled: bool = False,
 ) -> torch.Tensor:
     """
     Clip the gradient norm of an iterable of parameters.
@@ -514,6 +663,15 @@ def clip_grad_norm_(
     `torch.nn.utils.clip_grad_norm_` only computes gradient norm along DP/FSDP/TP dimensions.
     We need to manually reduce the gradient norm across PP stages.
     See https://github.com/pytorch/torchtitan/issues/596 for details.
+
+    Gradients are not always on the same DTensor mesh. For example:
+    - With EP, routed experts use the sparse mesh while all other parameters
+      use the dense mesh.
+    - With CP, the decoder is FSDP-sharded over dp_shard and cp. The vision
+      encoder is much smaller, so we deliberately do not apply CP to it and
+      shard it over dp_shard only. The two therefore use different meshes.
+    We compute the norm for each mesh separately, then combine them into
+    one total norm.
 
     Args:
         parameters: an iterable of Tensors or a single Tensor that will have gradients normalized
@@ -528,43 +686,54 @@ def clip_grad_norm_(
             fall back to the slow implementation for other device types.
             Default: ``None``
         pp_mesh: Pipeline Parallel device mesh. If not None, will reduce gradient norm across PP stages.
-        ep_dense_params_mesh_ndim: Mesh ndim of the dense params when EP is used. If EP is not used,
-            set it to ``None``.
 
     Returns:
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
-    if ep_enabled:
-        return _clip_grad_norm_with_ep(
-            parameters,
-            max_norm,
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+
+    # get_total_norm stacks per-parameter norms, so all gradients passed to it
+    # must be on the same mesh. Meshes can differ even over the same devices:
+    # FSDP over dp_shard and cp gives a (dp_shard_cp, tp) mesh, while FSDP
+    # over dp_shard alone keeps (dp_shard, cp, tp). So group gradients by mesh.
+    params_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = defaultdict(list)
+    for p in parameters:
+        if p.grad is not None:
+            mesh = p.grad.device_mesh if isinstance(p.grad, DTensor) else None
+            params_by_mesh[mesh].append(p)
+
+    norms = []
+    # An empty list yields tensor(0.), e.g. on a PP rank without gradients.
+    for params in params_by_mesh.values() or [[]]:
+        norm = torch.nn.utils.get_total_norm(
+            [p.grad for p in params if p.grad is not None],
             norm_type,
             error_if_nonfinite,
             foreach,
-            pp_mesh,
         )
+        # If norm is a DTensor, the placements must be
+        # `torch.distributed._tensor.ops.math_ops._NormPartial`. We can simply
+        # reduce the DTensor to get the norm in this tensor's process group
+        # and then convert it to a local tensor.
+        # NOTE: It has two purposes:
+        #       1. to make sure the total norm is computed correctly when PP
+        #          is used (see below)
+        #       2. to return a reduced total_norm tensor whose .item() would
+        #          return the correct value
+        if isinstance(norm, DTensor):
+            # Will reach here if any non-PP parallelism is used.
+            # If only using PP, norm will be a local tensor.
+            norm = norm.full_tensor()
+        norms.append(norm)
 
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
+    if len(norms) == 1:
+        total_norm = norms[0]
+    elif math.isinf(norm_type):
+        total_norm = torch.stack(norms).amax()
     else:
-        # prevent generators from being exhausted
-        parameters = list(parameters)
-    grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
-
-    # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
-    # We can simply reduce the DTensor to get the total norm in this tensor's process group
-    # and then convert it to a local tensor.
-    # NOTE: It has two purposes:
-    #       1. to make sure the total norm is computed correctly when PP is used (see below)
-    #       2. to return a reduced total_norm tensor whose .item() would return the correct value
-    if isinstance(total_norm, DTensor):
-        # Will reach here if any non-PP parallelism is used.
-        # If only using PP, total_norm will be a local tensor.
-        total_norm = total_norm.full_tensor()
+        total_norm = sum(norm**norm_type for norm in norms) ** (1.0 / norm_type)
 
     if pp_mesh is not None:
         if math.isinf(norm_type):
@@ -574,73 +743,6 @@ def clip_grad_norm_(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
-    return total_norm
-
-
-@torch.no_grad()
-def _clip_grad_norm_with_ep(
-    parameters: torch.Tensor | Iterable[torch.Tensor],
-    max_norm: float,
-    norm_type: float,
-    error_if_nonfinite: bool,
-    foreach: bool | None,
-    pp_mesh: DeviceMesh | None,
-) -> torch.Tensor:
-    ep_params = []
-    non_ep_params = []
-    ep_grads = []
-    non_ep_grads = []
-
-    for p in parameters:
-        if p.grad is None:
-            continue
-        assert isinstance(p, DTensor) and isinstance(p.grad, DTensor)
-        mesh_dim_names = p.device_mesh.mesh_dim_names
-        assert mesh_dim_names is not None
-        if "ep" in mesh_dim_names:
-            ep_params.append(p)
-            ep_grads.append(p.grad)
-        else:
-            non_ep_params.append(p)
-            non_ep_grads.append(p.grad)
-
-    # Either list can be empty depending on the parallelization strategy:
-    # - In torchtitan with separate dense/sparse meshes, both lists are typically non-empty
-    # - In autoparallel, all params may live on a single sparse mesh with "ep" dimension,
-    #   so non_ep_grads would be empty
-    # - In PP + EP setups, certain PP ranks may only own EP or non-EP layers
-    ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        ep_grads, norm_type, error_if_nonfinite, foreach
-    )
-    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
-    if isinstance(ep_grads_total_norm, DTensor):
-        ep_grads_total_norm = ep_grads_total_norm.full_tensor()
-
-    non_ep_grads_total_norm = torch.nn.utils.get_total_norm(
-        non_ep_grads, norm_type, error_if_nonfinite, foreach
-    )
-    # get_total_norm returns tensor(0.) for empty list, which is a non-DTensor
-    if isinstance(non_ep_grads_total_norm, DTensor):
-        non_ep_grads_total_norm = non_ep_grads_total_norm.full_tensor()
-
-    if math.isinf(norm_type):
-        total_norm = torch.maximum(ep_grads_total_norm, non_ep_grads_total_norm)
-    else:
-        total_norm = (
-            ep_grads_total_norm**norm_type + non_ep_grads_total_norm**norm_type
-        )
-        total_norm **= 1.0 / norm_type
-
-    if pp_mesh is not None:
-        if math.isinf(norm_type):
-            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
-        else:
-            total_norm **= norm_type
-            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type
-
-    torch.nn.utils.clip_grads_with_norm_(ep_params, max_norm, total_norm, foreach)
-    torch.nn.utils.clip_grads_with_norm_(non_ep_params, max_norm, total_norm, foreach)
-
+    for params in params_by_mesh.values():
+        torch.nn.utils.clip_grads_with_norm_(params, max_norm, total_norm, foreach)
     return total_norm

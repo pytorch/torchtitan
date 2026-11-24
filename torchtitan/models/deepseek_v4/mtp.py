@@ -8,16 +8,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
+import torch_remat as remat
 
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.deepseek_v3.mtp import MTPLoss, roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss, roll_mtp_sequence
 
 from .model import DeepSeekV4TransformerBlock
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.attention import VarlenAttentionMetadata
-
+    from .attention import DeepSeekV4CompressedSparseAttentionMetadata
     from .mhc import HcHead
 
 
@@ -48,7 +48,7 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         prev_hc_hidden: torch.Tensor,
         mtp_input_ids_T: torch.Tensor,
         mtp_input_valid_mask: torch.Tensor,
-        attention_metadata: "VarlenAttentionMetadata | None",
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata | None",
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -65,8 +65,11 @@ class MTPBlock(DeepSeekV4TransformerBlock):
             dtype=prev_hc_hidden.dtype
         )
 
-        hidden = self.e_proj(self.enorm(mtp_input_embed)).unsqueeze(1)
-        hidden = hidden + self.h_proj(self.hnorm(prev_hc_hidden))
+        embed_hidden = self.e_proj(self.enorm(mtp_input_embed))
+        prev_hidden = self.h_proj(self.hnorm(prev_hc_hidden))
+        # The unsqueeze and the add read both projection outputs with bare ops.
+        remat.recompute_needs_tensor(embed_hidden, prev_hidden)
+        hidden = embed_hidden.unsqueeze(1) + prev_hidden
         next_hc_hidden = super().forward(
             hidden,
             mtp_input_ids_T,
@@ -84,4 +87,4 @@ class MTPBlock(DeepSeekV4TransformerBlock):
         return next_hc_hidden, prediction_hidden
 
 
-__all__ = ["MTPBlock", "MTPLoss", "roll_mtp_sequence"]
+__all__ = ["MTPBlock", "MTPCrossEntropyLoss", "roll_mtp_sequence"]

@@ -1,0 +1,246 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+"""
+Unit tests for TP-degree / n_kv_heads divisibility validation.
+
+Covers Issue #2574: models with GQA (n_kv_heads < n_heads) would crash deep in
+the forward pass when tensor_parallel_degree > n_kv_heads. The fix adds an
+early ValueError while validating the complete trainer config.
+
+Also covers Issue #5854: Flux declares no TP/EP sharding, so
+tensor_parallel_degree / expert_parallel_degree above 1 must raise at config
+time instead of being silently ignored.
+"""
+
+import unittest
+from unittest.mock import patch
+
+# Flux needs no optional dependency, so import it at module top level:
+# a broken Flux import must fail loudly instead of silently skipping this
+# file's tests (including the pre-existing GQA ones) via _IMPORTS_OK.
+from torchtitan.models.flux import build_model_config as build_flux_model_config
+
+try:
+    import sys
+    from unittest.mock import MagicMock
+
+    # triton is Linux-only; stub it so MoE kernel imports don't crash on Windows
+    if "triton" not in sys.modules:
+        sys.modules["triton"] = MagicMock()
+        sys.modules["triton.language"] = MagicMock()
+
+    from torchtitan.config import DebugConfig, TrainingConfig
+    from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.config.validation import validate_model_training_config
+    from torchtitan.models.common import (
+        ComplexRoPE,
+        compute_ffn_hidden_dim,
+        Linear,
+        RMSNorm,
+        VocabParallelEmbedding,
+    )
+    from torchtitan.models.common.rope import Llama3ScalingConfig
+    from torchtitan.models.llama3 import Llama3Model
+    from torchtitan.models.llama3.model import Llama3TransformerBlock
+
+    _IMPORTS_OK = True
+except Exception:
+    _IMPORTS_OK = False
+
+_DIM = 256
+_N_LAYERS = 2
+_VOCAB_SIZE = 2048
+
+
+def _validate(config: "Llama3Model.Config", tp: int) -> None:
+    validate_model_training_config(
+        config,
+        parallelism=ParallelismConfig(tensor_parallel_degree=tp),
+        training=TrainingConfig(
+            disable_accelerator_graphs=True,
+        ),
+        debug=DebugConfig(),
+        activation_remat=None,
+        max_num_documents=None,
+    )
+
+
+def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Config":
+    """Build a minimal Llama3Model.Config with the given head counts."""
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.config_utils import make_ffn_config, make_gqa_config
+
+    _LINEAR_INIT = {"weight": lambda t: t}
+    _NORM_INIT = {"weight": lambda t: t}
+
+    layers = []
+    for layer_id in range(_N_LAYERS):
+        layers.append(
+            Llama3TransformerBlock.Config(
+                attention_norm=RMSNorm.Config(
+                    normalized_shape=_DIM, param_init=_NORM_INIT
+                ),
+                ffn_norm=RMSNorm.Config(normalized_shape=_DIM, param_init=_NORM_INIT),
+                attention=make_gqa_config(
+                    dim=_DIM,
+                    n_heads=n_heads,
+                    n_kv_heads=n_kv_heads,
+                    wqkv_param_init=_LINEAR_INIT,
+                    wo_param_init=_LINEAR_INIT,
+                    inner_attention=FlexInnerAttention.Config(),
+                    rope=ComplexRoPE.Config(
+                        dim=_DIM // n_heads,
+                        max_context_length=4096,
+                        theta=500000,
+                        scaling=Llama3ScalingConfig(),
+                    ),
+                    enable_sp=True,
+                ),
+                feed_forward=make_ffn_config(
+                    dim=_DIM,
+                    hidden_dim=compute_ffn_hidden_dim(_DIM, multiple_of=256),
+                    w13_param_init=_LINEAR_INIT,
+                    w2_param_init=_LINEAR_INIT,
+                    enable_sp=True,
+                ),
+            )
+        )
+
+    return Llama3Model.Config(
+        max_context_length=4096,
+        dim=_DIM,
+        vocab_size=_VOCAB_SIZE,
+        tok_embeddings=VocabParallelEmbedding.Config(
+            num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM
+        ),
+        norm=RMSNorm.Config(normalized_shape=_DIM),
+        lm_head=Linear.Config(in_features=_DIM, out_features=_VOCAB_SIZE),
+        layers=layers,
+    )
+
+
+@unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")
+class TestTPKVHeadsValidation(unittest.TestCase):
+    """Validate that config checking rejects models where n_heads or
+    n_kv_heads are not divisible by tensor_parallel_degree."""
+
+    # ------------------------------------------------------------------
+    # n_kv_heads not divisible by TP  →  should raise
+    # ------------------------------------------------------------------
+
+    def test_llama3_kv_heads_not_divisible_raises(self):
+        """n_kv_heads=2, tp=4 → fractional KV heads per rank → ValueError."""
+        cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
+        with self.assertRaises(ValueError):
+            _validate(cfg, tp=4)
+
+    # ------------------------------------------------------------------
+    # n_heads not divisible by TP  →  should raise
+    # ------------------------------------------------------------------
+
+    def test_llama3_n_heads_not_divisible_raises(self):
+        """n_heads=2, tp=4 -> fractional Q heads per rank -> ValueError."""
+        cfg = _make_llama3_config(n_heads=2, n_kv_heads=2)
+        with self.assertRaises(ValueError):
+            _validate(cfg, tp=4)
+
+    # ------------------------------------------------------------------
+    # Valid configs  →  should not raise
+    # ------------------------------------------------------------------
+
+    def test_llama3_valid_gqa_does_not_raise(self):
+        """n_kv_heads=8, n_heads=16, tp=4 -> both divisible -> no error."""
+        cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
+        _validate(cfg, tp=4)
+
+    def test_llama3_mha_none_kv_heads_does_not_raise(self):
+        """n_kv_heads=None (MHA, falls back to n_heads=16), tp=4 -> no error."""
+        cfg = _make_llama3_config(n_heads=16, n_kv_heads=None)
+        _validate(cfg, tp=4)
+
+    def test_llama3_tp1_skips_check(self):
+        """tp=1 -> valid GQA head counts do not raise."""
+        cfg = _make_llama3_config(n_heads=8, n_kv_heads=2)
+        _validate(cfg, tp=1)
+
+    def test_llama3_partial_tp_sharding_raises(self):
+        """One dense layout without TP must raise even if all others name TP."""
+        import spmd_types as spmd
+
+        from torchtitan.distributed.parallelism_context import MeshAxisName
+        from torchtitan.models.common.attention import GQAttention
+
+        cfg = _make_llama3_config(n_heads=16, n_kv_heads=8)
+        # Strip TP from a single dense layout; the union still names TP.
+        attention = cfg.layers[0].attention
+        assert isinstance(attention, GQAttention.Config)
+        qkv_linear = attention.qkv_linear
+        qkv_linear.wqkv.sharding_config.state_shardings["weight"] = spmd.SpmdType(
+            {MeshAxisName.DP: spmd.R, MeshAxisName.CP: spmd.R},
+            partition_spec=spmd.PartitionSpec(None, None),
+        )
+        with self.assertRaisesRegex(ValueError, r"declares no 'tp' sharding"):
+            _validate(cfg, tp=2)
+
+    def test_checks_full_attention_after_sliding_attention(self):
+        from torchtitan.models.common.attention import SlidingWindowFlexInnerAttention
+
+        cfg = _make_llama3_config(n_heads=8, n_kv_heads=8)
+        cfg.layers[
+            0
+        ].attention.inner_attention = SlidingWindowFlexInnerAttention.Config(
+            sliding_window_size=128
+        )
+        cfg.layers[1].attention.n_heads = 3
+
+        with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
+            _validate(cfg, tp=2)
+        with patch("torchtitan.distributed.spmd_types.spmd_mesh_size", return_value=2):
+            with self.assertRaisesRegex(ValueError, r"n_heads \(3\)"):
+                cfg.build()
+
+
+def _validate_flux(
+    *,
+    tensor_parallel_degree: int = 1,
+    expert_parallel_degree: int = 1,
+) -> None:
+    # Build with the same parallelism being validated: sharding is derived
+    # at build time and must not be patched afterwards.
+    parallelism = ParallelismConfig(
+        tensor_parallel_degree=tensor_parallel_degree,
+        expert_parallel_degree=expert_parallel_degree,
+    )
+    config = build_flux_model_config("flux-debug", parallelism=parallelism, seq_len=256)
+    validate_model_training_config(
+        config,
+        parallelism=parallelism,
+        training=TrainingConfig(disable_accelerator_graphs=True),
+        debug=DebugConfig(),
+        activation_remat=None,
+        max_num_documents=None,
+    )
+
+
+@unittest.skipUnless(_IMPORTS_OK, "torchtitan model imports not available")
+class TestFluxParallelismValidation(unittest.TestCase):
+    """Flux declares no TP/EP sharding, so TP/EP degrees above 1 must raise."""
+
+    def test_flux_tp1_ep1_does_not_raise(self):
+        _validate_flux()
+
+    def test_flux_tensor_parallel_degree_gt1_raises(self):
+        with self.assertRaisesRegex(ValueError, r"declares no 'tp' sharding"):
+            _validate_flux(tensor_parallel_degree=2)
+
+    def test_flux_expert_parallel_degree_gt1_raises(self):
+        with self.assertRaisesRegex(ValueError, r"has no routed experts"):
+            _validate_flux(expert_parallel_degree=2)
+
+
+if __name__ == "__main__":
+    unittest.main()

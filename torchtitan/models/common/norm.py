@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.distributed.local_compile import local_compile
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import UnaryActivationFn
-from torchtitan.protocols.module import Module
 
 
 class GatedRMSNorm(Module):
@@ -35,13 +35,13 @@ class GatedRMSNorm(Module):
     @local_compile("gated_rmsnorm", batch_invariant=False)
     def forward(
         self,
-        x: torch.Tensor,
+        input: torch.Tensor,
         gate: torch.Tensor,
     ) -> torch.Tensor:
-        input_dtype = x.dtype
+        input_dtype = input.dtype
         normalized = F.rms_norm(
-            x.float(),
-            (x.shape[-1],),
+            input.float(),
+            (input.shape[-1],),
             self.weight.float(),
             self.eps,
         )

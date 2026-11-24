@@ -12,12 +12,11 @@ from typing import Any, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from torchtitan.components.optim import Optim, OptimizersContainer
+from torchtitan.components.optim import Adam, AdamW, Optim, OptimizersContainer
 from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
 )
-from torchtitan.distributed import utils as dist_utils
 
 if TYPE_CHECKING:
     from torchtitan.experiments.torchft.manager import TorchFTManager
@@ -30,19 +29,28 @@ logger = logging.getLogger(__name__)
 class TorchFTOptimizersContainer(OptimizersContainer):
     @dataclass(kw_only=True, slots=True)
     class Config(OptimizersContainer.Config):
-        pass
+        def __post_init__(self) -> None:
+            if any(
+                isinstance(optimizer, (Adam.Config, AdamW.Config))
+                and optimizer.moment_cpu_offload_fraction > 0
+                for optimizer in self.optimizers
+            ):
+                raise ValueError(
+                    "TorchFT does not support CPU-offloaded Adam moments. Replica "
+                    "recovery would replace them with device tensors."
+                )
 
     def __init__(
         self,
         config: Config,
         *,
         model_parts: list[nn.Module],
-        enable_cuda_graph: bool = False,
+        enable_accelerator_graph: bool = False,
     ) -> None:
         super().__init__(
             config,
             model_parts=model_parts,
-            enable_cuda_graph=enable_cuda_graph,
+            enable_accelerator_graph=enable_accelerator_graph,
         )
 
         # Force to initialize the optimizer state so that `optim.step()`
@@ -126,13 +134,11 @@ class TorchFTOptim(Optim):
     def _update(self, loss: torch.Tensor) -> torch.Tensor:
         if self._quorum_manager is None:
             return super()._update(loss)
-        # Duplicates Optim._update except for the finite check.
-        grad_norm = dist_utils.clip_grad_norm_(
+        # Matches Optim._update except for the finite check.
+        grad_norm = self.gradient_clipper.clip_grad_norm_(
             self.parameters,
             self.config.max_norm,
-            foreach=True,
-            pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
-            ep_enabled=self.parallelism_context.ep_enabled,
+            parallelism_context=self.parallelism_context,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:

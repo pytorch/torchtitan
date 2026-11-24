@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from tests.unit_tests.cpu.test_optimizer_param_groups import (
+from tests.unit_tests.cpu.components.optim.test_optimizer_param_groups import (
     FakeMoEModel,
     FakeParallelismContext,
 )
@@ -55,7 +55,7 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
         expected_global_counts = torch.tensor([[10, 20], [20, 10]])
         local_counts = torch.tensor(local_counts_by_rank[rank])
         for layer, counts in zip(model.layers.values(), local_counts):
-            layer.moe.router.tokens_per_expert_E.copy_(counts)
+            layer.feed_forward.router.tokens_per_expert_E.copy_(counts)
 
         config = TorchFTOptimizersContainer.Config(
             optimizers=[
@@ -91,21 +91,21 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
 
         # Increase bias for the globally less-used expert in each layer.
         torch.testing.assert_close(
-            model.layers["0"].moe.expert_bias_E,
+            model.layers["0"].feed_forward.expert_bias_E,
             torch.tensor([0.1, -0.1]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.expert_bias_E,
+            model.layers["1"].feed_forward.expert_bias_E,
             torch.tensor([-0.2, 0.2]),
         )
 
         # The next training step must start with empty load counters.
         torch.testing.assert_close(
-            model.layers["0"].moe.router.tokens_per_expert_E,
+            model.layers["0"].feed_forward.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.router.tokens_per_expert_E,
+            model.layers["1"].feed_forward.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 
@@ -162,6 +162,22 @@ class TestTorchFTNonFiniteStep(unittest.TestCase):
     def test_finite_step_does_not_report_error(self):
         optim, manager = self._optim()
         optim._update(torch.tensor(1.0))
+        manager.report_error.assert_not_called()
+
+    def test_finite_step_uses_configured_grad_clip(self):
+        optim, manager = self._optim()
+        gradient_clipper = Mock()
+        gradient_clipper.clip_grad_norm_.return_value = torch.tensor(2.0)
+        optim.gradient_clipper = gradient_clipper
+
+        grad_norm = optim._update(torch.tensor(1.0))
+
+        gradient_clipper.clip_grad_norm_.assert_called_once_with(
+            optim.parameters,
+            optim.config.max_norm,
+            parallelism_context=optim.parallelism_context,
+        )
+        torch.testing.assert_close(grad_norm, torch.tensor(2.0))
         manager.report_error.assert_not_called()
 
     def test_persistent_non_finite_step_raises(self):

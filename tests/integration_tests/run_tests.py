@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+import importlib
 
 import logging
 import os
@@ -16,29 +17,45 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
+import torch
+
 from torchtitan.observability.logging import init_logger
 from torchtitan.trainer import Trainer
 
 from tests.integration_tests import (
+    DEFAULT_ENTRYPOINT,
     get_importable_config_module,
     IntegrationTestDefinition,
+    SELF_LAUNCHING_ENTRYPOINTS,
     validate_fake_pg_compatibility,
 )
-from tests.integration_tests.b200 import build_b200_tests_list
-from tests.integration_tests.features import build_features_test_list
-from tests.integration_tests.h100 import build_h100_tests_list
-from tests.integration_tests.models import build_model_tests_list
+from tests.integration_tests.hardware_skips import get_tests_to_skip_on_current_hardware
 
 
 logger = logging.getLogger(__name__)
 
 
-_TEST_SUITES_FUNCTION = {
-    "features": build_features_test_list,
-    "models": build_model_tests_list,
-    "h100": build_h100_tests_list,
-    "b200": build_b200_tests_list,
+# Suites are imported only when selected: the flux and RL suites need optional
+# dependencies (transformers; vLLM and Monarch) that other CI jobs do not install.
+_TEST_SUITES = {
+    "features": ("tests.integration_tests.features", "build_features_test_list"),
+    "models": ("tests.integration_tests.models", "build_model_tests_list"),
+    "flux": ("tests.integration_tests.flux", "build_flux_test_list"),
+    "h100": ("tests.integration_tests.h100", "build_h100_tests_list"),
+    "b200": ("tests.integration_tests.b200", "build_b200_tests_list"),
+    "rl": ("tests.integration_tests.rl", "build_rl_test_list"),
+    "rl_h100": ("tests.integration_tests.rl", "build_h100_rl_test_list"),
+    "rl_b200": ("tests.integration_tests.rl", "build_b200_rl_test_list"),
 }
+
+
+def _build_test_list(test_suite: str) -> list[IntegrationTestDefinition]:
+    module_name, builder_name = _TEST_SUITES[test_suite]
+    return getattr(importlib.import_module(module_name), builder_name)()
+
+
+# Suites that need hardware-specific kernels or a real multi-process runtime.
+_REAL_PG_ONLY_SUITES = frozenset({"h100", "b200", "rl", "rl_h100", "rl_b200"})
 
 # Held while a test writes its captured output so concurrent tests do not
 # interleave their lines.
@@ -49,9 +66,9 @@ def _parse_test_suites(value: str) -> tuple[str, ...]:
     suites = tuple(part.strip() for part in value.split(",") if part.strip())
     if not suites:
         raise ValueError("--test_suite must contain at least one suite")
-    unknown = tuple(suite for suite in suites if suite not in _TEST_SUITES_FUNCTION)
+    unknown = tuple(suite for suite in suites if suite not in _TEST_SUITES)
     if unknown:
-        available = ", ".join(_TEST_SUITES_FUNCTION)
+        available = ", ".join(_TEST_SUITES)
         raise ValueError(
             f"Unknown test suite(s): {', '.join(unknown)}. Available: {available}"
         )
@@ -199,6 +216,7 @@ def run_single_test(
     # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
     # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
+    hf_assets_path: str = "",
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
@@ -214,21 +232,25 @@ def run_single_test(
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     # When running in parallel, pin each test to a disjoint subset of physical
-    # GPUs. Setting both CUDA_/HIP_VISIBLE_DEVICES makes this a no-op for the
-    # architecture that does not apply.
+    # GPUs. Setting CUDA_/HIP_VISIBLE_DEVICES and ZE_AFFINITY_MASK together
+    # makes this a no-op for the two architectures that do not apply.
     base_env = os.environ.copy()
     if gpu_ids is not None:
         visible = ",".join(map(str, gpu_ids))
         base_env["CUDA_VISIBLE_DEVICES"] = visible
         base_env["HIP_VISIBLE_DEVICES"] = visible
+        base_env["ZE_AFFINITY_MASK"] = visible
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
     base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
         base_env["COMM_BACKEND"] = "fake"
+    if hf_assets_path:
+        base_env["TORCHTITAN_TEST_HF_ASSETS_PATH"] = hf_assets_path
 
-    for config_fn in test_flavor.configs:
+    for config_index, config_fn in enumerate(test_flavor.configs):
         test_output_dir = str(Path(output_dir) / test_name)
+        entrypoint = test_flavor.entrypoint(config_index)
         config = config_fn()
         config_module = get_importable_config_module(config_fn)
         if use_fake_pg:
@@ -237,8 +259,14 @@ def run_single_test(
         env["TORCHTITAN_TEST_OUTPUT_DIR"] = test_output_dir
         env["MODULE"] = config_module
         env["CONFIG"] = config_fn.__name__
+        env["ENTRYPOINT"] = entrypoint
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         if test_flavor.golden_numerics_path is not None:
+            if entrypoint != DEFAULT_ENTRYPOINT:
+                raise ValueError(
+                    f"{test_name} sets golden_numerics_path, which only supports "
+                    f"{DEFAULT_ENTRYPOINT}, but launches {entrypoint}"
+                )
             # Reuse this integration run for numerics: loss_compare.py runs the
             # config once, extracts full-precision TensorBoard metrics, and
             # compares them with the mode-specific golden (or exports them).
@@ -306,6 +334,13 @@ def run_single_test(
                     result_path,
                     _parallelism_summary(config, test_flavor.ngpu),
                 )
+        elif entrypoint in SELF_LAUNCHING_ENTRYPOINTS:
+            cmd = (
+                f"{shlex.quote(sys.executable)} -m {entrypoint} "
+                f"--module {config_module} --config {config_fn.__name__} "
+                f"{output_dir_arg}"
+            )
+            result = _run_cmd(cmd, timeout=test_flavor.timeout, env=env)
         else:
             # Tests without a golden run directly and guard E2E execution only;
             # they do not assert loss or gradient-norm values.
@@ -341,17 +376,26 @@ def run_single_test(
 
 def _filter_tests(
     args, test_list: list[IntegrationTestDefinition]
-) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
-    """Filter tests by name, scope, disabled state, architecture, and GPU count.
+) -> tuple[
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+    list[IntegrationTestDefinition],
+]:
+    """Filter tests by name, scope, disabled state, hardware skips, and GPU count.
 
-    Returns (runnable, skipped_due_to_ngpu).
+    Hardware skips are matched by test name, the same way ``--exclude`` is.
+
+    Returns (runnable, skipped_ngpu, skipped_by_hardware).
     """
     exclude_set = set()
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
+    tests_to_skip = get_tests_to_skip_on_current_hardware()
+
     runnable: list[IntegrationTestDefinition] = []
     skipped_ngpu: list[IntegrationTestDefinition] = []
+    skipped_by_hardware: list[IntegrationTestDefinition] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -365,16 +409,14 @@ def _filter_tests(
             continue
         if test_flavor.disabled or test_flavor.test_name in exclude_set:
             continue
-        if (
-            getattr(args, "gpu_arch_type", "cuda") == "rocm"
-            and test_flavor.skip_rocm_test
-        ):
+        if test_flavor.test_name in tests_to_skip:
+            skipped_by_hardware.append(test_flavor)
             continue
         if execution_mode != "fake_pg" and args.ngpu < test_flavor.ngpu:
             skipped_ngpu.append(test_flavor)
             continue
         runnable.append(test_flavor)
-    return runnable, skipped_ngpu
+    return runnable, skipped_ngpu, skipped_by_hardware
 
 
 def run_tests(
@@ -383,7 +425,9 @@ def run_tests(
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
-    runnable, skipped_ngpu = _filter_tests(args, test_list)
+    runnable, skipped_ngpu, skipped_by_hardware = _filter_tests(args, test_list)
+    for test_flavor in skipped_by_hardware:
+        logger.info(f"Skipping test {test_flavor.test_name} (hardware-specific skip)")
     for test_flavor in skipped_ngpu:
         logger.info(
             f"Skipping test {test_flavor.test_name} that requires {test_flavor.ngpu} gpus,"
@@ -392,9 +436,33 @@ def run_tests(
     failed_tests: list[tuple[str, str]] = []
     execution_mode = getattr(args, "execution_mode", "real_pg")
     export_numerics = getattr(args, "export_numerics", False)
+    hf_assets_path = getattr(args, "hf_assets_path", "")
+    if parallel and any(
+        t.entrypoint(i) in SELF_LAUNCHING_ENTRYPOINTS
+        for t in runnable
+        for i in range(len(t.configs))
+    ):
+        # Self-launching entrypoints place their own processes on all visible
+        # GPUs, so they cannot share the GPU pool.
+        logger.info("Running sequentially: suite has self-launching entrypoints")
+        parallel = False
 
     def physical_ngpu(test_flavor: IntegrationTestDefinition) -> int:
         return 1 if execution_mode == "fake_pg" else test_flavor.ngpu
+
+    # CUDA drops a missing id and every later id from a child's visible-device
+    # mask, so every id the pool hands out or a sequential launch spawns must
+    # exist on the host. Fail before scheduling rather than with rank errors.
+    if runnable:
+        num_devices = torch.accelerator.device_count()
+        required_devices = (
+            args.ngpu if parallel else max(physical_ngpu(t) for t in runnable)
+        )
+        if num_devices < required_devices:
+            raise ValueError(
+                f"Requires {required_devices} accelerator(s), but only "
+                f"{num_devices} accelerator(s) are visible"
+            )
 
     if parallel and runnable:
         # Schedule tests concurrently, packing them onto a fixed pool of
@@ -425,6 +493,7 @@ def run_tests(
                     gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
                     gpu_arch=getattr(args, "gpu_arch", "a10g"),
                     gpu_ids=gpus,
+                    hf_assets_path=hf_assets_path,
                 )
             finally:
                 pool.release(gpus)
@@ -451,6 +520,7 @@ def run_tests(
                     export_numerics=export_numerics,
                     gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
                     gpu_arch=getattr(args, "gpu_arch", "a10g"),
+                    hf_assets_path=hf_assets_path,
                 )
             except Exception as e:
                 logger.error(str(e))
@@ -489,24 +559,25 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda", "rocm", "xpu"],
+        help="GPU architecture type: 'cuda', 'rocm' or 'xpu'.",
     )
     parser.add_argument(
         "--gpu_arch",
         default=None,
-        choices=["a10g", "h100", "b200", "mi350x"],
+        choices=["a10g", "h100", "b200", "mi350x", "pvc"],
         help=(
             "Specific GPU model, used to select the matching golden numerics "
-            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
-            "otherwise, so a caller can't silently resolve ROCm goldens "
-            "under an A10G path by omitting this flag."
+            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm, 'pvc' for "
+            "--gpu_arch_type=xpu, and 'a10g' otherwise, so a caller can't "
+            "silently resolve ROCm/XPU goldens under an A10G path by "
+            "omitting this flag."
         ),
     )
     parser.add_argument(
         "--test_suite",
         default="features",
-        help="Comma-separated test suites to run: features, models, h100, b200.",
+        help=("Comma-separated test suites to run: " f"{', '.join(_TEST_SUITES)}."),
     )
     parser.add_argument(
         "--execution_mode",
@@ -542,6 +613,14 @@ def main():
         ),
     )
     parser.add_argument(
+        "--hf_assets_path",
+        default="",
+        help=(
+            "HF checkpoint (weights, tokenizer, config) exported to configs as "
+            "TORCHTITAN_TEST_HF_ASSETS_PATH; configs that read it use real weights."
+        ),
+    )
+    parser.add_argument(
         "--parallel",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -552,15 +631,15 @@ def main():
     )
     args = parser.parse_args()
     if args.gpu_arch is None:
-        args.gpu_arch = "mi350x" if args.gpu_arch_type == "rocm" else "a10g"
+        args.gpu_arch = {"rocm": "mi350x", "xpu": "pvc"}.get(args.gpu_arch_type, "a10g")
 
     try:
         test_suites = _parse_test_suites(args.test_suite)
     except ValueError as error:
         parser.error(str(error))
-    hardware_suites = {"h100", "b200"}.intersection(test_suites)
-    if args.execution_mode == "fake_pg" and hardware_suites:
-        suites = ", ".join(sorted(hardware_suites))
+    real_pg_only_suites = _REAL_PG_ONLY_SUITES.intersection(test_suites)
+    if args.execution_mode == "fake_pg" and real_pg_only_suites:
+        suites = ", ".join(sorted(real_pg_only_suites))
         parser.error(f"The {suites} suite(s) only support --execution_mode real_pg")
     if args.execution_mode == "fake_pg" and args.test_scope == "real_pg_required":
         parser.error("real_pg_required test scope requires --execution_mode real_pg")
@@ -576,7 +655,7 @@ def main():
             suite_args.output_dir = os.path.join(args.output_dir, test_suite)
             os.makedirs(suite_args.output_dir)
 
-        test_list = _TEST_SUITES_FUNCTION[test_suite]()
+        test_list = _build_test_list(test_suite)
         run_tests(suite_args, test_list, parallel=suite_args.parallel)
 
 

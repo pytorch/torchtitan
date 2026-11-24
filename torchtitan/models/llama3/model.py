@@ -10,18 +10,14 @@ from dataclasses import dataclass, field
 
 import torch
 import torch_remat as remat
-from torch import nn
 
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.utils import (
-    get_nparams_and_active_nparams,
-    quadratic_attention_flops_per_token,
-)
+from torchtitan.models.common.feed_forward import DenseFeedForward
 from .state_dict_adapter import Llama3StateDictAdapter
 
 
@@ -43,7 +39,7 @@ class Llama3TransformerBlock(TransformerBlock):
     def __init__(self, config: Config):
         super().__init__()
         self.attention = config.attention.build()
-        assert config.feed_forward is not None
+        assert isinstance(config.feed_forward, DenseFeedForward.Config)
         self.feed_forward = config.feed_forward.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -84,36 +80,11 @@ class Llama3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
-        local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "fused_binary_activation"]
-        )
-
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            nparams, active_nparams = get_nparams_and_active_nparams(model)
-            attention_op_flops = 0
-            for layer in self.layers:
-                attention = layer.attention
-                head_dim = (
-                    attention.head_dim
-                    if attention.head_dim is not None
-                    else attention.dim // attention.n_heads
-                )
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=attention.n_heads,
-                    qk_head_dim=head_dim,
-                    v_head_dim=head_dim,
-                    seq_len=seq_len,
-                )
-            return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_llama3_sharding_config
-
-            set_llama3_sharding_config(
-                self, enable_sp=parallelism.enable_sequence_parallel
+        local_compile: LocalCompileConfig = field(
+            default_factory=lambda: LocalCompileConfig(
+                regions=["loss", "fused_binary_activation", "rope"]
             )
+        )
 
     def __init__(self, config: Config):
         super().__init__(config)

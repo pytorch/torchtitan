@@ -67,6 +67,19 @@ def get_current_ref() -> str:
     return ref if ref != "HEAD" else git_run("rev-parse", "HEAD")
 
 
+def resolve_commit(commit: str) -> str:
+    """Resolve a commit-ish to its SHA. "." is the currently checked-out commit."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD" if commit == "." else commit],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log(f"Error: cannot resolve commit '{commit}': {result.stderr.strip()}")
+        sys.exit(1)
+    return result.stdout.strip()
+
+
 def checkout(commit: str, label: str) -> None:
     if commit != ".":
         log(f"Checking out {label}: {commit}")
@@ -199,20 +212,19 @@ def main() -> None:
     )
     log(f"  output: {args.output_folder}")
 
-    # Resolve SHAs before any checkout
-    save_sha = (
-        git_run("rev-parse", args.save_commit) if args.save_commit != "." else "."
-    )
-    load_sha = (
-        git_run("rev-parse", args.load_commit) if args.load_commit != "." else "."
-    )
+    # Resolve SHAs before any checkout. "." is the checked-out commit, and it
+    # must be resolved too once the other side checks out a different commit.
+    needs_checkout = args.save_commit != "." or args.load_commit != "."
+    save_sha = load_sha = "."
+    if needs_checkout:
+        save_sha = resolve_commit(args.save_commit)
+        load_sha = resolve_commit(args.load_commit)
 
     ref_dump = os.path.join(args.output_folder, "ref_outputs")
     resume_dump = os.path.join(args.output_folder, "resume_outputs")
     os.makedirs(ref_dump, exist_ok=True)
     os.makedirs(resume_dump, exist_ok=True)
 
-    needs_checkout = save_sha != "." or load_sha != "."
     original = get_current_ref() if needs_checkout else None
     if needs_checkout:
         check_git_clean()

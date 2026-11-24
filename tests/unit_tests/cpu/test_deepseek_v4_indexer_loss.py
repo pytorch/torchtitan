@@ -1,0 +1,301 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import bisect
+import unittest
+from unittest.mock import patch
+
+import torch
+from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
+
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.aux_loss import AuxLoss
+from torchtitan.models.deepseek_v4 import build_model_config
+from torchtitan.models.deepseek_v4.attention import CompressedSparseAttention
+from torchtitan.models.deepseek_v4.compressor import (
+    compressed_cu_seqlens,
+    InnerIndexer,
+    SparseIndexerLoss,
+)
+
+
+def dense_attention(q, local, compressed, indices, sink, scale, window, cu):
+    """Enumerate actual keys per query/head, independently of the loss."""
+    offsets = [0, len(q)] if cu is None else cu.tolist()
+    compressed_offsets = [0]
+    for start, end in zip(offsets[:-1], offsets[1:]):
+        compressed_offsets.append(compressed_offsets[-1] + (end - start) // 4)
+    output, teacher = torch.zeros_like(q), torch.zeros(indices.shape)
+    lse = torch.empty(q.shape[:2])
+    for token in range(len(q)):
+        doc = bisect.bisect_right(offsets, token) - 1
+        local_indices = list(range(max(offsets[doc], token - window + 1), token + 1))
+        slots = [slot for slot, index in enumerate(indices[token]) if index >= 0]
+        selected = [
+            compressed_offsets[doc] + int(indices[token, slot]) for slot in slots
+        ]
+        keys = torch.cat((local[local_indices], compressed[selected]))
+        for head in range(q.size(1)):
+            logits = torch.cat((keys @ q[token, head] * scale, sink[head : head + 1]))
+            probabilities = logits.softmax(0)
+            output[token, head] = probabilities[:-1] @ keys
+            lse[token, head] = logits.logsumexp(0)
+            teacher[token, slots] += probabilities[len(local_indices) : -1] / q.size(1)
+    return output, lse, teacher
+
+
+def _metadata(cu, seqlen):
+    """The sparse metadata for a packed or single-document layout."""
+    if cu is None:
+        positions = torch.arange(seqlen)
+    else:
+        positions = torch.cat([torch.arange(n) for n in torch.diff(cu).tolist()])
+    return CompressedSparseAttention.Config(
+        window_size=4, compress_ratio=4, softmax_scale=0.1
+    ).build_attention_metadata(positions)
+
+
+class TestSparseIndexerLoss(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
+        self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
+        torch.manual_seed(42)
+        self.q = torch.randn(12, 4, 8)
+        self.local, self.compressed = torch.randn(12, 8), torch.randn(3, 8)
+        self.sink = torch.randn(4)
+        self.scale, self.window = 8**-0.5, 3
+
+    def case(self, packed):
+        cu = torch.tensor([0, 4, 4, 12], dtype=torch.int32) if packed else None
+        indices = torch.full((12, 2), -1, dtype=torch.int32)
+        for token in range(12):
+            start = 0 if not packed or token < 4 else 4
+            count = min((token - start + 1) // 4, 2)
+            indices[token, :count] = torch.arange(count)
+        return indices, cu
+
+    def kernel(self, indices, cu):
+        out, aux = gather_attn(
+            self.q.transpose(0, 1)[None],
+            self.local[None, None],
+            self.compressed[None, None],
+            indices[None],
+            attention_sink=self.sink,
+            sliding_window_size=self.window,
+            cu_seqlens=cu,
+            cu_seqlens_k=None if cu is None else compressed_cu_seqlens(cu, 4),
+            scale=self.scale,
+            impl="reference",
+            return_aux=AuxRequest(lse=True),
+        )
+        return out[0].transpose(0, 1), aux.lse[0].transpose(0, 1)
+
+    def loss(self, **kwargs):
+        return SparseIndexerLoss.Config(
+            coeff=0.01,
+            reduce_mesh="loss",
+            softmax_scale=self.scale,
+            num_heads=4,
+            chunk_size=3,
+            **kwargs,
+        ).build()
+
+    def test_teacher_matches_independent_dense_attention_and_kernel(self):
+        for packed in (False, True):
+            with self.subTest(packed=packed):
+                indices, cu = self.case(packed)
+                expected_out, expected_lse, expected_teacher = dense_attention(
+                    self.q,
+                    self.local,
+                    self.compressed,
+                    indices,
+                    self.sink,
+                    self.scale,
+                    self.window,
+                    cu,
+                )
+                out, lse = self.kernel(indices, cu)
+                torch.testing.assert_close(out, expected_out)
+                torch.testing.assert_close(lse, expected_lse)
+                teacher = self.loss()._teacher(
+                    self.q, self.compressed, indices, lse, _metadata(cu, 12)
+                )
+                torch.testing.assert_close(teacher, expected_teacher)
+
+    def test_padding_gradient_and_metric_match_independent_kl(self):
+        indices, cu = self.case(True)
+        _, lse = self.kernel(indices, cu)
+        _, _, teacher = dense_attention(
+            self.q,
+            self.local,
+            self.compressed,
+            indices,
+            self.sink,
+            self.scale,
+            self.window,
+            cu,
+        )
+        valid_tokens = torch.arange(12) < 10
+        for weighted in (False, True):
+            with self.subTest(weighted=weighted):
+                scores = torch.randn(12, 2, requires_grad=True)
+                loss = self.loss(mass_weighted=weighted)
+                carrier = torch.randn_like(self.q, requires_grad=True)
+                out = loss(
+                    self.q,
+                    self.compressed,
+                    indices,
+                    scores.masked_fill(indices < 0, -torch.inf),
+                    lse,
+                    _metadata(cu, 12),
+                    carrier=carrier,
+                    denominator=torch.tensor(10.0),
+                    padding_mask_T=~valid_tokens,
+                )
+                torch.testing.assert_close(out, carrier, rtol=0, atol=0)
+                out.sum().backward()
+                ref_scores = scores.detach().clone().requires_grad_()
+                reference = ref_scores.sum() * 0
+                for token in range(10):
+                    valid = indices[token] >= 0
+                    if not valid.any():
+                        continue
+                    p = teacher[token, valid]
+                    target = p / p.sum()
+                    kl = (
+                        target
+                        * (target.log() - ref_scores[token, valid].log_softmax(0))
+                    ).sum()
+                    reference = reference + kl * (p.sum() if weighted else 1)
+                (reference * 0.01 / 10).backward()
+                torch.testing.assert_close(scores.grad, ref_scores.grad)
+                self.assertEqual(scores.grad[~valid_tokens].count_nonzero(), 0)
+                torch.testing.assert_close(loss.instance_acc, reference.detach() / 10)
+
+    def test_chunk_size_does_not_change_teacher(self):
+        indices, cu = self.case(True)
+        _, lse = self.kernel(indices, cu)
+        loss = self.loss()
+        small = loss._teacher(self.q, self.compressed, indices, lse, _metadata(cu, 12))
+        loss.chunk_size = 128
+        large = loss._teacher(self.q, self.compressed, indices, lse, _metadata(cu, 12))
+        torch.testing.assert_close(small, large)
+
+    def test_bfloat16_teacher_dot_products_accumulate_in_float32(self):
+        indices, cu = self.case(True)
+        q = self.q.bfloat16()
+        compressed = self.compressed.bfloat16()
+        _, lse, expected = dense_attention(
+            q.float(),
+            self.local,
+            compressed.float(),
+            indices,
+            self.sink,
+            self.scale,
+            self.window,
+            cu,
+        )
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            actual = self.loss()._teacher(
+                q, compressed, indices, lse, _metadata(cu, 12)
+            )
+        torch.testing.assert_close(actual, expected, atol=1e-7, rtol=1e-6)
+
+    def test_configuration_defaults_to_unweighted_kl(self):
+        self.assertFalse(self.loss().mass_weighted)
+        cfg = build_model_config(
+            "debugmodel", seq_len=512, parallelism=ParallelismConfig()
+        )
+        losses = [
+            layer.attention.inner_attention.aux_loss
+            for layer in cfg.layers
+            if layer.attention.inner_attention.aux_loss is not None
+        ]
+        self.assertTrue(losses)
+        for loss in losses:
+            self.assertFalse(loss.mass_weighted)
+
+    def test_configuration_can_be_tuned_or_disabled(self):
+        for coeff in (0.0, 0.02):
+            cfg = build_model_config(
+                "debugmodel",
+                seq_len=512,
+                parallelism=ParallelismConfig(),
+                indexer_loss_coeff=coeff,
+                indexer_loss_mass_weighted=True,
+                indexer_loss_chunk_size=32,
+            )
+            for layer in cfg.layers:
+                aux = layer.attention.inner_attention.aux_loss
+                if coeff == 0 or layer.attention.compress_ratio != 4:
+                    self.assertIsNone(aux)
+                else:
+                    self.assertEqual(aux.coeff, coeff)
+                    self.assertEqual(aux.num_heads, layer.attention.n_heads)
+                    self.assertTrue(aux.mass_weighted)
+                    self.assertEqual(aux.chunk_size, 32)
+
+
+class TestIndexerSelect(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
+        self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
+
+    def test_selection_does_not_depend_on_rescoring(self):
+        torch.manual_seed(0)
+        indexer = InnerIndexer.Config(ratio=4, topk=3).build()
+        for seqlen, metadata, width in (
+            (12, _metadata(None, 12), 3),
+            (12, _metadata(torch.tensor([0, 4, 12]), 12), 2),
+        ):
+            q = torch.randn(seqlen, 3, 8, requires_grad=True)
+            k = torch.randn(seqlen // 4, 8, requires_grad=True)
+            w = torch.randn(seqlen, 3, requires_grad=True)
+            kwargs = {"attention_metadata": metadata}
+            indices, scores = indexer(q, k, w, **kwargs, return_scores=True)
+            index_only, no_scores = indexer(q, k, w, **kwargs, return_scores=False)
+            self.assertEqual(indices.shape, (seqlen, width))
+            self.assertEqual(scores.shape, indices.shape)
+            self.assertEqual(no_scores.shape, (seqlen, 0))
+            torch.testing.assert_close(index_only, indices)
+            scores[indices >= 0].sum().backward()
+            for tensor in (q, k, w):
+                self.assertTrue(torch.isfinite(tensor.grad).all())
+
+    def test_eval_and_disabled_loss_do_not_rescore(self):
+        for training, loss_coeff in ((False, 0.01), (True, 0.0)):
+            config = build_model_config(
+                "debugmodel",
+                seq_len=16,
+                parallelism=ParallelismConfig(),
+                indexer_loss_coeff=loss_coeff,
+            )
+            cfg = next(
+                layer.attention
+                for layer in config.layers
+                if layer.attention.compress_ratio == 4
+            )
+            attention = cfg.build().train(training)
+            attention.init_states(buffer_device=torch.device("cpu"))
+            positions = torch.arange(16)
+            metadata = cfg.inner_attention.build_attention_metadata(positions)
+            score_shapes = []
+            with (
+                attention.indexer.register_forward_hook(
+                    lambda _mod, _args, out: score_shapes.append(out[1].shape)
+                ),
+                patch(
+                    "torchtitan.models.deepseek_v4.attention.gather_attn",
+                    wraps=gather_attn,
+                ) as kernel,
+            ):
+                attention(torch.randn(16, cfg.dim), metadata, positions)
+            self.assertEqual(score_shapes, [(16, 0)])
+            self.assertFalse(kernel.call_args.kwargs["return_aux"].lse)
+
+
+if __name__ == "__main__":
+    unittest.main()

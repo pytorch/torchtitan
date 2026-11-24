@@ -41,7 +41,7 @@ from torchtitan.components.optim import (  # noqa: N811
 )
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
-from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
+from torchtitan.models.base.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
 from torchtitan.tools.garbage_collector import GarbageCollector
 

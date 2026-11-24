@@ -1,0 +1,5 @@
+# torchao has no stable release that works with PyTorch nightly, so CI installs
+# this nightly from each job's PyTorch index:
+#   pip install --pre -r .github/requirements-torchao.txt --index-url <index>
+# Pick a date that every index CI uses serves (cu130, cu132, cpu, rocm10.0).
+torchao==0.19.0.dev20261103

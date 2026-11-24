@@ -9,9 +9,16 @@
 from dataclasses import dataclass, replace
 from typing import cast
 
+import torch
 from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.components.data.multimodal.vision_processor import (
+    NaViTPatchGridResize,
+    VisionProcessor,
+)
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -21,9 +28,9 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
@@ -31,20 +38,20 @@ from torchtitan.distributed.flex_shard import (
     Owned,
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
-from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.feed_forward import DenseFeedForward
 
 from torchtitan.models.kimi_k3 import (
     build_model_config,
     KIMI_K3_SPECIAL_TOKENS,
+    KIMI_K3_VISION_PROCESSOR_KWARGS,
     KimiK3Model,
 )
-from torchtitan.models.kimi_k3.model import KimiMLAAttention
+from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
@@ -57,28 +64,9 @@ from torchtitan_recipes.tests.models.kimi_k2_7 import (
 def _kimi_k3_multimodal_dataloader(
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
-    processor = dataset.processor
-    if not isinstance(processor, VisionProcessor.Config):
-        raise ValueError("Kimi K3 multimodal data requires VisionProcessor.Config")
-
-    processor = VisionProcessor.Config(
-        sample_processor=processor.sample_processor,
-        patch_size=14,
-        temporal_patch_size=1,
-        spatial_merge_size=2,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=256,
-        max_patches_per_side=16,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
     return GrainDataLoader.Config(
-        dataset=replace(dataset, processor=processor),
+        dataset=dataset,
         collator=MultiModalCollator.Config(
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
         ),
     )
@@ -86,10 +74,19 @@ def _kimi_k3_multimodal_dataloader(
 
 def kimi_k3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
+    attn_backend: str = "varlen",
 ) -> Trainer.Config:
     """Debugmodel with per-head Muon for all logical 2D matrices."""
-    parallelism = ParallelismConfig()
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "debugmodel_mm",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
+    )
     return _KimiK3TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -100,6 +97,13 @@ def kimi_k3_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**KIMI_K3_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        # Small images keep the debug vision encoder's grids short.
+        vision_processor=replace(
+            VisionProcessor.Config(**KIMI_K3_VISION_PROCESSOR_KWARGS),
+            resize=NaViTPatchGridResize.Config(
+                max_patches=256, max_patches_per_side=16
+            ),
+        ),
         dataloader=_kimi_k3_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -115,16 +119,15 @@ def kimi_k3_debugmodel(
                 min_lr_factor=0.0,
             ),
         ),
+        precision=PrecisionConfig(dtype="bfloat16"),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
-            dtype="bfloat16",
-            disable_cuda_graphs=True,
+            disable_accelerator_graphs=True,
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_remat=DefaultActivationRematConfig(),
     )
 
 
@@ -135,11 +138,11 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(KimiMLAAttention.Config, model_config.first_base_attention)
+    attention = cast(KimiMLAAttention.Config, model_config.first_full_attention)
     delta_attention = next(
-        layer.delta_attention
+        layer.attention
         for layer in model_config.layers
-        if layer.delta_attention is not None
+        if isinstance(layer.attention, KDA.Config)
     )
     # FSDP flattens dp_shard and cp into one storage axis under CP.
     owned = ComputeLayout(
@@ -147,6 +150,7 @@ def _dist_muon_optimizer(
             MeshAxisName.DP_SHARD.value: Owned(),
             f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
         },
+        compute_dtype=torch.bfloat16,
     )
 
     def blocks_of(*num_rows: int) -> ComputeLayout:
@@ -158,6 +162,7 @@ def _dist_muon_optimizer(
                     dim=0, block_sizes=num_rows
                 ),
             },
+            compute_dtype=torch.bfloat16,
         )
 
     # MLA fuses several projections into one parameter; Kimi runs Newton-Schulz
@@ -169,7 +174,9 @@ def _dist_muon_optimizer(
         # one block: [kv_latent; k_rope]
         "wkv_a": blocks_of(attention.kv_lora_rank, attention.qk_rope_head_dim),
         # per head: [k_nope_h; v_h]
-        "wkv_b": blocks_of(attention.qk_nope_head_dim, attention.v_head_dim),
+        "inner_attention.wkv_b": blocks_of(
+            attention.qk_nope_head_dim, attention.v_head_dim
+        ),
         "gate": blocks_of(attention.v_head_dim),
         "wo": owned,
     }
@@ -192,6 +199,7 @@ def _dist_muon_optimizer(
                 MeshAxisName.DP_SHARD.value: Shard(0),
                 f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
             },
+            compute_dtype=torch.bfloat16,
         ),
         "w2": owned,
     }
@@ -201,7 +209,7 @@ def _dist_muon_optimizer(
         layer = model_config.layers[layer_id]
         prefix = f"layers.{layer_id}"
         shardings = {}
-        if layer.attention is not None:
+        if isinstance(layer.attention, KimiMLAAttention.Config):
             shardings.update(
                 {
                     f"{prefix}.attention.{projection}.weight": compute_sharding
@@ -211,13 +219,13 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.delta_attention.{projection}.weight": compute_sharding
+                    f"{prefix}.attention.{projection}.weight": compute_sharding
                     for projection, compute_sharding in (
                         delta_attention_shardings.items()
                     )
                 }
             )
-        if layer.feed_forward is not None:
+        if isinstance(layer.feed_forward, DenseFeedForward.Config):
             shardings.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": compute_sharding
@@ -227,20 +235,20 @@ def _dist_muon_optimizer(
         else:
             shardings.update(
                 {
-                    f"{prefix}.moe.routed_experts.{projection}": per_expert
+                    f"{prefix}.feed_forward.routed_experts.{projection}": per_expert
                     for projection in expert_projections
                 }
             )
-            shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shardings[f"{prefix}.feed_forward.router.gate.weight"] = owned
             shardings.update(
                 {
-                    f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
+                    f"{prefix}.feed_forward.shared_experts.{projection}.weight": compute_sharding
                     for projection, compute_sharding in (feed_forward_shardings.items())
                 }
             )
             shardings.update(
                 {
-                    f"{prefix}.moe.{projection}.weight": owned
+                    f"{prefix}.feed_forward.{projection}.weight": owned
                     for projection in ("routed_down", "routed_up")
                 }
             )
@@ -287,13 +295,13 @@ def _dist_muon_optimizer(
     # single-row [1, D], so Newton-Schulz would only rescale them.
     muon_pattern = (
         r"(?:"
-        rf"attention\.(?:{'|'.join(attention_shardings)})\.weight|"
-        rf"delta_attention\.(?:{'|'.join(delta_attention_shardings)})\.weight|"
+        rf"attention\.(?:{'|'.join(attention_shardings)}|"
+        rf"{'|'.join(delta_attention_shardings)})\.weight|"
         r"routed_experts\.w(?:13|2)\.weight|"
         r"feed_forward\.w(?:13|2)\.weight|"
-        r"moe\.router\.gate\.weight|"
-        r"moe\.shared_experts\.w(?:13|2)\.weight|"
-        r"moe\.routed_(?:down|up)\.weight"
+        r"feed_forward\.router\.gate\.weight|"
+        r"feed_forward\.shared_experts\.w(?:13|2)\.weight|"
+        r"feed_forward\.routed_(?:down|up)\.weight"
         r")$"
     )
     return OptimizersContainer.Config(
@@ -305,6 +313,12 @@ def _dist_muon_optimizer(
                 lr=muon_lr,
                 weight_decay=0.1,
                 adjust_lr_fn="match_rms_adamw",
+                ns_device="accelerator",
+                # Start with 8 CTAs to reduce all-to-all memory without limiting
+                # FSDP. At 64 ranks and ~12 MiB per peer/channel, the 32-to-8
+                # channel connection-state estimate falls from ~23.6 to ~5.9 GiB
+                # per rank; revisit the cap if redistribution is bandwidth-bound.
+                max_nccl_ctas_for_comms=8,
             ),
             # The remaining parameters are embeddings, norms, biases, the LM
             # head, the KDA scalars/convolutions, and the vision tower.

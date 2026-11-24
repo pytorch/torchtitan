@@ -289,9 +289,15 @@ class DatasetConcatConfig:
         children = [
             dataset.build(
                 context=context,
-                dataset_iteration_policy=child_iteration_policy,
+                # As in DatasetMixConfig, each child gets its own seed so that
+                # a repeated child does not repeat its random draws.
+                # Inserting or reordering a child reseeds every later child.
+                dataset_iteration_policy=replace(
+                    child_iteration_policy,
+                    seed=dataset_iteration_policy.seed + index,
+                ),
             )
-            for dataset in self.datasets
+            for index, dataset in enumerate(self.datasets)
         ]
 
         if not children or not all(

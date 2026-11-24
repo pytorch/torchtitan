@@ -10,25 +10,133 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.distributed as dist
-from attn_gym.linear import l2norm
-from attn_gym.linear.context_parallel import (
-    _ContextParallelChunk,
-    context_parallel_conv_history,
-    ContextParallelRouting,
-)
-from attn_gym.linear.gdn.context_parallel import context_parallel_gdn
 
-from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.common.attn_gym import (
+    context_parallel_conv_history,
+    context_parallel_gdn,
+    ContextParallelRouting,
+    l2norm,
+    require_attn_gym,
+)
 
-from .cp_attention import CPInnerAttention
-from .cp_kda import ContextParallelLinearAttentionMetadata
+from .cp_attention import CPInnerAttention, Ulysses
+from .cp_linear_attention import (
+    ContextParallelLinearAttentionMetadata,
+    prepare_cp_linear_attention_metadata,
+    prepare_ulysses_linear_attention_metadata,
+    UlyssesLinearAttentionMetadata,
+)
 from .gdn import InnerGDN
-from .kda import LinearAttentionMetadata
+from .linear_attention import LinearAttentionMetadata
 
-spmd.register_local_autograd_function(_ContextParallelChunk)
+# Shape suffixes: T = tokens, C = channels, H = heads, K/V = head dimensions,
+# F = packed features per head, W = convolution kernel width.
+# Q/K and V may have different head counts.
+
+
+class UlyssesInnerGDN(Ulysses[LinearAttentionMetadata], InnerGDN):
+    """Run convolution and GDN on full sequences with CP-sharded heads."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Ulysses.Config, InnerGDN.Config):
+        pass
+
+    @staticmethod
+    def prepare_cp_metadata(
+        attention_metadata: LinearAttentionMetadata,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> LinearAttentionMetadata:
+        """Prepare Ulysses GDN metadata in original token order."""
+        return prepare_ulysses_linear_attention_metadata(
+            attention_metadata, permutation=permutation
+        )
+
+    def forward(
+        self,
+        mixed_qkv_TC: torch.Tensor,
+        a_TH: torch.Tensor,
+        b_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_H: torch.Tensor,
+        *,
+        key_head_dim: int,
+        value_head_dim: int,
+        attention_metadata: LinearAttentionMetadata | None,
+    ) -> torch.Tensor:
+        query_TC, key_TC, value_TC = mixed_qkv_TC.split(
+            [
+                conv_q_weight_C1W.shape[0],
+                conv_k_weight_C1W.shape[0],
+                conv_v_weight_C1W.shape[0],
+            ],
+            dim=-1,
+        )
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "Ulysses GDN requires an active multi-rank CP mesh axis."
+            )
+        packed_qk_THF = torch.cat(
+            (
+                query_TC.unflatten(-1, (-1, key_head_dim)),
+                key_TC.unflatten(-1, (-1, key_head_dim)),
+            ),
+            dim=-1,
+        )
+        packed_qk_THF = spmd.redistribute(
+            packed_qk_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
+        )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            packed_qk_THF = packed_qk_THF.index_select(
+                0, attention_metadata.inverse_permutation
+            )
+        q_THK, k_THK = packed_qk_THF.split([key_head_dim] * 2, dim=-1)
+        packed_vab_THF = torch.cat(
+            (
+                value_TC.unflatten(-1, (-1, value_head_dim)),
+                a_TH.unsqueeze(-1),
+                b_TH.unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        packed_vab_THF = spmd.redistribute(
+            packed_vab_THF, cp_group, src=spmd.S(0), dst=spmd.S(1)
+        )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            packed_vab_THF = packed_vab_THF.index_select(
+                0, attention_metadata.inverse_permutation
+            )
+        v_THV, a_TH1, b_TH1 = packed_vab_THF.split([value_head_dim, 1, 1], dim=-1)
+        parameters = tuple(
+            spmd.shard(parameter, cp_group, src=spmd.R, dst=spmd.S(0))
+            for parameter in (
+                conv_q_weight_C1W,
+                conv_k_weight_C1W,
+                conv_v_weight_C1W,
+                A_log_H,
+                dt_bias_H,
+            )
+        )
+        out_THV = super().forward(
+            torch.cat(
+                [q_THK.flatten(-2), k_THK.flatten(-2), v_THV.flatten(-2)], dim=-1
+            ),
+            a_TH1.squeeze(-1),
+            b_TH1.squeeze(-1),
+            *parameters,
+            key_head_dim=key_head_dim,
+            value_head_dim=value_head_dim,
+            attention_metadata=attention_metadata,
+        )
+        if isinstance(attention_metadata, UlyssesLinearAttentionMetadata):
+            out_THV = out_THV.index_select(0, attention_metadata.permutation)
+        return spmd.redistribute(out_THV, cp_group, src=spmd.S(1), dst=spmd.S(0))
 
 
 class ContextParallelInnerGDN(
@@ -44,53 +152,30 @@ class ContextParallelInnerGDN(
     class Config(CPInnerAttention.Config, InnerGDN.Config):
         pass
 
+    def __init__(self, config: Config):
+        # Every attn_gym export this module calls; keep the list in sync.
+        require_attn_gym(
+            context_parallel_gdn,
+            context_parallel_conv_history,
+            ContextParallelRouting,
+            l2norm,
+        )
+        super().__init__(config)
+
     @staticmethod
     def prepare_cp_metadata(
         attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
     ) -> ContextParallelLinearAttentionMetadata:
-        """Build rank-local routing from global Gated DeltaNet metadata."""
-        if attention_metadata.varlen is None:
-            if permutation is None:
-                raise ValueError(
-                    "Gated DeltaNet context parallelism requires global "
-                    "VarlenAttentionMetadata when using contiguous CP sharding."
-                )
-            cu_seqlens_global = [0, permutation.shape[1]]
-            device = permutation.device
-        else:
-            cu_seqlens_global = attention_metadata.varlen.cu_seq_q.tolist()
-            device = attention_metadata.varlen.cu_seq_q.device
-
-        group = spmd_mesh_group(MeshAxisName.CP)
-        if group is None:
-            raise RuntimeError(
-                "Gated DeltaNet metadata preparation requires an active "
-                "multi-rank CP mesh axis."
-            )
-        routing = ContextParallelRouting.from_fragments(
-            cu_seqlens_global=cu_seqlens_global,
-            fragments=get_token_fragments(
-                cu_seqlens_global[-1],
-                cp_size=group.size(),
-                permutation=permutation,
-            ),
-            cp_rank=dist.get_rank(group),
-            device=device,
-            conv_history=attention_metadata.num_conv_history_tokens,
-        )
-        return ContextParallelLinearAttentionMetadata(
-            varlen=attention_metadata.varlen,
-            num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
-            cp_routing=routing,
+        """Build rank-local routing from global Gated DeltaNet sequence metadata."""
+        return prepare_cp_linear_attention_metadata(
+            attention_metadata, permutation=permutation, family="Gated DeltaNet"
         )
 
     def forward(
         self,
-        query_TC: torch.Tensor,
-        key_TC: torch.Tensor,
-        value_TC: torch.Tensor,
+        mixed_qkv_TC: torch.Tensor,
         a_TH: torch.Tensor,
         b_TH: torch.Tensor,
         conv_q_weight_C1W: torch.Tensor,
@@ -103,6 +188,14 @@ class ContextParallelInnerGDN(
         value_head_dim: int,
         attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
+        query_TC, key_TC, value_TC = mixed_qkv_TC.split(
+            [
+                conv_q_weight_C1W.shape[0],
+                conv_k_weight_C1W.shape[0],
+                conv_v_weight_C1W.shape[0],
+            ],
+            dim=-1,
+        )
         if not isinstance(attention_metadata, ContextParallelLinearAttentionMetadata):
             raise ValueError(
                 "Gated DeltaNet context parallelism requires rank-local "

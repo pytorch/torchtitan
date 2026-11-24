@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.activation import ClampedSwiGLU, SwiGLU
 from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
@@ -19,9 +21,8 @@ from torchtitan.models.common.dist_moe import (
 )
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.protocols.module import Module
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
+from .base import ModelConfigTransform
 
 
 __all__ = ["DistMoeTransform"]
@@ -50,8 +51,8 @@ def _replace_routed_experts(
             swiglu_limit = None
         elif isinstance(source.activation_fn, ClampedSwiGLU.Config):
             activation = "swiglu_clamped"
-            swiglu_alpha = source.activation_fn.swiglu_alpha
-            swiglu_limit = source.activation_fn.swiglu_limit
+            swiglu_alpha = source.activation_fn.alpha
+            swiglu_limit = source.activation_fn.limit
         else:
             raise TypeError(
                 "Dist-MoE supports SwiGLU.Config or ClampedSwiGLU.Config; "
@@ -105,18 +106,28 @@ class DistMoeTransform(ModelConfigTransform):
             FPROP/DGRAD grouped-GEMM schedule. ``None`` uses production defaults.
         block_scaled_config: MXFP8 kernel policy. ``None`` selects the annex
             defaults when ``expert_precision`` is ``"mxfp8"``.
+        mxfp8_mega_fused_inference: Prepare MXFP8 weights in the
+            gate/up interleaved format so the Mega kernel can fuse SwiGLU into
+            the W13 GEMM, for inference only. Quantized weights and scales match
+            training numerics exactly. Requires
+            ``expert_precision="mxfp8"`` and ``block_scaled_config.pipeline="mega"``.
     """
 
     expert_precision: Literal["bf16", "mxfp8"] = "bf16"
     inplace_wgrad_accum: bool = True
     bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
     block_scaled_config: dist_moe.BlockScaledConfig | None = None
+    mxfp8_mega_fused_inference: bool = False
 
     def __post_init__(self) -> None:
         if self.expert_precision == "bf16":
             if self.block_scaled_config is not None:
                 raise ValueError(
                     "block_scaled_config requires expert_precision='mxfp8'"
+                )
+            if self.mxfp8_mega_fused_inference:
+                raise ValueError(
+                    "mxfp8_mega_fused_inference requires " "expert_precision='mxfp8'"
                 )
         elif self.expert_precision == "mxfp8":
             if self.bf16_grouped_gemm_preset is not None:
@@ -128,17 +139,20 @@ class DistMoeTransform(ModelConfigTransform):
             )
             if block_scaled_config.format is not dist_moe.BlockScaledFormat.MXFP8_E4M3:
                 raise ValueError("Dist-MoE MXFP8 requires the MXFP8_E4M3 format")
+            if (
+                self.mxfp8_mega_fused_inference
+                and block_scaled_config.pipeline != "mega"
+            ):
+                raise ValueError(
+                    "mxfp8_mega_fused_inference requires "
+                    "block_scaled_config.pipeline='mega'"
+                )
         else:
             raise ValueError(
                 f"unsupported Dist-MoE expert precision {self.expert_precision!r}"
             )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Replace each stock routed-expert config with the selected precision."""
         if self.expert_precision == "bf16":
             return _replace_routed_experts(
@@ -154,4 +168,5 @@ class DistMoeTransform(ModelConfigTransform):
             block_scaled_config=(
                 self.block_scaled_config or dist_moe.BlockScaledConfig()
             ),
+            mega_fused_inference=self.mxfp8_mega_fused_inference,
         )

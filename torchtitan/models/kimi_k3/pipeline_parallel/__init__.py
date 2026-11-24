@@ -21,7 +21,7 @@ from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     pipeline_llm,
 )
-from torchtitan.protocols.model import BaseModel
+from torchtitan.models.base.model import BaseModel
 
 from .cache import PPRankLocalCache
 from .layout import infer_block_layout_tables, layer_to_stage_from_split

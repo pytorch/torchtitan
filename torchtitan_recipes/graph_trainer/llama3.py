@@ -7,13 +7,13 @@
 """Verified Llama 3 GraphTrainer recipes."""
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
-from torchtitan.hf_datasets.text_datasets import DATASETS
 
 from torchtitan_recipes.models.llama3 import llama3_8b
 
@@ -29,6 +29,7 @@ def graph_trainer_llama3_8b(*, seq_len: int = 8192) -> GraphTrainer.Config:
 def graph_trainer_llama3_8b_c4_test() -> GraphTrainer.Config:
     config = graph_trainer_llama3_8b()
     config.dataloader = GrainDataLoader.Config(
+        max_num_documents=config.dataloader.max_num_documents,
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
     return config
@@ -40,8 +41,8 @@ def graph_trainer_llama3_8b_autoresearch() -> GraphTrainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 8192
     config.training.steps = 20
-    config.metrics.enable_tensorboard = False
-    config.profiler.enable_profiling = False
+    config.metrics.loggers = []
+    config.profiler.trace = None
     config.comm.trace_buf_size = 0
     config.debug.seed = 42
     return config

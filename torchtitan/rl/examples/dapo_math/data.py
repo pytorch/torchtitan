@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from datasets import concatenate_datasets, load_dataset
 
-from torchtitan.rl.components.data import RLDataset
+from torchtitan.rl.rollout.data import RLDataset
 
 _MATH_PROMPT_TEMPLATE = (
     "Solve the following math problem step by step. The last line of your response "

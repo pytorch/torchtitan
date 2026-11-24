@@ -18,15 +18,15 @@ import torch.distributed as dist
 
 from torchtitan.config import CommConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.rl.model.vllm_registry import register_to_vllm
+from torchtitan.rl.generator.vllm.registry import register_to_vllm
 from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
-    _make_prompt_tokens,
     _run_engine,
     build_inference_engine,
+    make_prompt_tokens,
 )
 
 # Runs under a four-GPU torchrun launch.
@@ -58,15 +58,16 @@ def test_vllm_uneven_decode_tp_padding():
         )
 
     register_to_vllm(
-        config.model,
+        config.generator.model,
         parallelism=config.generator.parallelism,
+        precision=config.precision,
         checkpointer_config=None,
-        override=config.generator.override,
+        model_state_dict_load_mode="cpu_prefetch",
     )
 
     engine = build_inference_engine(config)
     try:
-        prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())
+        prompt_ids = make_prompt_tokens(3, 100, engine.get_tokenizer())
         outputs = _run_engine(
             engine,
             "uneven_decode",

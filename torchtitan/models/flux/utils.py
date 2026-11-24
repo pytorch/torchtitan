@@ -8,8 +8,8 @@ import torch
 
 from torch import Tensor
 
-from .model.autoencoder import AutoEncoder
-from .model.hf_embedder import FluxEmbedder
+from .autoencoder import AutoEncoder
+from .hf_embedder import FluxEmbedder
 
 PATCH_HEIGHT, PATCH_WIDTH = 2, 2
 LATENT_CHANNELS, IMAGE_LATENT_SIZE_RATIO = 16, 8
@@ -32,7 +32,7 @@ def preprocess_data(
     Args:
         device (torch.device): device to do preprocessing on
         dtype (torch.dtype): data type to do preprocessing in
-        autoencoer(AutoEncoder): autoencoder to use for preprocessing
+        autoencoder (AutoEncoder): autoencoder to use for preprocessing
         clip_encoder (HFEmbedder): CLIPTextModel to use for preprocessing
         t5_encoder (HFEmbedder): T5EncoderModel to use for preprocessing
         batch (dict[str, Tensor]): batch of data to preprocess. Tensor shape: [bsz, ...]

@@ -73,3 +73,12 @@ class GarbageCollector(Configurable):
         begin = time.monotonic()
         gc.collect(generation)
         logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
+
+    @staticmethod
+    def freeze(reason: str) -> None:
+        """Run a full collection, then move the survivors to the permanent generation.
+
+        Later collections skip frozen objects, so call it when everything alive lives until exit.
+        """
+        GarbageCollector.collect(reason, generation=2)
+        gc.freeze()

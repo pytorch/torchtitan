@@ -6,24 +6,150 @@
 
 from __future__ import annotations
 
+import traceback
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, TYPE_CHECKING
 
-from renderers import Message
+import numpy as np
+from renderers import Message, PlaceholderRange
 
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.types import Completion, RolloutTurnID
 
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
-    from torchtitan.rl.generator import SamplingConfig
+    from torchtitan.rl.generator.types import SamplingConfig
 
 
-_TRUNCATED = frozenset(
-    {"truncated_length", "truncated_prompt_too_long", "truncated_max_turns"}
-)
-_ERROR = frozenset({"error_parse", "error_timeout", "error_abort", "error"})
+@dataclass(frozen=True, kw_only=True, slots=True)
+class PromptImage:
+    """One image of a prompt: the image file and its patch grid. Where the image sits in
+    the prompt's tokens is the prompt's (`Prompt.image_placeholders`).
+
+    Prompts carry the image file's bytes instead of pixels; the generator and the
+    trainer turn them into pixel values (`VisionProcessor.resize_and_normalize`, then
+    `patchify`).
+
+    Example (a 64x64-patch image):
+
+        PromptImage(
+            hash_value="9f2c...",
+            source_path="./assets/datasets/geometry3k/images/train/00000_0.png",
+            grid_thw=(1, 64, 64),
+            data=b"\\xff\\xd8\\xff\\xe0...",  # the JPEG file
+        )
+    """
+
+    hash_value: str
+    """Hash of `data`, the image file's content (`hash_image_file`). The generator also
+    passes it to vLLM as the image's multimodal hash (salted with the policy version), so
+    requests showing the same file share encoder outputs and prefix-cache entries."""
+
+    source_path: str
+    """Where the rollout worker read `data`: the image part's path in the prompt's message,
+    on the rollout worker's file system. Only error messages and the rollout recorder use it;
+    the generator and the trainer read `data`, not this path."""
+
+    grid_thw: tuple[int, int, int]
+    """Raw patch grid ``(T, H, W)`` before spatial merging."""
+
+    data: bytes = field(repr=False, compare=False)
+    """The image file's bytes (JPEG, PNG, ...). Not compared: ``hash_value`` is their hash."""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Prompt:
+    """What `GenerateFn` generates from: the prompt's tokens and the images its placeholder
+    tokens stand for.
+
+    Each image is a run of placeholder tokens in `token_ids`, at its `image_placeholders`
+    entry, and its `PromptImage` names the file that fills them. This is the form the
+    renderer emits (``RenderedTokens``), vLLM takes (prompt ids, placeholder ranges and mm
+    hashes, one list each) and the trainer packs, so no layer converts it.
+
+    Example (a text prompt, and a prompt whose 4 image placeholders start at token 1):
+
+        Prompt(token_ids=[1, 2, 3])
+        Prompt(
+            token_ids=[1, 9, 9, 9, 9, 2],
+            images=(PromptImage(hash_value="9f2c...", ...),),
+            image_placeholders=(PlaceholderRange(offset=1, length=4),),
+        )
+    """
+
+    token_ids: list[int]  # [num_prompt_tokens]
+    """The tokenized prompt, including each image's placeholder tokens."""
+
+    images: tuple[PromptImage, ...] = ()
+    """Images whose placeholder tokens are in `token_ids`, in prompt order. Empty for text."""
+
+    image_placeholders: tuple[PlaceholderRange, ...] = ()
+    """Where each image sits in `token_ids`: ``images[i]`` fills ``token_ids[offset : offset +
+    length]`` of ``image_placeholders[i]``. ``length`` is the image's number of placeholder
+    tokens (`VisionProcessor.num_placeholder_tokens`)."""
+
+    def __post_init__(self) -> None:
+        if len(self.images) != len(self.image_placeholders):
+            raise ValueError(
+                f"A prompt has {len(self.images)} images but "
+                f"{len(self.image_placeholders)} image placeholder ranges."
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutTurnID:
+    """A turn's id: (group, sibling rollout, turn index); renders to the generator request_id.
+
+    Example:
+
+        RolloutTurnID(group_id=5, rollout_id=2, turn_id=0).to_string()
+        # -> "group=5/rollout=2/turn=0"
+        RolloutTurnID(group_id=5, rollout_id=2, turn_id=0).to_string(include_turn=False)
+        # -> "group=5/rollout=2"
+    """
+
+    group_id: int
+    """Globally-unique GRPO group id; siblings share it (the sticky-routing key, sans turn)."""
+    rollout_id: int
+    """Sibling index within the group (0..group_size-1)."""
+    turn_id: int
+    """Turn index within the rollout; for a TrainingSample, the turn where begins.
+    This is not 0 when a single rollout is split into multiple training samples."""
+
+    def to_string(self, *, include_turn: bool = True) -> str:
+        base = f"group={self.group_id}/rollout={self.rollout_id}"
+        return f"{base}/turn={self.turn_id}" if include_turn else base
+
+
+@dataclass(kw_only=True, slots=True)
+class Completion:
+    """A single generated sequence from the generator.
+
+    Example:
+
+        Completion(min_policy_version=7, max_policy_version=7, request_id="r0", token_ids=[12, 9],
+                   token_logprobs=[-0.2, -1.1], finish_reason="stop",
+                   metrics=[Metric("generator/queue_time_ms", ...)])
+    """
+
+    min_policy_version: int
+    """Oldest policy version among this turn's decode."""
+    max_policy_version: int
+    """Newest policy version among this turn's decode."""
+    # TODO(async-rl): for exact per-token version attribution, switch the engine to
+    #   RequestOutputKind.CUMULATIVE and record (start_token, version) boundaries; today we keep only
+    #   the per-turn min (min_policy_version) / max (max_policy_version).
+    request_id: str
+    """Echoes the id the caller passed to `generate`, so callers can validate
+    ordered completions or map by id."""
+    token_ids: list[int]
+    token_logprobs: list[float]
+    finish_reason: str | None = None
+    """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort" | "error")"""
+
+    metrics: list[m.Metric] = field(default_factory=list)
+    """Per-generation metrics measured by the generator (latencies); the
+    controller attaches them to the rollout turn."""
 
 
 class GenerateFn(Protocol):
@@ -35,7 +161,7 @@ class GenerateFn(Protocol):
 
     async def __call__(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
@@ -45,7 +171,7 @@ class GenerateFn(Protocol):
         """Run one generation.
 
         Args:
-            prompt_token_ids: The tokenized prompt to generate from.
+            prompt: The prompt to generate from: its tokens and images.
             request_id: Unique per call; identifies the exact turn (e.g. ".../turn=2") in logs.
             group_id: Rollout group this call belongs to. Calls of one group share a prefix
                 cache namespace, so siblings and later turns can reuse the group's KV.
@@ -59,24 +185,88 @@ class GenerateFn(Protocol):
         """
 
 
+class ReleaseSessionFn(Protocol):
+    """Tell the generator side that a routing session makes no more calls.
+
+    The Rollouter calls this once per rollout, after its last turn, so a router can drop the
+    session's affinity.
+    """
+
+    async def __call__(self, *, routing_session_id: str) -> None:
+        """Release one routing session.
+
+        Args:
+            routing_session_id: The `routing_session_id` the rollout passed to `GenerateFn`.
+        """
+
+
+# TODO: let users add a status, change what is trainable, without editing this file
 class RolloutStatus(StrEnum):
-    """Per-rollout status."""
+    """How a rollout ended. Used to debug and decide if a rollout is trainable."""
+
+    COMPLETED = "completed"
+    """The env ended the episode."""
+
+    ERROR = "error"
+    """Any other failure the policy may have caused, e.g. it killed its own agent's process."""
+
+    ERROR_INFRA = "error_infra"
+    """A failure outside the policy, e.g. an unreachable generator or a crashed env."""
+
+    ERROR_PARSE = "error_parse"
+    """The completion couldn't be parsed, e.g. a malformed tool call."""
+
+    ERROR_TIMEOUT = "error_timeout"
+    """A deadline passed, e.g. the policy ran a command that never ends. Counts as the policy's
+    failure."""
+
+    ERROR_UNKNOWN = "error_unknown"
+    """The env can't tell how the rollout ended, e.g. a stop it doesn't map. Not trained, so a
+    wrong guess can't train."""
+
+    FIRST_PROMPT_TOO_LONG = "first_prompt_too_long"
+    """The first prompt alone reached `max_rollout_tokens`, so the policy never answered. A data
+    problem."""
 
     ONGOING = "ongoing"
-    COMPLETED = "completed"
+    """Still running."""
+
     TRUNCATED_LENGTH = "truncated_length"
-    TRUNCATED_PROMPT_TOO_LONG = "truncated_prompt_too_long"
+    """The rollout ran out of tokens: its last completion hit its limit, or the env's token budget
+    ran out."""
+
     TRUNCATED_MAX_TURNS = "truncated_max_turns"
-    ERROR_PARSE = "error_parse"
-    ERROR_TIMEOUT = "error_timeout"
-    ERROR_ABORT = "error_abort"
-    ERROR = "error"
+    """The turn limit was reached."""
+
+    TRUNCATED_PROMPT_TOO_LONG = "truncated_prompt_too_long"
+    """A later prompt reached `max_rollout_tokens`, e.g. after a long tool result: it leaves no
+    room for one output token."""
 
     def is_truncated(self) -> bool:
-        return self.value in _TRUNCATED
+        return self in (
+            RolloutStatus.TRUNCATED_LENGTH,
+            RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
+            RolloutStatus.TRUNCATED_MAX_TURNS,
+        )
 
     def is_error(self) -> bool:
-        return self.value in _ERROR
+        return self in (
+            RolloutStatus.ERROR,
+            RolloutStatus.ERROR_INFRA,
+            RolloutStatus.ERROR_PARSE,
+            RolloutStatus.ERROR_TIMEOUT,
+            RolloutStatus.ERROR_UNKNOWN,
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
+        )
+
+    def is_trainable(self) -> bool:
+        """False for a status that is never scored or trained, e.g. ERROR_INFRA: a failure
+        outside the policy says nothing about the policy."""
+        return self not in (
+            RolloutStatus.ERROR_INFRA,
+            RolloutStatus.ERROR_UNKNOWN,
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
+        )
 
     def is_terminal(self) -> bool:
         return self is not RolloutStatus.ONGOING
@@ -84,9 +274,26 @@ class RolloutStatus(StrEnum):
 
 @dataclass(kw_only=True, slots=True)
 class RolloutTurn:
-    """Full per-turn snapshot: the prompt fed to the generator + the sampled completion +
+    """One turn: the prompt fed to the generator + the sampled completion +
     the env's reply, in both token and message space. Rubrics score it and
-    `rollout_to_training_samples` packs the rollout into training tokens."""
+    `rollout_to_training_samples` packs the rollout into training tokens.
+
+    A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
+    turn's prompt + completion, then its new tokens and the images among them (`prompt_messages` stay
+    in full):
+
+        full prompt = (previous prompt + completion)[:prompt_prefix_len] + prompt_delta_token_ids
+        full prompt images = previous prompt's images before prompt_prefix_len + prompt_delta_images
+
+    Example: the previous turn's prompt is [0, 1, 2] and its completion [3].
+
+        this turn's prompt   prompt_prefix_len  prompt_delta_token_ids
+        [0, 1, 2, 3, 4, 5]   4                  [4, 5]                  # continues
+        [0, 1, 9, 3]         2                  [9, 3]                  # edited 2 -> 9: 3 is stored again
+
+    Per-token fields are numpy arrays, not lists: a group pickles as raw bytes from the rollout worker
+    to the controller, and the GC doesn't track them.
+    """
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
     # so a turn can be dumped and inspected without re-deriving from tokens.
@@ -95,13 +302,24 @@ class RolloutTurn:
     """Identifies this turn (group, sibling index, turn index)."""
 
     # Fields needed for training
-    prompt_token_ids: list[int]  # [num_prompt_tokens]
-    """Tokenized conversation up to this turn, used to generate this turn's completion."""
+    prompt_prefix_len: int
+    """Length of the longest prefix shared with the previous turn's prompt + completion; set by `split_prompt`."""
 
-    completion_token_ids: list[int]  # [num_completion_tokens]
+    prompt_delta_token_ids: np.ndarray  # [num_prompt_tokens - prompt_prefix_len] int32
+    """The prompt after its first `prompt_prefix_len` tokens."""
+
+    prompt_delta_images: tuple[PromptImage, ...] = ()
+    """The images in `prompt_delta_token_ids`; the images before `prompt_prefix_len` are the
+    previous turn's."""
+
+    prompt_delta_image_placeholders: tuple[PlaceholderRange, ...] = ()
+    """Where each of `prompt_delta_images` sits in the full prompt (see
+    `Prompt.image_placeholders`)."""
+
+    completion_token_ids: np.ndarray  # [num_completion_tokens] int32
     """This turn's completion token ids."""
 
-    completion_logprobs: list[float]  # [num_completion_tokens]
+    completion_logprobs: np.ndarray  # [num_completion_tokens] float32
     """This turn's completion token logprobs generated by the generator policy."""
 
     # Filtering
@@ -115,7 +333,7 @@ class RolloutTurn:
     prompt_messages: list[Message] = field(
         default_factory=list
     )  # [num_prompt_messages]
-    """Full conversation up to this turn; equivalent to `prompt_token_ids`."""
+    """Full conversation up to this turn, not a delta."""
 
     completion_message: Message | None = None
     """This turn's completion decoded into a message by the renderer (the TokenEnv's parse,
@@ -131,6 +349,68 @@ class RolloutTurn:
     metrics: list[m.Metric] = field(default_factory=list)
     """Per-turn metrics produced during rollouts"""
 
+    @property
+    def num_prompt_tokens(self) -> int:
+        """Length of the full prompt this turn generated from."""
+        return self.prompt_prefix_len + len(self.prompt_delta_token_ids)
+
+
+def split_prompt(prompt: Prompt, previous: Prompt) -> tuple[int, np.ndarray]:
+    """Split a prompt into the part shared with the previous turn and the new part.
+
+    The shared prefix is the longest run of equal tokens that also shows the same images. An
+    image that is not the previous turn's image at the same place (e.g. another file with the
+    same number of placeholder tokens) ends the prefix at its first placeholder token, so every
+    changed image is in the new part.
+
+    Args:
+        prompt: this turn's full prompt.
+        previous: the previous turn's prompt + completion, with the previous prompt's images;
+            ``Prompt(token_ids=[])`` on the first turn.
+
+    Returns:
+        `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the shared prefix, and the
+        prompt after it.
+
+    Example (``Prompt(...)`` abbreviated to its token ids where it has no images):
+        split_prompt([0, 1, 2, 3, 4, 5], previous=[0, 1, 2, 3])  # -> (4, array([4, 5])): continues
+        split_prompt([0, 1, 9, 3], previous=[0, 1, 2, 3])        # -> (2, array([9, 3])): history edited
+        split_prompt([0, 1, 2], previous=[])                     # -> (0, array([0, 1, 2])): first turn
+
+        # Tokens 1-2 are image placeholders in both, but the image changed from a to b:
+        split_prompt(
+            Prompt(token_ids=[0, 7, 7, 3], images=(b,), image_placeholders=(PlaceholderRange(1, 2),)),
+            previous=Prompt(token_ids=[0, 7, 7, 3], images=(a,), image_placeholders=(PlaceholderRange(1, 2),)),
+        )  # -> (1, array([7, 7, 3]))
+    """
+    prompt_token_ids, previous_token_ids = prompt.token_ids, previous.token_ids
+    # Common case: the prompt extends the previous turn. One list compare, no Python loop.
+    if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
+        prefix_len = len(previous_token_ids)
+    else:
+        prefix_len = 0
+        for token, previous_token in zip(prompt_token_ids, previous_token_ids):
+            if token != previous_token:
+                break
+            prefix_len += 1
+    # Equal placeholder tokens can show another image: end the prefix at the first image in it
+    # that the previous prompt does not have at the same place.
+    for index, placeholder in enumerate(prompt.image_placeholders):
+        if placeholder.offset >= prefix_len:
+            break
+        if (
+            index >= len(previous.images)
+            or prompt.images[index].hash_value != previous.images[index].hash_value
+            or (placeholder.offset, placeholder.length)
+            != (
+                previous.image_placeholders[index].offset,
+                previous.image_placeholders[index].length,
+            )
+        ):
+            prefix_len = placeholder.offset
+            break
+    return prefix_len, np.asarray(prompt_token_ids[prefix_len:], dtype=np.int32)
+
 
 @dataclass(kw_only=True, slots=True)
 class Rollout:
@@ -143,16 +423,17 @@ class Rollout:
     """Sibling index within the group (0..group_size-1)."""
 
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
-    """Ordered rollout turns. Each turn stores its full prompt (redundant across turns); kept so a
-    rollout can be replayed/branched and divergences found, then collapsed at training_sample assembly."""
-    # TODO: represent shared history as graph nodes so branching does not repeat
-    # complete prompt prefixes and consume O(num_turns**2) token storage.
+    """Ordered rollout turns; each stores its prompt as a delta on the previous turn (see `RolloutTurn`)."""
+    # TODO: let a turn be a delta on any earlier turn, not just the previous one, so a turn that resumes
+    # an older turn (a retry, or a main agent after a subagent) stores only its new tokens.
 
     status: RolloutStatus
     """Rollout-level terminal status."""
 
+    # TODO: make it per token, e.g. to give each turn of a multi-turn rollout its own reward.
+    #   Not done yet: `RubricOutput.reward` and the advantage estimators give one float per rollout.
     reward: float | None = None
-    """Final weighted reward, filled by the rubric."""
+    """Final weighted reward, filled by the rubric. None if the rollout wasn't scored."""
 
     reward_breakdown: dict[str, float] = field(default_factory=dict)
     """Raw per-reward-function values, filled by the rubric."""
@@ -162,8 +443,25 @@ class Rollout:
     """Advantage for this sample."""
 
     logs: dict[str, Any] = field(default_factory=dict)
-    """Rollouter-specific debug record, e.g. why the rollout failed. Saved with the rollout
-    by `RolloutSampleRecorder`; not used for training."""
+    """Rollouter-specific debug record, e.g. why the rollout failed. `logs["errors"]`, if set, is a
+    list of `error_entry` dicts, counted in `<prefix>/errors/<type>`. Saved with the rollout by
+    `RolloutSampleRecorder`; not used for training."""
+
+
+# TODO: consider typed errors (`RolloutError`: type, message, traceback)
+# as Verifiers' `Trace.errors` and `Trace.info`
+def error_entry(error: Exception) -> dict[str, str]:
+    """One `Rollout.logs["errors"]` entry for an exception.
+
+    Example:
+        error_entry(ConnectionError("generator unreachable"))
+        # -> {"type": "ConnectionError", "message": "generator unreachable", "traceback": "Traceback ..."}
+    """
+    return {
+        "type": type(error).__name__,
+        "message": str(error),
+        "traceback": "".join(traceback.format_exception(error)),
+    }
 
 
 @dataclass(kw_only=True, slots=True)

@@ -16,7 +16,9 @@ Model architectures exist for 4B, 8B, and 235B-A22B, but those sizes do not
 yet have verified training recipes.
 
 ## Download Qwen3 tokenizer
-```python scripts/download_hf_assets.py --repo_id <hf_repo_name> --assets tokenizer```
+```bash
+python scripts/download_hf_assets.py --repo_id <hf_repo_name> --assets tokenizer
+```
 
 For example, the 0.6B and 1.7B repositories are `Qwen/Qwen3-0.6B` and
 `Qwen/Qwen3-1.7B`. The conventional local directory is

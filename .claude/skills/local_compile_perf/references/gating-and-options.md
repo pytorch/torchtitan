@@ -39,7 +39,7 @@ Example of `compile_friendly()`: MoE dispatch/combine as a gather-sum costs +3.8
 
 It matters, so measure with the AC mode the recipe uses.
 
-- **RegionAC (current main, `torch_remat`):** code outside declared remat regions is always replayed in the backward, including eager glue around `local_compile` regions. A bare consumer of a remat region's output needs `remat.recompute_needs_tensor`. Check how your compile regions line up with the remat regions: a compile region that falls outside a remat region is replayed. Nest compile inside remat, never remat inside a compiled region.
+- **Activation remat (current main, `torch_remat`):** code outside declared remat regions is always replayed in the backward, including eager glue around `local_compile` regions. A bare consumer of a remat region's output needs `remat.recompute_needs_tensor`. Check how your compile regions line up with the remat regions: a compile region that falls outside a remat region is replayed. Nest compile inside remat, never remat inside a compiled region.
 
 Older trees (eager SelectiveAC):
 

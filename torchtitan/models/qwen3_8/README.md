@@ -12,6 +12,21 @@ This directory owns only:
 The shared model, Gated DeltaNet, RoPE, vision encoder, sharding,
 parallelization, and state-dict adapter keep their existing Qwen3.5 names.
 
+## Supported Parallelisms
+
+Qwen3.8 reuses the Qwen3.5 model implementation and parallelization (see the
+note above), so it supports the same parallelisms documented in
+[Qwen3.5's Supported Parallelisms](../qwen3_5/README.md#supported-parallelisms):
+
+| Feature | Notes |
+|---------|-------|
+| FSDP / HSDP | Decoder sharded per-layer; vision encoder sharded as a single unit (one AllGather) |
+| Tensor Parallelism (TP) | With Sequence Parallel; head-sharded TP on GatedDeltaNet projections |
+| Expert Parallelism (EP) | For the `2.4T-A95B` MoE variant |
+| Pipeline Parallel (PP) | Vision encoder assigned to first stage; 1F1B and Interleaved1F1B schedules |
+| Context Parallelism (CP) | Attention Gym native CP for GatedDeltaNet; full attention supports K/V all-gather with contiguous, head-tail, or PTRR partitions and Ulysses with contiguous partitions |
+| Sample Packing | Opt-in via `MMSamplePackingConfig` |
+
 ## Model variants
 
 | Variant | Type | LLM dim | Layers | Heads | KV heads | Experts | Top-k | Vision |

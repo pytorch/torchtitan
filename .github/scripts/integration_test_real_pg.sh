@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Real PG (8 GPU) integration suite.
 #
-# Shared by the CUDA job in integration_test.yaml and the ROCm job in
-# integration_test_rocm.yaml. They cannot be one job because `uses:` is not
+# Shared by the CUDA job in integration_test.yaml, the ROCm job in
+# integration_test_rocm.yaml, and (once wired up) the XPU job in
+# integration_test_xpu.yaml. They cannot be one job because `uses:` is not
 # templatable and ROCm has to stay on linux_job_v2 -- v3 pulls from the private
 # ECR, which the ROCm runners cannot authenticate to.
 #
 # Inputs (environment):
-#   GPU_ARCH_TYPE   cuda | rocm
+#   GPU_ARCH_TYPE   cuda | rocm | xpu
 #   TORCH_VERSION   pinned torch version, or empty for the channel default
 #   INDEX_URL       pip index to install torch/torchvision/torchao from
 #   TEST_SUITE      features | models
@@ -35,7 +36,7 @@ if [ -n "${TORCH_VERSION}" ]; then
 fi
 python -m pip install --force-reinstall --pre \
   "${TORCH_SPEC}" torchvision --index-url "${INDEX_URL}"
-USE_CPP=0 python -m pip install --pre torchao --index-url "${INDEX_URL}"
+USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url "${INDEX_URL}"
 
 GPU_ARCH="a10g"
 if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
@@ -44,6 +45,18 @@ if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then
   if [ -d "${HIPBLASLT_LIB_DIR}" ]; then
     export HIPBLASLT_TENSILE_LIBPATH="${HIPBLASLT_LIB_DIR}"
   fi
+elif [[ "${GPU_ARCH_TYPE}" == "xpu" ]]; then
+  GPU_ARCH="pvc"
+  # expandable_segments is unsupported by the XPU allocator and SIGSEGVs at
+  # startup; empty keeps run_train.sh from setting it.
+  # TODO(intel/torch-xpu-ops#4427): drop this override once XPU supports
+  # expandable_segments.
+  export PYTORCH_ALLOC_CONF=""
+  # The image's sccache (/opt/cache/bin) has no backend configured and breaks
+  # triton's JIT builds; point triton at the plain compilers. Same workaround
+  # as torchao:
+  # https://github.com/pytorch/ao/blob/566d15ea721da0d305270b4c552c59970ec89304/.github/scripts/ci_test_xpu.sh#L6-L8
+  export CC=/usr/bin/gcc CXX=/usr/bin/g++ SCCACHE_DISABLE=1
 fi
 
 sudo mkdir -p "$RUNNER_ARTIFACT_DIR"
@@ -76,11 +89,12 @@ python -m tests.integration_tests.run_tests \
   --test_suite "${TEST_SUITE}" --execution_mode real_pg --ngpu 8 \
   $EXPORT_ARG $TEST_NAME_ARG $TEST_SCOPE_ARG \
   "$RUNNER_ARTIFACT_DIR" || status=$?
-# FLUX is a separate runner only because it does not fit in run_tests.
-# Always run it on the models job, then fail if either suite failed.
+# Run the FLUX suite on the models job, then fail if either suite failed.
 if [[ "${TEST_SUITE}" == "models" ]]; then
-  python -m tests.integration_tests.flux \
-    --execution_mode real_pg --ngpu 8 \
+  python -m tests.integration_tests.run_tests \
+    --gpu_arch_type "${GPU_ARCH_TYPE}" \
+    --gpu_arch "$GPU_ARCH" \
+    --test_suite flux --execution_mode real_pg --ngpu 8 \
     $TEST_NAME_ARG $TEST_SCOPE_ARG \
     "$RUNNER_ARTIFACT_DIR/flux" || status=$?
 fi

@@ -25,7 +25,7 @@ pass-specific arguments.
 
 ## Pass Tiers
 
-Graph passes are structured into two tiers:
+Graph passes are structured into three tiers:
 
 1. **Default passes** (`passes.py`, `remove_noop_passes.py`, etc.) — always
    applied. These are numerics-preserving: cleanup, memory policy, bucketing,
@@ -36,9 +36,17 @@ Graph passes are structured into two tiers:
    `config.compile.numerics_changing_optim = True`. These improve performance but may change numerics
    compared to the uncompiled path (e.g. RMSNorm Inductor fusion).
 
+3. **Registered passes** -- opt-in by name via `config.compile.extra_passes`.
+   Registered with `@register_graph_pass` (`registry.py`) from any module,
+   including outside torchtitan. They run on the joint graph after the other
+   GraphTrainer passes and before Inductor compilation. Use them for model-
+   or shape-specialized rewrites such as replacing a subgraph with a
+   handwritten kernel.
+
 When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like
-`remove_noop_passes.py`.
+`remove_noop_passes.py`. Model- or kernel-specific rewrites that only some
+recipes want are registered passes.
 
 ## Memory Policy Framework
 
@@ -237,9 +245,10 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 ### Profiling
 
-Set `config.profiler.enable_profiling = True` in the recipe.
-Set `config.profiler.profile_freq` to control which step is captured
-(default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
+Set `config.profiler.trace = KinetoTraceProfiler.Config()` in the recipe.
+Set `KinetoTraceProfiler.Config(freq=...)` to control which step is captured
+(default: 10). Each rank writes
+`{dump_folder}/profiling/traces/iteration_{step}/rank{N}_trace.json.gz`.
 
 ```bash
 NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_profile ./run_train.sh
@@ -247,12 +256,13 @@ NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_profile ./run_train.sh
 
 ### Memory Snapshot
 
-Set `config.profiler.enable_memory_snapshot = True` in the recipe to capture a
-memory snapshot.
-The snapshot fires at every `profile_freq`-th step and is saved to
-`{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
-Each rank produces its own file:
-`iteration_{step}/rank{N}_memory_snapshot.pickle`.
+Set `config.profiler.memory_snapshot = MemorySnapshotProfiler.Config()` in the
+recipe to capture a memory snapshot.
+The snapshot fires at every `freq`-th step (default: 10) and is saved to
+`{dump_folder}/profiling/memory_snapshot/` (default:
+`./outputs/profiling/memory_snapshot/`). Each rank produces its own file:
+`step_{step:012d}/{N:06d}_step_{step}.pickle`. An OOM dumps to
+`step_{step:012d}_exit/` instead.
 
 Open the `.pickle` files with the
 [PyTorch Memory Viz](https://pytorch.org/memory_viz) tool.
@@ -298,10 +308,11 @@ NGPU=4 MODULE=my_graph_configs CONFIG=llama3_8b_async_tp4 ./run_train.sh
 ### CUDA Graph Kernel Annotations
 
 The `insert_kernel_annotations_pass` labels CUDA graph kernels with their
-originating `nn.Module` path in profiler traces. It runs automatically in the
-`aot_fx_trace` path (bundled with the cudagraph pass). The profiler passes the
-captured annotations to ``export_chrome_trace``, which bakes them into the trace
-as it writes, so they are merged automatically and no post-processing is needed.
+originating `nn.Module` path in profiler traces. Use
+`construct_cuda_graph_passes` to construct the correctly ordered opt-in pass
+list. The profiler passes the captured annotations to ``export_chrome_trace``,
+which bakes them into the trace as it writes, so they are merged automatically
+and no post-processing is needed.
 
 Requirements: `cuda-python` package and CUDA toolkit/driver >= 13.1
 (or `cuda-compat >= 13.1` on `LD_LIBRARY_PATH`). The pass is a no-op when

@@ -9,7 +9,7 @@ combine as one ordered operation.
 TorchTitan supports BF16 and asynchronous MXFP8 Dist-MoE training on NVIDIA
 SM100 or newer. The annex also provides NVFP4 inference, which TorchTitan does
 not expose yet. Dist-MoE requires
-`training.mixed_precision_param="bfloat16"` because FSDP unshards its persistent
+`precision.param_dtype="bfloat16"` because FSDP unshards its persistent
 parameters in BF16.
 
 ## Installation
@@ -40,7 +40,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     scratch_capacity_factor=4.0,
     activation_slot_capacity_factor=1.0,
     pp_activation_slot_policy="stage_microbatch",
@@ -61,7 +61,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     scratch_capacity_factor=4.0,
     activation_slot_capacity_factor=1.0,
 )
@@ -78,6 +78,38 @@ config = apply_transforms(
     ],
 )
 ```
+
+For an MXFP8 RL generator, the fused-SwiGLU Mega kernel needs the inference
+weight format and an inference runtime:
+
+```python
+import dist_moe
+
+from torchtitan.config.transform import apply_transforms
+from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_30b_a3b_varlen
+
+config = rl_grpo_qwen3_30b_a3b_varlen()
+config.generator.dist_moe_runtime = DistMoeRuntime.Config(
+    inference=True,
+    scratch_capacity_factor=4.0,
+)
+config.generator = apply_transforms(
+    config.generator,
+    [
+        DistMoeTransform(
+            expert_precision="mxfp8",
+            block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
+            mxfp8_mega_fused_inference=True,
+        )
+    ],
+)
+```
+
+Set `mxfp8_mega_fused_inference` only on the RL generator, since it does not
+support backward. During validation, the trainer runs under `torch.no_grad()`
+instead.
 
 Verified 671B recipes live in `torchtitan_recipes.models.deepseek_v3`, while
 debug and 16B CI recipes live in `torchtitan_recipes.tests.models.deepseek_v3`.
@@ -108,6 +140,7 @@ Per-layer settings belong to the transform:
 | `inplace_wgrad_accum` | Let annex WGRAD kernels accumulate directly into standard `parameter.grad` storage. This is enabled by default for BF16 and MXFP8 experts. GraphTrainer recipes temporarily disable it because tracing functionalizes parameters into graph inputs; a graph pass must bind those inputs to their leaf `parameter.grad` destinations before enabling accumulation. |
 | `bf16_grouped_gemm_preset` | Optional BF16 FPROP/DGRAD schedule override for expert users. `None` uses the annex's shape-aware production defaults. BF16 WGRAD has its own production schedule. |
 | `block_scaled_config` | MXFP8-only annex policy. `pipeline="staged"` uses separate expert kernels; `pipeline="mega"` uses the fused chunk-pipelined implementation. `fast_math` selects approximate fused-SwiGLU sigmoid math, and `kernel_config` is an expert-only CuTe tuning override. |
+| `mxfp8_mega_fused_inference` | MXFP8 RL generator only; requires `pipeline="mega"`. Prepare weights in the interleaved format so the Mega kernel can fuse SwiGLU into the W13 GEMM, for inference only. Quantized weights and scales match training numerics exactly. |
 
 One `DistMoeRuntime.Config` owns rank-wide resources shared by every local
 Dist-MoE layer:
@@ -120,7 +153,7 @@ Dist-MoE layer:
 | `vmm_capacity_factor` | Optional total device-plus-host scratch bound. `None` disables VMM; a value larger than `scratch_capacity_factor` provides host-backed overflow capacity. Saved activations remain in HBM. |
 | `pp_activation_slot_policy` | `"stage_microbatch"` reuses slots at stage-microbatch lifetime; `"microbatch"` retains one deeper slot across all local stages for a microbatch. The default is `"stage_microbatch"`. |
 
-The recipe assigns this config to the optional `TrainingEngine.Config.dist_moe`
+The recipe assigns this config to the optional `TrainingEngine.Config.dist_moe_runtime`
 field, whose base type is `Configurable.Config | None`. The concrete config's
 `build()` method constructs `DistMoeRuntime` only when the recipe selects it.
 Forward/backward initialization supplies materialized model parts, topology,
@@ -132,7 +165,7 @@ parameter's declared gradient dtype, existing gradient storage, or parameter
 dtype. GraphTrainer uses the BF16 mixed-precision parameter dtype for its
 functional WGrad output because prepared MXFP8 graph operands do not expose a
 live parameter destination. Current FSDP casts the resulting local BF16 WGrad
-to `training.mixed_precision_reduce` for reduction. If FSDP later declares an
+to `precision.reduce_dtype` for reduction. If FSDP later declares an
 FP32 parameter gradient dtype, eager Dist-MoE will use it without a separate
 TorchTitan override.
 
@@ -223,7 +256,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     activation_slot_capacity_factor=1.0,
     scratch_capacity_factor=1.0,
     vmm_capacity_factor=4.0,
@@ -273,7 +306,7 @@ unfused callback.
 
 TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 
-1. A recipe assigns `DistMoeRuntime.Config` to `TrainingEngine.Config.dist_moe`.
+1. A recipe assigns `DistMoeRuntime.Config` to `TrainingEngine.Config.dist_moe_runtime`.
 2. The model transform independently replaces routed-expert modules.
 3. At the beginning of forward/backward initialization, the standard or graph
    engine supplies final model parts, topology, liveness schedule, and its
@@ -286,9 +319,27 @@ TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 6. Partial initialization unwinds runtime-owned resources. Normal teardown
    removes registrations, detaches modules, and closes the Annex context.
 
-This TorchTitan integration supports training. Annex itself supports inference,
-but TorchTitan does not yet provide an inference owner that builds and closes
-this runtime; the training PR does not imply general inference integration.
+The RL vLLM generator owns an inference runtime
+(`DistMoeRuntime.Config(inference=True)`, passed as
+`Generator.Config.dist_moe_runtime`): scratch-only planning, sized for
+vLLM's per-step token budget. vLLM pads every step at the end (TP rounding,
+CUDA-graph size, DP maximum); the runner publishes the unpadded count and the
+model passes a `padding_mask` down to the routed experts.
+
+## Padding Rows
+
+Rows marked in `padding_mask` get expert ID `-1` and score zero, in training and
+inference. Dist-MoE never dispatches a `-1` route, so padding costs no
+communication or expert GEMM work and produces zero output rows. Every EP rank
+must pass the same row count to a call:
+
+- Training passes its microbatch rows unchanged.
+- Inference calls with the largest TP-local token count across vLLM DP
+  replicas (graph steps already share one size; eager steps do not), padded
+  with `-1` rows. In batch-invariant mode calls are raised to more than 128
+  rows: at or below 128 rows the annex's post-expert top-k reduction uses
+  another, equally correct, accumulation order, so a token's output would
+  depend on how many tokens share its step.
 
 The annex context owns symmetric buffers, activation storage, scratch storage,
 VMM allocation, and VMM prefetch. TorchTitan never accesses their private

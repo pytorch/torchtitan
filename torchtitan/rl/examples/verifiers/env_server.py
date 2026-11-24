@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import multiprocessing
 import os
+import sys
+import types
 from dataclasses import dataclass, field
 from queue import Empty
 from typing import Any
@@ -21,15 +24,12 @@ from verifiers.v1.configs.serve import (
 )
 from verifiers.v1.serve import env_config_data, serve_env
 from verifiers.v1.utils.loaders import resolve_env_config
-from verifiers.v1.utils.logging import setup_logging
 
 from torchtitan.config import Configurable
-from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-
-
-def _setup_env_server_process() -> None:
-    """Configure logging in the spawned environment-server process."""
-    setup_logging("INFO")
+from torchtitan.rl.examples.verifiers.worker_setup import (
+    register_local_taskset_alias,
+    setup_env_server_worker,
+)
 
 
 def _run_env_server_process(
@@ -46,17 +46,26 @@ def _run_env_server_process(
     os.environ["no_proxy"] = no_proxy
     os.environ["NO_PROXY"] = no_proxy
 
+    # Registered here too: resolve_env_config imports the taskset before serve_env runs log_setup.
     if local_taskset_module is not None:
         environment["taskset"]["id"] = register_local_taskset_alias(
             local_taskset_module
         )
     env_config = resolve_env_config(environment)
+    # Each spawned pool worker re-runs this process's __main__: the controller's
+    # script, with its trainer imports. An empty __main__ skips that.
+    sys.modules["__main__"] = types.ModuleType("__main__")
     serve_env(
         **pool_serve_kwargs(serve.pool),
         address=serve.address,
         address_queue=address_queue,
         death_pipe=death_pipe,
-        log_setup=_setup_env_server_process,
+        # Workers unpickle this by importing its module, so that module must not import torch.
+        log_setup=functools.partial(
+            setup_env_server_worker,
+            level="INFO",
+            local_taskset_module=local_taskset_module,
+        ),
         config_data=env_config_data(env_config),
         max_concurrent=serve.max_concurrent,
     )
