@@ -500,9 +500,11 @@ config.dataloader = GrainDataLoader.Config(
 
 The default cost, `document_attention_cost`, is the sum of squared attention segment lengths, read from `positions` as the varlen attention metadata does: documents plus the padding tail, which attention computes as segments of `max_context_length`. RL's batcher uses the same model (`packed_attention_cost`).
 
-Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, and gradient accumulation when FSDP synchronizes every microbatch (the default). It does not help when ranks synchronize once per several microbatches (pipeline parallelism, `defer_fsdp_gradient_reduction`): there each rank's sum over the step matters, and reordering within a window does not balance it. Rows that are one full-length document stay as heavy as they are. The rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window.
+Only the order within a window changes: every microbatch is still trained once, and each moves by at most `window_size - 1` steps. Local balancing works the same for `dp_replicate`, `dp_shard`, CP, and gradient accumulation when FSDP synchronizes every microbatch (the default). It does not help when ranks synchronize once per several microbatches (pipeline parallelism, `defer_fsdp_gradient_reduction`): there each rank's sum over the step matters, and reordering within a window does not balance it.
 
-Datasets whose rows already cost about the same (C4, short chat SFT) gain little.
+Costs: each rank holds `window_size` collated microbatches in host memory, and a checkpoint resumes mid-window by re-reading the window from the parent iterator.
+
+The gain depends on how much row costs vary. Long-context datasets that mix many short documents with some full-length ones (for example ProLong, OBELICS, or long-context code corpora) gain the most. Datasets whose rows already cost about the same (C4, short chat SFT) gain little, and so do datasets where most rows are a single full-length document, since no order can split a document.
 
 # Distributed and checkpoint behavior
 
