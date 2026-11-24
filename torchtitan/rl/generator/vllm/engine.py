@@ -670,6 +670,8 @@ def _finished_request(request_output: RequestOutput) -> FinishedRequest:
         if len(token_logprobs) != num_tokens * row_width or sampled_token_ids != list(
             completion_output.token_ids
         ):
+            # TODO: fail only this request instead: raising inside the engine step stops the engine
+            # loop and fails every request on this generator. Not done yet: no other layout is known.
             raise RuntimeError(
                 f"vLLM logprobs of request {request_output.request_id} are not "
                 f"[sampled, top-1, ..., top-k] rows: {len(token_logprobs)} entries for "

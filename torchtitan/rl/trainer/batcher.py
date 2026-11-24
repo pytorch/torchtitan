@@ -1022,6 +1022,9 @@ class Batcher(Configurable):
                     else len(training_sample.topk_token_ids)
                 )
                 if num_rows != num_loss_tokens:
+                    # TODO: drop only this rollout (a TrainingSampleBuilder drop reason) instead: this
+                    # raise escapes `add_group` and ends the run. Not done yet: a mismatch means a
+                    # generator or Verifiers bug, and none is known.
                     raise ValueError(
                         f"{training_sample.rollout_id.to_string()} has {num_rows} top-k rows "
                         f"for {num_loss_tokens} loss tokens"
