@@ -84,22 +84,19 @@ def padding_segment_lengths(num_padding: int, max_context_length: int) -> list[i
 
 
 def positions_segment_lengths(positions: torch.Tensor) -> list[int]:
-    """Segments as the varlen attention metadata sees them.
+    """Attention segments of a microbatch, read from its ``positions``.
 
-    ``create_varlen_metadata_for_document`` starts a segment at every
-    ``positions == 0``, padding included; the first token always starts one
-    (a row may begin mid-document)::
+    A segment starts at every ``positions == 0``, padding included, exactly as
+    ``create_varlen_metadata_for_document`` and ``get_document_mask_mod`` cut
+    them. Packers start every row and every document piece at 0, and pad each
+    piece to ``per_sample_pad_multiple`` by continuing its positions, so that
+    padding belongs to the piece's segment::
 
-        positions     5 6 7 0 1 0 1 2 | 0 1 2 3 4 0 1
-        segments      [ 3 ] [2] [ 3 ]   [   5   ] [2]
-
-    (``|``: padding starts; ``max_context_length`` = 5.)
+        positions   0 1 2 3   0 1 2 3 4 5 6 7   0 1 2 3
+        mask        - - - P   - - - - - P P P   P P P P     (P = padding)
+        segments    [  4  ]   [      8      ]   [  4  ]
     """
-    positions = positions.reshape(-1)
-    if positions.numel() == 0:
-        return []
-    starts = positions == 0
-    starts[0] = True
+    starts = (positions.reshape(-1) == 0).to(torch.int64)
     return torch.bincount(torch.cumsum(starts, dim=0))[1:].tolist()
 
 
@@ -120,9 +117,11 @@ def packed_attention_cost(
 def document_attention_cost(microbatch: TrainingMicrobatch) -> float:
     """``attention_cost`` of a collated token microbatch, from its ``positions``.
 
-    Reading segments from ``positions`` matches the kernel exactly, including
-    per-document padding (``per_sample_pad_multiple``) and padding added by
-    both the packer and the collator.
+    A microbatch carries no document lengths, so the segments come from
+    ``positions``. That also counts per-document padding
+    (``per_sample_pad_multiple``) inside its document's segment, as the
+    kernel computes it; ``packed_attention_cost`` would count it as tail
+    padding.
     """
     if not isinstance(microbatch, TokenizedTrainingMicrobatch):
         raise ValueError(
