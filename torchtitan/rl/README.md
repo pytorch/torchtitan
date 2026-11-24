@@ -129,6 +129,7 @@ rollouter = Rollouter.Config(
     validation_dataset=MyValidationDataset.Config(),
     worker=MessageEnvRolloutWorker.Config(
         message_env=MyEnv.Config(),
+        token_env=TokenEnv.Config(max_rollout_tokens=32768),
         rubric=Rubric.Config(
             reward_fns=[RewardCorrect.Config(weight=1.0)]
         ),

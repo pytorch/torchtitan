@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -21,12 +22,14 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
+    error_entry,
     GenerateFn,
     ReleaseSessionFn,
     Rollout,
@@ -35,6 +38,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurn,
     RolloutTurnID,
 )
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 if TYPE_CHECKING:
     from renderers import Renderer
@@ -81,8 +85,9 @@ class Rollouter(Configurable):
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
                 ),
                 message_env=MyEnv.Config(),
+                token_env=TokenEnv.Config(max_rollout_tokens=32768),
             ),
-        ).build()
+        ).build(max_rollouts_in_flight=256)
 
     Customization:
         Rollouter supports customization at several levels:
@@ -108,27 +113,27 @@ class Rollouter(Configurable):
         """How a rollout group is built, driven, scored and advantaged. Selects the
         `BaseRolloutWorker` subclass by config type; one worker is built per pool process."""
 
-        worker_pool_size: int = 4
-        """CPU rollout worker processes to spawn on the controller host."""
+        rollouts_per_worker: int = 128
+        """Training rollouts in flight per rollout worker process, on average. It sets the pool size,
+        rounded up: 300 training rollouts in flight / 128 per worker -> 3 workers. Not a cap: validation
+        rollouts come on top, and groups can land unevenly."""
 
-        num_threads_per_worker: int = 4
-        """Size of each worker process's default thread pool executor, i.e. the pool
-        behind every `asyncio.to_thread` call in that process."""
+        rollouts_per_thread: int = 4
+        """Rollouts per thread in each worker's `asyncio.to_thread` pool. Threads = rollouts_per_worker /
+        rollouts_per_thread, rounded up: 128 / 4 -> 32, 7 / 4 -> 2, 2 / 4 -> 1. Lower it when rollouts
+        block threads, e.g. 1 for one blocking call per rollout."""
 
         def __post_init__(self) -> None:
-            if self.worker_pool_size < 1:
+            if self.rollouts_per_thread < 1:
                 raise ValueError(
-                    "worker_pool_size must be at least 1, got "
-                    f"{self.worker_pool_size}"
-                )
-            if self.num_threads_per_worker < 1:
-                raise ValueError(
-                    "num_threads_per_worker must be at least 1, got "
-                    f"{self.num_threads_per_worker}"
+                    f"rollouts_per_thread must be at least 1, got {self.rollouts_per_thread}"
                 )
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, max_rollouts_in_flight: int) -> None:
         self._config = config
+        # The most training rollouts in flight at once. Validation rollouts come on top.
+        # `setup_async` sizes the worker pool from it.
+        self._max_rollouts_in_flight = max_rollouts_in_flight
         training_dataloader = config.training_dataloader.build()
         if not isinstance(training_dataloader, RolloutDataLoader):
             raise ValueError("training_dataloader must build a RolloutDataLoader")
@@ -172,15 +177,28 @@ class Rollouter(Configurable):
         # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        """Spawn the rollout worker pool through ``actor_system`` and initialize it."""
+        """Spawn one rollout worker per `rollouts_per_worker` training rollouts in flight, rounded up,
+        and initialize them."""
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
+
+        num_workers = math.ceil(
+            self._max_rollouts_in_flight / self._config.rollouts_per_worker
+        )
+        logger.info(
+            "%d rollout workers (%d training rollouts in flight, rollouts_per_worker=%d)",
+            num_workers,
+            self._max_rollouts_in_flight,
+            self._config.rollouts_per_worker,
+        )
 
         self._actor_system = actor_system
         self._worker_actors = await actor_system.spawn_rollout_workers(
             self._config.worker,
-            num_workers=self._config.worker_pool_size,
-            num_threads=self._config.num_threads_per_worker,
+            num_workers=num_workers,
+            num_threads=math.ceil(
+                self._config.rollouts_per_worker / self._config.rollouts_per_thread
+            ),
             **(worker_kwargs or {}),
         )
         await self._worker_actors.setup_async.call(
@@ -282,6 +300,36 @@ class Rollouter(Configurable):
         self._training_dataloader.load_state_dict(state_dict)
 
 
+def log_failed_rollout(rollout: Rollout) -> None:
+    """Log a rollout whose status is an error. A rollout that didn't fail logs nothing.
+
+    Example:
+        "rollout group=3/rollout=1 failed: ERROR_TIMEOUT | TimeoutError: MessageEnv.step timed out
+        after 1800.0s"
+    """
+    if not rollout.status.is_error():
+        return
+
+    parts = [
+        f"rollout group={rollout.group_id}/rollout={rollout.rollout_id} failed: "
+        f"{rollout.status.name}"
+    ]
+
+    # add errors from logs, if any
+    errors = rollout.logs.get("errors", [])
+    if errors:
+        error = errors[-1]
+        parts.append(f"{error['type']}: {error['message']}")
+        parts.extend((error.get("traceback") or "").strip().splitlines()[-3:])
+
+    # add other logs, if any
+    other_logs = {key: value for key, value in rollout.logs.items() if key != "errors"}
+    if other_logs:
+        parts.append(" ".join(f"{key}={value}" for key, value in other_logs.items()))
+
+    logger.warning(" | ".join(parts))
+
+
 class BaseRolloutWorker(Configurable, ABC):
     """Runs one rollout group in a rollout worker process, then scores it and computes its
     advantages. Subclasses implement `run_group`."""
@@ -300,6 +348,9 @@ class BaseRolloutWorker(Configurable, ABC):
     def __init__(self, config: Config) -> None:
         self.rubric: Rubric = config.rubric.build()
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
+        # Created in start_process_metrics, so setup isn't counted as lag.
+        self._event_loop_lag: m.EventLoopLag
+        self._thread_pool_lag: m.ThreadPoolLag
 
     async def setup_async(
         self,
@@ -309,15 +360,72 @@ class BaseRolloutWorker(Configurable, ABC):
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
-        """Called once in the worker process after it is spawned."""
+        """Called once in the worker process after it is spawned:
+        1. build the renderer,
+        2. freeze the setup objects,
+        3. start this process's metrics.
+        A subclass that overrides it calls `super().setup_async(...)` last, or ends with steps 2 and 3 itself.
+
+        ``vision_processor_config``: `Controller.Config.vision_processor`, for a renderer that
+        reads image files; None for text prompts.
+        """
+        tokenizer = tokenizer_config.build(tokenizer_path=hf_assets_path)
+        vision_processor = (
+            vision_processor_config.build()
+            if vision_processor_config is not None
+            else None
+        )
+        self._renderer: Renderer = renderer_config.build(
+            tokenizer=tokenizer, vision_processor=vision_processor
+        )
+
+        # Setup objects live until exit: freeze them, so later full GCs skip them.
+        GarbageCollector.freeze(
+            "Full GC before freezing the rollout worker's setup objects"
+        )
+
+        # Start measuring after setup and the freeze: both hold the loop.
+        self.start_process_metrics()
+
+    def start_process_metrics(self) -> None:
+        """Start measuring this process's event-loop lag and thread-pool lag."""
+        self._event_loop_lag = m.EventLoopLag("rollout_worker")
+        self._thread_pool_lag = m.ThreadPoolLag("rollout_worker")
+
+    def flush_process_metrics(self, group_id: int) -> list[m.Metric]:
+        """Return this process's lag since the previous training group and its RAM (now and peak),
+        then reset the lag trackers.
+
+            training group (group_id >= 0)    gets the metrics
+            validation group (group_id < 0)   gets none: the controller never reads its metrics.
+                                              Its lag counts in the next training group.
+        """
+        if group_id < 0:
+            return []
+
+        # RAM this worker uses now (VmRSS) and the most it has used (VmHWM), shared libraries counted
+        # in full. Each line reads e.g. "VmRSS:  1745628 kB".
+        with open("/proc/self/status") as status:
+            kib = {
+                line.split(":")[0]: int(line.split()[1])
+                for line in status
+                if line.startswith(("VmRSS:", "VmHWM:"))
+            }
+        return [
+            # The event loop's longest delay, and how many ms late it ran per second
+            *self._event_loop_lag.flush(),
+            # How late the thread pool starts a call: the longest delay, and ms late per second
+            *self._thread_pool_lag.flush(),
+            m.Metric("rollout_worker/ram_gib", m.Max(kib["VmRSS"] / 2**20)),
+            m.Metric("rollout_worker/peak_ram_gib", m.Max(kib["VmHWM"] / 2**20)),
+        ]
 
     async def score_group(
         self,
         rollouts: list[Rollout],
         env_input: object,
     ) -> list[RubricOutput]:
-        """Score one group's rollouts; `run_group` applies the rewards.
-        Default impl delegates to `self.rubric.score_group`.
+        """Score one group's rollouts. Default impl delegates to `self.rubric.score_group`.
 
         Args:
             rollouts: Sibling rollouts in one prompt group, already stepped.
@@ -339,8 +447,11 @@ class BaseRolloutWorker(Configurable, ABC):
         group_size: int,
         sampling: SamplingConfig,
     ) -> RolloutGroup:
-        """Roll out one prompt group, then set each reward from `score_group` and each
-        advantage from `advantage_estimator`.
+        """Roll out one prompt group. A worker ends it by adding this process's metrics:
+
+            group = await self.make_scored_group(...)
+            group.metrics += self.flush_process_metrics(group_id)
+            return group
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
@@ -355,6 +466,56 @@ class BaseRolloutWorker(Configurable, ABC):
             One scored `RolloutGroup`.
         """
 
+    async def make_scored_group(
+        self,
+        *,
+        rollouts: list[Rollout],
+        sample: object,
+        group_id: int,
+    ) -> RolloutGroup:
+        """Score one group's trainable rollouts and fill their advantages.
+
+        Example, group 7, rewards from `score_group`:
+
+            rollouts    [Rollout(0, COMPLETED), Rollout(1, ERROR_INFRA), Rollout(2, ERROR)]
+            rewards     [1.0,                   None,                    0.0]
+            advantages  [0.5,                   None,                    -0.5]
+
+        A rollout that isn't `is_trainable()` gets no reward or advantage, and isn't trained.
+
+        Args:
+            rollouts: one per sibling, in rollout-id order.
+            sample: the dataset sample the group shares; passed to `score_group`.
+            group_id: the group's id.
+        """
+        # ======== Score the trainable rollouts ========
+        # "Trainable" is about the status, not about training: validation groups are scored here too.
+        rollouts_to_score = [
+            rollout for rollout in rollouts if rollout.status.is_trainable()
+        ]
+        if not rollouts_to_score:
+            return RolloutGroup(group_id=group_id, rollouts=rollouts)
+
+        # TODO: a reward fn that raises (e.g. a judge that is down) fails the whole group. Catch it
+        #   per rollout instead, so its siblings still train.
+        rubric_outputs = await self.score_group(rollouts_to_score, sample)
+        for rollout, rubric_output in zip(
+            rollouts_to_score, rubric_outputs, strict=True
+        ):
+            rollout.reward = rubric_output.reward
+            rollout.reward_breakdown = rubric_output.reward_breakdown
+
+        # ======== Compute advantages ========
+        # TODO: run an ordered list of group postprocessors here, e.g. a length penalty, or drop a
+        # group whose rewards all match, then compute advantages. The advantage estimator becomes
+        # one of them.
+        advantages = self.advantage_estimator(
+            RolloutGroup(group_id=group_id, rollouts=rollouts_to_score)
+        )
+        for rollout, advantage in zip(rollouts_to_score, advantages, strict=True):
+            rollout.advantage = advantage
+        return RolloutGroup(group_id=group_id, rollouts=rollouts)
+
 
 class MessageEnvRolloutWorker(BaseRolloutWorker):
     """Builds each rollout's env from `message_env` and `token_env`, and drives it against the
@@ -365,37 +526,13 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         message_env: MessageEnv.Config
         """The env to build per sample; `make_env_group` calls `build(env_input=sample)`."""
 
-        token_env: TokenEnv.Config = field(default_factory=TokenEnv.Config)
+        token_env: TokenEnv.Config
         """`TokenEnv` wraps the `MessageEnv` in `make_env_group`."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
-        self._renderer: Renderer
-
-    async def setup_async(
-        self,
-        *,
-        tokenizer_config: HuggingFaceTokenizer.Config,
-        renderer_config: RendererConfig,
-        hf_assets_path: str,
-        vision_processor_config: VisionProcessor.Config | None = None,
-    ) -> None:
-        """Build the renderer that each rollout's `TokenEnv` uses.
-
-        ``vision_processor_config``: `Controller.Config.vision_processor`, for a renderer that
-        reads image files; None for text prompts.
-        """
-        tokenizer = tokenizer_config.build(tokenizer_path=hf_assets_path)
-        vision_processor = (
-            vision_processor_config.build()
-            if vision_processor_config is not None
-            else None
-        )
-        self._renderer = renderer_config.build(
-            tokenizer=tokenizer, vision_processor=vision_processor
-        )
 
     def make_env_group(
         self,
@@ -440,41 +577,31 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
         try:
-            # produce the rollouts
-            rollouts = await asyncio.gather(
-                *(
-                    self._run_single_rollout(
-                        generate_fn=generate_fn,
-                        release_session_fn=release_session_fn,
-                        env=env,
-                        # Offset the base seed per sample so a group's n=1
-                        # requests are diverse yet reproducible run-to-run.
-                        sampling=(
-                            sampling
-                            if sampling.seed is None
-                            else replace(sampling, seed=sampling.seed + sample_idx)
-                        ),
-                        group_id=group_id,
-                        rollout_id=sample_idx,
+            async with asyncio.TaskGroup() as task_group:
+                tasks = [
+                    task_group.create_task(
+                        self._run_single_rollout(
+                            generate_fn=generate_fn,
+                            release_session_fn=release_session_fn,
+                            env=env,
+                            sampling=(
+                                sampling
+                                if sampling.seed is None
+                                else replace(sampling, seed=sampling.seed + sample_idx)
+                            ),
+                            group_id=group_id,
+                            rollout_id=sample_idx,
+                        )
                     )
                     for sample_idx, env in enumerate(envs)
-                )
-            )
+                ]
         finally:
             # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
-
-        # score
-        outputs = await self.score_group(rollouts, sample)
-        for rollout, output in zip(rollouts, outputs, strict=True):
-            rollout.reward = output.reward
-            rollout.reward_breakdown = output.reward_breakdown
-
-        # Post-scoring: turn group rewards into per-rollout advantages.
-        group = RolloutGroup(group_id=group_id, rollouts=rollouts)
-        advantages = self.advantage_estimator(group)
-        for rollout, advantage in zip(group.rollouts, advantages, strict=True):
-            rollout.advantage = advantage
+        group = await self.make_scored_group(
+            rollouts=[task.result() for task in tasks], sample=sample, group_id=group_id
+        )
+        group.metrics += self.flush_process_metrics(group_id)
         return group
 
     async def _run_single_rollout(
@@ -488,7 +615,8 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         rollout_id: int,
     ) -> Rollout:
         """Produce a single rollout, alternating between env and generator calls,
-        until the env is terminal (env `done`, truncation, errors).
+        until the env is terminal (env `done`, truncation, errors). An exception ends it as
+        `ERROR_INFRA`. A failed rollout is logged once, at the end.
 
         For custom logic, users can override this method.
 
@@ -504,14 +632,13 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 per-turn `RolloutTurnID`, and stored as `Rollout.rollout_id`.
 
         Returns:
-            One unscored `Rollout`; `run_group` fills its reward later.
+            One unscored `Rollout`; `make_scored_group` fills its reward later.
         """
         # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
         routing_session_id = RolloutTurnID(
             group_id=group_id, rollout_id=rollout_id, turn_id=0
         ).to_string(include_turn=False)
         turns: list[RolloutTurn] = []
-        status = RolloutStatus.ERROR
         try:
             env_step = await env.init()
             while not env_step.status.is_terminal():
@@ -563,25 +690,25 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 env_step = next_env_step
 
             status = env_step.status
-        except Exception:
-            # TODO: at shutdown, every rollout still generating lands here with a ~40-line remote
-            # traceback. Raise a typed error on generator close and log it at info, without the traceback.
-            logger.exception(
-                "rollout %s/rollout=%d failed after %d turn(s); marking ERROR",
-                group_id,
-                rollout_id,
-                len(turns),
-            )
-            status = RolloutStatus.ERROR
+            errors = env_step.errors
+        except Exception as error:
+            # An exception is ERROR_INFRA.
+            # TODO: at shutdown, every rollout still generating lands here and logs a failure.
+            # Raise a typed error on generator close, and skip the log for it.
+            status = RolloutStatus.ERROR_INFRA
+            errors = [error_entry(error)]
 
         try:
             await release_session_fn(routing_session_id=routing_session_id)
         except Exception:
             # Not fatal: `max_sessions` evicts an unreleased session.
             logger.exception("releasing routing session %s failed", routing_session_id)
-        return Rollout(
+        rollout = Rollout(
             group_id=group_id,
             rollout_id=rollout_id,
             status=status,
             turns=turns,
+            logs={"errors": errors} if errors else {},
         )
+        log_failed_rollout(rollout)
+        return rollout

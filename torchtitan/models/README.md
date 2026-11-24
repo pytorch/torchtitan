@@ -96,7 +96,7 @@ The folder should be organized as follows
 CPU microbatch dictionary to model-wide logical training FLOPs before sharding.
 Build it from the full model; runtime estimation should use CPU metadata and tensor
 shapes without device-to-host synchronization or retaining model modules.
-Native decoders use `Attention.Config.flops_per_token(seq_len)`. Multimodal models
+Native decoders use `Attention.Config.flops(positions)`. Multimodal models
 share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
 estimator to add output-module work using encoder-owned output-token counts.
 `ForwardBackwardResult.num_flops` reports unreduced work for this DP rank's raw
@@ -106,5 +106,8 @@ Trainers average it over the DP mesh; CP ranks hold the same value.
 `Config.get_parameter_counts(model)` reports unique total and architecturally
 active parameters, including embeddings and encoders and weighting routed experts
 by their active ratio. FLOPs exclude lookup-only embeddings separately.
-Decoder attention uses configured sequence length rather than packed document
-lengths. Causal sparsity, recomputation, and elementwise operations are omitted.
+Each decoder attention config computes its cost from the positions of the
+non-padding queries within their documents: a causal query at position p attends
+to p + 1 keys, at most the window size for sliding-window attention, while linear
+attention costs the same for every query. Padding tokens are excluded.
+Recomputation and elementwise operations are omitted.

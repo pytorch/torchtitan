@@ -37,6 +37,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     final_inductor_compile_passes,
 )
 from torchtitan.experiments.graph_trainer.registry import register_pass_pipeline
+from torchtitan.observability.profiler import KinetoTraceProfiler
 
 _PROFILE_STEP = 10
 _FRAME_RE = re.compile(r'File "(.+)", line (\d+), in (\S+)')
@@ -68,9 +69,9 @@ def configure_capture(config: Any, out_dir: str) -> Any:
     # Accelerator graph replay would hide the per-node labels.
     config.training.disable_accelerator_graphs = True
     config.training.steps = _PROFILE_STEP
-    config.profiler.enable_profiling = True
-    config.profiler.profile_freq = _PROFILE_STEP
-    config.profiler.save_traces_folder = "profile"
+    config.profiler.trace = KinetoTraceProfiler.Config(
+        freq=_PROFILE_STEP, save_folder="profile"
+    )
     # Kernels written for the regions found must match this step bit for bit, so
     # profile the deterministic code paths.
     config.debug.seed = 42

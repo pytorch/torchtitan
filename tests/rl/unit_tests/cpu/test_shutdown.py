@@ -122,6 +122,9 @@ def _make_stub_rl_trainer(tmp_path):
     from torchtitan.rl.observability import metrics as m
 
     class _StubRollouter:
+        def __init__(self, *, max_rollouts_in_flight: int):
+            self.max_rollouts_in_flight = max_rollouts_in_flight
+
         async def close(self):
             pass
 
@@ -148,7 +151,7 @@ def _make_stub_rl_trainer(tmp_path):
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
         override = OverrideConfig()
-        rollouter = SimpleNamespace(build=lambda: _StubRollouter())
+        rollouter = SimpleNamespace(build=_StubRollouter)
 
         def to_dict(self):
             return {}
@@ -203,6 +206,13 @@ def test_rl_trainer_shutdown_is_noop_before_meshes_spawn(tmp_path):
     assert trainer.trainer is None
     assert trainer.generator_router is None
     assert trainer.actor_system is None
+
+
+def test_controller_builds_rollouter_with_training_rollouts_in_flight(tmp_path):
+    controller = _make_stub_rl_trainer(tmp_path)
+
+    # Default AsyncLoopConfig: (3 + 1) x 8 = 32 groups in flight, x 8 rollouts per group
+    assert controller._rollouter.max_rollouts_in_flight == 256
 
 
 def test_main_reraises_cancellation_after_shutdown(monkeypatch):

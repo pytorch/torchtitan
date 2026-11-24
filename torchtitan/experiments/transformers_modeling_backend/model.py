@@ -9,6 +9,8 @@ import importlib
 import logging
 import math
 import os
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, MISSING
 from fractions import Fraction
 from typing import Any
@@ -35,7 +37,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.flops import quadratic_attention_flops
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
@@ -155,13 +157,6 @@ _TT_SPECIFIC_ATTRIBUTES = [
     "depth_init",
     "attn_mask_type",
 ]
-
-# NOTE: This backend instantiates model classes from the installed
-# ``transformers`` package. When a model repo ships an older remote config
-# implementation, mixing that remote config with the newer local model code can
-# drop compatibility attrs the local model expects. Prefer the local
-# ``transformers`` config/model pair for denylisted model types.
-_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v2", "deepseek_v3"})
 
 
 def _get_moe_attr_name(layer: nn.Module) -> str | None:
@@ -465,15 +460,11 @@ class HFTransformerModel(BaseModel):
             deterministic: bool,
         ) -> None:
             """Populate this config from the selected Hugging Face model."""
-            config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
-            trust_remote_code = (
-                config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
-            )
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=False,
             )
 
             # For composite (VL) models, use the nested text config so we
@@ -634,6 +625,8 @@ class HFTransformerModel(BaseModel):
         def build_flops_estimator(
             self, model: nn.Module, *, seq_len: int
         ) -> FlopsEstimator:
+            # Attention cost comes from each microbatch's positions.
+            del seq_len
             _, active_nparams = self._parameter_counts(model, include_embeddings=False)
 
             if all(
@@ -668,7 +661,9 @@ class HFTransformerModel(BaseModel):
                         ["full_attention"] * (len(model.layers) - len(layer_types))
                     )
 
-            attention_op_flops = 0
+            # Number of layers for each (qk_head_dim, v_head_dim,
+            # sliding_window_size) attention shape.
+            attention_shapes: Counter[tuple[int, int, int | None]] = Counter()
             unsupported_layer_types = set()
             for layer_type in layer_types:
                 if layer_type in ("attention", "full_attention"):
@@ -694,13 +689,9 @@ class HFTransformerModel(BaseModel):
                         layer_qk_head_dim = global_head_dim
                         layer_v_head_dim = global_head_dim
 
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=self.n_heads,
-                    qk_head_dim=layer_qk_head_dim,
-                    v_head_dim=layer_v_head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=sliding_window_size,
-                )
+                attention_shapes[
+                    (layer_qk_head_dim, layer_v_head_dim, sliding_window_size)
+                ] += 1
 
             if unsupported_layer_types:
                 logger.warning(
@@ -709,8 +700,34 @@ class HFTransformerModel(BaseModel):
                     "approximating them as full attention."
                 )
 
-            num_flops_per_token = 6 * active_nparams + attention_op_flops
-            return lambda input_dict: num_flops_per_token * input_dict["input"].numel()
+            document_masked = (
+                getattr(self, "attn_mask_type", "causal") == "block_causal"
+            )
+
+            def estimate(input_dict: Mapping[str, Any]) -> int:
+                # A causal query at position p attends to p + 1 keys. positions
+                # restart at each document, which only "block_causal" masks
+                # follow. Padding does no useful work, so it is not counted.
+                positions = input_dict["positions"]
+                if not document_masked:
+                    positions = torch.arange(positions.shape[0])
+                num_keys = positions[~input_dict["padding_mask"]] + 1
+                flops = 6 * active_nparams * num_keys.numel()
+                for shape, num_layers in attention_shapes.items():
+                    layer_qk_head_dim, layer_v_head_dim, sliding_window_size = shape
+                    flops += num_layers * quadratic_attention_flops(
+                        num_heads=self.n_heads,
+                        qk_head_dim=layer_qk_head_dim,
+                        v_head_dim=layer_v_head_dim,
+                        num_keys=(
+                            num_keys
+                            if sliding_window_size is None
+                            else num_keys.clamp(max=sliding_window_size)
+                        ),
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config):
         super().__init__()
