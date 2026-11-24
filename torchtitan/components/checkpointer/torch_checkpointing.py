@@ -480,8 +480,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # TODO: On a flat (non-HNS) GCS bucket the commit rename copies each
         # object and is not atomic, so a preempted commit can leave a step-N that
         # has metadata.pkl but not all of its shards, and this accepts it. Fixed
-        # once torch_checkpointing's fsspec backend publishes metadata.pkl after
-        # the rename: https://github.com/meta-pytorch/torch_checkpointing/issues/12
+        # once torch_checkpointing's fsspec backend moves metadata.pkl last:
+        # https://github.com/meta-pytorch/torch_checkpointing/issues/17
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
