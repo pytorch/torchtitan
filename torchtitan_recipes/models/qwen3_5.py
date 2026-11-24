@@ -61,7 +61,7 @@ class _FP32LMHead(Linear):
 
 
 def _qwen3_5_9b_ulysses_lean_remat_offload(
-    flavor: str, *, cp: int, max_num_documents: int
+    flavor: str, *, cp: int, max_num_documents: int, num_head_chunks: int
 ) -> Trainer.Config:
     """Qwen3.5 9B text model at long context with YaRN RoPE and Ulysses CP.
 
@@ -148,6 +148,8 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
         inner_attention = layer.attention.inner_attention
         if isinstance(inner_attention, UlyssesVarlenInnerAttention.Config):
             inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
+        elif isinstance(inner_attention, ContextParallelInnerGDN.Config):
+            inner_attention.num_head_chunks = num_head_chunks
     kernel_regions = ["attention.inner_attention.kernel*"]
     last_block = f"layers.{len(config.model.layers) - 1}"
     config.activation_remat = ActivationRematConfig(
@@ -172,16 +174,29 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
 def qwen3_5_9b_1m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
     """1M context, CP 8 (128K tokens per rank)."""
     # max_num_documents: (2**20 - 1) // 131351 + 2 = 9
-    return _qwen3_5_9b_ulysses_lean_remat_offload("9B_1M", cp=8, max_num_documents=9)
+    return _qwen3_5_9b_ulysses_lean_remat_offload(
+        "9B_1M", cp=8, max_num_documents=9, num_head_chunks=1
+    )
 
 
-def qwen3_5_9b_2m_cp16_ulysses_lean_remat_offload() -> Trainer.Config:
-    """2M context, CP 16 (128K tokens per rank)."""
+def qwen3_5_9b_2m_cp8_ulysses_lean_remat_offload() -> Trainer.Config:
+    """2M context, CP 8 (256K tokens per rank).
+
+    Two GDN head chunks halve the GDN backward workspace so 256K tokens per rank
+    fit in 80 GB.
+    """
     # max_num_documents: (2**21 - 1) // 131351 + 2 = 17
-    return _qwen3_5_9b_ulysses_lean_remat_offload("9B_2M", cp=16, max_num_documents=17)
+    return _qwen3_5_9b_ulysses_lean_remat_offload(
+        "9B_2M", cp=8, max_num_documents=17, num_head_chunks=2
+    )
 
 
 def qwen3_5_9b_4m_cp16_ulysses_lean_remat_offload() -> Trainer.Config:
-    """4M context, CP 16 (256K tokens per rank; Ulysses allows at most CP 16)."""
+    """4M context, CP 16 (256K tokens per rank; Ulysses allows at most CP 16).
+
+    Two GDN head chunks, as in the 2M recipe.
+    """
     # max_num_documents: (2**22 - 1) // 131351 + 2 = 33
-    return _qwen3_5_9b_ulysses_lean_remat_offload("9B_4M", cp=16, max_num_documents=33)
+    return _qwen3_5_9b_ulysses_lean_remat_offload(
+        "9B_4M", cp=16, max_num_documents=33, num_head_chunks=2
+    )
