@@ -42,14 +42,18 @@ grouped by step. For example, a file with two steps and five kernels:
 Graph node ids are only valid within one process, so each file carries its own
 node table. scripts/kernel_spans_to_trace.py converts steps to a Perfetto trace.
 
-Caveats: a step's end is the host time of its step() call, and the host runs
-ahead of the GPU, so a step can include the tail of earlier steps. Unwritten
-steps are lost if the process is killed.
+Steps are cut on the GPU: each step() replays a one-kernel marker CUDA graph on
+the current stream, and step N holds the kernels that started after marker N-1
+and before marker N. A kernel on another stream whose record arrives after
+marker N+1's is filed into a later step. Unwritten steps are lost if the
+process is killed. On restart, files holding steps after the resumed step are
+deleted.
 """
 
 import json
 import logging
 import os
+import re
 from collections import deque
 
 from dataclasses import dataclass
@@ -68,6 +72,7 @@ KERNEL_SPANS_DIR = (
 )
 KERNEL_SPANS_RANK_DIR = "rank{rank}"  # KERNEL_SPANS_DIR/{KERNEL_SPANS_RANK_DIR}
 STEPS_FILE = "steps_{first_step:012d}_{last_step:012d}.npz"
+_STEPS_FILE_RE = re.compile(r"steps_(\d{12})_(\d{12})\.npz")
 
 # One row per kernel. Times are unix nanoseconds; graph_node_id is 0 for eager
 # kernels.
@@ -84,18 +89,22 @@ _SPAN_DTYPE = np.dtype(
 class KernelSpanRecorder(Configurable):
     """Assigns each kernel CUPTI delivers to the training step it started in.
 
-    CUPTI delivers kernel records late and in batches, so when step() is called
-    (the step "ends" on the host), some of its kernels haven't been delivered
-    yet. The step is "finished" once a kernel that started after its end has
-    been delivered.
+    The host runs ahead of the GPU, so a step's end on the host says nothing
+    about which kernels belong to it. Instead, step() replays a one-kernel
+    marker CUDA graph on the current stream: the marker starts on the GPU after
+    everything step N enqueued on that stream, so its GPU start time is step N's
+    end. CUPTI delivers kernel records late and in batches; a step is finished
+    once the next step's marker has been delivered.
 
     State:
-    - self._open_step_ends: (step, host end time) of ended, unfinished steps.
+    - self._steps_awaiting_marker: steps whose marker hasn't been delivered.
+    - self._step_ends: (step, marker GPU start) of steps whose marker has been
+      delivered but that aren't finished yet.
     - self._unassigned_spans: delivered kernels not yet in a finished step,
       sorted by start time.
 
-    step(): append the step's end time, flush CUPTI (no device sync), and move
-    each finished step's kernels to self._files (see _close_finished_steps).
+    step(): replay the marker, flush CUPTI (no device sync), and move each
+    finished step's kernels to self._files (see _close_finished_steps).
 
     Kernels are named from CUDA graph nodes, so training must use CUDA graphs;
     kernels outside graphs are recorded without names.
@@ -172,15 +181,13 @@ class KernelSpanRecorder(Configurable):
                 "profiler.kernel_spans could not register a Cuspy observer; "
                 "see the preceding 'Cuspy observer unavailable' warning."
             )
-        # The last completed training step. step() increments it, so the first
-        # call ends step global_step + 1.
-        self._step = global_step
-        # (step, time the step ended on the host, unix ns) of each ended step whose
-        # kernels may not all have been delivered yet, oldest first.
-        self._open_step_ends: list[tuple[int, int]] = []
-        # Delivered kernels not yet assigned to a step, sorted by start time: they
-        # belong to steps in _open_step_ends or to the step currently running.
-        self._unassigned_spans = np.empty(0, dtype=_SPAN_DTYPE)
+        # The marker graph ends each step on the GPU (see step()). It is captured
+        # before the instantiate hook is registered, so it stays out of the node
+        # tables, and it increments self._marker_buffer, which must outlive it.
+        self._marker_buffer = torch.zeros(1, device="cuda")
+        self._marker_graph, self._marker_graph_id = _capture_marker_graph(
+            self._marker_buffer
+        )
         # exec graph id -> {graph node id: node info}, recorded once per graph.
         self._graph_nodes: dict[int, dict[int, dict[str, Any]]] = {}
         self._instantiate_hook = torch.cuda.graphs.register_graph_instantiate_hook(
@@ -192,31 +199,47 @@ class KernelSpanRecorder(Configurable):
             leaf_folder,
             KERNEL_SPANS_RANK_DIR.format(rank=rank),
         )
-        self._files = _KernelSpanFiles(
-            files_dir,
-            rank=rank,
-            num_steps_retained=config.num_steps_retained,
-            steps_per_file=config.steps_per_file,
-            graph_nodes=self._graph_nodes,
+        self._init_step_state(
+            global_step,
+            _KernelSpanFiles(
+                files_dir,
+                global_step=global_step,
+                rank=rank,
+                num_steps_retained=config.num_steps_retained,
+                steps_per_file=config.steps_per_file,
+                graph_nodes=self._graph_nodes,
+            ),
         )
         logger.info(
             f"Kernel span recording active. Keeping the last "
             f"{config.num_steps_retained} steps at {files_dir}"
         )
 
+    def _init_step_state(self, global_step: int, files: "_KernelSpanFiles") -> None:
+        """Set up the state that assigns kernels to steps; needs no GPU."""
+        self._files = files
+        # The last ended training step. step() increments it, so the first call
+        # ends step global_step + 1.
+        self._step = global_step
+        # Steps whose marker kernel was launched but hasn't been delivered yet,
+        # oldest first. Markers run in launch order, so the next delivered marker
+        # ends the leftmost step.
+        self._steps_awaiting_marker: deque[int] = deque()
+        # (step, GPU start of its marker, unix ns) of each step whose marker has
+        # been delivered but that isn't finished yet, oldest first.
+        self._step_ends: list[tuple[int, int]] = []
+        # Delivered kernels not yet assigned to a step, sorted by start time: they
+        # belong to steps in _step_ends or to later steps.
+        self._unassigned_spans = np.empty(0, dtype=_SPAN_DTYPE)
+
     def step(self) -> None:
-        """End the current training step: append its host end time to
-        self._open_step_ends, flush CUPTI without a device sync, and pass the
-        kernels of every step that has finished to self._files (see
-        _close_finished_steps)."""
+        """End the current training step: replay the marker graph on the current
+        stream, flush CUPTI without a device sync, and pass the kernels of every
+        step that has finished to self._files (see _close_finished_steps)."""
         with sl.log_trace_span("kernel_span_recorder_step_call"):
             self._step += 1
-            self._open_step_ends.append(
-                (
-                    self._step,
-                    self._observer.convert_time(self._observer.now_record_ns()),
-                )
-            )
+            self._marker_graph.replay()
+            self._steps_awaiting_marker.append(self._step)
             # TODO: _cuspy is private; flush through a public observer API once
             # torch has one.
             self._observer._cuspy.flush(sync=False)
@@ -226,10 +249,10 @@ class KernelSpanRecorder(Configurable):
         """Stop recording and write everything recorded so far to disk.
 
         Removes the graph instantiate hook, flushes CUPTI with a device sync so
-        every kernel that ran is delivered, assigns all delivered kernels to
-        their steps, writes every unwritten step to a final .npz file, and
-        unregisters the CUPTI observer. Kernels that started after the last
-        step() call are dropped.
+        every kernel that ran (including every marker) is delivered, assigns all
+        delivered kernels to their steps, writes every unwritten step to a final
+        .npz file, and unregisters the CUPTI observer. Kernels that started after
+        the last marker are dropped.
         """
         self._instantiate_hook.remove()
         # Fenced flush: blocks until every kernel that has run is delivered.
@@ -263,53 +286,46 @@ class KernelSpanRecorder(Configurable):
         """Assign delivered kernels to the steps that have finished, and pass each
         finished step's kernels to self._files.add_step().
 
-        Two things are compared. self._open_step_ends holds the host time at which
-        each not-yet-finished step ended, recorded by step(). self._unassigned_spans
-        holds the kernels CUPTI has delivered that don't belong to a finished step
-        yet, sorted by GPU start time.
+        Step N's kernels are those that started on the GPU after marker N-1 and
+        before marker N:
 
-            open step ends:     |end 41              |end 42              |end 43
+            delivered markers:  |marker 41           |marker 42           |marker 43
             unassigned kernels: k k k k k k k k k k k k k k k k k k k k k k ...
                                 <----- step 42 ----->|<----- step 43 ---->|
 
-        Step N's kernels are those whose start time is after step N-1's end and
-        at or before step N's end. CUPTI delivers kernels in the order they ran,
-        so once a kernel that started after step N's end has been delivered, no
-        more kernels of step N can be delivered: step N is finished. For each finished
-        step, its kernels are the leading rows of self._unassigned_spans up to its
-        end time; those rows are removed from self._unassigned_spans and passed to
-        self._files.add_step(). Kernels of unfinished steps stay in
-        self._unassigned_spans for the next call.
+        Delivery order across streams isn't guaranteed: a kernel on another
+        stream that started before marker N can be delivered after it. So step N
+        is finished only once marker N+1 has been delivered, a full step later.
+        For each finished step, its kernels are the leading rows of
+        self._unassigned_spans that started before its marker; those rows are
+        removed from self._unassigned_spans and passed to self._files.add_step().
 
         Args:
-            close_all: Treat every step as finished. Used at shutdown, after a
-                fenced flush has delivered every kernel that ran.
+            close_all: Treat every step whose marker was delivered as finished.
+                Used at shutdown, after a fenced flush has delivered every
+                kernel that ran.
         """
         self._drain_cupti_kernel_spans()
-        starts = self._unassigned_spans["start_ns"]
-        latest_start_ns = starts[-1] if starts.size else -1
-        complete_steps = [
-            (step, step_end_ns)
-            for step, step_end_ns in self._open_step_ends
-            if close_all or step_end_ns <= latest_start_ns
-        ]
-        self._open_step_ends = self._open_step_ends[len(complete_steps) :]
-        for step, step_end_ns in complete_steps:
+        num_finished = len(self._step_ends) - (0 if close_all else 1)
+        for step, marker_start_ns in self._step_ends[:num_finished]:
             num_in_step = np.searchsorted(
-                self._unassigned_spans["start_ns"], step_end_ns
+                self._unassigned_spans["start_ns"], marker_start_ns
             )
             self._files.add_step(step, self._unassigned_spans[:num_in_step])
             self._unassigned_spans = self._unassigned_spans[num_in_step:]
+        self._step_ends = self._step_ends[max(num_finished, 0) :]
 
     def _drain_cupti_kernel_spans(self) -> None:
         """Move the kernels CUPTI delivered since the last call from the observer
-        into self._unassigned_spans.
+        into self._unassigned_spans, and the delivered markers into
+        self._step_ends.
 
-        Converts their start and end times from CUPTI's record clock to unix
-        nanoseconds, appends them to self._unassigned_spans, and re-sorts it by
-        start time. The re-sort is needed because a delivery can contain a kernel
-        (on another stream) that started before kernels already in
-        self._unassigned_spans.
+        Converts start and end times from CUPTI's record clock to unix
+        nanoseconds. Marker kernels are recognized by their exec graph id; each
+        one ends the oldest step in self._steps_awaiting_marker. The other
+        kernels are appended to self._unassigned_spans, which is re-sorted by
+        start time, because a delivery can contain a kernel (on another stream)
+        that started before kernels already in self._unassigned_spans.
         """
         graph_node_id, start_ns, end_ns, stream_id = self._observer.drain()
         delivered = np.empty(len(start_ns), dtype=_SPAN_DTYPE)
@@ -317,9 +333,26 @@ class KernelSpanRecorder(Configurable):
         delivered["start_ns"] = self._observer.convert_time_array(start_ns)
         delivered["end_ns"] = self._observer.convert_time_array(end_ns)
         delivered["stream_id"] = stream_id
+        is_marker = (delivered["graph_node_id"] >> 32) == self._marker_graph_id
+        for marker_start_ns in np.sort(delivered["start_ns"][is_marker]).tolist():
+            self._step_ends.append(
+                (self._steps_awaiting_marker.popleft(), marker_start_ns)
+            )
         self._unassigned_spans = np.sort(
-            np.concatenate([self._unassigned_spans, delivered]), order="start_ns"
+            np.concatenate([self._unassigned_spans, delivered[~is_marker]]),
+            order="start_ns",
         )
+
+
+def _capture_marker_graph(buffer: torch.Tensor) -> tuple[torch.cuda.CUDAGraph, int]:
+    """Capture a CUDA graph of one tiny kernel that increments ``buffer``, and
+    return it with its exec graph id, which CUPTI reports in the upper 32 bits
+    of the kernel's graph node id."""
+    graph = torch.cuda.CUDAGraph(keep_graph=True)
+    with torch.cuda.graph(graph):
+        buffer.add_(1)
+    graph.instantiate()
+    return graph, graph.get_graph_data()["exec_graph_id"]
 
 
 class _KernelSpanFiles:
@@ -330,14 +363,17 @@ class _KernelSpanFiles:
     After each write, files are deleted oldest first as long as the remaining
     files hold at least num_steps_retained steps.
 
-    Only files written by this instance are tracked and deleted; files already in
-    files_dir (e.g. from before a restart) are left alone.
+    Files already in files_dir (from before a restart) are taken over: those
+    holding any step after global_step belong to the abandoned timeline and are
+    deleted, and the rest count toward num_steps_retained like files this
+    instance writes.
     """
 
     def __init__(
         self,
         files_dir: str,
         *,
+        global_step: int,
         rank: int,
         num_steps_retained: int,
         steps_per_file: int,
@@ -354,9 +390,34 @@ class _KernelSpanFiles:
         self._graph_nodes = graph_nodes
         # (step, its kernels as _SPAN_DTYPE rows) of complete steps not yet written.
         self._unwritten_steps: list[tuple[int, np.ndarray]] = []
-        # (path, number of steps it holds) of each step file written, oldest first.
+        # (path, number of steps it holds) of each step file on disk, oldest first.
         self._files_and_num_steps: deque[tuple[str, int]] = deque()
         self._num_steps_on_disk = 0
+        self._take_over_existing_files(global_step)
+
+    def _take_over_existing_files(self, global_step: int) -> None:
+        """Track the step files a previous run left in self._dir.
+
+        A file holding any step after global_step was written past the
+        checkpoint this run resumed from, so its steps will be recorded again;
+        delete it. The rest are tracked oldest first and evicted like files this
+        instance writes.
+        """
+        existing = []
+        for name in os.listdir(self._dir):
+            match = _STEPS_FILE_RE.fullmatch(name)
+            if match is None:
+                continue
+            first_step, last_step = int(match[1]), int(match[2])
+            path = os.path.join(self._dir, name)
+            if last_step > global_step:
+                os.remove(path)
+            else:
+                existing.append((first_step, last_step, path))
+        for first_step, last_step, path in sorted(existing):
+            self._files_and_num_steps.append((path, last_step - first_step + 1))
+            self._num_steps_on_disk += last_step - first_step + 1
+        self._evict_old_files()
 
     def add_step(self, step: int, spans: np.ndarray) -> None:
         """Append one finished step's kernels to self._unwritten_steps, and write
@@ -417,9 +478,13 @@ class _KernelSpanFiles:
         """Delete files oldest first, as long as the files left after each deletion
         still hold at least num_steps_retained steps."""
         while (
-            num_steps_without_oldest := self._num_steps_on_disk
-            - self._files_and_num_steps[0][1]
-        ) >= self._num_steps_retained:
+            self._files_and_num_steps
+            and (
+                num_steps_without_oldest := self._num_steps_on_disk
+                - self._files_and_num_steps[0][1]
+            )
+            >= self._num_steps_retained
+        ):
             oldest_path, _ = self._files_and_num_steps.popleft()
             os.remove(oldest_path)
             self._num_steps_on_disk = num_steps_without_oldest

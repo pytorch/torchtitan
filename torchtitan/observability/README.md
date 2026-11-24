@@ -87,8 +87,9 @@ The sample buffer is held in process memory while profiling, not written to the 
 
 ## Always-on kernel spans
 
-torchtitan supports always-on profiling through the Cuspy backend, typically
-adding under 1% overhead in real-scale training. Every step, each rank records
+torchtitan supports always-on profiling through the Cuspy backend. On Llama 3
+8B (seq 8192, FSDP over 4 GB300s, CUDA graphs) it lowered tokens/s by 0.3-0.5%
+with a file written every 20 steps. Every step, each rank records
 every CUDA kernel's GPU start/end time and keeps the most recent steps on disk,
 so a slow step can be inspected after the fact. It stays cheap because:
 
@@ -125,9 +126,14 @@ python scripts/kernel_spans_to_trace.py \
 
 Caveats:
 
-* A step holds the kernels that started between the previous step's end on
-  the host and its own. When the host runs ahead of the GPU, a step can include
-  the tail of earlier steps.
+* Steps are cut on the GPU, not the host: each step ends with a one-kernel
+  marker CUDA graph replayed on the current stream, and a step holds the
+  kernels that started between the previous step's marker and its own. A
+  kernel on another stream whose record arrives after the next step's marker
+  is filed into a later step.
+* Step N also holds the checkpoint and validation kernels of step N.
+* On restart, files holding steps after the resumed step are deleted, since
+  those steps will be recorded again.
 * Kernels launched outside CUDA graphs are recorded without names.
 * Steps not yet written to a file are lost if the process is killed.
 * It can run alongside `CuspyTraceProfiler`, but not `KinetoTraceProfiler`.

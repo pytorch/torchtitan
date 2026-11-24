@@ -33,15 +33,12 @@ from torchtitan.components.checkpointer.base import (
     BaseCheckpointManager,
     CheckpointStorage,
     DATALOADER,
+    FilesystemCheckpointStorage,
     MODEL,
     ModelWrapper,
     purge_thread,
 )
-from torchtitan.components.checkpointer.dcp import (
-    _FilesystemCheckpointStorage,
-    AsyncMode,
-    CheckpointManager,
-)
+from torchtitan.components.checkpointer.dcp import AsyncMode, CheckpointManager
 from torchtitan.components.optim import EMA
 from torchtitan.config import CallableFunction
 from torchtitan.config.parallelism import ParallelismConfig
@@ -1413,9 +1410,9 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
     def _manager(self):
         # The real storage adapter, so this keeps covering the fsspec path that
-        # torchtitan.tools.filesystem provides and the backend Storage does not.
+        # torchtitan.tools.filesystem provides.
         manager = CheckpointManager.__new__(CheckpointManager)
-        manager._storage = _FilesystemCheckpointStorage()
+        manager._storage = FilesystemCheckpointStorage()
         return manager
 
     def test_returns_latest_resumable_step(self):
@@ -1449,11 +1446,11 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
 
 class TestFilesystemCheckpointStorage(unittest.TestCase):
-    """The DCP adapter must answer the CheckpointStorage protocol using
+    """The adapter must answer the CheckpointStorage protocol using
     torchtitan.tools.filesystem, including for remote fsspec URIs."""
 
     def setUp(self):
-        self.storage = _FilesystemCheckpointStorage()
+        self.storage = FilesystemCheckpointStorage()
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
@@ -1619,7 +1616,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self.manager = CheckpointManager.__new__(CheckpointManager)
         self.manager.keep_latest_k = 2
         self.manager.folder = self.root
-        self.manager._storage = _FilesystemCheckpointStorage()
+        self.manager._storage = FilesystemCheckpointStorage()
         self.manager.purge_thread = mock.sentinel.purge_thread
         self.manager.purge_queue = mock.Mock()
 

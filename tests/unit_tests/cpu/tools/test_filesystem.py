@@ -68,8 +68,21 @@ class TestLocalOps(unittest.TestCase):
             filesystem.rmtree(step)
             self.assertFalse(filesystem.exists(step))
 
-            # rmtree on a missing path is a no-op (ignore_errors=True).
+            # rmtree on a missing path is a no-op.
             filesystem.rmtree(step)
+
+    def test_rmtree_propagates_a_failed_local_delete(self):
+        # Only a missing path is ignored. Any other failure must reach the
+        # caller: the purge thread logs it, instead of reporting a deletion
+        # that did not happen.
+        with tempfile.TemporaryDirectory() as d:
+            not_a_directory = os.path.join(d, "step-10")
+            with open(not_a_directory, "w") as f:
+                f.write("x")
+
+            with self.assertRaises(NotADirectoryError):
+                filesystem.rmtree(not_a_directory)
+            self.assertTrue(filesystem.exists(not_a_directory))
 
 
 class TestRemoteOps(unittest.TestCase):
