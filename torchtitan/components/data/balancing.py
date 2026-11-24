@@ -419,8 +419,6 @@ class GlobalBalancer(MicrobatchBalancer):
                     dist.P2POp(dist.isend, t, group=group, group_peer=d, tag=k)
                     for (k, d, _), t in zip(sends, send)
                 ]
-                # P2POp.__new__ is annotated to return object.
-                # pyrefly: ignore [bad-argument-type]
                 for work in dist.batch_isend_irecv(ops) if ops else []:
                     work.wait()
 
