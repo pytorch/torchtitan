@@ -7,12 +7,11 @@
 """Grain-backed TorchTitan dataloader."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
-import torch.distributed as dist
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 from torchtitan.components.data.balancing import (
@@ -123,7 +122,7 @@ class GrainDataLoader(BaseDataLoader):
         max_context_length: int,
         num_tokens_per_microbatch: int,
         vision_processor: VisionProcessor | None = None,
-        dp_group: dist.ProcessGroup | None = None,
+        dp_ranks: Sequence[int] | None = None,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -191,7 +190,7 @@ class GrainDataLoader(BaseDataLoader):
             # Built on every rank's main thread: balancers that communicate
             # create their process groups here.
             balancer = self._balancer = config.balancer.build(
-                dp_rank=dp_rank, dp_world_size=dp_world_size, dp_group=dp_group
+                dp_rank=dp_rank, dp_world_size=dp_world_size, dp_ranks=dp_ranks
             )
             dataset = MicrobatchBalancingIterDataset(dataset, balancer=balancer)
 

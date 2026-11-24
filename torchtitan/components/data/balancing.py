@@ -220,10 +220,10 @@ class GlobalBalancer(MicrobatchBalancer):
 
     Every microbatch is still trained once per window. Ranks that share a
     data-parallel rank (CP, TP, PP stages) read the same microbatches and
-    compute the same plan; each exchanges over a gloo group with the same ranks
-    as its data-parallel process group (``dp_group``, passed in by the
-    trainer). Every rank must fill full windows, which the loader guarantees by
-    requiring ``repeat`` with DP > 1.
+    compute the same plan; each exchanges over a gloo group of the global ranks
+    of its data-parallel group (``dp_ranks``, passed in by the trainer). Every
+    rank must fill full windows, which the loader guarantees by requiring
+    ``repeat`` with DP > 1.
 
     Any picklable microbatch can move, including ``model_kwargs`` with image
     tensors; received tensors are pinned like the collators' output.
@@ -253,7 +253,7 @@ class GlobalBalancer(MicrobatchBalancer):
         config: Config,
         *,
         dp_world_size: int,
-        dp_group: dist.ProcessGroup | None = None,
+        dp_ranks: Sequence[int] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(config)
@@ -261,12 +261,12 @@ class GlobalBalancer(MicrobatchBalancer):
         self._dp_gloo_group: dist.ProcessGroup | None = None
         if dp_world_size == 1:
             return  # nothing to exchange: each window is planned alone
-        if dp_group is None:
-            raise ValueError("GlobalBalancer needs the data-parallel group (dp_group)")
-        # A CPU group over the same ranks as the data-parallel group; only its
-        # members create it.
+        if dp_ranks is None:
+            raise ValueError("GlobalBalancer needs the data-parallel ranks (dp_ranks)")
+        # A CPU group over the data-parallel group's ranks; only its members
+        # create it.
         group = dist.new_group(
-            dist.get_process_group_ranks(dp_group),
+            list(dp_ranks),
             backend="gloo",
             timeout=timedelta(minutes=30),
             use_local_synchronization=True,

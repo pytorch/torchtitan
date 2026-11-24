@@ -47,12 +47,10 @@ def _worker(rank, dp, cp, cp_outer, tmp, resume_at):
         "gloo", init_method=f"file://{tmp}/init", rank=rank, world_size=dp * cp
     )
     dp_rank, cp_rank = (rank % dp, rank // dp) if cp_outer else divmod(rank, cp)
-    dp_group = dist.new_group(  # what the trainer passes: the DP mesh's group
-        [_global_rank(d, cp_rank, dp, cp, cp_outer) for d in range(dp)],
-        use_local_synchronization=True,
-    )
+    # What the trainer passes: the global ranks of this rank's DP group.
+    dp_ranks = [_global_rank(d, cp_rank, dp, cp, cp_outer) for d in range(dp)]
     balancer = GlobalBalancer.Config(window_size=WINDOW, cost_fn=_cost).build(
-        dp_rank=dp_rank, dp_world_size=dp, dp_group=dp_group
+        dp_rank=dp_rank, dp_world_size=dp, dp_ranks=dp_ranks
     )
     rows = [_row(dp_rank, i) for i in range(NUM_ROWS)]
     source = grain.MapDataset.source(rows).to_iter_dataset()

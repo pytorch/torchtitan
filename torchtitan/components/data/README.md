@@ -522,7 +522,7 @@ config.dataloader = GrainDataLoader.Config(
 )
 ```
 
-It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors; received tensors are pinned like the collators' output. Ranks that share a data-parallel rank (CP, TP, PP stages) read the same microbatches and compute the same plan; each exchanges over a gloo group with the same ranks as its data-parallel process group, which the trainer passes to the loader.
+It runs on the loader's prefetch thread, so the exchange overlaps training. Any picklable microbatch moves, including `model_kwargs` with image tensors; received tensors are pinned like the collators' output. Ranks that share a data-parallel rank (CP, TP, PP stages) read the same microbatches and compute the same plan; each exchanges over a gloo group of its data-parallel group's global ranks, which the trainer passes to the loader (`dp_ranks`).
 
 If a peer stops producing microbatches (it crashed or hung), the exchange waits up to 30 minutes and then the loader raises. It does not fall back to training the rank's own microbatches: CP and TP peers must train the same microbatch at every step, and each balances in its own gloo group, so a rank that fell back while its peers did not would silently train different data than them.
 

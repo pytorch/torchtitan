@@ -229,8 +229,10 @@ class Trainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
-            dp_group=(
-                parallelism_context.get_mesh("dp").get_group()
+            dp_ranks=(
+                torch.distributed.get_process_group_ranks(
+                    parallelism_context.get_mesh("dp").get_group()
+                )
                 if parallelism_context.dp_enabled
                 else None
             ),
