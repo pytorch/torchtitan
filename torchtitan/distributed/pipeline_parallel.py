@@ -87,7 +87,14 @@ def pipeline_llm(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
+    stage_cls: Callable[..., PipelineStage] = PipelineStage,
 ) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
+    """Split ``model`` into pipeline stages and build their schedule.
+
+    ``stage_cls`` builds each stage and is called with ``PipelineStage``'s
+    constructor arguments. A model's ``pipeline()`` override can pass a
+    ``PipelineStage`` subclass.
+    """
     pp_mesh = parallelism_context.get_mesh("pp")
 
     (
@@ -137,6 +144,7 @@ def pipeline_llm(
         module_names_per_stage,
         get_mesh=get_mesh_cb,
         stage_io=stage_io,
+        stage_cls=stage_cls,
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
@@ -856,6 +864,7 @@ def _pipeline_module_split(
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
     stage_io: _DecoderStageIO | None = None,
+    stage_cls: Callable[..., PipelineStage] = PipelineStage,
 ) -> tuple[list[PipelineStage], list[BaseModel]]:
     """Create pipeline stages based on specified module names for each stage.
 
@@ -882,6 +891,8 @@ def _pipeline_module_split(
         get_mesh: Callback used to reconstruct DTensor inputs after PP receives.
         stage_io: Static tensors describing decoder stage boundaries. Fake PP
             requires these because it cannot exchange metadata dynamically.
+        stage_cls: Builds each stage. It is called with ``PipelineStage``'s
+            constructor arguments, so a ``PipelineStage`` subclass works.
 
     Returns:
         Tuple of (stages, models) where stages are PipelineStage objects and models are the
@@ -905,7 +916,7 @@ def _pipeline_module_split(
     for stage_idx in pp_rank_to_stage_indices:
         module_names = module_names_per_stage[stage_idx]
         model_chunk = split_module(whole_model, module_names)
-        stage = PipelineStage(
+        stage = stage_cls(
             model_chunk,
             stage_idx,
             num_stages,

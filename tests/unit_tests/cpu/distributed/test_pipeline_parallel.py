@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.pipelining import PipelineStage
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -98,6 +99,91 @@ def test_base_model_pipeline_derives_the_split_only_when_none_is_configured(
     )
     BaseModel.pipeline(model, parallelism=configured, **common)
     assert captured[-1] is configured
+
+
+def test_pipeline_module_split_builds_each_local_stage_with_stage_cls(monkeypatch):
+    chunks = {}
+
+    def fake_split_module(model, module_names):
+        chunks[tuple(module_names)] = nn.Linear(2, 2)
+        return chunks[tuple(module_names)]
+
+    monkeypatch.setattr(pipeline_parallel, "split_module", fake_split_module)
+    group = object()
+    pp_mesh = SimpleNamespace(
+        get_local_rank=lambda: 0, size=lambda: 2, get_group=lambda name: group
+    )
+    calls = []
+
+    def stage_cls(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(stage_index=args[1])
+
+    module_names_per_stage = [["layers.0"], ["layers.1"], ["layers.2"], ["layers.3"]]
+    device = torch.device("cpu")
+    stages, models = pipeline_parallel._pipeline_module_split(
+        nn.Module(),
+        pp_mesh,
+        "Interleaved1F1B",
+        device,
+        module_names_per_stage,
+        stage_cls=stage_cls,
+    )
+
+    # Rank 0 of 2 owns stages 0 and 2 of 4, and stage_cls builds both.
+    assert [stage.stage_index for stage in stages] == [0, 2]
+    assert models == [chunks[("layers.0",)], chunks[("layers.2",)]]
+    assert [args for args, _ in calls] == [
+        (chunks[("layers.0",)], 0, 4, device),
+        (chunks[("layers.2",)], 2, 4, device),
+    ]
+    assert all(kwargs["group"] is group for _, kwargs in calls)
+
+
+def test_pipeline_llm_forwards_stage_cls_to_the_split(monkeypatch):
+    class _SplitCalled(Exception):
+        pass
+
+    captured = []
+
+    def capture_split(*args, **kwargs):
+        captured.append(kwargs["stage_cls"])
+        raise _SplitCalled
+
+    monkeypatch.setattr(pipeline_parallel, "_pipeline_module_split", capture_split)
+    monkeypatch.setattr(
+        pipeline_parallel, "_get_pipeline_metadata", lambda *args: (1, 2, 1, 1)
+    )
+    monkeypatch.setattr(pipeline_parallel, "_build_get_mesh_callback", lambda ctx: None)
+    monkeypatch.setattr(torch.distributed, "get_backend", lambda group: "gloo")
+    pp_mesh = SimpleNamespace(get_group=lambda name: object())
+    kwargs = dict(
+        parallelism_context=SimpleNamespace(get_mesh=lambda name: pp_mesh),
+        training=None,
+        precision=None,
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_module_fqns_per_model_part=[
+                ["tok_embeddings", "layers.0"],
+                ["layers.1", "norm", "lm_head"],
+            ],
+        ),
+        local_compile=None,
+        activation_remat=None,
+        dump_folder="",
+        device=torch.device("cpu"),
+        model_config=None,
+        loss_fn=None,
+    )
+
+    class CustomStage(PipelineStage):
+        pass
+
+    with pytest.raises(_SplitCalled):
+        pipeline_parallel.pipeline_llm(nn.Module(), stage_cls=CustomStage, **kwargs)
+    with pytest.raises(_SplitCalled):
+        pipeline_parallel.pipeline_llm(nn.Module(), **kwargs)
+    assert captured == [CustomStage, PipelineStage]
 
 
 def test_pipeline_with_first_last_stage_modules_appends_present_last_stage_modules(
