@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import os
 import random
 
@@ -15,13 +16,14 @@ import torch.nn.functional as F
 
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan_recipes.decision.loss import AnswerTokenLoss
-from torchtitan_recipes.decision.prepare_data import LETTERS, render
+from torchtitan_recipes.decision.prepare_data import flatten_record, LETTERS, render
 from torchtitan_recipes.decision.qwen3 import (
+    AnswerTokenLoss,
+    CandidateDistributionLoss,
     DecisionLetterProcessor,
     qwen3_1_7b_decision,
 )
@@ -164,3 +166,124 @@ def test_context_parallel_recipe_uses_ulysses_varlen_attention() -> None:
         type(layer.attention.inner_attention) for layer in config.model.layers
     }
     assert attention_types == {UlyssesVarlenInnerAttention.Config}
+
+
+class _Tokenizer(BaseTokenizer):
+    def encode(self, text: str, **kwargs) -> list[int]:
+        del kwargs
+        if text.startswith(" ") and len(text) == 2 and text[1] in LETTERS:
+            return [10 + LETTERS.index(text[1])]
+        return [1, 2, 3]
+
+    def decode(self, token_ids, **kwargs) -> str:
+        del kwargs
+        return "".join(str(token_id) for token_id in token_ids)
+
+    def get_vocab_size(self) -> int:
+        return 64
+
+
+def _sample() -> dict:
+    return {
+        "state": '{"balance":18}',
+        "type": "choice",
+        "prompt": "Context:\nhi\nOptions:\nA) 2\nB) 12\nC) 5\nAnswer:",
+        "instructions": "Choose the lower-cost job.",
+        "keys": ["job_a", "job_b", "job_c"],
+        "options": ["Cost 2", "Cost 12", "Cost 5"],
+        "target_probs": [0.2, 0.3, 0.5],
+    }
+
+
+def test_native_distribution_record_flattens_by_candidate_identity() -> None:
+    record = {
+        "request": {
+            "state": {"balance": 18},
+            "questions": {
+                "choice": {
+                    "type": "choice",
+                    "instructions": "Pick one.",
+                    "criteria": {"a": "A", "b": "B"},
+                }
+            },
+        },
+        "targets": {
+            "choice": {"candidate_ids": ["b", "a"], "distribution": [0.25, 0.75]}
+        },
+    }
+    rows = flatten_record(record)
+    assert rows[0]["target_probs"] == [0.75, 0.25]
+    assert json.loads(rows[0]["state"]) == {"balance": 18}
+
+
+@pytest.mark.parametrize(
+    ("state", "eligible"),
+    [
+        ([{"type": "image", "path": "image.png"}], False),
+        ({"metadata": {"type": "image"}}, True),
+        ({"frames": [{"type": "image", "path": "frame.png"}]}, False),
+    ],
+    ids=["media", "metadata", "nested-media"],
+)
+def test_preparation_filters_media_state(state, eligible: bool) -> None:
+    record = {
+        "request": {
+            "state": state,
+            "questions": {"q": {"type": "choice", "criteria": {"a": "A", "b": "B"}}},
+        },
+        "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
+    }
+    assert len(flatten_record(record)) == int(eligible)
+
+
+def _distribution_processor(max_context_length: int) -> DecisionLetterProcessor:
+    return DecisionLetterProcessor(
+        DecisionLetterProcessor.Config(candidate_labels=True),
+        context=DatasetBuildContext(
+            tokenizer=_Tokenizer(),
+            max_context_length=max_context_length,
+            num_tokens_per_microbatch=max_context_length,
+            read_options=grain.ReadOptions(num_threads=1),
+        ),
+    )
+
+
+def test_processor_carries_candidate_count_and_samples_target_label() -> None:
+    sequence = _distribution_processor(64)(_sample(), np.random.default_rng(3))
+    assert sequence is not None
+    assert (sequence.labels != -100).sum() == 1
+    assert sequence.labels[-1] in {26, 27, 28}
+    assert sequence.input_ids[-1] == 3
+
+
+def test_distribution_processor_rejects_overlength_rows() -> None:
+    with pytest.raises(ValueError, match="max_context_length"):
+        _distribution_processor(2)(_sample(), np.random.default_rng(0))
+
+
+def test_sampled_nll_brier_has_soft_target_expectation(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "torchtitan_recipes.decision.qwen3.HuggingFaceTokenizer",
+        lambda **_: _Tokenizer(),
+    )
+    weight = 0.7
+    loss_fn = CandidateDistributionLoss(
+        CandidateDistributionLoss.Config(tokenizer_path="unused", brier_weight=weight)
+    )
+    logits = torch.zeros((1, 40))
+    logits[0, 10:13] = torch.tensor([1.0, -0.5, 0.25])
+    probs = torch.softmax(logits[0, 10:13], dim=-1)
+    target = torch.tensor([0.2, 0.3, 0.5])
+    observed = 0.0
+    for index, probability in enumerate(target):
+        loss, _ = loss_fn(
+            logits,
+            torch.tensor([26 + index]),
+            torch.tensor(1.0),
+        )
+        observed += float(probability * loss)
+    expected_nll = -(target * probs.log()).sum()
+    expected_brier = probs.square().sum() + 1 - 2 * (target * probs).sum()
+    torch.testing.assert_close(
+        torch.tensor(observed), expected_nll + weight * expected_brier
+    )

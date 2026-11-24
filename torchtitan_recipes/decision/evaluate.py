@@ -25,7 +25,7 @@ import torch
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+from .prepare_data import LETTERS
 
 
 @torch.no_grad()
@@ -50,20 +50,34 @@ def letter_logits(model, tokenizer, rows: list[dict], batch_size: int = 16):
     return out
 
 
+def target_probs(row, like):
+    if "target_probs" in row:
+        target = like.new_tensor(row["target_probs"])
+        return target / target.sum()
+    target = torch.zeros_like(like)
+    target[row["gold"]] = 1
+    return target
+
+
 def nll(logits, rows, temperature: float) -> float:
     return sum(
-        -torch.log_softmax(lg / temperature, -1)[r["gold"]].item()
-        for lg, r in zip(logits, rows)
+        -(target_probs(row, scores) * (scores / temperature).log_softmax(-1))
+        .sum()
+        .item()
+        for scores, row in zip(logits, rows, strict=True)
     ) / len(rows)
 
 
 def metrics(probs, rows, num_bins: int = 10) -> dict:
     n = len(rows)
     conf = [p.max().item() for p in probs]
-    correct = [int(p.argmax().item() == r["gold"]) for p, r in zip(probs, rows)]
+    targets = [target_probs(row, p) for p, row in zip(probs, rows, strict=True)]
+    correct = [
+        target[p.argmax()].item() for p, target in zip(probs, targets, strict=True)
+    ]
     brier = sum(
-        ((p - torch.eye(len(p))[r["gold"]]) ** 2).sum().item()
-        for p, r in zip(probs, rows)
+        ((p - target).square().sum() + 1 - target.square().sum()).item()
+        for p, target in zip(probs, targets, strict=True)
     )
     ece = 0.0
     for b in range(num_bins):
@@ -72,7 +86,7 @@ def metrics(probs, rows, num_bins: int = 10) -> dict:
             gap = sum(correct[i] - conf[i] for i in idx)
             ece += abs(gap) / n
     # Largest k such that the k most confident answers have at most 5% errors.
-    answered, errors = 0, 0
+    answered, errors = 0, 0.0
     order = sorted(range(n), key=lambda j: -conf[j])
     for k, i in enumerate(order, 1):
         errors += 1 - correct[i]
@@ -115,9 +129,19 @@ def main() -> None:
         state_dict = {}
         for path in Path(args.checkpoint).glob("*.safetensors"):
             state_dict.update(load_file(path))
-        # Qwen3-1.7B ties lm_head to embed_tokens, so lm_head is not saved.
+        if "model.language_model.embed_tokens.weight" in state_dict:
+            # TorchTitan exports text weights under the multimodal checkpoint prefix.
+            state_dict = {
+                "model." + key.removeprefix("model.language_model."): value
+                for key, value in state_dict.items()
+                if key.startswith("model.language_model.")
+            } | {
+                key: state_dict[key] for key in ("lm_head.weight",) if key in state_dict
+            }
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if unexpected or set(missing) - {"lm_head.weight"}:
+        if model.config.tie_word_embeddings:
+            missing = [key for key in missing if key != "lm_head.weight"]
+        if missing or unexpected:
             raise ValueError(f"missing={missing} unexpected={unexpected}")
     model = model.cuda().eval()
 
@@ -138,11 +162,12 @@ def main() -> None:
     report: dict[str, object] = {"temperature": round(temperature, 3)}
     for kind in ("all", "choice", "noul", "score"):
         idx = [i for i, r in enumerate(rows) if kind in ("all", r["type"])]
-        report[kind] = metrics([probs[i] for i in idx], [rows[i] for i in idx])
+        if idx:
+            report[kind] = metrics([probs[i] for i in idx], [rows[i] for i in idx])
     print(json.dumps(report, indent=1))
     for p, row in zip(probs[: args.num_examples], rows):
         print(f"\nstate: {row['state'][:200]!r}\nquestion: {row['instructions']}")
-        print(f"gold: {row['keys'][row['gold']]}")
+        print(f"target: {system_one_answer(target_probs(row, p), row)}")
         print(f"answer: {json.dumps(system_one_answer(p, row))}")
 
 

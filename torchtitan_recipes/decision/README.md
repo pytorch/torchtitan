@@ -72,29 +72,35 @@ questions come from the same source datasets as training.
 
 ## Candidate-distribution fine-tuning
 
-This recipe fine-tunes **Qwen3.5**, using GS1-format `request`/`targets`
-records and sampled distribution NLL plus weighted expected multiclass Brier.
-
-- `prepare_distribution_data.py` selects text questions and aligns targets by candidate ID.
-- `distribution.py` contains the processor, loss, and `qwen3_5_distribution` config.
-- `evaluate.py` evaluates the Jev recipe using its prompt format.
-
-Both recipes use letter-slot scoring and share `AnswerTokenLoss`. Jev uses
-a gold letter with full-vocabulary cross-entropy. The distribution recipe
-samples letters from soft targets and scores only the valid candidates.
+The Qwen3.5 recipe reads GS1-format `request`/ `targets` JSONL. Preparation
+aligns targets by candidate ID, fixes option order, and uses Jev's `Answer:`
+readout. Supply distinct source splits for training, calibration and evaluation.
 
 ```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3.5-0.8B-Base --assets tokenizer safetensors config
-python -m torchtitan_recipes.decision.prepare_distribution_data --input /path/to/train.jsonl
-NGPU=2 MODULE=torchtitan_recipes.decision.distribution CONFIG=qwen3_5_distribution ./run_train.sh
+python -m torchtitan_recipes.decision.prepare_data \
+    --input /path/to/train.jsonl --calibration /path/to/calibration.jsonl --eval /path/to/final_test.jsonl
+NGPU=1 MODULE=torchtitan_recipes.decision.qwen3 CONFIG=qwen3_5_distribution ./run_train.sh
+python -m torchtitan_recipes.decision.evaluate --hf-assets ./assets/hf/Qwen3.5-0.8B-Base \
+    --checkpoint /path/to/export --data ./assets/hf/gs1-distribution
 ```
 
-Preparation accepts a JSONL file with one `request` and `targets` object per
-line. Each question target supplies `candidate_ids` and `distribution`. The
-distribution-v4.5 export used for validation is local to the GS1 project.
+Both objectives sample one answer from the soft targets per question.
+Use `qwen3_5_distribution(full_vocab_ce=True)` for full-vocabulary CE on
+the sampled token. The default objective uses the sampled slot and option
+count for candidate NLL plus expected multiclass Brier, with configurable
+`brier_weight`. The Qwen3.5 recipe uses data parallelism and four contexts
+per microbatch to bound activation memory.
 
-On one A800, Qwen3.5-0.8B-Base completed 10 optimizer steps and exported its
-final weights. The run used 3,000 sampled questions (preparation seed 0),
-8,192 tokens per microbatch, and accelerator graphs disabled. Training loss
-was 1.93938 at step 1 and 1.50018 at step 10. Held-out calibration and
-comparisons with full-vocabulary CE remain to be measured.
+Both objectives trained Qwen3.5-0.8B-Base for 30 steps with seed 42 on one
+A800 each, with 8,192 tokens per microbatch and accelerator graphs disabled.
+Preparation sampled 3,000 questions from the first 10,000 training records
+of distribution-v4.5 with seed 0. Temperature was fit on 500 calibration
+questions and metrics were measured on 500 final-test questions. Sampled
+states were disjoint across the three splits. Accuracy and ECE use the
+target probability of the predicted option as expected correctness.
+
+| Objective | Expected accuracy | Expected Brier ↓ | ECE ↓ |
+| --- | ---: | ---: | ---: |
+| Full-vocabulary CE | 0.3311 | 0.6697 | 0.0438 |
+| Candidate NLL + Brier (weight 1.0) | 0.3311 | 0.6639 | 0.0397 |
