@@ -72,9 +72,8 @@ questions come from the same source datasets as training.
 
 ## GS1 distribution recipe
 
-`DecisionModel` in `base.py` defines the reusable recipe interface, data
-processor, and loss for candidate-distribution fine-tuning. `GS1DecisionModel`
-in `gs1.py` supplies the GS1 model-family boundary and GS1-format data.
+`base.py` contains the GS1 candidate-distribution processor, loss, and trainer
+config builder. `gs1.py` supplies the model config and GS1-format data.
 The preparation script selects 3,000 eligible questions by default.
 
 Training estimates candidate probabilities with
@@ -82,10 +81,10 @@ Training estimates candidate probabilities with
 soft target distribution, giving unbiased NLL and Brier gradient estimates.
 Set `brier_weight` through `gs1_decision`.
 
-GS1 is not the Jev/Qwen letter-slot model: its native checkpoint owns a hybrid
-backbone, compiler, and cross-attention decision head. This recipe keeps those
-model-specific pieces behind the GS1 boundary and trains text records with
-data parallelism.
+This TorchTitan recipe currently uses the TorchTitan Qwen3.5 hybrid backbone
+and candidate-letter readout. It does not yet load the native GS1 compiler or
+cross-attention head; those require a separate TorchTitan model implementation.
+The recipe trains text records with data parallelism.
 
 ```bash
 python -m torchtitan_recipes.decision.prepare_gs1_data \
