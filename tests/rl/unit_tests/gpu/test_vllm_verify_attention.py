@@ -27,12 +27,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize(
     "query_lens, seq_lens, is_verify_step",
     [
-        # Rows of 1 + 3 tokens; the 30k row gets KV splits; a padded row (seq_len 0).
-        ([4, 4, 4, 4, 4, 4], [4, 130, 1000, 257, 30_000, 0], True),
+        # 8 rows of 1 + 3 tokens; the 30k row gets KV splits; a padded row (seq_len 0).
+        ([4] * 8, [4, 130, 1000, 257, 30_000, 0, 513, 2_048], True),
+        # Fewer than 8 verify rows: FA4's varlen call.
+        ([4, 4, 4], [130, 30_000, 257], False),
         # A 1-token row: FA4's varlen call.
         ([4, 4, 1], [130, 30_000, 257], False),
     ],
-    ids=["verify", "mixed"],
+    ids=["verify", "few_rows", "mixed"],
 )
 def test_forward_matches_causal_attention(
     query_lens, seq_lens, is_verify_step, max_seq_len
