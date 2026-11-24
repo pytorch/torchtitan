@@ -27,14 +27,6 @@ _SESSION_ID_HEADER = "X-Session-ID"
 _LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
 
 
-GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
-"""Sampling parameter carrying a request's rollout group id.
-
-Verifiers forwards extra sampling fields verbatim in ``sampling_params``, so the
-rollouter tags every request of a group with its id.
-"""
-
-
 @dataclass(frozen=True, slots=True)
 class VerifiersGenerationMetadata:
     """TorchTitan generation data aggregated over one Verifiers rollout.
@@ -57,7 +49,7 @@ class VerifiersGenerationMetadata:
 class GenerationServer(Configurable):
     """Serves TitanRL's `generate_fn` as the vLLM endpoint that Verifiers' train client calls.
 
-    Each rollout worker runs one, on the controller host:
+    Each rollout worker runs one, on the worker's host:
 
         Verifiers' train client --POST /inference/v1/generate--> GenerationServer
                                   (X-Session-ID: the trace id)        |
@@ -96,6 +88,8 @@ class GenerationServer(Configurable):
         self.bound_port: int | None = None
         self.request_counts: dict[str, int] = {}
         self.generation_metadata: dict[str, VerifiersGenerationMetadata] = {}
+        # Each session's rollout group, e.g. {"9f3c": 7}: the generator needs it per call.
+        self.group_ids: dict[str, int] = {}
 
     @property
     def port(self) -> int:
@@ -146,11 +140,15 @@ class GenerationServer(Configurable):
         self.bound_port = None
         self.request_counts.clear()
         self.generation_metadata.clear()
+        self.group_ids.clear()
 
-    def pop_generation_metadata(
-        self, session_id: str
-    ) -> VerifiersGenerationMetadata | None:
-        """Detach the generation metadata accumulated for one rollout."""
+    def start_session(self, *, session_id: str, group_id: int) -> None:
+        """Accept model calls for `session_id`, as calls of rollout group `group_id`."""
+        self.group_ids[session_id] = group_id
+
+    def end_session(self, session_id: str) -> VerifiersGenerationMetadata | None:
+        """Refuse further calls for `session_id`, and return its generation metadata."""
+        self.group_ids.pop(session_id, None)
         self.request_counts.pop(session_id, None)
         return self.generation_metadata.pop(session_id, None)
 
@@ -175,7 +173,7 @@ class GenerationServer(Configurable):
 
             503  `generate_fn` is not set yet
             400  a prompt with no room for an output token
-            422  no X-Session-ID header, or a malformed body
+            422  no X-Session-ID header, a session `start_session` didn't open, or a malformed body
             500  `generate_fn` raised, or the completion's token ids and logprobs differ in length
             502  no completion, or a finish reason other than "stop" or "length"
 
@@ -184,8 +182,7 @@ class GenerationServer(Configurable):
             headers  {"X-Session-ID": "9f3c..."}
             body     {"token_ids": [151644, 872, ...],
                       "sampling_params": {"temperature": 1.0, "top_p": 1.0, "max_tokens": 512,
-                                          "stop_token_ids": [151645], "torchtitan_group_id": 7,
-                                          "logprobs": 1, ...}}
+                                          "stop_token_ids": [151645], "logprobs": 1, ...}}
             reply    {"request_id": "9f3c.../request=0",
                       "choices": [{"token_ids": [9707, 151645], "finish_reason": "stop",
                                    "logprobs": {"content": [{"token": "token_id:9707",
@@ -202,27 +199,23 @@ class GenerationServer(Configurable):
             return web.json_response(
                 {"error": f"missing {_SESSION_ID_HEADER} header"}, status=422
             )
-
         try:
             body = await request.json()
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            sampling_params = body.get("sampling_params")
-            if not isinstance(sampling_params, dict):
-                raise ValueError("sampling_params must be an object")
-            sampling_params = dict(sampling_params)
-            group_id = sampling_params.pop(GROUP_ID_SAMPLING_PARAM, None)
-            if isinstance(group_id, bool) or not isinstance(group_id, int):
-                raise ValueError(
-                    f"sampling_params.{GROUP_ID_SAMPLING_PARAM} must be an integer"
-                )
-            sampling = _parse_sampling_config(sampling_params)
+            sampling = _parse_sampling_config(body.get("sampling_params"))
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
             return web.json_response({"error": str(error)}, status=422)
 
+        # After reading the body: `end_session` may have run during that await.
+        if session_id not in self.group_ids:
+            return web.json_response(
+                {"error": f"session {session_id!r} has no rollout group"}, status=422
+            )
+        group_id = self.group_ids[session_id]
         # vLLM needs room for one output token. Keep vLLM's wording: Verifiers' harnesses match it
         # as a context overflow.
         if len(prompt_token_ids) >= self.max_rollout_tokens:
@@ -250,6 +243,9 @@ class GenerationServer(Configurable):
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            # TODO: at shutdown, every call still in flight fails here and logs a traceback. Raise a
+            # typed error on generator close and log it at info, without the traceback, as the TODO
+            # in `MessageEnvRolloutWorker` also plans.
             logger.exception("TorchTitan generation failed for %s", request_id)
             return web.json_response({"error": str(error)}, status=500)
 
@@ -273,26 +269,29 @@ class GenerationServer(Configurable):
                 status=502,
             )
 
-        previous = self.generation_metadata.get(session_id)
-        self.generation_metadata[session_id] = VerifiersGenerationMetadata(
-            min_policy_version=(
-                completion.min_policy_version
-                if previous is None
-                else min(previous.min_policy_version, completion.min_policy_version)
-            ),
-            max_policy_version=(
-                completion.max_policy_version
-                if previous is None
-                else max(previous.max_policy_version, completion.max_policy_version)
-            ),
-            # Fold so a long rollout holds one set of generator records, not one per
-            # generation: every full GC walks them.
-            metrics=m.fold(
-                completion.metrics
-                if previous is None
-                else [*previous.metrics, *completion.metrics]
-            ),
-        )
+        # Keep the metadata only while the session is open. If `end_session` ran while this call
+        # generated (Verifiers gave up on the call), nothing would ever remove the entry.
+        if session_id in self.group_ids:
+            previous = self.generation_metadata.get(session_id)
+            self.generation_metadata[session_id] = VerifiersGenerationMetadata(
+                min_policy_version=(
+                    completion.min_policy_version
+                    if previous is None
+                    else min(previous.min_policy_version, completion.min_policy_version)
+                ),
+                max_policy_version=(
+                    completion.max_policy_version
+                    if previous is None
+                    else max(previous.max_policy_version, completion.max_policy_version)
+                ),
+                # Fold so a long rollout holds one set of generator records, not one per
+                # generation: every full GC walks them.
+                metrics=m.fold(
+                    completion.metrics
+                    if previous is None
+                    else [*previous.metrics, *completion.metrics]
+                ),
+            )
 
         # ======== Reply ========
         # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.

@@ -16,7 +16,7 @@ agent and the grading through the [Verifiers bridge](../README.md).
 Each rollout takes the path in the Verifiers README's
 [integration flow](../README.md#integration-flow). Here:
 
-- **Agent.** The env server starts a Docker container from the task's `docker_image` and runs
+- **Agent.** The rollout worker's env starts a Docker container from the task's `docker_image` and runs
   Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and
   reads the screen back. Each agent turn is one model call.
 - **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the container
@@ -29,9 +29,9 @@ runs beside it (`ValidationConfig`).
 | --- | --- |
 | Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
 | Terminus-2 harness and the program it runs in the container, copied from Verifiers 0.3.1 to expose reasoning in the history and summarization | [`harness.py`](./harness.py), [`terminus_harness.py`](./terminus_harness.py) |
-| Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
+| Harbor taskset, declared here so each rollout worker imports it | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
-| Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
+| Bridge: task dataset, rollout worker, generation server, trace to turns | [Verifiers integration](../README.md) |
 | CPU tests | `tests/rl/unit_tests/cpu/test_verifiers_terminal_bench*.py` |
 
 ## Run

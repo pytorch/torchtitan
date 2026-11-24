@@ -36,11 +36,9 @@ from torchtitan.rl.controller.controller import (
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskDataset
-from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
 from torchtitan.rl.examples.verifiers.rollouter import (
     RewardFromVerifiers,
-    VerifiersRollouter,
     VerifiersRolloutWorker,
 )
 from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
@@ -51,6 +49,7 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
+from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer.losses import DAPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
@@ -69,35 +68,27 @@ def _math_taskset_config(
     return VerifiersMathTasksetConfig(id=taskset_id, dataset=dataset)
 
 
-def _verifiers_math_rollouter_config(
-    *, max_rollout_tokens: int
-) -> VerifiersRollouter.Config:
-    return VerifiersRollouter.Config(
+def _verifiers_math_rollouter_config(*, max_rollout_tokens: int) -> Rollouter.Config:
+    training_taskset = _math_taskset_config("dapo_math")
+    return Rollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
-            dataset=VerifiersTaskDataset.Config(
-                verifiers_taskset=_math_taskset_config("dapo_math")
-            ),
+            dataset=VerifiersTaskDataset.Config(verifiers_taskset=training_taskset),
         ),
         validation_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=_math_taskset_config("aime2025"),
-        ),
-        verifiers_env_server=VerifiersEnvServer.Config(
-            environment=vf.SingleAgentEnvConfig(
-                agent=vf.AgentConfig(
-                    runtime=vf.SubprocessConfig(),
-                    max_turns=1,
-                    harness=VerifiersNullHarnessConfig(id="null"),
-                ),
-            ),
-            serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=1),
-                address="tcp://127.0.0.1:0",
-            ),
         ),
         worker=VerifiersRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
                 error_reward=0.0,
+            ),
+            environment=vf.SingleAgentEnvConfig(
+                taskset=training_taskset,
+                agent=vf.AgentConfig(
+                    runtime=vf.SubprocessConfig(),
+                    max_turns=1,
+                    harness=VerifiersNullHarnessConfig(id="null"),
+                ),
             ),
             generation_server=GenerationServer.Config(
                 max_rollout_tokens=max_rollout_tokens

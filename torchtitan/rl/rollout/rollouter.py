@@ -51,10 +51,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# How long `Rollouter.close` waits for in-flight `run_group` calls before stopping their workers anyway.
-# Drains took under 0.3 s once the generators closed; 30 s only covers a group stuck in a slow env step.
-_RUN_GROUP_DRAIN_TIMEOUT_S = 30.0
-
 
 class Rollouter(Configurable):
     """Turns a problem (train/val datasets and a rollout worker config) into scored rollouts, the
@@ -123,10 +119,25 @@ class Rollouter(Configurable):
         rollouts_per_thread, rounded up: 128 / 4 -> 32, 7 / 4 -> 2, 2 / 4 -> 1. Lower it when rollouts
         block threads, e.g. 1 for one blocking call per rollout."""
 
+        run_group_drain_timeout_s: float = 30.0
+        """How long `close` waits for in-flight `run_group` calls before it closes their workers
+        anyway. The generators close first, so a group waiting on a model call ends at once. The
+        limit is for a group stuck in a slow env step. Not tuned."""
+
+        worker_close_timeout_s: float = 60.0
+        """How long `close` waits for the workers' own `close`, all workers together. A worker's
+        `close` stops what it still runs, e.g. its episodes' sandboxes. Past the limit, the workers
+        stop anyway, and what they still ran is left behind. Not tuned."""
+
         def __post_init__(self) -> None:
             if self.rollouts_per_thread < 1:
                 raise ValueError(
                     f"rollouts_per_thread must be at least 1, got {self.rollouts_per_thread}"
+                )
+            if self.run_group_drain_timeout_s <= 0 or self.worker_close_timeout_s <= 0:
+                raise ValueError(
+                    "run_group_drain_timeout_s and worker_close_timeout_s must be positive, got "
+                    f"{self.run_group_drain_timeout_s} and {self.worker_close_timeout_s}"
                 )
 
     def __init__(self, config: Config, *, max_rollouts_in_flight: int) -> None:
@@ -172,10 +183,6 @@ class Rollouter(Configurable):
         renderer_config: RendererConfig,
         hf_assets_path: str,
         vision_processor_config: VisionProcessor.Config | None = None,
-        # Constructor args of each rollout worker known only at setup, e.g. a server address.
-        # TODO: VerifiersRollouter is the only user. Once its env runs in the rollout worker, remove
-        # this, `spawn_rollout_workers(**kwargs)` and `RolloutWorkerActor(worker_kwargs=...)`.
-        worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Spawn one rollout worker per `rollouts_per_worker` training rollouts in flight, rounded up,
         and initialize them."""
@@ -199,7 +206,6 @@ class Rollouter(Configurable):
             num_threads=math.ceil(
                 self._config.rollouts_per_worker / self._config.rollouts_per_thread
             ),
-            **(worker_kwargs or {}),
         )
         await self._worker_actors.setup_async.call(
             tokenizer_config=tokenizer_config,
@@ -209,22 +215,28 @@ class Rollouter(Configurable):
         )
 
     async def close(self) -> None:
-        """Wait for in-flight `run_group` calls, then stop the rollout worker pool.
+        """Wait for in-flight `run_group` calls, close each worker, then stop the worker pool.
 
         Close the generators first, so pending `generate_fn` calls fail fast:
 
-            generators closed -> generate_fn raises -> run_group returns -> stop_rollout_workers()
-            run_group still running after _RUN_GROUP_DRAIN_TIMEOUT_S       -> stop_rollout_workers()
+            generators closed -> generate_fn raises -> run_group returns -> workers' close -> stop_rollout_workers()
+            run_group still running after run_group_drain_timeout_s        -> workers' close -> stop_rollout_workers()
+            workers' close still running after worker_close_timeout_s                         -> stop_rollout_workers()
 
         Why wait: so each in-flight `run_group` ends on its own (closing its envs and releasing its
         sessions) instead of being cut off when its worker stops.
         """
         actor_system = self._actor_system
+        workers = self._worker_actors
         self._worker_actors = None
         self._actor_system = None
+
+        # ======== Drain the groups ========
         calls = tuple(self._inflight_run_group_calls)
         if calls:
-            _, pending = await asyncio.wait(calls, timeout=_RUN_GROUP_DRAIN_TIMEOUT_S)
+            _, pending = await asyncio.wait(
+                calls, timeout=self._config.run_group_drain_timeout_s
+            )
             if pending:
                 logger.warning(
                     "Stopping rollout workers with %d run_group calls still running",
@@ -233,7 +245,24 @@ class Rollouter(Configurable):
                 for call in pending:
                     call.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-        if actor_system is not None:
+        if actor_system is None:
+            return
+
+        # ======== Close the workers, then stop them ========
+        try:
+            # `workers` is None if spawning failed: there is nothing to `close`. The `finally`
+            # below still stops the pool.
+            if workers is not None:
+                # Each worker stops what it still runs, e.g. its episodes' sandboxes.
+                await asyncio.wait_for(
+                    workers.close.call(), timeout=self._config.worker_close_timeout_s
+                )
+        except TimeoutError:
+            logger.warning(
+                "Rollout workers still closing after %.0f s; stopping them anyway",
+                self._config.worker_close_timeout_s,
+            )
+        finally:
             await actor_system.stop_rollout_workers()
 
     async def sync_log_step(self, step: int) -> None:
@@ -255,8 +284,8 @@ class Rollouter(Configurable):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
-            release_session_fn: Async callable each rollout calls after its last turn, to
-                release resources associated to that session. E.g. generator's kv-cache.
+            release_session_fn: Async callable called once per routing session, after its last
+                call, to release resources associated to that session. E.g. generator's kv-cache.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -455,8 +484,8 @@ class BaseRolloutWorker(Configurable, ABC):
 
         Args:
             generate_fn: Async callable that returns a Completion given a prompt.
-            release_session_fn: Async callable each rollout calls after its last turn, to
-                release resources associated to that session. E.g. generator's kv-cache.
+            release_session_fn: Async callable called once per routing session, after its last
+                call, to release resources associated to that session. E.g. generator's kv-cache.
             sample: Dataset sample shared by the group.
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
@@ -465,6 +494,11 @@ class BaseRolloutWorker(Configurable, ABC):
         Returns:
             One scored `RolloutGroup`.
         """
+
+    async def close(self) -> None:
+        """Stop what this worker still runs. `Rollouter.close` calls it once, after it stops waiting
+        for the groups, so some may still run. The default stops nothing: its lag trackers end with
+        the process."""
 
     async def make_scored_group(
         self,
@@ -698,11 +732,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             status = RolloutStatus.ERROR_INFRA
             errors = [error_entry(error)]
 
-        try:
-            await release_session_fn(routing_session_id=routing_session_id)
-        except Exception:
-            # Not fatal: `max_sessions` evicts an unreleased session.
-            logger.exception("releasing routing session %s failed", routing_session_id)
+        await release_session_fn(routing_session_id=routing_session_id)
         rollout = Rollout(
             group_id=group_id,
             rollout_id=rollout_id,

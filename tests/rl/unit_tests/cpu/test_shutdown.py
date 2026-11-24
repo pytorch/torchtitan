@@ -5,8 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import os
+import pathlib
+import sys
 from types import SimpleNamespace
 
+import cloudpickle
 import pytest
 
 from torchtitan.config import OverrideConfig
@@ -483,6 +487,44 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
         )
 
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
+
+
+class _MarkerWorker:
+    """Its `close` leaves a file: the test can't read a worker process's memory."""
+
+    def __init__(self, marker_dir: str) -> None:
+        self.marker_dir = marker_dir
+
+    async def close(self) -> None:
+        pathlib.Path(self.marker_dir, f"closed-{os.getpid()}").touch()
+
+
+class _MarkerWorkerConfig:
+    def __init__(self, marker_dir: str) -> None:
+        self.marker_dir = marker_dir
+
+    def build(self) -> _MarkerWorker:
+        return _MarkerWorker(self.marker_dir)
+
+
+def test_the_close_endpoint_reaches_each_worker_process(tmp_path):
+    async def run():
+        system = MonarchActorSystem(MonarchActorSystem.Config())
+        # The worker processes can't import this test module, so ship the fakes by value.
+        cloudpickle.register_pickle_by_value(sys.modules[__name__])
+        try:
+            workers = await system.spawn_rollout_workers(
+                _MarkerWorkerConfig(str(tmp_path)),
+                num_workers=2,
+                num_threads=1,
+            )
+            await workers.close.call()
+            await system.stop_rollout_workers()
+        finally:
+            cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+    asyncio.run(run())
+    assert len(list(tmp_path.glob("closed-*"))) == 2
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
