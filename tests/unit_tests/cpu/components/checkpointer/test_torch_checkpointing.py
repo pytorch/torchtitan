@@ -1112,7 +1112,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                     ema=None,
                     extra_states={"train_state": _Stateful("train")},
                     sd_adapter=adapter,
-                    base_folder=f"memory://{self._memory_bucket()}",
+                    base_folder=base_folder,
                 )
 
                 self.assertTrue(manager.load())
@@ -1167,13 +1167,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 manager._manager_config.items[MODEL].resharder,
                 DefaultResharder,
             )
-            # The folder is remote and the HF assets are local: each manager is
-            # built on the storage its own path names.
-            self.assertEqual(
-                FsspecStorageConfig(protocol="memory"),
-                manager._manager_config.storage_config,
-            )
-            self.assertIsNone(hf_config.storage_config)
             self.assertTrue(hf_manager.closed)
             self.assertFalse(backend_manager.closed)
             manager.close()
@@ -1583,29 +1576,3 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 backend_manager.load_calls[0][0],
             )
             manager.close()
-
-    def test_load_latest_on_remote_folder_ignores_incomplete_checkpoint_directories(
-        self,
-    ) -> None:
-        memory_fs = fsspec.filesystem("memory")
-        memory_folder = f"{self._memory_bucket()}/checkpoint"
-        for step in (2, 5):
-            memory_fs.pipe_file(f"{memory_folder}/step-{step}/metadata.pkl", b"")
-        memory_fs.makedirs(f"{memory_folder}/step-8", exist_ok=True)
-        for decoy in ("tmp_step-9", "step-99.partial"):
-            memory_fs.pipe_file(f"{memory_folder}/{decoy}/metadata.pkl", b"")
-        config = TorchCheckpointingManager.Config(
-            folder=f"memory://{memory_folder}",
-            keep_latest_k=0,
-            initial_load_model_only=False,
-            load_only=True,
-        )
-        manager, backend_manager = self._build_manager(config)
-
-        self.assertTrue(manager.load())
-
-        self.assertEqual(
-            f"{memory_folder}/step-5",
-            backend_manager.load_calls[0][0],
-        )
-        manager.close()

@@ -478,6 +478,12 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         return True
 
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
+        """Whether automatic loading may select ``checkpoint_dir``.
+
+        Unlike ``_is_valid_checkpoint``, this excludes final Hugging Face exports.
+        Hugging Face checkpoint loading has not landed in torch_checkpointing yet,
+        so automatic loading cannot select those exports.
+        """
         # TODO: On a flat (non-HNS) GCS bucket the commit rename copies each
         # object and is not atomic, so a preempted commit can leave a step-N that
         # has metadata.pkl but not all of its shards, and this accepts it. Fixed
