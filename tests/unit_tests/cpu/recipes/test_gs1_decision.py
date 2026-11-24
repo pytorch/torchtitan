@@ -12,12 +12,12 @@ import torch
 
 from torchtitan.components.data.types import DatasetBuildContext
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan_recipes.decision.base import (
+from torchtitan.experiments.decision_distribution.recipe import (
     LETTERS,
     CandidateDistributionLoss,
     DecisionSampleProcessor,
 )
-from torchtitan_recipes.decision.prepare_gs1_data import flatten_record
+from torchtitan.experiments.decision_distribution.prepare_data import flatten_record
 
 
 class _Tokenizer(BaseTokenizer):

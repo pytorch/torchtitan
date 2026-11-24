@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Reusable components for candidate-distribution decision fine-tuning."""
+"""Experimental Qwen3.5 training on GS1-format candidate distributions."""
 
 import math
 from dataclasses import dataclass
@@ -32,7 +32,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import Configurable, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
@@ -120,15 +120,23 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Loss.Config):
-        candidate_token_ids: list[int]
+        candidate_token_ids: list[int] | None = None
+        tokenizer_path: str | None = None
         brier_weight: float = 1.0
 
     def __init__(self, config: Config) -> None:
         if not math.isfinite(config.brier_weight) or config.brier_weight < 0:
             raise ValueError("brier_weight must be finite and nonnegative")
-        if len(config.candidate_token_ids) != MAX_CANDIDATES:
+        candidate_token_ids = config.candidate_token_ids
+        if candidate_token_ids is None:
+            tokenizer = HuggingFaceTokenizer(tokenizer_path=config.tokenizer_path)
+            encoded = [tokenizer.encode(f" {letter}", add_bos=False, add_eos=False) for letter in LETTERS]
+            if any(len(ids) != 1 for ids in encoded):
+                raise ValueError("Each answer letter must encode as one token")
+            candidate_token_ids = [ids[0] for ids in encoded]
+        if len(candidate_token_ids) != MAX_CANDIDATES:
             raise ValueError("candidate_token_ids must contain IDs for A through Z")
-        self.candidate_token_ids = config.candidate_token_ids
+        self.candidate_token_ids = candidate_token_ids
         self.brier_weight = config.brier_weight
         self._candidate_ids_by_device: dict[str, torch.Tensor] = {}
         self._candidate_positions_by_device: dict[str, torch.Tensor] = {}
@@ -232,23 +240,16 @@ class DecisionLoss(ChunkedLossWrapper):
         )
 
 
-def build_candidate_distribution_config(
+def qwen3_5_distribution(
+    model_size: str = "0.8B",
     *,
-    model_config: Configurable.Config,
-    hf_assets_path: str,
-    data_path: str,
     parallelism: ParallelismConfig | None = None,
     brier_weight: float = 1.0,
-    max_context_length: int,
-    max_num_questions: int = 256,
-    steps: int = 600,
 ) -> Trainer.Config:
-    """Build the shared soft-candidate training plumbing for a model recipe.
-
-    Model families provide their own model config and asset path. This helper
-    is deliberately a function rather than a model-family base class: Jev's
-    hard-label recipe and GS1's distribution recipe have different objectives.
-    """
+    """Fine-tune a Qwen3.5 base model on GS1-format candidate distributions."""
+    max_num_questions, steps = 256, 600
+    hf_assets_path = f"./assets/hf/Qwen3.5-{model_size}"
+    data_path = "./assets/hf/gs1-distribution/train.jsonl"
     parallelism = parallelism or ParallelismConfig()
     if not math.isfinite(brier_weight) or brier_weight < 0:
         raise ValueError("brier_weight must be finite and nonnegative")
@@ -259,20 +260,12 @@ def build_candidate_distribution_config(
         or parallelism.expert_parallel_degree > 1
     ):
         raise ValueError("This decision recipe currently supports data parallelism only")
-    tokenizer = HuggingFaceTokenizer(tokenizer_path=hf_assets_path)
-    candidate_token_ids = [
-        tokenizer.encode(f" {letter}", add_bos=False, add_eos=False)
-        for letter in LETTERS
-    ]
-    if any(len(token_ids) != 1 for token_ids in candidate_token_ids):
-        raise ValueError("The tokenizer must encode each space-prefixed answer letter as one token")
-    candidate_token_ids = [token_ids[0] for token_ids in candidate_token_ids]
-    if len(set(candidate_token_ids)) != MAX_CANDIDATES:
-        raise ValueError("Answer-letter tokens must be distinct")
+    model_config = build_model_config(model_size, seq_len=8192, parallelism=parallelism)
+    max_context_length = model_config.max_context_length
     return Trainer.Config(
         loss=DecisionLoss.Config(
             loss_fn=CandidateDistributionLoss.Config(
-                candidate_token_ids=candidate_token_ids,
+                tokenizer_path=hf_assets_path,
                 brier_weight=brier_weight,
             ),
             max_num_supervised=max_num_questions,
@@ -285,6 +278,7 @@ def build_candidate_distribution_config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=1e-5, weight_decay=0.0)]
             ),
             lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=0,
                 decay_ratio=0.9,
                 decay_type="cosine",
                 min_lr_factor=0.1,
@@ -316,23 +310,4 @@ def build_candidate_distribution_config(
             last_save_in_hf=True,
             export_dtype="bfloat16",
         ),
-    )
-
-
-def gs1_decision(
-    model_size: str = "0.8B",
-    *,
-    parallelism: ParallelismConfig | None = None,
-    brier_weight: float = 1.0,
-) -> Trainer.Config:
-    """Build the GS1 distribution recipe using TorchTitan's current backbone."""
-    parallelism = parallelism or ParallelismConfig()
-    model_config = build_model_config(model_size, seq_len=8192, parallelism=parallelism)
-    return build_candidate_distribution_config(
-        model_config=model_config,
-        hf_assets_path=f"./assets/hf/GS1-{model_size}",
-        data_path="./assets/hf/gs1-distribution/train.jsonl",
-        parallelism=parallelism,
-        brier_weight=brier_weight,
-        max_context_length=model_config.max_context_length,
     )
