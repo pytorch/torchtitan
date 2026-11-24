@@ -42,7 +42,12 @@ The set of microbatches per window is unchanged; each moves at most
 ``window_size - 1`` steps (like the packer's own bin shuffling). Local
 balancing does not depend on the mesh, so it applies unchanged to
 dp_replicate, dp_shard, CP (CP peers read the same data and order it the same
-way), gradient accumulation, and pipeline-parallel microbatches. No order can
+way), and gradient accumulation when FSDP synchronizes every microbatch (the
+default). It does not help when ranks synchronize once per several
+microbatches: with pipeline parallelism, or with
+``defer_fsdp_gradient_reduction``, what matters is each rank's sum over the
+step's microbatches, which reordering within a window does not balance. No
+order can
 split a single document: a row that is one full-length document stays as
 heavy as it is.
 """
@@ -72,46 +77,75 @@ from torchtitan.config import Configurable
 logger = logging.getLogger(__name__)
 
 
-def document_attention_cost(
-    microbatch: TrainingMicrobatch, *, token_weight: float = 0.0
-) -> float:
-    """Relative compute cost of a token microbatch with document masking.
+def attention_cost(segment_lengths: Sequence[int]) -> int:
+    """Document-masked attention cost: ``sum(L ** 2)`` over attention segments.
 
-    ``cost = sum(document_length ** 2) + token_weight * num_non_padding_tokens``
+    Each token attends only to earlier tokens of its own segment, so this is
+    proportional to attention FLOPs. Linear layers cost the same for every
+    microbatch of a fixed size, padding included, so they do not change the
+    order.
+    """
+    return sum(length * length for length in segment_lengths)
 
-    Documents are maximal runs of consecutive positions over non-padding
-    tokens, so a position reset starts a new document::
 
-        positions     0 1 2 3 0 1 0 1 2 . .      (. = padding)
-        documents     [ 4   ] [2] [ 3 ]
-        cost          16 + 4 + 9 = 29
+def padding_segment_lengths(num_padding: int, max_context_length: int) -> list[int]:
+    """Segments of a padding tail whose positions reset every ``max_context_length``.
 
-    The squared term is proportional to document-masked attention FLOPs. The
-    token term covers linear layers; it only changes the order when rows hold
-    different numbers of non-padding tokens. Set ``token_weight`` to the
-    ratio of per-token linear cost to per-token-pair attention cost, about
-    the non-embedding parameters per layer divided by the hidden size. A fit
-    of Llama-3-8B step times on GB300 gives 57,220.
+    Collators and packers give padding positions ``arange(n) % max_context_length``,
+    so attention computes 10 padding tokens with ``max_context_length`` 4 as
+    segments ``[4, 4, 2]``.
+    """
+    num_full, rest = divmod(num_padding, max_context_length)
+    return [max_context_length] * num_full + ([rest] if rest else [])
+
+
+def positions_segment_lengths(positions: torch.Tensor) -> list[int]:
+    """Segments as the varlen attention metadata sees them.
+
+    ``create_varlen_metadata_for_document`` starts a segment at every
+    ``positions == 0``, padding included; the first token always starts one
+    (a row may begin mid-document)::
+
+        positions     5 6 7 0 1 0 1 2 | 0 1 2 3 4 0 1
+        segments      [ 3 ] [2] [ 3 ]   [   5   ] [2]
+
+    (``|``: padding starts; ``max_context_length`` = 5.)
+    """
+    positions = positions.reshape(-1)
+    if positions.numel() == 0:
+        return []
+    starts = positions == 0
+    starts[0] = True
+    return torch.bincount(torch.cumsum(starts, dim=0))[1:].tolist()
+
+
+def packed_attention_cost(
+    document_lengths: Sequence[int], *, num_tokens: int, max_context_length: int
+) -> int:
+    """``attention_cost`` of documents packed into ``num_tokens``, then padding.
+
+    For packing decisions made from lengths, before a microbatch exists (RL's
+    batcher): the segments are the documents plus the padding tail.
+    """
+    tail = padding_segment_lengths(
+        num_tokens - sum(document_lengths), max_context_length
+    )
+    return attention_cost([*document_lengths, *tail])
+
+
+def document_attention_cost(microbatch: TrainingMicrobatch) -> float:
+    """``attention_cost`` of a collated token microbatch, from its ``positions``.
+
+    Reading segments from ``positions`` matches the kernel exactly, including
+    per-document padding (``per_sample_pad_multiple``) and padding added by
+    both the packer and the collator.
     """
     if not isinstance(microbatch, TokenizedTrainingMicrobatch):
         raise ValueError(
             "document_attention_cost requires TokenizedTrainingMicrobatch, got "
             f"{type(microbatch).__name__}"
         )
-    positions = microbatch.positions.reshape(-1)
-    valid = ~microbatch.padding_mask.reshape(-1)
-    if positions.numel() == 0:
-        return 0.0
-    # A token starts a document if it is valid and does not continue the
-    # previous valid token's position run.
-    prev = torch.cat([positions.new_full((1,), -2), positions[:-1]])
-    prev_valid = torch.cat([valid.new_zeros(1), valid[:-1]])
-    starts = valid & ~(prev_valid & (positions == prev + 1))
-    doc_ids = torch.cumsum(starts.to(torch.int64), dim=0)[valid]
-    if doc_ids.numel() == 0:
-        return 0.0
-    lengths = torch.bincount(doc_ids).to(torch.float64)
-    return float(torch.dot(lengths, lengths)) + token_weight * doc_ids.numel()
+    return float(attention_cost(positions_segment_lengths(microbatch.positions)))
 
 
 class MicrobatchBalancer(Configurable, ABC):
@@ -124,8 +158,7 @@ class MicrobatchBalancer(Configurable, ABC):
         better but hold more collated microbatches in host memory and move
         microbatches further from their packed order."""
         cost_fn: Callable[[TrainingMicrobatch], float] = document_attention_cost
-        """Relative cost of one microbatch; use ``functools.partial`` to set the
-        weights of a cost function."""
+        """Relative cost of one microbatch."""
 
         def __post_init__(self) -> None:
             if self.window_size < 1:
@@ -155,6 +188,50 @@ class LocalBalancer(MicrobatchBalancer):
         return [rows[i] for i in sorted(range(len(rows)), key=lambda i: -costs[i])]
 
 
+def assign_sorted_bins_keep_local(
+    owners: Sequence[int], *, dp_degree: int
+) -> list[list[int]]:
+    """Assign D-wide rows of sorted bins to DP ranks, moving as few as possible.
+
+    The bins are sorted from highest to lowest cost; each run of D consecutive
+    bins is a row, one microbatch on every rank. ``owners[j]`` is the rank that
+    already holds bin ``j`` (data-parallel loaders split data across ranks
+    before balancing). Each bin stays on its owner when possible (at most one
+    per rank per row) and the rest go to the ranks left free. Returns, per
+    row, the bin index each rank trains.
+
+    One microbatch per rank per step only: then a row's cost is its heaviest
+    bin whatever the ranks, so keeping bins local is free. RL's batcher, which
+    gathers the batch in one place, uses the same rows with a different rank
+    choice (``torchtitan.rl.trainer.batcher.assign_sorted_bins_to_dp_ranks``).
+
+    TODO: a PP version (M microbatches per step) must also balance each rank's
+    step total, trading moves against balance (RL's planner balances step
+    totals but ignores where bins are).
+
+    Example:
+        # Sorted bins 9, 8 | 4, 3 held by ranks 0, 0 | 1, 1.
+        assign_sorted_bins_keep_local([0, 0, 1, 1], dp_degree=2)
+        # -> [[0, 1], [3, 2]]: rank 0 keeps 9 and sends 8 to rank 1;
+        #    rank 1 keeps 4 and sends 3 to rank 0.
+    """
+    assert dp_degree > 0 and len(owners) % dp_degree == 0
+    assignments = []
+    for row_start in range(0, len(owners), dp_degree):
+        slots: list[int | None] = [None] * dp_degree
+        moved = []
+        for bin_index in range(row_start, row_start + dp_degree):
+            if slots[owners[bin_index]] is None:
+                slots[owners[bin_index]] = bin_index
+            else:
+                moved.append(bin_index)
+        free = [rank for rank in range(dp_degree) if slots[rank] is None]
+        for rank, bin_index in zip(free, moved):
+            slots[rank] = bin_index
+        assignments.append([i for i in slots if i is not None])
+    return assignments
+
+
 def plan_window(costs: Sequence[Sequence[float]]) -> list[list[tuple[int, int]]]:
     """Plan one window across ``N`` ranks.
 
@@ -163,32 +240,19 @@ def plan_window(costs: Sequence[Sequence[float]]) -> list[list[tuple[int, int]]]
     (ties by rank, then index) and cut into ``W`` groups of ``N``: step ``k``
     runs the ``k``-th group, so each step's microbatches cost about the same.
     Within a step, each microbatch stays on the rank that holds it when it can
-    (at most one per rank); the rest go to the ranks left free. Deterministic,
-    so every rank computes the same plan from the same costs.
+    (``assign_sorted_bins_keep_local``). Deterministic, so every rank computes
+    the same plan from the same costs.
 
     Returns:
         ``plan[k][d] = (s, i)``: at step ``k``, rank ``d`` trains rank ``s``'s
         ``i``-th microbatch.
     """
-    num_ranks, window = len(costs), len(costs[0])
     order = sorted(
-        ((costs[s][i], s, i) for s in range(num_ranks) for i in range(window)),
+        ((cost, s, i) for s, row in enumerate(costs) for i, cost in enumerate(row)),
         key=lambda x: (-x[0], x[1], x[2]),
     )
-    plan = []
-    for k in range(window):
-        step: list[tuple[int, int] | None] = [None] * num_ranks
-        moved = []
-        for _, s, i in order[k * num_ranks : (k + 1) * num_ranks]:
-            if step[s] is None:
-                step[s] = (s, i)
-            else:
-                moved.append((s, i))
-        free = [d for d in range(num_ranks) if step[d] is None]
-        for d, src in zip(free, moved):
-            step[d] = src
-        plan.append([src for src in step if src is not None])
-    return plan
+    rows = assign_sorted_bins_keep_local([s for _, s, _ in order], dp_degree=len(costs))
+    return [[order[j][1:] for j in row] for row in rows]
 
 
 class GlobalBalancer(MicrobatchBalancer):

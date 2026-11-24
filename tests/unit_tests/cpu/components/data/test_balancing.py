@@ -14,6 +14,7 @@ from torchtitan.components.data.balancing import (
     document_attention_cost,
     LocalBalancer,
     MicrobatchBalancingIterDataset,
+    packed_attention_cost,
 )
 from torchtitan.components.data.collators import TextCollator
 from torchtitan.components.data.dataset import SingleDatasetConfig
@@ -25,18 +26,14 @@ from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 
-def _microbatch(doc_lens: list[int], seq: int = 16) -> TokenizedTrainingMicrobatch:
-    """A ``seq``-token microbatch holding the given documents, then padding."""
-    n = sum(doc_lens)
-    positions = torch.arange(seq)
-    positions[:n] = torch.cat([torch.arange(d) for d in doc_lens])
-    padding_mask = torch.arange(seq) >= n
-    zeros = torch.zeros(seq, dtype=torch.int64)
+def _microbatch(positions: list[int]) -> TokenizedTrainingMicrobatch:
+    n = len(positions)
+    zeros = torch.zeros(n, dtype=torch.int64)
     return TokenizedTrainingMicrobatch(
         input=zeros,
         labels=zeros,
-        positions=positions,
-        padding_mask=padding_mask,
+        positions=torch.tensor(positions),
+        padding_mask=torch.zeros(n, dtype=torch.bool),
         loss_token_counts=torch.tensor(n),
         routing_token_counts=torch.tensor([n]),
     )
@@ -50,11 +47,23 @@ def _iter(values: list[int], window_size: int):
 
 class TestBalancing(unittest.TestCase):
     def test_document_attention_cost(self):
-        # Sum of squared document lengths; padding is not a document.
-        self.assertEqual(document_attention_cost(_microbatch([3, 2, 7])), 62)
+        r = lambda n: list(range(n))  # positions of one segment
+        # Documents 3 and 5, then a padding tail of 8 (max_context_length 8):
+        # the same cost from positions as from lengths.
+        mb = _microbatch(r(3) + r(5) + r(8))
+        self.assertEqual(document_attention_cost(mb), 9 + 25 + 64)
         self.assertEqual(
-            document_attention_cost(_microbatch([3, 2]), token_weight=10.0), 63
+            document_attention_cost(mb),
+            packed_attention_cost([3, 5], num_tokens=16, max_context_length=8),
         )
+        # per_sample_pad_multiple 4: documents padded to 4 and 8, then a tail of 4.
+        self.assertEqual(document_attention_cost(_microbatch(r(4) + r(8) + r(4))), 96)
+        # Packer and collator tails of 4 each: segments 4 and 4, not one of 8.
+        self.assertEqual(
+            document_attention_cost(_microbatch(r(3) + r(5) + r(4) + r(4))), 66
+        )
+        # A row that starts mid-document: the leading run is its own segment.
+        self.assertEqual(document_attention_cost(_microbatch([5, 6, 7, 0, 1])), 13)
 
     def test_each_window_heaviest_first(self):
         out = list(_iter([3, 9, 1, 4, 2, 8, 5, 7, 6], window_size=4))

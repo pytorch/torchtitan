@@ -16,6 +16,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from torchtitan.components.data.balancing import (
+    assign_sorted_bins_keep_local,
     GlobalBalancer,
     MicrobatchBalancingIterDataset,
     plan_window,
@@ -73,6 +74,12 @@ def test_plan_window():
         [(0, 3), (1, 1)],
         [(0, 1), (1, 2)],
     ]
+
+
+def test_keep_local_assignment():
+    # Sorted bins 9, 8 | 4, 3 held by ranks 0, 0 | 1, 1: each row keeps one bin
+    # on its owner and moves the other to the free rank.
+    assert assign_sorted_bins_keep_local([0, 0, 1, 1], dp_degree=2) == [[0, 1], [3, 2]]
 
 
 @pytest.mark.parametrize("dp,cp,resume_at", [(4, 2, 0), (2, 1, 5)])

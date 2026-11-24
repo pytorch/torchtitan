@@ -9,6 +9,7 @@ from torchtitan.components.data.balancing import (
     GlobalBalancer,
     LocalBalancer,
     MicrobatchBalancer,
+    packed_attention_cost,
 )
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import (
@@ -56,6 +57,7 @@ __all__ = [
     "IndexedJsonlSource",
     "LocalBalancer",
     "MicrobatchBalancer",
+    "packed_attention_cost",
     "RandomAccessDataSource",
     "SampleProcessor",
     "SingleDatasetConfig",
