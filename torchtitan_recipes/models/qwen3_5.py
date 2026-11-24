@@ -162,6 +162,10 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
     )
     # TODO: re-enable once CUDA graph capture works with this PyTorch build.
     config.training.disable_accelerator_graphs = True
+    # The fused SwiGLU's backward overwrites w13's output with its gradient:
+    # one [T, 2, F] tensor less at the MLP backward peak (12 GiB at 256K tokens
+    # per rank). Lean remat recomputes the MLP, so no other op saves w13's output.
+    config.override.imports = ["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     return config
 
 
