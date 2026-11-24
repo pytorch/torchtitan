@@ -31,6 +31,7 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.rl.generator.attention.attention import fa4_takes_query_len_in_heads
 from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
 from torchtitan.rl.generator.model import validate_ep_token_dispatchers
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
@@ -305,14 +306,25 @@ class VLLMEngine(GenerationEngine):
                 "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
                 "with kernels the trainer does not run"
             )
-        if config.kv_cache_dtype == "fp8" and config.num_speculative_tokens > 0:
-            # TODO: support MTP drafts with fp8: `_verify_rows_as_decode` doesn't pass the
-            # fp8 descales to FA4 yet.
-            raise ValueError(
-                f"kv_cache_dtype='fp8' does not support num_speculative_tokens="
-                f"{config.num_speculative_tokens} yet: MTP verify rows don't pass the fp8 "
-                "descales to FA4"
+
+        if config.kv_cache_dtype == "fp8":
+            import flash_attn.cute
+
+            # An FA4 copy earlier on PYTHONPATH replaces the installed one: log which one runs.
+            logger.info(
+                f"fp8 KV cache: flash_attn.cute from {flash_attn.cute.__file__}"
             )
+            if config.num_speculative_tokens > 0 and not fa4_takes_query_len_in_heads():
+                # Without query_len_in_heads, fp8 verify rows would take the decode + fp32-tail
+                # path of `_verify_rows_as_decode`, which no engine run has measured with drafts.
+                # TODO: once a released FA4 takes query_len_in_heads, raise the FA4 floor and drop
+                # this check. DiffKV layers (V head dim != K's) take the tail path already.
+                raise RuntimeError(
+                    f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
+                    "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "
+                    f"flash_attn.cute comes from {flash_attn.cute.__file__}"
+                )
+
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
             _enable_breakable_cuda_graphs()
         if config.num_speculative_tokens > 0 and vision_processor is not None:

@@ -38,7 +38,10 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
-from torchtitan.rl.generator.attention.attention import paged_varlen_attention_out
+from torchtitan.rl.generator.attention.attention import (
+    fa4_takes_query_len_in_heads,
+    paged_varlen_attention_out,
+)
 from torchtitan.tools.utils import (
     activate_cuda_flash_attention_impl,
     get_cuda_flash_attention_impl,
@@ -390,6 +393,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata,
+                descales=descales,
             )
         if (
             current_flash_attention_impl() == "FA4"
@@ -445,6 +449,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
+        descales: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Attention of a verify step, every row ``n`` query tokens, on FA4's decode kernel.
 
@@ -455,6 +460,10 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             FA4 decode, 4 x heads        keys 0 .. L-4             every token
             here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
             merge                        logsumexp of the two parts
+
+        With fp8 ``descales`` (q, k, v), the decode call applies them and the tail dequantizes.
+        An FA4 whose SwapAB kernel takes ``query_len_in_heads`` runs fp8 rows as one call over
+        keys 0 .. L-1 instead; the kernel hides key L-4+i from tokens before token i.
         """
         num_rows = attn_metadata.seq_lens.shape[0]
         num_tokens, num_heads, head_dim = query.shape
@@ -469,8 +478,46 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         query_by_kv_head = query.view(
             num_rows, query_len, num_kv_heads, num_queries_per_kv, head_dim
         ).transpose(1, 2)
+        cu_seqlens_q = torch.arange(
+            num_rows + 1, device=query.device, dtype=torch.int32
+        )
+        # query_len_in_heads runs only on SwapAB, which a DiffKV layer's V head dim can refuse.
+        # TODO: two reorder copies (q, out) cost ~9 us per layer (26 rows, GB300). bf16 rows
+        # could take this call once torch's varlen API passes query_len_in_heads.
+        if (
+            descales is not None
+            and head_dim_v == head_dim
+            and fa4_takes_query_len_in_heads()
+        ):
+            out_by_kv_head = output.new_empty(
+                num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v
+            )
+            paged_varlen_attention_out(
+                out_by_kv_head.view(num_rows, -1, head_dim_v),
+                query_by_kv_head.reshape(num_rows, -1, head_dim),
+                key_cache,
+                value_cache,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=1,
+                max_seqlen_k=attn_metadata.max_seq_len,
+                seqused_k=attn_metadata.seq_lens,
+                block_table=attn_metadata.block_table,
+                scale=self.scale,
+                window_size=(-1, 0),
+                enable_gqa=True,
+                return_lse=False,
+                descales=descales,
+                query_len_in_heads=query_len,
+            )
+            output.view(num_rows, query_len, num_heads, head_dim_v).copy_(
+                out_by_kv_head.transpose(1, 2).reshape(
+                    num_rows, query_len, num_heads, head_dim_v
+                )
+            )
+            return output
+
         num_shared_keys = (attn_metadata.seq_lens - (query_len - 1)).clamp_(min=0)
-        shared_out = query.new_empty(
+        shared_out = output.new_empty(
             num_rows, num_kv_heads * query_len * num_queries_per_kv, head_dim_v
         )
         _, shared_lse = paged_varlen_attention_out(
@@ -478,9 +525,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             query_by_kv_head.reshape(num_rows, -1, head_dim),
             key_cache,
             value_cache,
-            cu_seqlens_q=torch.arange(
-                num_rows + 1, device=query.device, dtype=torch.int32
-            ),
+            cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=1,
             max_seqlen_k=attn_metadata.max_seq_len,
             seqused_k=num_shared_keys,
@@ -489,6 +534,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             window_size=(-1, 0),
             enable_gqa=True,
             return_lse=True,
+            descales=descales,
         )
         # [rows, KV heads, tokens, query heads per KV head]
         shared_lse = shared_lse.view(
@@ -508,11 +554,17 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         )
         pages = attn_metadata.block_table.gather(1, positions // page_size).long()
         offsets = positions % page_size
+        tail_queries = query_by_kv_head.float()
         tail_keys = key_cache[pages, offsets].float()
         tail_values = value_cache[pages, offsets].float()
-        tail_scores = torch.einsum(
-            "rkjgd,rikd->rkjgi", query_by_kv_head.float(), tail_keys
-        ).mul_(self.scale)
+        if descales is not None:
+            query_descale, key_descale, value_descale = descales
+            tail_queries = tail_queries * query_descale[:, :, None, None, None]
+            tail_keys = tail_keys * key_descale[:, None, :, None]
+            tail_values = tail_values * value_descale[:, None, :, None]
+        tail_scores = torch.einsum("rkjgd,rikd->rkjgi", tail_queries, tail_keys).mul_(
+            self.scale
+        )
         key_index = torch.arange(query_len - 1, device=query.device)
         token_index = torch.arange(query_len, device=query.device)
         is_future = key_index[None, :] >= token_index[:, None]
