@@ -22,7 +22,7 @@ from torchtitan.models.common.attn_gym import (
     bound_gate,
     causal_conv1d,
     chunk_kda,
-    ChunkKdaCudnn,
+    ChunkKdaWarpdrive,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -51,7 +51,7 @@ from .linear_attention import (
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
-for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaCudnn, _MaskRows):
+for _kernel_function in (_FusedGate, _ChunkKDA, ChunkKdaWarpdrive, _MaskRows):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 
@@ -343,10 +343,11 @@ class KDA(LinearAttention):
                     f"conv_kernel_size must be positive, got {self.conv_kernel_size}"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
+        def flops(self, positions: torch.Tensor) -> int:
             from torchtitan.models.common.flops import delta_rule_flops_per_token
 
-            return delta_rule_flops_per_token(
+            # The recurrent state has a fixed size, so every query costs the same.
+            return positions.numel() * delta_rule_flops_per_token(
                 num_heads=self.n_heads,
                 key_head_dim=self.head_dim,
                 v_head_dim=self.head_dim,

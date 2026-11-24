@@ -638,11 +638,7 @@ class TestDistMuonCpuOffload(DTensorTestBase):
     def device_type(self):
         return "cuda"
 
-    @property
-    def backend(self):
-        return "cpu:gloo,cuda:nccl"
-
-    @with_comms
+    @with_comms(backend="cpu:gloo,cuda:nccl")
     def test_accelerator_ns_device_matches_gpu_resident_run(self):
         mesh = init_device_mesh(
             self.device_type, (self.world_size,), mesh_dim_names=("dp_shard",)

@@ -35,6 +35,10 @@ ignore-words-list = ["assertin", "datas" ,"indx", "inpt", "nd", "socio-economic"
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+torchtitan = ["py.typed"]
+torchtitan_recipes = ["py.typed"]
+
 [tool.setuptools.packages.find]
 where = [""]
 # torchtitan_recipes is a second top-level package, listed so that

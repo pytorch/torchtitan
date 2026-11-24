@@ -31,7 +31,7 @@ from torchtitan.tools.utils import device_type
 __all__ = [
     "FusedSwiGLU",
     "fused_swiglu",
-    "silu_and_mul_backward_kernel",
+    "silu_and_mul_backward_kernel_",
     "silu_and_mul_forward_kernel",
     "silu_and_mul_op",
 ]
@@ -95,8 +95,6 @@ def _silu_and_mul_backward_kernel(
     grad_out,
     gate,
     up,
-    grad_gate,
-    grad_up,
     offsets,
     NUM_ROWS,  # Not constexpr: routed row counts change every step.
     NUM_COLS: tl.constexpr,
@@ -108,14 +106,14 @@ def _silu_and_mul_backward_kernel(
     GATE_COL_STRIDE: tl.constexpr,
     UP_ROW_STRIDE: tl.constexpr,
     UP_COL_STRIDE: tl.constexpr,
-    GRAD_GATE_ROW_STRIDE: tl.constexpr,
-    GRAD_GATE_COL_STRIDE: tl.constexpr,
-    GRAD_UP_ROW_STRIDE: tl.constexpr,
-    GRAD_UP_COL_STRIDE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
 ) -> None:
-    """Backward for ``_silu_and_mul_forward_kernel`` over defined rows."""
+    """Backward for ``_silu_and_mul_forward_kernel`` over defined rows.
+
+    Stores the gradients over ``gate`` and ``up``: each program loads its tiles
+    before storing, and tiles do not overlap.
+    """
     row_start = tl.program_id(0).to(tl.int64) * BLOCK_M
     row_limit = NUM_ROWS
     if HAS_OFFSETS:
@@ -150,16 +148,12 @@ def _silu_and_mul_backward_kernel(
     silu_grad = sigmoid * (1.0 + gate_values * (1.0 - sigmoid))
 
     tl.store(
-        grad_gate
-        + rows[:, None] * GRAD_GATE_ROW_STRIDE
-        + cols[None, :] * GRAD_GATE_COL_STRIDE,
+        gate + rows[:, None] * GATE_ROW_STRIDE + cols[None, :] * GATE_COL_STRIDE,
         grad_values * up_values * silu_grad,
         mask=mask,
     )
     tl.store(
-        grad_up
-        + rows[:, None] * GRAD_UP_ROW_STRIDE
-        + cols[None, :] * GRAD_UP_COL_STRIDE,
+        up + rows[:, None] * UP_ROW_STRIDE + cols[None, :] * UP_COL_STRIDE,
         grad_values * silu,
         mask=mask,
     )
@@ -201,18 +195,15 @@ def silu_and_mul_forward_kernel(
     return out
 
 
-def silu_and_mul_backward_kernel(
+def silu_and_mul_backward_kernel_(
     grad_out: torch.Tensor,
     gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Return the gradient of ``gate_up`` as one ``[R, 2, F]`` tensor."""
+) -> None:
+    """Overwrite ``gate_up [R, 2, F]`` with its gradient."""
     if offsets is not None and offsets.numel() == 0:
         raise ValueError("offsets must be non-empty when provided.")
     gate, up = gate_up.unbind(-2)
-    grad_gate_up = torch.empty_like(gate_up, memory_format=torch.contiguous_format)
-    # The kernel writes both halves of grad_gate_up in place.
-    grad_gate, grad_up = grad_gate_up.unbind(-2)
 
     block_m = _SILU_AND_MUL_BLOCK_M
     block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(gate.shape[1]))
@@ -221,8 +212,6 @@ def silu_and_mul_backward_kernel(
         grad_out,
         gate,
         up,
-        grad_gate,
-        grad_up,
         offsets if offsets is not None else gate,
         NUM_ROWS=gate.shape[0],
         NUM_COLS=gate.shape[1],
@@ -234,15 +223,10 @@ def silu_and_mul_backward_kernel(
         GATE_COL_STRIDE=gate.stride(1),
         UP_ROW_STRIDE=up.stride(0),
         UP_COL_STRIDE=up.stride(1),
-        GRAD_GATE_ROW_STRIDE=grad_gate.stride(0),
-        GRAD_GATE_COL_STRIDE=grad_gate.stride(1),
-        GRAD_UP_ROW_STRIDE=grad_up.stride(0),
-        GRAD_UP_COL_STRIDE=grad_up.stride(1),
         BLOCK_M=block_m,
         BLOCK_N=block_n,
         num_warps=8,
     )
-    return grad_gate_up
 
 
 @torch.library.custom_op(
@@ -267,26 +251,26 @@ def silu_and_mul_op_fake(
 
 
 @torch.library.custom_op(
-    "torchtitan::silu_and_mul_backward",
-    mutates_args=(),
+    "torchtitan::silu_and_mul_backward_",
+    mutates_args=("gate_up",),
     device_types=device_type,
 )
-def silu_and_mul_backward_op(
+def silu_and_mul_backward_op_(
     grad_out: torch.Tensor,
     gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Compute the gradient of ``gate_up`` for ``torchtitan::silu_and_mul``."""
-    return silu_and_mul_backward_kernel(grad_out, gate_up, offsets)
+) -> None:
+    """Overwrite ``gate_up`` with its gradient for ``torchtitan::silu_and_mul``."""
+    silu_and_mul_backward_kernel_(grad_out, gate_up, offsets)
 
 
-@silu_and_mul_backward_op.register_fake
+@silu_and_mul_backward_op_.register_fake
 def silu_and_mul_backward_op_fake(
     grad_out: torch.Tensor,
     gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
-) -> torch.Tensor:
-    return torch.empty_like(gate_up, memory_format=torch.contiguous_format)
+) -> None:
+    return None
 
 
 def silu_and_mul_autograd_backward(ctx, grad_out):
@@ -295,11 +279,20 @@ def silu_and_mul_autograd_backward(ctx, grad_out):
     else:
         (gate_up,) = ctx.saved_tensors
         offsets = None
-    return silu_and_mul_backward_op(grad_out, gate_up, offsets), None
+    # Saves a [R, 2, F] buffer. Nothing reads gate_up after this: its producer,
+    # w13, needs only its input and weight for backward.
+    silu_and_mul_backward_op_(grad_out, gate_up, offsets)
+    return gate_up, None
 
 
 def silu_and_mul_setup_context(ctx, inputs, output):
     gate_up = inputs[0]
+    if gate_up.is_leaf and gate_up.requires_grad:
+        raise ValueError(
+            "torchtitan::silu_and_mul overwrites gate_up with its gradient in "
+            "backward, so gate_up must be an autograd intermediate such as "
+            "w13's output, not a leaf tensor."
+        )
     offsets = inputs[1] if len(inputs) > 1 else None
     ctx.has_offsets = offsets is not None
     if offsets is None:
@@ -314,7 +307,16 @@ silu_and_mul_op.register_autograd(
 
 
 class FusedSwiGLU(BinaryActivationFn):
-    """SwiGLU activation implemented by the fused Triton operation."""
+    """SwiGLU activation implemented by the fused Triton operation.
+
+    Backward overwrites ``gate_up`` with its gradient instead of allocating a
+    new ``[T, 2, F]`` tensor. So ``gate_up`` must be ``w13``'s output, whose
+    backward needs only its input and weight, and no other op may save it:
+    saved-tensor hooks (remat, activation offload) skip autograd's version
+    check, so a second saver would silently read the gradient. For the same
+    reason ``gate_up`` can't be backpropagated through twice
+    (``retain_graph=True``).
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(BinaryActivationFn.Config):

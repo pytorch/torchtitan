@@ -16,6 +16,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
@@ -1058,6 +1059,40 @@ class TestUlysses(unittest.TestCase):
         self.assertEqual(2, group.size())
         self.assertEqual(spmd.S(1), src)
         self.assertEqual(spmd.S(0), dst)
+
+    def test_kv_head_copies_match_full_gqa(self):
+        # CP rank r gets the r-th contiguous head chunk after the all-to-all.
+        # Running GQA on each chunk must match GQA over all heads.
+        def gqa(q_THK, k_THK, v_THV):
+            out_HTV = F.scaled_dot_product_attention(
+                q_THK.transpose(0, 1),
+                k_THK.transpose(0, 1),
+                v_THV.transpose(0, 1),
+                enable_gqa=True,
+            )
+            return out_HTV.transpose(0, 1)
+
+        kernel = UlyssesFlexInnerAttention(UlyssesFlexInnerAttention.Config())
+        for n_heads, n_kv_heads, tp, cp in ((4, 2, 1, 4), (16, 4, 2, 4), (16, 4, 1, 8)):
+            with self.subTest(n_heads=n_heads, n_kv_heads=n_kv_heads, tp=tp, cp=cp):
+                q = torch.randn(8, n_heads, 16, dtype=torch.float64)
+                k, v = (
+                    torch.randn(8, n_kv_heads, 16, dtype=torch.float64)
+                    for _ in range(2)
+                )
+
+                def gqa_per_cp_rank(_, *qkv, cp=cp, **kwargs):
+                    chunks = zip(*(x.chunk(cp, dim=1) for x in qkv))
+                    return torch.cat([gqa(*c) for c in chunks], dim=1)
+
+                # Identity redistribute keeps every token on this process.
+                with _in_mesh(cp), mock.patch.object(
+                    spmd, "redistribute", lambda x, *a, **kw: x
+                ), mock.patch.object(FlexInnerAttention, "forward", gqa_per_cp_rank):
+                    tp_shards = zip(*(x.chunk(tp, dim=1) for x in (q, k, v)))
+                    out = torch.cat([kernel.forward(*s) for s in tp_shards], dim=1)
+
+                torch.testing.assert_close(out, gqa(q, k, v))
 
 
 class TestMLAContextParallelAttention(unittest.TestCase):

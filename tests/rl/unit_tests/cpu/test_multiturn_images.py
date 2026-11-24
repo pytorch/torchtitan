@@ -177,7 +177,7 @@ def test_rollout_keeps_each_image_on_its_placeholders(
             advantage=_Config(None),
         )
     )
-    env = TokenEnv.Config().build(
+    env = TokenEnv.Config(max_rollout_tokens=1024).build(
         message_env=_TwoImageEnv(image_paths), renderer=renderer
     )
     rollout = asyncio.run(

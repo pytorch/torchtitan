@@ -37,7 +37,7 @@ _OPTIONAL_PACKAGE_RECIPES = {
     "rl_grpo_moe_debug_dist_moe_tp2_ep4",
     "rl_dapo_qwen3_30b_a3b_math_8k_mxfp8",
 }
-# SoftCappedLinear head: LMHeadFP32OutputConverter can't convert it (see the recipe's TODO).
+# SoftCappedLinear head: LMHeadFP32OutputTransform can't convert it (see the recipe's TODO).
 _BF16_HEAD_RECIPES = {
     "rl_grpo_muse_glimmer_30b_search_r1",
     "rl_grpo_muse_glimmer_30b_terminal_bench",
@@ -69,6 +69,9 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
             if name not in _OPTIONAL_PACKAGE_RECIPES:
                 raise
             continue
+        # fp32 master weights. FSDP mixed precision still runs the trainer forward
+        # in precision.param_dtype, which the generator matches.
+        assert config.precision.dtype == "float32", name
         for model in (config.trainer.model, config.generator.model):
             is_fp32_head = isinstance(model.lm_head, HiMidLoLinear.Config)
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name
