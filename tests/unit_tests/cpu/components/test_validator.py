@@ -300,6 +300,7 @@ def _flux_validator(loader):
     validator.clip_encoder = None
     validator.t5_encoder = None
     validator.dump_folder = "."
+    validator._noise_seed = 17
     return validator
 
 
@@ -318,12 +319,16 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
     validator = _flux_validator(loader)
 
     def preprocess_data(**kwargs):
+        from torchtitan.models.flux.autoencoder import DiagonalGaussian
+
+        gaussian = DiagonalGaussian.Config().build()
+        encodings = gaussian(torch.zeros(1, 2, 2, 2), generator=kwargs["generator"])
         if raises:
             raise RuntimeError("validation failed")
         batch = kwargs["batch"]
         return {
             **batch,
-            "img_encodings": torch.zeros(1, 1, 2, 2),
+            "img_encodings": encodings,
             "clip_encodings": torch.zeros(1, 1),
             "t5_encodings": torch.zeros(1, 1, 1),
         }
@@ -336,6 +341,7 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         lambda *args: torch.zeros(1, 1, 3),
     )
     monkeypatch.setattr(flux_validator_module.dist_utils, "device_type", "cpu")
+    rng_before = torch.get_rng_state().clone()
     if raises:
         with pytest.raises(RuntimeError, match="validation failed"):
             validator.validate([_FluxModel()], step=1)
@@ -343,6 +349,7 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         validator.validate([_FluxModel()], step=1)
 
     assert loader.closed
+    torch.testing.assert_close(torch.get_rng_state(), rng_before, rtol=0, atol=0)
     validator.metrics_processor.reset.assert_called_once()
 
 
@@ -382,7 +389,17 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
 
     def generate_image(**kwargs):
         assert spmd_context_active
+        from torchtitan.models.flux.utils import generate_noise_latent
+
         generated.update(kwargs)
+        generated["noise"] = generate_noise_latent(
+            1,
+            16,
+            16,
+            torch.device("cpu"),
+            torch.float32,
+            generator=kwargs["generator"],
+        )
         return torch.zeros(3, kwargs["img_height"], kwargs["img_width"])
 
     monkeypatch.setattr(flux_validator_module, "generate_image", generate_image)
@@ -406,11 +423,20 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
     )
     monkeypatch.setattr(flux_validator_module.dist_utils, "device_type", "cpu")
 
+    rng_before = torch.get_rng_state().clone()
     validator.validate([_FluxModel()], step=1)
+    first_noise = generated["noise"].clone()
+    torch.testing.assert_close(torch.get_rng_state(), rng_before, rtol=0, atol=0)
+    # A new validation call must repeat its private noise even after training draws.
+    torch.rand(7)
+    rng_before = torch.get_rng_state().clone()
+    validator.validate([_FluxModel()], step=2)
+    torch.testing.assert_close(generated["noise"], first_noise, rtol=0, atol=0)
+    torch.testing.assert_close(torch.get_rng_state(), rng_before, rtol=0, atol=0)
 
     assert generated["img_height"] == 6
     assert generated["img_width"] == 10
-    assert spmd_context_entries == 2
+    assert spmd_context_entries == 4
 
 
 def test_generic_validator_raises_on_zero_validation_batches(monkeypatch):

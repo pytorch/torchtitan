@@ -374,11 +374,13 @@ class DiagonalGaussian(Module):
         self.sample = config.sample
         self.chunk_dim = config.chunk_dim
 
-    def forward(self, z: Tensor) -> Tensor:
+    def forward(self, z: Tensor, generator: torch.Generator | None = None) -> Tensor:
         mean, logvar = torch.chunk(z, 2, dim=self.chunk_dim)
         if self.sample:
             std = torch.exp(0.5 * logvar)
-            return mean + std * torch.randn_like(mean)
+            return mean + std * torch.randn(
+                mean.shape, device=mean.device, dtype=mean.dtype, generator=generator
+            )
         else:
             return mean
 
@@ -420,8 +422,8 @@ class AutoEncoder(Module):
         self.scale_factor = config.scale_factor
         self.shift_factor = config.shift_factor
 
-    def encode(self, x: Tensor) -> Tensor:
-        z = self.reg(self.encoder(x))
+    def encode(self, x: Tensor, generator: torch.Generator | None = None) -> Tensor:
+        z = self.reg(self.encoder(x), generator=generator)
         z = self.scale_factor * (z - self.shift_factor)
         return z
 

@@ -114,6 +114,7 @@ def test_denoise_shifts_schedule_by_packed_sequence_length(img_size, expected):
         seen_timesteps.append(timesteps[0].item())
         return torch.zeros_like(img)
 
+    rng_before = torch.get_rng_state().clone()
     flux_sampling.denoise(
         device=torch.device("cpu"),
         dtype=torch.float32,
@@ -123,8 +124,10 @@ def test_denoise_shifts_schedule_by_packed_sequence_length(img_size, expected):
         denoising_steps=denoising_steps,
         clip_encodings=torch.zeros(1, 768),
         t5_encodings=torch.zeros(1, 1, 4096),
+        generator=torch.Generator().manual_seed(17),
     )
 
+    torch.testing.assert_close(torch.get_rng_state(), rng_before, rtol=0, atol=0)
     torch.testing.assert_close(
         torch.tensor(seen_timesteps), torch.tensor(expected), atol=1e-4, rtol=0
     )

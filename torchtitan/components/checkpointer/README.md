@@ -133,3 +133,43 @@ python -m torch.distributed.checkpoint.format_utils dcp_to_torch torchtitan/outp
 
 
 That's it. You have now successfully converted a sharded `torchtitan` checkpoint for use with pytorch formats.
+
+### Rank-local RNG state (DCP)
+
+Set `CheckpointManager.Config(enable_rng_state=True)` to include Torch CPU RNG state and the initialized current accelerator's global random stream in full DCP checkpoints.
+This is opt-in and is currently supported by the DCP backend only. TorchFT
+rejects this option because its per-replica participation requires a separate RNG
+checkpoint contract. Each global
+rank writes its own `rng_state.rank_<rank>` entry: DCP treats a shared key as
+replicated state, so using one common key would discard other ranks' streams.
+Snapshots are serialized to immutable bytes before asynchronous staging starts.
+
+Restore happens after the model, optimizer, scheduler and loader have loaded.
+The default Grain loader restores its already-created iterator. Custom loaders
+must complete iterator preparation in `load_state_dict`; lazy setup that consumes
+training RNG after restoration breaks continuation. Python and NumPy global streams, dataset worker streams and
+explicit `torch.Generator`, NumPy `Generator`, or Python `Random` objects remain
+owned by their components and must be checkpointed there.
+
+Flux training consumes global RNG for noise, timesteps and autoencoder sampling.
+Its validator uses a separate generator, reset to the rank's initial training seed
+on each validation call. This isolates validation from training, including image
+generation and autoencoder sampling. It intentionally changes Flux validation
+noise and the training trajectory after validation compared with older versions.
+Other custom validators must likewise avoid consuming training RNG.
+
+Old checkpoints without RNG records still restore other training state, with a
+warning that RNG continuity is unavailable. A different rank set or initialized
+accelerator backend also warns and skips RNG restoration on every rank. This does
+not override the loader's or model's own compatibility checks. To deliberately
+skip RNG restoration, include `"rng_state"` in `exclude_from_loading` while RNG
+checkpointing is enabled, or disable `enable_rng_state`. Model-only exports and
+loads omit RNG. Loads excluding the optimizer also omit RNG so evaluation can
+retain the saved training step without inheriting training streams.
+
+Exact continuation additionally requires unchanged parallel layout, rank mapping,
+software, data and deterministic operations. Equal world size and accelerator backend
+cannot establish those conditions. This feature does not enable deterministic
+kernels, support topology-independent replay, or guarantee bitwise results from
+nondeterministic kernels. Accelerator modules must expose initialized-state and current-device RNG APIs.
+CUDA is hardware-tested; other accelerator backends are not.
