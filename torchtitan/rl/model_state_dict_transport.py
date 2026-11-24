@@ -58,6 +58,12 @@ class StagedPiece(NamedTuple):
 
 
 @dataclass(frozen=True, slots=True)
+class ModelStateDictTransferMetadata:
+    """Small control-plane metadata returned by one trainer rank's push, which the
+    controller forwards unchanged to generator reads. Empty for full sync."""
+
+
+@dataclass(frozen=True, slots=True)
 class TrainerSource:
     """What a generator rank needs to read one trainer rank's staging buffer."""
 
@@ -69,7 +75,7 @@ class TrainerSource:
     url: bytes
 
 
-class _Read(NamedTuple):
+class Read(NamedTuple):
     source: int
     """Index of the trainer rank in the generator's sources."""
     byte_offset: int
@@ -112,7 +118,7 @@ def _global_offset_and_local_shape(
     return tuple(offset), tuple(shape)
 
 
-def _pinned_buffer(nbytes: int) -> torch.Tensor:
+def pinned_buffer(nbytes: int) -> torch.Tensor:
     """A pinned CPU byte buffer, pageable without an accelerator."""
     if not torch.cuda.is_available():
         return torch.empty(
@@ -126,7 +132,7 @@ def _pinned_buffer(nbytes: int) -> torch.Tensor:
     return buffer
 
 
-def _local(tensor: torch.Tensor) -> torch.Tensor:
+def local_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.to_local() if isinstance(tensor, DTensor) else tensor
 
 
@@ -224,7 +230,7 @@ def _plan_reads(
     *,
     rank: int,
     generator_index: int,
-) -> tuple[list[_Read], dict[str, list[_PackedPiece]]]:
+) -> tuple[list[Read], dict[str, list[_PackedPiece]]]:
     """Plan the reads that fill generator rank ``rank``'s shards from the trainer.
 
     Each staged piece is read whole, into the key's prefetch buffer at the next
@@ -271,7 +277,7 @@ def _plan_reads(
                 )
             numel = math.prod(piece.shape)
             reads.append(
-                _Read(
+                Read(
                     source,
                     piece.byte_offset,
                     numel * shard.dtype.itemsize,
@@ -316,7 +322,11 @@ class ModelStateDictTransport(Configurable):
     out per generator rank; each generator rank reads its pieces from every trainer
     rank directly into its own registered prefetch buffers.
 
-    Trainer: ``register_trainer_source`` once, then ``stage`` per push.
+    ``ModelStateDictDeltaTransport`` (its own ``Config``) reads only the changes
+    after the first pull.
+
+    Trainer: ``register_trainer_source`` once, then ``stage`` and
+    ``prepare_transfer`` per push.
     Generator: ``connect_generator`` once, then ``read`` per prefetch and
     ``copy_prefetched_`` per load.
     """
@@ -344,6 +354,7 @@ class ModelStateDictTransport(Configurable):
         # the prefetch buffers; and (shard index, packed view) per piece of each
         # packed key.
         self._reads: list[tuple[Any, Any]] | None = None
+        self._read_plan: list[Read] = []
         self._prefetched: dict[str, torch.Tensor] = {}
         self._packed: dict[str, list[tuple[tuple[slice, ...], torch.Tensor]]] = {}
 
@@ -388,7 +399,7 @@ class ModelStateDictTransport(Configurable):
             boxes[key] = _global_offset_and_local_shape(tensor)
 
         pieces, nbytes = _staged_pieces(boxes, generator_rank_layouts)
-        staging = _pinned_buffer(max(nbytes, 1))
+        staging = pinned_buffer(max(nbytes, 1))
         memory = self._transport.register_memory(staging)
         self._staging_plan = {}
         copied = set()
@@ -419,14 +430,20 @@ class ModelStateDictTransport(Configurable):
             for key, (dtype, copies) in self._staging_plan.items():
                 # Cast on the device: a casting device-to-host copy_ goes through
                 # a pageable temporary and casts on the CPU.
-                local = _local(model_state_dict[key]).to(dtype)
+                local = local_tensor(model_state_dict[key]).to(dtype)
                 for index, view in copies:
                     view.copy_(local[index], non_blocking=True)
+
+    def prepare_transfer(self) -> ModelStateDictTransferMetadata:
+        """Prepare the push staged by ``stage``, once its copies have completed,
+        for generators to read, and return the metadata they read it with."""
+        return ModelStateDictTransferMetadata()
 
     def connect_generator(
         self,
         prefetched_model_state_dict: dict[str, torch.Tensor],
         *,
+        load_groups: list[list[str]],
         sources: list[TrainerSource],
         rank: int,
         generator_index: int,
@@ -438,6 +455,9 @@ class ModelStateDictTransport(Configurable):
             prefetched_model_state_dict: The buffers ``read`` fills, whose
                 ``shard_layout`` the trainer staged for. Packed keys hold
                 their pieces out of place; load them with ``copy_prefetched_``.
+            load_groups: The keys of each ``copy_prefetched_`` call of a load
+                (e.g. each FSDP group's), covering every prefetched key. Delta
+                sync applies each group's changes at once.
             sources: Every trainer rank's ``register_trainer_source`` result.
             rank: This rank within its generator.
             generator_index: Index of this rank's generator.
@@ -451,7 +471,7 @@ class ModelStateDictTransport(Configurable):
         for source in sources:
             self._transport.connect(source.url)
         locals_ = {
-            key: _local(tensor).view(-1)
+            key: local_tensor(tensor).view(-1)
             for key, tensor in prefetched_model_state_dict.items()
         }
         # Only keys with reads: backends reject registering empty tensors.
@@ -466,6 +486,7 @@ class ModelStateDictTransport(Configurable):
             )
             for r in reads
         ]
+        self._read_plan = reads
         self._prefetched = prefetched_model_state_dict
         self._packed = {
             key: [
@@ -480,8 +501,13 @@ class ModelStateDictTransport(Configurable):
             for key, pieces in packed.items()
         }
 
-    async def read(self) -> None:
+    async def read(
+        self, metadata_by_trainer_rank: tuple[ModelStateDictTransferMetadata, ...]
+    ) -> None:
         """Fill the prefetch buffers from the trainer's staging buffers.
+
+        ``metadata_by_trainer_rank`` is returned by the same trainer ranks whose
+        ``TrainerSource`` values were passed to ``connect_generator``.
 
         A timeout leaves the transfers in flight: the prefetch buffers are
         undefined and the job must restart.
@@ -508,7 +534,7 @@ class ModelStateDictTransport(Configurable):
                     tensor.copy_(self._prefetched[key])
                     continue
                 unpacked = True
-                local = _local(tensor)
+                local = local_tensor(tensor)
                 for index, view in pieces:
                     local[index].copy_(view, non_blocking=True)
         # Packed copies are async; finish them before the next read reuses
