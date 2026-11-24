@@ -7,6 +7,7 @@
 """Llama 3 GraphTrainer configurations used by tests."""
 
 from torchtitan.components.loss import CrossEntropyLoss
+from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -25,7 +26,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.llama3 import build_model_config as build_llama3_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer
 
-from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
+from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_transform
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
@@ -55,11 +56,9 @@ def graph_trainer_llama3_debugmodel_mxfp8() -> GraphTrainer.Config:
     base.model = build_llama3_model_config(
         "debugmodel_mxfp8",
         seq_len=base.model.max_context_length,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
         parallelism=base.parallelism,
     )
+    base = apply_transforms(base, [llama3_mxfp8_linear_transform()])
     config = to_graph_trainer_config(base, GraphTrainerLlama3Model.Config)
     config.compile = GraphTrainerCompileConfig()
     return config

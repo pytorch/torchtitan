@@ -13,10 +13,6 @@ from functools import partial
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.common import (
     BatchWiseLoadBalanceLoss,
     ColumnParallelLinear,
@@ -58,6 +54,7 @@ from torchtitan.models.common.moe.sharding import (
 )
 from torchtitan.models.common.moe.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.common.rope import YaRNScalingConfig
 from .model import GptOssAttention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear
 from .sharding import attention_sharding_config, routed_expert_linear_sharding_config
@@ -336,12 +333,7 @@ def _debugmodel(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(factor=32, truncate=False),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -395,12 +387,7 @@ def _20b(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(factor=32, truncate=False),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -454,12 +441,7 @@ def _120b(
                 dim=64,
                 max_context_length=seq_len,
                 theta=150000.0,
-                scaling="yarn",
-                rope_factor=32,
-                beta_fast=32.0,
-                beta_slow=1.0,
-                truncate=False,
-                original_seq_len=4096,
+                scaling=YaRNScalingConfig(factor=32, truncate=False),
             ),
             enable_sp=parallelism.enable_sequence_parallel,
             enable_ep=parallelism.expert_parallel_degree > 1,
@@ -480,7 +462,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> GptOssModel.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -494,8 +475,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

@@ -38,7 +38,6 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.deepseek_v4 import build_model_config, DeepSeekV4Model
 from torchtitan.models.deepseek_v4.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 _NSCoefficients = tuple[float, float, float]
@@ -309,12 +308,6 @@ def deepseek_v4_debugmodel(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -381,12 +374,6 @@ def deepseek_v4_mtp_debugmodel(
         loss=MTPCrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -436,12 +423,6 @@ def deepseek_v4_flash(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -489,12 +470,6 @@ def deepseek_v4_pro(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
-        ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,

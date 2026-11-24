@@ -24,6 +24,7 @@ import torch
 from torchtitan.components.data.multimodal.mrope import get_mrope_positions
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.data.padding import append_padded_segment
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
@@ -37,6 +38,7 @@ from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSampleBuilder,
     TrainingSampleGroup,
 )
+from torchtitan.tools.utils import round_up
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +142,7 @@ class TrainerStepBatch:
     """
 
     # [num_groups][num_microbatches_per_group][dp_degree]; under PP, each group runs as one
-    # pipeline step. RDMAMicrobatches when `rdma_min_tensor_bytes` is set.
+    # pipeline step. RDMAMicrobatches unless `rdma_min_tensor_bytes` is None.
     microbatch_groups: (
         list[list[list[TrainingMicrobatch]]] | list[list[list[RDMAMicrobatch]]]
     )
@@ -236,13 +238,14 @@ class Batcher(Configurable):
             dp_degree=2,
             pad_id=0,
             temperature=1.0,
+            register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
         pending, _ = batcher.add_training_samples(training_sample_group=group0)
         batch, _ = batcher.add_training_samples(training_sample_group=group1)
         # pending is None; batch.microbatch_groups: [num_groups][1][2 ranks];
-        # each TrainingMicrobatch.input: [256 tokens]
+        # each RDMAMicrobatch reads back a TrainingMicrobatch with input: [256 tokens]
 
-    With `rdma_min_tensor_bytes` set, it returns `RDMAMicrobatch`es registered with
+    Unless `rdma_min_tensor_bytes` is None, it returns `RDMAMicrobatch`es registered with
     `register_rdma_microbatch`, the actor system's RDMA registration (e.g.
     `MonarchRDMAMicrobatch.register`), which is then required.
 
@@ -255,9 +258,9 @@ class Batcher(Configurable):
     class Config(Configurable.Config):
         num_mtp_layers: int = 0
         """Model-derived MTP depth used while preparing token counts."""
-        per_sample_pad_multiple: int | None = None
-        """When non-zero, pad each sample to a multiple of this value
-        before packing. Used by flex attention in batch-invariant mode
+        per_sample_pad_multiple: int = 1
+        """Pad each sample to this multiple after shifting labels, before packing.
+        1 leaves lengths unchanged. Used by flex attention in batch-invariant mode
         so that block boundaries align regardless of batch composition."""
         max_num_documents: int | None = None
         """Maximum non-padding document segments per local trainer microbatch.
@@ -265,14 +268,16 @@ class Batcher(Configurable):
         When unset, the trainer uses the microbatch token capacity as the
         CUDA-graph-safe metadata bound without imposing a tighter packing cap.
         """
-        rdma_min_tensor_bytes: int | None = None
+        rdma_min_tensor_bytes: int | None = 1024
         """Send microbatch tensors of at least this many bytes as RDMA buffers (the actor system's
         `RDMAMicrobatch`), not in the RPC message:
-            None (default): every tensor in the message.
-            e.g. 1024: tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty tensors go in the message.
-        The Monarch actor system uses ibverbs where the host has it, else TCP; a host that lists unusable
-        ibverbs devices fails instead. MONARCH_RDMA_DISABLE_IBVERBS=1 forces TCP in every process, weight sync
-        included."""
+            None: every tensor in the message.
+            1024 (default): tensors >= 1 KiB stay in the batcher; token counts (8 B) and empty
+            tensors go in the message.
+        1 KiB because registering a buffer costs far more than sending a few bytes.
+        Monarch uses ibverbs where the host has it, else TCP. With neither, spawning the batcher raises.
+        A host that lists ibverbs devices it can't use fails at the first batch: set None, or
+        MONARCH_RDMA_DISABLE_IBVERBS=1 (TCP in every process, weight sync included)."""
         build_mrope_positions: bool = False
         """Give microbatches with images 3D M-RoPE positions (``mrope_positions``), as SFT's
         ``MultiModalCollator.Config.build_mrope_positions`` does: True for models whose image
@@ -286,6 +291,8 @@ class Batcher(Configurable):
         def __post_init__(self) -> None:
             if self.num_mtp_layers < 0:
                 raise ValueError("num_mtp_layers must be non-negative")
+            if self.per_sample_pad_multiple < 1:
+                raise ValueError("per_sample_pad_multiple must be positive")
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
             if (
@@ -316,21 +323,19 @@ class Batcher(Configurable):
             and register_rdma_microbatch is None
         ):
             raise ValueError(
-                "rdma_min_tensor_bytes is set, but no register_rdma_microbatch was given: "
-                "the batcher must run in an actor system that provides RDMA."
+                f"rdma_min_tensor_bytes={config.rdma_min_tensor_bytes} needs register_rdma_microbatch, "
+                "which only an actor system provides. Set rdma_min_tensor_bytes=None for an "
+                "in-process batcher."
             )
         self._training_sample_builder = config.training_sample_builder.build()
         self.seq_len = max_context_length
-        self._num_rows_per_microbatch, remainder = divmod(
-            num_tokens_per_microbatch_per_dp_rank,
-            max_context_length,
-        )
-        if remainder:
+        if num_tokens_per_microbatch_per_dp_rank < max_context_length:
             raise ValueError(
                 "num_tokens_per_microbatch_per_dp_rank "
-                f"({num_tokens_per_microbatch_per_dp_rank}) must be divisible by "
+                f"({num_tokens_per_microbatch_per_dp_rank}) must be at least "
                 f"max_context_length ({max_context_length})."
             )
+        self._num_tokens_per_microbatch = num_tokens_per_microbatch_per_dp_rank
         self.pad_id = pad_id
         self._temperature = temperature
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
@@ -419,11 +424,12 @@ class Batcher(Configurable):
                 dp_degree=1,
                 pad_id=0,
                 temperature=1.0,
+                register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             )
             batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
             batcher.add_training_samples(training_sample_group=group1)  # -> (TrainerStepBatch, True)
         """
-        # Drop samples longer than seq_len: can't fill a row
+        # Drop samples longer than seq_len, the model's context length
         samples = training_sample_group.training_samples
         kept = [s for s in samples if self.num_tokens_to_pack(s) <= self.seq_len]
         num_dropped = len(samples) - len(kept)
@@ -648,7 +654,7 @@ class Batcher(Configurable):
         ``[G * M][D]``; the trainer runs each M consecutive microbatches as
         one pipeline step.
         """
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_rank = self._num_tokens_per_microbatch
 
         # Step 1: find the bin count with FFD, retaining its fallback packing.
         ordered_samples = sorted(
@@ -717,7 +723,7 @@ class Batcher(Configurable):
         For packed sample lengths L and token capacity T, let
         ``q, r = divmod(T - sum(L), seq_len)``. The estimate is
         ``sum(L**2) + q * seq_len**2 + r**2``. Padding positions reset at
-        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2``.
+        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2 + (T % seq_len)**2``.
         This models the existing padding segments without increasing their
         number or changing fixed-size varlen metadata.
         """
@@ -726,7 +732,7 @@ class Batcher(Configurable):
         sample_lengths = [
             self.num_tokens_to_pack(sample) for sample in training_samples
         ]
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_bin = self._num_tokens_per_microbatch
         num_full_padding_segments, remaining_padding = divmod(
             num_tokens_per_bin - sum(sample_lengths), self.seq_len
         )
@@ -753,7 +759,7 @@ class Batcher(Configurable):
         Return None if token or document capacity blocks a sample; the caller
         then discards this partial assignment and uses the FFD fallback.
         """
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_bin = self._num_tokens_per_microbatch
         bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
         bin_num_tokens = [0] * target_num_bins
         bin_workloads = [self._attention_workload([])] * target_num_bins
@@ -810,7 +816,7 @@ class Batcher(Configurable):
         either appends a non-empty bin or stops and pads the remaining slots, so
         neither loop can stall when no further redistribution is possible.
         """
-        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_bin = self._num_tokens_per_microbatch
         donor_heap = [
             (-self._attention_workload(bin_), -len(bin_), index)
             for index, bin_ in enumerate(bins)
@@ -893,14 +899,11 @@ class Batcher(Configurable):
 
         Example:
 
-            # token_ids of length 6, per_sample_pad_multiple=None  -> 5
+            # token_ids of length 6, per_sample_pad_multiple=1     -> 5
             # token_ids of length 6, per_sample_pad_multiple=8     -> 8
         """
         num_tokens = len(training_sample.token_ids) - 1
-        if self._per_sample_pad_multiple:
-            multiple = self._per_sample_pad_multiple
-            num_tokens = ((num_tokens + multiple - 1) // multiple) * multiple
-        return num_tokens
+        return round_up(num_tokens, self._per_sample_pad_multiple)
 
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality, and move the image path (`_pack_image_inputs`, the
@@ -922,9 +925,10 @@ class Batcher(Configurable):
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
-        packed_fields: dict[str, list[np.ndarray]] = {key: [] for key in keys}
-        positions: list[np.ndarray] = []
-        padding_mask: list[np.ndarray] = []
+        packed_fields: dict[str, list[np.ndarray]] = {
+            key: [] for key in (*keys, "positions", "padding_mask")
+        }
+        sample_lens: list[int] = []
 
         def pad(key: str, num_tokens: int) -> np.ndarray:
             return np.full(num_tokens, pad_values[key], dtype=_DTYPES[key])
@@ -938,40 +942,40 @@ class Batcher(Configurable):
                 "loss_mask": training_sample.loss_mask[1:],
                 "advantages": training_sample.advantage[1:],
             }
-            sample_len = len(sample["input_ids"])
-            unpadded_len = sample_len
+            sample_len = append_padded_segment(
+                packed_fields,
+                sample,
+                per_sample_pad_multiple=self._per_sample_pad_multiple,
+                pad_values=pad_values,
+                padding_mask=None,
+            )
+            sample_lens.append(sample_len)
 
-            # pad to multiple
-            if self._per_sample_pad_multiple:
-                align = self._per_sample_pad_multiple
-                sample_len = ((sample_len + align - 1) // align) * align
-
-            # extend row
-            for key in keys:
-                packed_fields[key] += [sample[key], pad(key, sample_len - unpadded_len)]
-            positions.append(np.arange(sample_len, dtype=np.int64))
-            padding_mask.append(np.arange(sample_len) >= unpadded_len)
-
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
-        sample_lens = [len(sample_positions) for sample_positions in positions]
+        num_tokens_per_rank = self._num_tokens_per_microbatch
         pad_len = num_tokens_per_rank - sum(sample_lens)
         assert pad_len >= 0
         if pad_len > 0:
             for key in keys:
                 packed_fields[key].append(pad(key, pad_len))
-            positions.append(np.arange(pad_len, dtype=np.int64) % self.seq_len)
-            padding_mask.append(np.ones(pad_len, dtype=bool))
+            packed_fields["positions"].append(
+                np.arange(pad_len, dtype=np.int64) % self.seq_len
+            )
+            packed_fields["padding_mask"].append(np.ones(pad_len, dtype=bool))
 
         # Concatenate into the packed dtype (e.g. float64 logprobs -> float32); torch.from_numpy doesn't copy
         packed = {
-            key: torch.from_numpy(np.concatenate(arrays, dtype=_DTYPES[key]))
-            for key, arrays in packed_fields.items()
+            key: torch.from_numpy(
+                np.concatenate(packed_fields[key], dtype=_DTYPES[key])
+            )
+            for key in keys
         }
         generator_logprobs = packed["generator_logprobs"]
         loss_mask = packed["loss_mask"]
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
-        positions_tensor = torch.from_numpy(np.concatenate(positions))
-        padding_mask_tensor = torch.from_numpy(np.concatenate(padding_mask))
+        positions_tensor = torch.from_numpy(np.concatenate(packed_fields["positions"]))
+        padding_mask_tensor = torch.from_numpy(
+            np.concatenate(packed_fields["padding_mask"])
+        )
         loss_token_counts, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions_tensor,
@@ -1134,7 +1138,7 @@ class Batcher(Configurable):
         num_microbatches: int,
         training_samples: list[TrainingSample],
     ) -> float:
-        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        num_tokens_per_rank = self._num_tokens_per_microbatch
         total_slots = num_microbatches * self._dp_degree * num_tokens_per_rank
         num_real_tokens = sum(len(sample.token_ids) - 1 for sample in training_samples)
         return (total_slots - num_real_tokens) / total_slots

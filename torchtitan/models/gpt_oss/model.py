@@ -68,23 +68,23 @@ class GptOssAttention(Attention):
         @property
         def softmax_scale(self) -> float:
             scale = 1.0 / math.sqrt(self.head_dim)
-            if self.rope.scaling == "yarn" and self.rope.rope_factor > 1.0:
-                mscale = 0.1 * math.log(self.rope.rope_factor) + 1.0
-                # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
-                scale *= mscale * mscale
+            # RoPE is a pure rotation; apply YaRN's Q/K magnitude here.
+            mscale = self.rope.attention_factor()
+            scale *= mscale * mscale
             return scale
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
-            return quadratic_attention_flops_per_token(
+            # A causal query at document position p attends to p + 1 keys.
+            num_keys = positions + 1
+            if self.sliding_window_size is not None:
+                num_keys = num_keys.clamp(max=self.sliding_window_size)
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.head_dim,
                 v_head_dim=self.head_dim,
-                seq_len=seq_len,
-                sliding_window_size=self.sliding_window_size,
+                num_keys=num_keys,
             )
 
     def __init__(self, config: Config):

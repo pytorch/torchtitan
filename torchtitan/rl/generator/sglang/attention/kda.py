@@ -174,7 +174,7 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
             state_indices=state_indices,
         )
         if replay_state is None:
-            return recurrent_kda_decode(
+            output = recurrent_kda_decode(
                 convolved_TC,
                 raw_gate_THK.unsqueeze(0),
                 b.unsqueeze(0),
@@ -184,21 +184,41 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
                 state_indices,
                 lower_bound=layer.lower_bound,
             )
-        # Attention Gym's replay-backed decode, of one token per row.
-        return paged_kda(
-            convolved_TC.unsqueeze(1),
-            raw_gate_THK.unsqueeze(1),
-            b.unsqueeze(1),
-            A_log_H,
-            dt_bias_HK,
+        else:
+            # Attention Gym's replay-backed decode, of one token per row.
+            output = paged_kda(
+                convolved_TC.unsqueeze(1),
+                raw_gate_THK.unsqueeze(1),
+                b.unsqueeze(1),
+                A_log_H,
+                dt_bias_HK,
+                recurrent_state,
+                state_indices,
+                cu_seqlens=None,
+                has_initial_state=None,
+                replay_state=replay_state,
+                head_dim=layer.head_k_dim,
+                lower_bound=layer.lower_bound,
+            ).transpose(0, 1)
+        # SGLang's extra_buffer prefix cache: copy the states of the requests at a
+        # tracked position into their track slots, once, after the last layer.
+        self._track_mamba_state_decode(
+            forward_batch,
+            conv_state,
             recurrent_state,
-            state_indices,
-            cu_seqlens=None,
-            has_initial_state=None,
-            replay_state=replay_state,
-            head_dim=layer.head_k_dim,
-            lower_bound=layer.lower_bound,
-        ).transpose(0, 1)
+            self.forward_metadata.mamba_cache_indices,
+            layer_id=layer.layer_id,
+        )
+        if replay_state is not None and forward_batch.mamba_track_mask is not None:
+            # Decode positions SGLang tracks are multiples of 64, where the replay
+            # state holds no tokens. SGLang does not copy the replay entries, so zero
+            # the track slots' replay counts.
+            count_N = replay_state[-1][:, 0]
+            track_slots = self.forward_metadata.mamba_track_indices.clamp(min=0).long()
+            count_N[track_slots] = torch.where(
+                forward_batch.mamba_track_mask, 0, count_N[track_slots]
+            )
+        return output
 
     def forward_extend(
         self,
@@ -213,6 +233,7 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
         ``(1, T, H, K)``."""
         conv_weight_CW, A_log_H, dt_bias_HK = linear_attention_weights(layer)
         conv_state, recurrent_state, replay_state = self._state(layer)
+        checkpoints = self.track_extend_states(forward_batch, mixed_qkv, conv_state)
         (
             convolved_1TC,
             state_indices,
@@ -232,6 +253,7 @@ class TorchTitanKDAAttnBackend(TorchTitanLinearAttnBackend):
             replay_state=replay_state,
             head_dim=layer.head_k_dim,
             lower_bound=layer.lower_bound,
+            **checkpoints,
         )
 
 
@@ -254,7 +276,9 @@ class SGLangInnerKDA(InnerAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__()
-        tp_size = get_parallel().tp_size
+        # SGLang's attention TP is torchtitan's TP; under attention DP, SGLang's
+        # tp_size is DP x TP.
+        tp_size = get_parallel().attn_tp_size
         if config.num_heads % tp_size != 0:
             raise ValueError(
                 f"num_heads ({config.num_heads}) must be divisible by "

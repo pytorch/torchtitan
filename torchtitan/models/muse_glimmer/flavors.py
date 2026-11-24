@@ -19,10 +19,6 @@ from torchtitan.components.data.multimodal.vision_processor import (
     PixelBudgetResize,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
@@ -59,6 +55,7 @@ from torchtitan.models.muse_spark.flavors import (
     muse_spark_navit_adapter_config,
     muse_spark_navit_configs,
     muse_spark_navit_encoder_config,
+    NAVIT_MAX_IMAGE_TOKENS,
 )
 from torchtitan.models.muse_spark.vision_encoder import (
     MuseSparkNaViTAdapter,
@@ -136,7 +133,9 @@ MUSE_GLIMMER_30B_VISION_PROCESSOR_KWARGS: dict[str, Any] = {
     "spatial_merge_size": 2,
     "image_mean": (0.5, 0.5, 0.5),
     "image_std": (0.5, 0.5, 0.5),
-    "resize": MuseGlimmerPatchGridResize.Config(max_image_tokens=4096),
+    "resize": MuseGlimmerPatchGridResize.Config(
+        max_image_tokens=NAVIT_MAX_IMAGE_TOKENS
+    ),
     "patch_order": "raster",
     "image_interpolation_mode": "lanczos",
 }
@@ -580,7 +579,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> MuseGlimmerModel.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -594,8 +592,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

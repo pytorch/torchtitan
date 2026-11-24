@@ -16,10 +16,6 @@ import torch.nn as nn
 
 from torchtitan.components.data.multimodal.vision_processor import PixelBudgetResize
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 
 from torchtitan.models.base.sharding import ShardingConfig
 
@@ -58,6 +54,7 @@ from torchtitan.models.common.decoder_sharding import (
 from torchtitan.models.common.moe.sharding import shared_experts_sharding_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
+from torchtitan.models.common.rope import CosSinVisionRoPE
 from torchtitan.models.common.vision_encoder import (
     VisionAttention,
     VisionMLP,
@@ -69,6 +66,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_colwise_sharding_config,
     vision_inner_attention_sharding_config,
     vision_invariant_linear_sharding_config,
+    vision_rope_sharding_config,
     vision_rowwise_sharding_config,
 )
 from .model import (
@@ -92,10 +90,9 @@ from .sharding import (
     transformer_block_sharding_config,
     vision_encoder_sharding_config,
     vision_merger_sharding_config,
-    vision_rotary_embedding_sharding_config,
 )
 
-from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
+from .vision_encoder import PatchMerger, Qwen35VisionEncoder
 
 __all__ = [
     "Qwen35Model",
@@ -252,7 +249,7 @@ def _shared_experts_config(
     )
 
 
-def _qwen35_vision_encoder_config(
+def make_qwen35_vision_encoder_config(
     *,
     dim: int,
     ffn_dim: int,
@@ -265,6 +262,8 @@ def _qwen35_vision_encoder_config(
     num_position_embeddings: int,
     layer_norm_eps: float = 1e-6,
     rope_theta: float = 10000.0,
+    # The default 16M-pixel budget with aspect ratio < 200 gives <= 3,620 patches per side.
+    max_rope_positions: int = 4096,
     in_channels: int = 3,
 ) -> Qwen35VisionEncoder.Config:
     """Build a fully-specified Qwen35VisionEncoder.Config."""
@@ -294,6 +293,12 @@ def _qwen35_vision_encoder_config(
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=num_heads,
+                rope=CosSinVisionRoPE.Config(
+                    dim=head_dim,
+                    max_context_length=max_rope_positions,
+                    theta=rope_theta,
+                    sharding_config=vision_rope_sharding_config(),
+                ),
                 wq=_linear(
                     dim,
                     dim,
@@ -313,17 +318,12 @@ def _qwen35_vision_encoder_config(
                 inner_attention=FlexInnerAttention.Config(
                     sharding_config=vision_inner_attention_sharding_config()
                 ),
-                sharding_config=vision_attention_sharding_config(rope_cache_dp=spmd.V),
+                sharding_config=vision_attention_sharding_config(positions_dp=spmd.V),
             ),
             mlp=VisionMLP.Config(
                 fc1=_vision_column_parallel_linear(dim, ffn_dim),
                 fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
-        ),
-        rotary_pos_emb=VisionRotaryEmbedding.Config(
-            dim=head_dim // 2,
-            theta=rope_theta,
-            sharding_config=vision_rotary_embedding_sharding_config(),
         ),
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,
@@ -400,7 +400,7 @@ def _qwen35_attention_config(
     )
 
 
-def _qwen35_deltanet_config(
+def make_qwen35_deltanet_config(
     *,
     dim: int,
     n_key_heads: int,
@@ -524,7 +524,7 @@ def _build_qwen35_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else _qwen35_deltanet_config(
+            else make_qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -598,7 +598,7 @@ def _build_qwen35_moe_layers(
                 enable_sp=enable_sp,
             )
             if is_full
-            else _qwen35_deltanet_config(
+            else make_qwen35_deltanet_config(
                 dim=dim,
                 n_key_heads=n_key_heads,
                 n_value_heads=n_value_heads,
@@ -724,7 +724,7 @@ def _debugmodel(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=256,
                 ffn_dim=512,
                 num_layers=4,
@@ -804,7 +804,7 @@ def _debugmodel_moe(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=256,
                 ffn_dim=512,
                 num_layers=2,
@@ -885,7 +885,7 @@ def _0_8b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=768,
                 ffn_dim=3072,
                 num_layers=12,
@@ -966,7 +966,7 @@ def _2b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1024,
                 ffn_dim=4096,
                 num_layers=24,
@@ -1047,7 +1047,7 @@ def _4b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1024,
                 ffn_dim=4096,
                 num_layers=24,
@@ -1123,7 +1123,7 @@ def _9b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1199,7 +1199,7 @@ def _27b(
             enable_sp=parallelism.enable_sequence_parallel,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1279,7 +1279,7 @@ def _35b_a3b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1359,7 +1359,7 @@ def _122b_a10b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1439,7 +1439,7 @@ def _397b_a17b(
             enable_ep=parallelism.expert_parallel_degree > 1,
         ),
         vision_encoder=(
-            _qwen35_vision_encoder_config(
+            make_qwen35_vision_encoder_config(
                 dim=1152,
                 ffn_dim=4304,
                 num_layers=27,
@@ -1486,7 +1486,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Qwen35Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
     context_len = seq_len or max_context_len
@@ -1500,8 +1499,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

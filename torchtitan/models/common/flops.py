@@ -7,43 +7,36 @@
 from collections.abc import Iterable
 from fractions import Fraction
 
+import torch
 from torch import nn
 
 from torchtitan.models.common.moe import MoE
 
 
-def quadratic_attention_flops_per_token(
+def quadratic_attention_flops(
     *,
     num_heads: int,
     qk_head_dim: int,
     v_head_dim: int,
-    seq_len: int,
-    sliding_window_size: int | None = None,
+    num_keys: torch.Tensor,
 ) -> int:
-    """Training FLOPs per token for quadratic or windowed attention.
+    """Training FLOPs of softmax attention over a set of queries.
 
-    Reasoning behind the factor of 6 for the self-attention part of the formula:
+    ``num_keys`` holds the number of keys each query attends to, e.g. a causal
+    query at document position p attends to p + 1 keys.
+
+    Reasoning behind the factor of 6:
     1. each self-attention has 2 matmul in the forward and 4 (counted as 2)
        in the backward                                                      (3)
-       The 2 matmuls per token are:
-       a. tmp = q @ K^T: [1, qk_head_dim] @ [qk_head_dim, seq_len]
-       b. tmp @ V: [1, seq_len] @ [seq_len, v_head_dim]
-       so we get
-       seq_len * qk_head_dim + seq_len * v_head_dim = seq_len * (qk_head_dim + v_head_dim)
+       The 2 matmuls per query attending to k keys are:
+       a. tmp = q @ K^T: [1, qk_head_dim] @ [qk_head_dim, k]
+       b. tmp @ V: [1, k] @ [k, v_head_dim]
+       so we get k * (qk_head_dim + v_head_dim)
     2. the flash attention does 1 more matmul recomputation in the backward
        but recomputation should not be counted in calculating MFU           (+0)
     3. each matmul performs 1 multiplication and 1 addition                 (*2)
-    4. we follow the convention and do not account for sparsity in causal attention
-
-    ``qk_head_dim`` and ``v_head_dim`` describe the two attention
-    contractions. The factor of 6 accounts for multiply-adds in forward and
-    backward. As in the existing MFU convention, causal sparsity and backward
-    recomputation are not counted.
     """
-    attended_tokens = (
-        seq_len if sliding_window_size is None else min(seq_len, sliding_window_size)
-    )
-    return 6 * num_heads * (qk_head_dim + v_head_dim) * attended_tokens
+    return 6 * num_heads * (qk_head_dim + v_head_dim) * int(num_keys.sum())
 
 
 def delta_rule_flops_per_token(

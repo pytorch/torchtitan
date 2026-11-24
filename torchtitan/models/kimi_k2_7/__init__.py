@@ -13,7 +13,6 @@ from .flavors import (
     KimiK2Model,
     MODEL_FLAVORS,
     VisionProjector,
-    VisionRotaryEmbedding2D,
 )
 
 __all__ = [
@@ -24,6 +23,5 @@ __all__ = [
     "KimiK2Model",
     "MODEL_FLAVORS",
     "VisionProjector",
-    "VisionRotaryEmbedding2D",
     "build_model_config",
 ]
