@@ -82,22 +82,13 @@ class PerHostProvisioner:
     Monarch launchers do.
 
     Args:
-        total_gpus: Number of GPUs to hand out.
-        device_ids: The host's device ids to hand out, in order. ``None`` hands out
-            ``0 .. total_gpus - 1``.
+        device_ids: The host's device ids to hand out, in order.
     """
 
-    def __init__(self, total_gpus: int = 8, *, device_ids: Sequence[str] | None = None):
+    def __init__(self, device_ids: Sequence[str]):
         self.env_var = get_visible_devices_env_var()
-        if device_ids is None:
-            device_ids = [str(index) for index in range(total_gpus)]
-        if len(device_ids) < total_gpus:
-            raise ValueError(
-                f"The run needs {total_gpus} GPUs, but {self.env_var} lists "
-                f"{len(device_ids)}: {','.join(device_ids)}"
-            )
         self.device_ids = list(device_ids)
-        self.total_gpus = total_gpus
+        self.total_gpus = len(self.device_ids)
         self.next_gpu = 0
 
     @property
@@ -264,7 +255,8 @@ def spawn_proc_mesh(
         provisioners: dict[int, PerHostProvisioner] = {}
         for host_mesh in [trainer_host_mesh, *generator_host_meshes]:
             provisioners.setdefault(
-                id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
+                id(host_mesh),
+                PerHostProvisioner([str(index) for index in range(gpus_per_node)]),
             )
         trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh,
@@ -287,11 +279,20 @@ def spawn_proc_mesh(
         # CUDA_VISIBLE_DEVICES=4,5,6,7 runs on GPUs 4-7, and
         # CUDA_VISIBLE_DEVICES=0,1,4,5,2,3,6,7 gives the trainer GPUs 0,1,4,5.
         host_mesh = this_host()
-        visible_devices = os.environ.get(get_visible_devices_env_var())
-        provisioner = PerHostProvisioner(
-            total_gpus=total_gpus,
-            device_ids=visible_devices.split(",") if visible_devices else None,
+        env_var = get_visible_devices_env_var()
+        visible_devices = os.environ.get(env_var)
+        # An empty mask means this process sees no GPUs, so the check below rejects it.
+        device_ids = (
+            [str(index) for index in range(total_gpus)]
+            if visible_devices is None
+            else [device for device in visible_devices.split(",") if device]
         )
+        if len(device_ids) < total_gpus:
+            raise ValueError(
+                f"The run needs {total_gpus} GPUs, but {env_var} lists "
+                f"{len(device_ids)}: {visible_devices!r}"
+            )
+        provisioner = PerHostProvisioner(device_ids)
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,

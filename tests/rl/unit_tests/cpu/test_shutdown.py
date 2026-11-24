@@ -474,14 +474,22 @@ def test_spawn_proc_mesh_on_this_host_follows_the_visible_devices_mask(
     assert host.visible_devices == expected
 
 
+@pytest.mark.parametrize(
+    "visible, match",
+    [
+        ("4,5", "needs 4 GPUs, but .* lists 2: '4,5'"),
+        # An empty mask means the controller sees no GPUs, not "use 0 .. n-1".
+        ("", "needs 4 GPUs, but .* lists 0: ''"),
+    ],
+)
 def test_spawn_proc_mesh_on_this_host_needs_enough_visible_devices(
-    bootstrap_cmd_returns_env, monkeypatch
+    bootstrap_cmd_returns_env, monkeypatch, visible, match
 ):
     host = _FakeHostMesh()
     monkeypatch.setattr(provisioning, "this_host", lambda: host)
-    monkeypatch.setenv(get_visible_devices_env_var(), "4,5")
+    monkeypatch.setenv(get_visible_devices_env_var(), visible)
 
-    with pytest.raises(ValueError, match="needs 4 GPUs, but .* lists 2: 4,5"):
+    with pytest.raises(ValueError, match=match):
         provisioning.spawn_proc_mesh(
             trainer_world_size=2, per_generator_world_size=1, num_generators=2
         )
