@@ -70,7 +70,7 @@ def test_fa4_splits_hybrid_kv_blocks_into_pages(batch_invariant, page_size):
 
 
 def test_fa4_page_size_with_kv_cache_spec():
-    """vLLM main calls the hook with the layer's KV cache spec."""
+    """vLLM 0.33 and later call the hook with the layer's KV cache spec."""
     spec = FullAttentionSpec(
         block_size=16, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
     )

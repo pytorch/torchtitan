@@ -114,15 +114,12 @@ def _scheduler(manager, max_num_scheduled_tokens=0, **attrs) -> SimpleNamespace:
     )
 
 
-def _holder(
-    manager, requests, floor=0, running=(), waiting=(), skipped_waiting=()
-) -> VLLMSessionKVHolder:
+def _holder(manager, requests, floor=0, running=(), waiting=()) -> VLLMSessionKVHolder:
     scheduler = _scheduler(
         manager,
         requests=requests,
         running=running,
-        waiting=waiting,
-        skipped_waiting=skipped_waiting,
+        get_request_counts=lambda: (len(running), len(waiting)),
     )
     holder = VLLMSessionKVHolder.Config().build(scheduler=scheduler)
     holder.free_floor_blocks = floor
@@ -310,12 +307,10 @@ def test_holder_rejects_partial_block_hits_and_speculative_decoding(manager):
         VLLMSessionKVHolder.Config().build(scheduler=scheduler)
 
 
-@pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])
-def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queue):
-    """Nothing runs, free >= floor, and the waiting turn needs more blocks than are free.
-    vLLM serves `skipped_waiting` first and leaves a refused request there."""
+def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager):
+    """Nothing runs, free >= floor, and the waiting turn needs more blocks than are free."""
     requests, waiting = {}, []
-    holder = _holder(manager, requests, **{queue: waiting})
+    holder = _holder(manager, requests, waiting=waiting)
     for i in range(12):  # 6 held blocks each: 7 of 80 stay free
         _finished_turn(
             manager, holder, requests, f"s{i}", [1000 * i + j for j in range(50)]

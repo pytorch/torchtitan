@@ -437,6 +437,8 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
             inputs_embeds: ``(num_tokens, dim)`` from `embed_input_ids`.
         """
         assert inputs_embeds is not None and positions is not None
+        num_tokens = inputs_embeds.shape[0]
+        inputs_embeds, positions = self._pad_step_to_tp(inputs_embeds, positions)
         if positions.ndim == 2:
             # TorchTitan's MRoPE takes (num_tokens, 3).
             positions = positions.transpose(0, 1)
@@ -446,7 +448,7 @@ class VLLMMultimodalModelWrapper(VLLMModelWrapper, SupportsMultiModal, SupportsM
                 positions,
                 **self._prepare_step_kwargs(inputs_embeds.shape[0]),
             )
-        return h
+        return h[:num_tokens]
 
     def get_mrope_input_positions(
         self,
