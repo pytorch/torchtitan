@@ -120,7 +120,8 @@ class CheckpointManager(BaseCheckpointManager):
             BaseCheckpointManager.Config.__post_init__(self)
             # DCP's Hugging Face storage reads and writes local paths only, so
             # reject a remote URI up front instead of failing deep in DCP.
-            # TODO: drop once pytorch/pytorch#205015 reaches the nightly CI uses.
+            # TODO: drop once https://github.com/pytorch/pytorch/issues/205015
+            # is fixed in the nightly CI uses.
             if self.last_save_in_hf and filesystem.is_remote(self.folder):
                 raise ValueError(
                     "last_save_in_hf is not supported with a remote "

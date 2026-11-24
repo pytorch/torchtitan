@@ -243,15 +243,31 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
         manager.close()
 
+        # Path() in the backend drops these segments but probes keep them, so a
+        # save would land where resume does not look. A trailing slash (above)
+        # is fine: both sides drop it.
+        for kwargs in (
+            {"folder": "gs://bucket/run//checkpoint"},
+            {"folder": "gs://bucket/run/./checkpoint"},
+            {"initial_load_path": "gs://bucket//seed/step-5"},
+        ):
+            with self.subTest(**kwargs):
+                with self.assertRaisesRegex(ValueError, "path segments"):
+                    self._build_manager(
+                        TorchCheckpointingManager.Config(keep_latest_k=0, **kwargs)
+                    )
+
     def test_remote_folder_round_trip(self) -> None:
-        """Save and resume through a URI folder with the real backend."""
+        """Save with retention and resume through a URI folder, real backend."""
         with tempfile.TemporaryDirectory() as base_folder:
-            folder = f"file://{base_folder}/checkpoint"
+            local_folder = os.path.join(base_folder, "checkpoint")
+            folder = f"file://{local_folder}"
+            # A staging directory a crashed run left behind.
+            os.makedirs(os.path.join(local_folder, "tmp_step-0"))
 
             def build(model: nn.Module, **overrides) -> TorchCheckpointingManager:
                 return TorchCheckpointingManager.Config(
                     folder=folder,
-                    keep_latest_k=0,
                     initial_load_model_only=False,
                     last_save_model_only=False,
                     **overrides,
@@ -265,17 +281,26 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 )
 
             saved = nn.Linear(2, 2)
-            manager = build(saved)
-            try:
-                self.assertTrue(manager.save(curr_step=5, last_step=True))
-            finally:
-                manager.close()
+            with mock.patch("torch.distributed.get_rank", return_value=0):
+                manager = build(saved, interval=1, keep_latest_k=2)
+                try:
+                    for step in (1, 2, 3):
+                        with torch.no_grad():
+                            saved.weight.fill_(float(step))
+                        self.assertTrue(
+                            manager.save(curr_step=step, last_step=step == 3)
+                        )
+                finally:
+                    # Drains the purge thread.
+                    manager.close()
             self.assertIsInstance(
                 manager._manager_config.storage_config, FsspecStorageConfig
             )
+            # Saving step-3 purged step-1 and the abandoned staging directory.
+            self.assertEqual({"step-2", "step-3"}, set(os.listdir(local_folder)))
 
             restored = nn.Linear(2, 2)
-            loader = build(restored, load_only=True)
+            loader = build(restored, keep_latest_k=0, load_only=True)
             try:
                 self.assertTrue(loader.load())
             finally:
@@ -1064,7 +1089,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                     ema=None,
                     extra_states={"train_state": _Stateful("train")},
                     sd_adapter=adapter,
-                    base_folder=base_folder,
+                    base_folder=f"memory://{self._memory_bucket()}",
                 )
 
                 self.assertTrue(manager.load())
@@ -1119,10 +1144,13 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 manager._manager_config.items[MODEL].resharder,
                 DefaultResharder,
             )
-            self.assertIs(
+            # The folder is remote and the HF assets are local: each manager is
+            # built on the storage its own path names.
+            self.assertEqual(
+                FsspecStorageConfig(protocol="memory"),
                 manager._manager_config.storage_config,
-                hf_config.storage_config,
             )
+            self.assertIsNone(hf_config.storage_config)
             self.assertTrue(hf_manager.closed)
             self.assertFalse(backend_manager.closed)
             manager.close()

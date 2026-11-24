@@ -100,6 +100,20 @@ remote store. `initial_load_path` may be on other storage than `folder`, and a l
 `hf_assets_path` works with a remote `folder`, e.g. HF weights on local disk with
 checkpoints on `gs://`.
 
+Keep `hf_assets_path` on local disk, and include the safetensors index even when the
+weights are remote:
+```bash
+python scripts/download_hf_assets.py --repo_id <repo_id> --assets tokenizer index
+```
+State dict adapters read `model.safetensors.index.json` from `hf_assets_path`, not from
+`initial_load_path`. A Hugging Face export uses it to lay out its shards, and some
+adapters use it to pick Hugging Face key names, e.g. Qwen3.5's `model.language_model.`
+prefix.
+
+On GCS, use a bucket with hierarchical namespace (HNS). On a flat bucket a checkpoint is
+committed by copying each object, so a job preempted mid-commit can leave a `step-N` that
+resume selects and fails to load.
+
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.
 E.g. it is hard, if not impossible, for meta initialization on multiple devices to reproduce the initialization on a single device.

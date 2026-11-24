@@ -12,6 +12,7 @@ import threading
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import torch.distributed as dist
@@ -219,8 +220,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     Each path is saved to and loaded from the storage its own scheme names:
     the local filesystem for a local path, fsspec storage for a URI such as
-    ``gs://bucket/run``. So ``initial_load_path``, or the ``hf_assets_path`` an
-    HF initial load reads, may be on other storage than ``checkpointer.folder``.
+    ``gs://bucket/run``. So ``initial_load_path``, or the local
+    ``hf_assets_path`` an HF initial load reads, may be on other storage than
+    ``checkpointer.folder``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -251,6 +253,20 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self.purge_thread: threading.Thread | None = None
 
         self.folder = filesystem.join(base_folder, config.folder)
+        # The backend wraps a path in Path(), which drops empty and "." segments,
+        # while probes and retention use the URI as written. With such a segment
+        # a save lands where a later resume does not look.
+        for label, path in (
+            ("checkpointer.folder", self.folder),
+            ("checkpointer.initial_load_path", config.initial_load_path),
+        ):
+            if path and filesystem.is_remote(path):
+                backend_path = _backend_path(path).rstrip("/")
+                if str(Path(backend_path)) != backend_path:
+                    raise ValueError(
+                        f"{label} ({path!r}) must not contain empty or '.' "
+                        "path segments, such as '//' or '/./'."
+                    )
         self._storage = FilesystemCheckpointStorage()
         self.interval = config.interval
         self._validate_extra_state_keys(extra_states)
@@ -453,17 +469,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         return True
 
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
-        """Whether automatic loading may select ``checkpoint_dir``.
-
-        Unlike ``_is_valid_checkpoint``, this excludes final Hugging Face exports.
-        Hugging Face checkpoint loading has not landed in torch_checkpointing yet,
-        so automatic loading cannot select those exports.
-        """
         # TODO: On a flat (non-HNS) GCS bucket the commit rename copies each
         # object and is not atomic, so a preempted commit can leave a step-N that
         # has metadata.pkl but not all of its shards, and this accepts it. Fixed
-        # once torch_checkpointing publishes metadata.pkl after the rename
-        # (zhixiangli/torch_checkpointing:checkpoint-writer-metadata-staging).
+        # once torch_checkpointing's fsspec backend publishes metadata.pkl after
+        # the rename: https://github.com/meta-pytorch/torch_checkpointing/issues/12
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
