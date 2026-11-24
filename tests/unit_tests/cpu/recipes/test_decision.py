@@ -23,7 +23,9 @@ from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan_recipes.decision.prepare_data import flatten_record, LETTERS, render
 from torchtitan_recipes.decision.qwen3 import (
     AnswerTokenLoss,
+    CANDIDATE_LABEL_START,
     CandidateDistributionLoss,
+    CandidateLetterProcessor,
     DecisionLetterProcessor,
     qwen3_1_7b_decision,
 )
@@ -91,6 +93,9 @@ def test_answer_token_loss_matches_full_cross_entropy() -> None:
     (expected_grad,) = torch.autograd.grad(expected, hidden_TD)
     torch.testing.assert_close(loss, expected)
     torch.testing.assert_close(grad, expected_grad)
+    labels_T[5] = CANDIDATE_LABEL_START
+    with pytest.raises(RuntimeError, match="vocabulary token IDs"):
+        loss_fn(hidden_TD, labels_T)
 
 
 def test_answer_token_loss_rejects_too_many_supervised_positions() -> None:
@@ -147,10 +152,10 @@ def test_render_gold_letter_names_labeled_option(
     orders = set()
     for _ in range(20):
         row = render("state", question, rng)
-        letter = LETTERS[row["gold"]]
-        assert row["answer"] == " " + letter
+        gold = row["target_probs"].index(1.0)
+        letter = LETTERS[gold]
         assert f"\n{letter}) {gold_desc}\n" in row["prompt"]
-        assert row["keys"][row["gold"]] == gold_key
+        assert row["keys"][gold] == gold_key
         orders.add(tuple(row["keys"]))
     # choice and noul are shuffled against letter-position priors; score stays ordered.
     if fixed_order:
@@ -220,12 +225,13 @@ def test_native_distribution_record_flattens_by_candidate_identity() -> None:
     ("state", "eligible"),
     [
         ([{"type": "image", "path": "image.png"}], False),
+        ("x" * 4001, False),
         ({"metadata": {"type": "image"}}, True),
         ({"frames": [{"type": "image", "path": "frame.png"}]}, False),
     ],
-    ids=["media", "metadata", "nested-media"],
+    ids=["media", "long-state", "metadata", "nested-media"],
 )
-def test_preparation_filters_media_state(state, eligible: bool) -> None:
+def test_preparation_filters_states(state, eligible: bool) -> None:
     record = {
         "request": {
             "state": state,
@@ -237,8 +243,8 @@ def test_preparation_filters_media_state(state, eligible: bool) -> None:
 
 
 def _distribution_processor(max_context_length: int) -> DecisionLetterProcessor:
-    return DecisionLetterProcessor(
-        DecisionLetterProcessor.Config(candidate_labels=True),
+    return CandidateLetterProcessor(
+        CandidateLetterProcessor.Config(),
         context=DatasetBuildContext(
             tokenizer=_Tokenizer(),
             max_context_length=max_context_length,
@@ -252,7 +258,9 @@ def test_processor_carries_candidate_count_and_samples_target_label() -> None:
     sequence = _distribution_processor(64)(_sample(), np.random.default_rng(3))
     assert sequence is not None
     assert (sequence.labels != -100).sum() == 1
-    assert sequence.labels[-1] in {26, 27, 28}
+    assert sequence.labels[-1] in {
+        CANDIDATE_LABEL_START - offset for offset in (26, 27, 28)
+    }
     assert sequence.input_ids[-1] == 3
 
 
@@ -270,6 +278,8 @@ def test_sampled_nll_brier_has_soft_target_expectation(monkeypatch) -> None:
     loss_fn = CandidateDistributionLoss(
         CandidateDistributionLoss.Config(tokenizer_path="unused", brier_weight=weight)
     )
+    with pytest.raises(RuntimeError, match="encoded option counts"):
+        loss_fn(torch.zeros((1, 40)), torch.tensor([10]))
     logits = torch.zeros((1, 40))
     logits[0, 10:13] = torch.tensor([1.0, -0.5, 0.25])
     probs = torch.softmax(logits[0, 10:13], dim=-1)
@@ -278,7 +288,7 @@ def test_sampled_nll_brier_has_soft_target_expectation(monkeypatch) -> None:
     for index, probability in enumerate(target):
         loss, _ = loss_fn(
             logits,
-            torch.tensor([26 + index]),
+            torch.tensor([CANDIDATE_LABEL_START - 26 - index]),
             torch.tensor(1.0),
         )
         observed += float(probability * loss)

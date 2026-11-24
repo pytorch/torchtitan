@@ -31,7 +31,7 @@ from typing import Any
 
 LETTERS = string.ascii_uppercase
 MAX_STATE_CHARS = 4000
-GS1_MAX_STATE_CHARS = 12_000
+MIN_CANDIDATES = 2
 
 
 def render(state: str, question: dict, rng: random.Random) -> dict:
@@ -49,26 +49,32 @@ def render(state: str, question: dict, rng: random.Random) -> dict:
         rng.shuffle(options)
     keys = [key for key, _ in options]
     gold = keys.index(label)
-    return {
-        **render_options(
-            state, kind, question["instructions"], keys, [d for _, d in options]
-        ),
-        "gold": gold,
-        "answer": " " + LETTERS[gold],
-    }
+    return render_options(
+        state,
+        kind,
+        question["instructions"],
+        keys,
+        [d for _, d in options],
+        [float(i == gold) for i in range(len(keys))],
+    )
 
 
-def render_options(state, kind, instructions, keys, descriptions):
+def render_options(state, kind, instructions, keys, descriptions, target_probs):
     options = "\n".join(f"{LETTERS[i]}) {d}" for i, d in enumerate(descriptions))
     title = {"noul": "yes/no", "choice": "choice", "score": "ordered scale"}[kind]
     return {
         "prompt": f"Context:\n{state}\n\nQuestion ({title}): "
         f"{instructions}\nOptions:\n{options}\nAnswer:",
         "keys": keys,
+        "target_probs": target_probs,
         "type": kind,
         "state": state,
         "instructions": instructions,
     }
+
+
+def valid_option_count(count: int) -> bool:
+    return MIN_CANDIDATES <= count <= len(LETTERS)
 
 
 def flatten(split: str) -> list[dict]:
@@ -82,7 +88,7 @@ def flatten(split: str) -> list[dict]:
             continue
         for question in json.loads(questions).values():
             num_options = 2 if question["type"] == "noul" else len(question["criteria"])
-            if 2 <= num_options <= len(LETTERS):
+            if valid_option_count(num_options):
                 rows.append(render(state, question, option_rng))
     random.Random(0).shuffle(rows)
     return rows
@@ -125,7 +131,7 @@ def flatten_record(
     if _contains_media(request["state"]):
         return []
     state_text = _text(request["state"])
-    if len(state_text) > GS1_MAX_STATE_CHARS:
+    if len(state_text) > MAX_STATE_CHARS:
         return []
     rows = []
     for question_id, question in questions.items():
@@ -149,7 +155,7 @@ def flatten_record(
         target = targets[question_id]
         target_ids = target["candidate_ids"]
         distribution = target["distribution"]
-        if not 2 <= len(candidate_ids) <= len(LETTERS):
+        if not valid_option_count(len(candidate_ids)):
             continue
         if len(target_ids) != len(candidate_ids) or set(target_ids) != set(
             candidate_ids
@@ -157,9 +163,14 @@ def flatten_record(
             raise ValueError(f"Target candidates do not match question {question_id!r}")
         target_by_id = dict(zip(target_ids, distribution, strict=True))
         target_probs = [float(target_by_id[key]) for key in candidate_ids]
+        total = (
+            math.fsum(target_probs)
+            if all(math.isfinite(p) for p in target_probs)
+            else math.nan
+        )
         if any(
             not math.isfinite(value) or value < 0 for value in target_probs
-        ) or not math.isclose(sum(target_probs), 1.0, rel_tol=0, abs_tol=1e-6):
+        ) or not math.isclose(total, 1.0, rel_tol=0, abs_tol=1e-6):
             raise ValueError(
                 f"Invalid target distribution for question {question_id!r}"
             )
@@ -167,23 +178,21 @@ def flatten_record(
         if rng is not None and kind != "score":
             rng.shuffle(order)
         rows.append(
-            {
-                **render_options(
-                    state_text,
-                    kind,
-                    _text(question.get("instructions") or question_id),
-                    [candidate_ids[i] for i in order],
-                    [options[i] for i in order],
-                ),
-                "target_probs": [target_probs[i] for i in order],
-            }
+            render_options(
+                state_text,
+                kind,
+                _text(question.get("instructions") or question_id),
+                [candidate_ids[i] for i in order],
+                [options[i] for i in order],
+                [target_probs[i] / total for i in order],
+            )
         )
     return rows
 
 
-def sample_gs1(path: Path, count: int, seed: int) -> list[dict]:
-    rng = random.Random(seed)
-    option_rng = random.Random(seed)
+def sample_gs1(path: Path, count: int, seed: int, split: str) -> list[dict]:
+    rng = random.Random(f"sample:{split}:{seed}")
+    option_rng = random.Random(f"options:{split}:{seed}")
     rows = []
     with path.open() as source:
         questions = (
@@ -230,12 +239,21 @@ def main() -> None:
     )
     args.out.mkdir(parents=True, exist_ok=True)
     if args.input:
+        splits = {}
+        states = set()
         for name, path, count in (
             ("train", args.input, args.num_samples),
             ("calib", args.calibration, args.num_held_out),
             ("eval", args.eval, args.num_held_out),
         ):
-            write(sample_gs1(path, count, args.seed), args.out / f"{name}.jsonl")
+            rows = sample_gs1(path, count, args.seed, name)
+            split_states = {row["state"] for row in rows}
+            if states & split_states:
+                raise ValueError(f"Sampled {name} states overlap an earlier split")
+            states.update(split_states)
+            splits[name] = rows
+        for name, rows in splits.items():
+            write(rows, args.out / f"{name}.jsonl")
         return
     write(flatten("train"), args.out / "train.jsonl")
     # BEV train and test share no states. Split test by state so the

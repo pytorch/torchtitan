@@ -57,10 +57,11 @@ from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
-from .prepare_data import LETTERS
+from .prepare_data import LETTERS, MIN_CANDIDATES
 
-MIN_CANDIDATES = 2
 MAX_CANDIDATES = len(LETTERS)
+# Reserve negative IDs below IGNORE_INDEX, outside the CE vocabulary.
+CANDIDATE_LABEL_START = IGNORE_INDEX - 1
 
 
 class AnswerTokenLoss(ChunkedLossWrapper):
@@ -87,6 +88,7 @@ class AnswerTokenLoss(ChunkedLossWrapper):
     def __init__(self, config: Config):
         super().__init__(config)
         self.max_num_supervised = config.max_num_supervised
+        self._candidate_loss = isinstance(self.loss_fn, CandidateDistributionLoss)
 
     def __call__(
         self,
@@ -105,6 +107,11 @@ class AnswerTokenLoss(ChunkedLossWrapper):
             is_supervised_T, size=self.max_num_supervised, fill_value=-1
         ).squeeze(-1)
         labels_S = labels[index_S].masked_fill(index_S < 0, IGNORE_INDEX)
+        if not self._candidate_loss:
+            torch._assert_async(
+                ((labels_S >= 0) | (labels_S == IGNORE_INDEX)).all(),
+                "Answer token loss requires vocabulary token IDs",
+            )
         return super().__call__(
             pred[index_S], labels_S, global_loss_token_counts, **loss_inputs
         )
@@ -115,10 +122,9 @@ class DecisionLetterProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        candidate_labels: bool = False
+        pass
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
-        self._candidate_labels = config.candidate_labels
         self._tokenizer = context.tokenizer
         self._max_context_length = context.max_context_length
 
@@ -133,23 +139,10 @@ class DecisionLetterProcessor(SampleProcessor):
                 raise ValueError(
                     "Expected 2 to 26 candidates with aligned target probabilities"
                 )
-            total = probs.sum()
-            if (
-                not np.isfinite(probs).all()
-                or (probs < 0).any()
-                or not np.isclose(total, 1, atol=1e-6, rtol=0)
-            ):
-                raise ValueError(
-                    "target_probs must be finite, nonnegative, and sum to one"
-                )
-            slot = rng.choice(count, p=probs / total)
-            if self._candidate_labels:
-                # The restricted loss needs both the option count and the sampled slot.
-                label = (count - MIN_CANDIDATES) * MAX_CANDIDATES + slot
-            else:
-                label = self._answer_id(" " + LETTERS[slot])
+            slot = int(rng.choice(count, p=probs))
+            label = self._label(count, slot)
         else:
-            label = self._answer_id(sample["answer"])
+            label = self._legacy_label(sample["answer"])
         # Packing would split an over-length row into separate documents, and
         # the answer token would be supervised without the start of its prompt.
         if len(prompt) > self._max_context_length:
@@ -161,11 +154,28 @@ class DecisionLetterProcessor(SampleProcessor):
         labels[-1] = label
         return TextSequence(input_ids=np.asarray(prompt, dtype=np.int64), labels=labels)
 
-    def _answer_id(self, answer: str) -> int:
+    def _label(self, count: int, slot: int) -> int:
+        return self._legacy_label(" " + LETTERS[slot])
+
+    def _legacy_label(self, answer: str) -> int:
         ids = self._tokenizer.encode(answer, add_bos=False, add_eos=False)
         if len(ids) != 1:
             raise ValueError(f"Answer must be one token, got {answer!r}")
         return ids[0]
+
+
+class CandidateLetterProcessor(DecisionLetterProcessor):
+    @dataclass(kw_only=True, slots=True)
+    class Config(DecisionLetterProcessor.Config):
+        pass
+
+    def _label(self, count: int, slot: int) -> int:
+        return CANDIDATE_LABEL_START - (
+            (count - MIN_CANDIDATES) * MAX_CANDIDATES + slot
+        )
+
+    def _legacy_label(self, answer: str) -> int:
+        raise ValueError("Candidate loss requires target_probs and keys")
 
 
 class CandidateDistributionLoss(Loss[torch.Tensor]):
@@ -213,9 +223,17 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         candidate_ids, positions = candidates
         logits = pred.index_select(-1, candidate_ids).float()
         valid = labels != IGNORE_INDEX
-        class_ids = labels.masked_fill(~valid, 0)
+        class_ids = (CANDIDATE_LABEL_START - labels).masked_fill(~valid, 0)
         candidate_counts = class_ids // MAX_CANDIDATES + MIN_CANDIDATES
         target_indices = class_ids % MAX_CANDIDATES
+        torch._assert_async(
+            (
+                (class_ids >= 0)
+                & (candidate_counts <= MAX_CANDIDATES)
+                & (target_indices < candidate_counts)
+            ).all(),
+            "Candidate loss requires encoded option counts and slots",
+        )
         logits = logits.masked_fill(
             positions >= candidate_counts[:, None], float("-inf")
         )
@@ -271,7 +289,7 @@ def qwen3_5_distribution(
     *,
     parallelism: ParallelismConfig | None = None,
     brier_weight: float = 1.0,
-    full_vocab_ce: bool = False,
+    loss_fn: Loss.Config | None = None,
 ) -> Trainer.Config:
     """Train on GS1-format targets, optionally using full-vocabulary CE as a baseline."""
     parallelism = parallelism or ParallelismConfig()
@@ -291,12 +309,8 @@ def qwen3_5_distribution(
         model_size, seq_len=8192, parallelism=parallelism
     )
     assets = f"./assets/hf/Qwen3.5-{model_size}-Base"
-    loss_fn = (
-        CrossEntropyLoss.Config(global_vocab_size=decoder_vocab_size(model_config))
-        if full_vocab_ce
-        else CandidateDistributionLoss.Config(
-            tokenizer_path=assets, brier_weight=brier_weight
-        )
+    loss_fn = loss_fn or CandidateDistributionLoss.Config(
+        tokenizer_path=assets, brier_weight=brier_weight
     )
     return _decision_config(
         model_config=model_config,
@@ -352,10 +366,10 @@ def _decision_config(
                         split="train",
                         load_dataset_kwargs={"data_files": data_path},
                     ),
-                    processor=DecisionLetterProcessor.Config(
-                        candidate_labels=isinstance(
-                            loss_fn, CandidateDistributionLoss.Config
-                        )
+                    processor=(
+                        CandidateLetterProcessor.Config()
+                        if isinstance(loss_fn, CandidateDistributionLoss.Config)
+                        else DecisionLetterProcessor.Config()
                     ),
                 ),
             ),

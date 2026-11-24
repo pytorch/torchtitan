@@ -74,7 +74,9 @@ questions come from the same source datasets as training.
 
 The Qwen3.5 recipe reads GS1-format `request`/ `targets` JSONL. Preparation
 aligns targets by candidate ID, fixes option order, and uses Jev's `Answer:`
-readout. Supply distinct source splits for training, calibration and evaluation.
+readout. Both sources write `target_probs` (one-hot for Jev), use the same
+4,000-character state limit, and reject over-length tokenized prompts. GS1
+preparation checks that sampled states are disjoint across the three input splits.
 
 ```bash
 python scripts/download_hf_assets.py --repo_id Qwen/Qwen3.5-0.8B-Base --assets tokenizer safetensors config
@@ -86,21 +88,18 @@ python -m torchtitan_recipes.decision.evaluate --hf-assets ./assets/hf/Qwen3.5-0
 ```
 
 Both objectives sample one answer from the soft targets per question.
-Use `qwen3_5_distribution(full_vocab_ce=True)` for full-vocabulary CE on
+Pass `loss_fn=CrossEntropyLoss.Config()` to `qwen3_5_distribution` for CE on
 the sampled token. The default objective uses the sampled slot and option
 count for candidate NLL plus expected multiclass Brier, with configurable
 `brier_weight`. The Qwen3.5 recipe uses data parallelism and four contexts
 per microbatch to bound activation memory.
 
-Both objectives trained Qwen3.5-0.8B-Base for 30 steps with seed 42 on one
-A800 each, with 8,192 tokens per microbatch and accelerator graphs disabled.
-Preparation sampled 3,000 questions from the first 10,000 training records
-of distribution-v4.5 with seed 0. Temperature was fit on 500 calibration
-questions and metrics were measured on 500 final-test questions. Sampled
-states were disjoint across the three splits. Accuracy and ECE use the
-target probability of the predicted option as expected correctness.
 
-| Objective | Expected accuracy | Expected Brier ↓ | ECE ↓ |
-| --- | ---: | ---: | ---: |
-| Full-vocabulary CE | 0.3311 | 0.6697 | 0.0438 |
-| Candidate NLL + Brier (weight 1.0) | 0.3311 | 0.6639 | 0.0397 |
+For the comparison, take the first 10,000 records from distribution-v4.5's
+training JSONL with `head -n 10000` and use that file as `--input`. Train on
+3,000 sampled questions with the default 600 steps and 32,768 tokens per
+microbatch, with CUDA graphs enabled. For each objective run seeds 42 and 43
+by setting `config.debug.seed` in a recipe function. Fit temperature on 500
+calibration questions and evaluate on 500 final-test questions. Accuracy
+and ECE use the target probability of the predicted option as its expected
+correctness.
