@@ -209,6 +209,10 @@ class RolloutStatus(StrEnum):
     COMPLETED = "completed"
     """The env ended the episode."""
 
+    DROPPED = "dropped"
+    """The env's grader declined to score it, e.g. a judge found the reference answer wrong. Not
+    trained."""
+
     ERROR = "error"
     """Any other failure the policy may have caused, e.g. it killed its own agent's process."""
 
@@ -265,6 +269,7 @@ class RolloutStatus(StrEnum):
         """False for a status that is never scored or trained, e.g. ERROR_INFRA: a failure
         outside the policy says nothing about the policy."""
         return self not in (
+            RolloutStatus.DROPPED,
             RolloutStatus.ERROR_INFRA,
             RolloutStatus.ERROR_UNKNOWN,
             RolloutStatus.FIRST_PROMPT_TOO_LONG,
@@ -357,7 +362,9 @@ class RolloutTurn:
         return self.prompt_prefix_len + len(self.prompt_delta_token_ids)
 
 
-def split_prompt(prompt: Prompt, previous: Prompt) -> tuple[int, np.ndarray]:
+def split_prompt(
+    prompt: Prompt | np.ndarray, previous: Prompt | np.ndarray
+) -> tuple[int, np.ndarray]:
     """Split a prompt into the part shared with the previous turn and the new part.
 
     The shared prefix is the longest run of equal tokens that also shows the same images. An
@@ -366,18 +373,21 @@ def split_prompt(prompt: Prompt, previous: Prompt) -> tuple[int, np.ndarray]:
     changed image is in the new part.
 
     Args:
-        prompt: this turn's full prompt.
-        previous: the previous turn's prompt + completion, with the previous prompt's images;
-            ``Prompt(token_ids=[])`` on the first turn.
+        prompt: this turn's full prompt: a `Prompt`, or a text prompt's token ids as an array.
+        previous: the previous turn's prompt + completion, of the same type as `prompt`, with the
+            previous prompt's images; `Prompt(token_ids=[])` or an empty array on the first turn.
 
     Returns:
         `(prompt_prefix_len, prompt_delta_token_ids)`: the length of the shared prefix, and the
         prompt after it.
 
-    Example (``Prompt(...)`` abbreviated to its token ids where it has no images):
+    Example (a list here is short for `Prompt(token_ids=list)`; a plain list raises):
         split_prompt([0, 1, 2, 3, 4, 5], previous=[0, 1, 2, 3])  # -> (4, array([4, 5])): continues
         split_prompt([0, 1, 9, 3], previous=[0, 1, 2, 3])        # -> (2, array([9, 3])): history edited
         split_prompt([0, 1, 2], previous=[])                     # -> (0, array([0, 1, 2])): first turn
+
+        # Arrays, as the Verifiers converter passes them:
+        split_prompt(np.array([0, 1, 9, 3]), previous=np.array([0, 1, 2, 3]))  # -> (2, array([9, 3]))
 
         # Tokens 1-2 are image placeholders in both, but the image changed from a to b:
         split_prompt(
@@ -385,6 +395,12 @@ def split_prompt(prompt: Prompt, previous: Prompt) -> tuple[int, np.ndarray]:
             previous=Prompt(token_ids=[0, 7, 7, 3], images=(a,), image_placeholders=(PlaceholderRange(1, 2),)),
         )  # -> (1, array([7, 7, 3]))
     """
+    if isinstance(prompt, np.ndarray):
+        # A text prompt's token ids as an array: one vectorized compare, no Python ints.
+        shared_len = min(len(prompt), len(previous))
+        mismatches = np.flatnonzero(prompt[:shared_len] != previous[:shared_len])
+        prefix_len = int(mismatches[0]) if mismatches.size else shared_len
+        return prefix_len, prompt[prefix_len:].astype(np.int32, copy=False)
     prompt_token_ids, previous_token_ids = prompt.token_ids, previous.token_ids
     # Common case: the prompt extends the previous turn. One list compare, no Python loop.
     if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
