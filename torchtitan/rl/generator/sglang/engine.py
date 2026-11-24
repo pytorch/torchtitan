@@ -217,6 +217,7 @@ class SGLangEngine(GenerationEngine):
         precision: PrecisionConfig,
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
+        num_topk_logprobs: int,
         checkpointer: CheckpointManager.Config | None,
         dist_moe_runtime: DistMoeRuntime.Config | None,
         debug: DebugConfig,
@@ -233,6 +234,11 @@ class SGLangEngine(GenerationEngine):
             raise ValueError(
                 "SGLangEngine serves text prompts only; image prompts "
                 "(Controller.Config.vision_processor) need VLLMEngine."
+            )
+        if num_topk_logprobs > 0:
+            raise ValueError(
+                "SGLangEngine returns no top-k logprobs; got "
+                f"num_topk_logprobs={num_topk_logprobs}. ScoreCenteringLoss needs VLLMEngine."
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
