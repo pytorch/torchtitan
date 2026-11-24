@@ -43,7 +43,7 @@ _batcher_loop
 +----------------------------------------------------------------------------------------+
 | batch, trainable = batcher.add_group.call_one(summary)                                 |
 | if not trainable: del _packed_groups_by_id[group_id]                                   |
-|                   group_buffer.release_active_groups(1, "untrainable_group")           |
+|                   _release_groups([group_id], "untrainable_group")                     |
 | training_batch_queue.put(StepPlan)                                                     |
 +-----------------------+------------------------------+---------------------------------+
                         |  ^                           |
@@ -58,9 +58,11 @@ Batcher (own process)                                training_batch_queue
                                                                          v
 _trainer_loop
 +----------------------------------------------------------------------------------------------------------+
-| per DP rank d: leader_by_dp_rank[d].receive_replica_column(plan column d + the rollouts it names)        |
+| per DP rank d: leader_by_dp_rank[d].receive_replica_column(plan column d + the rollouts it names;        |
+|   a group that stays in its rollout worker goes as a handle, and the leader reads its regions)           |
 | by_dp_rank[d].forward_backward(num groups, global counts): the leader packs, broadcasts to its replica   |
-| -> optim -> push/pull weights -> buffer.release_active_groups(num_prompts_per_train_step)                |
+| -> optim -> push/pull weights -> _release_groups(plan.trainable_group_ids)                               |
+|    (groups in rollout workers: rollouter.release_groups -> each worker returns their buffers to its pool)|
 +----------------------------------------------------------------------------------------------------------+
 
 Backpressure (each loop: what it consumes/produces, and what gates each side):
@@ -137,10 +139,12 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.packed_group import pack_rollout_group, PackedRolloutGroup
+from torchtitan.rl.rollout.packed_group_handle import PackedRolloutGroupHandle
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.torch_transport_rdma import RDMAProbe
 from torchtitan.rl.trainer.batcher import Batcher, StepPlan
 from torchtitan.rl.trainer.microbatch_group_reader import ReplicaColumn
 from torchtitan.rl.trainer.trainer import Trainer
@@ -311,6 +315,42 @@ def _default_actor_system_config() -> ActorSystem.Config:
     from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
     return MonarchActorSystem.Config()
+
+
+# One probe read per rollout worker, connection setup included, took ~2 s on one host. A fabric
+# that hangs instead of failing (e.g. a wrong UCX_NET_DEVICES) must still fail setup.
+RDMA_PROBE_TIMEOUT_S = 60.0
+
+
+async def check_rdma_probes_on_leaders(
+    leaders: list[Any],
+    probes: list[RDMAProbe],
+    *,
+    timeout_s: float = RDMA_PROBE_TIMEOUT_S,
+) -> None:
+    """Have every trainer DP replica leader read every rollout worker's probe
+    (`Trainer.check_rdma_probes`), so a broken RDMA path fails at setup, not in the first step.
+
+    Raises:
+        ValueError: a leader did not finish within ``timeout_s``. A leader whose read fails
+            raises its own ``ValueError`` naming the hosts.
+    """
+
+    async def check(dp_rank: int, leader: Any) -> None:
+        try:
+            await asyncio.wait_for(leader.check_rdma_probes.call_one(probes), timeout_s)
+        except TimeoutError:
+            hosts = sorted({probe.host for probe in probes})
+            raise ValueError(
+                f"The trainer DP replica leader of DP rank {dp_rank} did not finish reading the "
+                f"rollout worker probes from {hosts} over torch transport within {timeout_s:g} s. "
+                "Check UCX_TLS and UCX_NET_DEVICES, or set "
+                "BaseRolloutWorker.Config.rdma_min_group_bytes=None to send rollout groups by value."
+            ) from None
+
+    await asyncio.gather(
+        *(check(dp_rank, leader) for dp_rank, leader in enumerate(leaders))
+    )
 
 
 class Controller(Configurable):
@@ -601,7 +641,9 @@ class Controller(Configurable):
         # on to the trainer's DP replica leaders (the batcher gets only summaries). Bytes, not the
         # group's Python objects: holding those for several steps made the full GC collections
         # frequent and slow.
-        self._packed_groups_by_id: dict[int, PackedRolloutGroup] = {}
+        self._packed_groups_by_id: dict[
+            int, PackedRolloutGroup | PackedRolloutGroupHandle
+        ] = {}
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
         self.metrics_processor: m.MetricsProcessor = config.metrics.build(
@@ -810,6 +852,9 @@ class Controller(Configurable):
                 pad_id=self.tokenizer.eos_id,
                 temperature=self._sampling.temperature,
                 vision_processor=config.vision_processor,
+                rollout_groups_by_rdma=(
+                    config.rollouter.worker.rdma_min_group_bytes is not None
+                ),
             )
             # TODO: torch.compile with aot_eager backend (inductor crashes the vLLM engine on the shared model path).
             self.generator_router = await actor_system.spawn_generator_router(
@@ -847,6 +892,22 @@ class Controller(Configurable):
                 hf_assets_path=config.hf_assets_path,
                 rollout_recorder_config=config.rollout_recorder,
                 vision_processor_config=config.vision_processor,
+            )
+
+        if config.rollouter.worker.rdma_min_group_bytes is not None:
+            # Each trainer DP replica leader reads one probe from each rollout worker, so a host
+            # whose RDMA reads fail raises here instead of in the first step.
+            with sl.log_trace_span("rdma_group_probe"):
+                probes = await self._rollouter.make_rdma_probes()
+                await check_rdma_probes_on_leaders(
+                    self.trainer.leader_by_dp_rank, probes
+                )
+                await self._rollouter.drop_rdma_probes()
+            logger.info(
+                "Rollout groups of >= %d bytes stay in the rollout workers; trainer DP "
+                "replica leaders read them over torch transport (UCX_TLS=%s)",
+                config.rollouter.worker.rdma_min_group_bytes,
+                os.environ.get("UCX_TLS"),
             )
 
         if config.model_state_dict_transport is not None:
@@ -1290,6 +1351,8 @@ class Controller(Configurable):
                 summary.group.recorder_lines = ""
             except Exception:
                 logger.exception(f"rollout group {work.group_id} failed; dropping")
+                # Its worker may have kept it before the failure. As an empty group it is
+                # untrainable, so `_batcher_loop` releases it to the workers like any other.
                 summary, packed = pack_rollout_group(
                     RolloutGroup(
                         group_id=work.group_id,
@@ -1337,8 +1400,8 @@ class Controller(Configurable):
                 ) = await self.batcher.add_group.call_one(summary=summary)
             if not group_is_trainable:
                 del self._packed_groups_by_id[summary.group.group_id]
-                await self._group_buffer.release_active_groups(
-                    1, reason="untrainable_group"
+                await self._release_groups(
+                    [summary.group.group_id], reason="untrainable_group"
                 )
             del summary
             if maybe_plan is not None:
@@ -1505,7 +1568,8 @@ class Controller(Configurable):
                 # Overlap this step's pull -> group release with the next step's fwd/bwd.
                 pull_task = asyncio.create_task(
                     self._pull_model_state_dict_and_release_groups(
-                        optimizer_result.policy_version
+                        optimizer_result.policy_version,
+                        trainable_group_ids=plan.trainable_group_ids,
                     )
                 )
 
@@ -1572,12 +1636,22 @@ class Controller(Configurable):
                         rollout_ids_by_group_id.setdefault(
                             spec.rollout_id.group_id, set()
                         ).add(spec.rollout_id.rollout_id)
+            selected = [
+                self._packed_groups_by_id[group_id].select(rollout_ids)
+                for group_id, rollout_ids in rollout_ids_by_group_id.items()
+            ]
             columns.append(
                 ReplicaColumn(
                     microbatch_groups=microbatch_groups,
                     rollout_groups=[
-                        self._packed_groups_by_id[group_id].select(rollout_ids)
-                        for group_id, rollout_ids in rollout_ids_by_group_id.items()
+                        group
+                        for group in selected
+                        if isinstance(group, PackedRolloutGroup)
+                    ],
+                    rollout_group_handles=[
+                        group
+                        for group in selected
+                        if isinstance(group, PackedRolloutGroupHandle)
                     ],
                 )
             )
@@ -1595,9 +1669,12 @@ class Controller(Configurable):
             )
         )
 
-    async def _pull_model_state_dict_and_release_groups(self, version: int) -> float:
-        """Load policy ``version`` into every generator, then admit the next rollout groups; returns
-        the pull's wall time in seconds."""
+    async def _pull_model_state_dict_and_release_groups(
+        self, version: int, *, trainable_group_ids: list[int]
+    ) -> float:
+        """Load policy ``version`` into every generator, then release the step's
+        ``trainable_group_ids`` to admit the next rollout groups; returns the pull's wall time in
+        seconds."""
         with sl.log_trace_span("generator_pull_model_state_dict"):
             start = time.perf_counter()
             await self.generator_router.pull_model_state_dict.call_one(version)
@@ -1609,7 +1686,14 @@ class Controller(Configurable):
 
         # Born-fresh: admit the next groups only now that the generators are on `version`, so a new
         # rollout starts at the current version (keeps policy_age within the derived freshness bound).
-        await self._group_buffer.release_active_groups(
-            self.config.async_loop.num_prompts_per_train_step, reason="trained"
-        )
+        await self._release_groups(trainable_group_ids, reason="trained")
         return pull_s
+
+    async def _release_groups(self, group_ids: list[int], *, reason: str) -> None:
+        """Free the groups' active slots (`RolloutGroupWorkBuffer.release_active_groups`). When
+        groups can stay in the rollout workers, tell every worker too: the one that keeps a group
+        returns its buffer to its pool, and the others ignore the id. Every read of a trained
+        group's buffer ends before its step's `forward_backward` returns, before this."""
+        await self._group_buffer.release_active_groups(len(group_ids), reason=reason)
+        if self.config.rollouter.worker.rdma_min_group_bytes is not None:
+            self._rollouter.release_groups(group_ids)

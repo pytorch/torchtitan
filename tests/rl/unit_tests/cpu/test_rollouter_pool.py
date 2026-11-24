@@ -59,7 +59,9 @@ def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
 ) -> None:
     async def run() -> None:
         worker = object()
-        worker_config = SimpleNamespace(build=lambda: worker, rdma_min_image_bytes=None)
+        worker_config = SimpleNamespace(
+            build=lambda: worker, rdma_min_image_bytes=None, rdma_min_group_bytes=None
+        )
         init_calls = []
         monkeypatch.setattr(
             rollout_worker_module, "current_rank", lambda: SimpleNamespace(rank=2)

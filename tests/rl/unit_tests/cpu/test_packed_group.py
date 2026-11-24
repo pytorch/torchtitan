@@ -299,3 +299,31 @@ def test_a_leaders_rollouts_carry_no_group_metrics() -> None:
     assert summary.group.metrics
     assert leader_group.metrics == []
     assert [rollout.rollout_id for rollout in leader_group.rollouts] == [0, 2]
+
+
+def test_a_group_packed_into_a_given_buffer_keeps_the_padding_around_each_region() -> None:
+    """`allocate` supplies the buffer and `region_padding` bytes before and after each region
+    stay as `allocate` returned them, for the caller's markers; the regions unpack the same."""
+    group = _multiturn_group()
+    allocated = []
+
+    def allocate(num_bytes: int) -> np.ndarray:
+        allocated.append(np.full(num_bytes, 0xAB, dtype=np.uint8))
+        return allocated[-1]
+
+    _, packed = pack_rollout_group(group, allocate=allocate, region_padding=16)
+
+    [buffer] = allocated
+    regions = [*packed.rollout_regions, *packed.image_regions.values()]
+    _, by_value = pack_rollout_group(group)
+    assert [region.nbytes for region in regions] == [
+        region.nbytes
+        for region in [*by_value.rollout_regions, *by_value.image_regions.values()]
+    ]
+    for region in regions:
+        start = region.ctypes.data - buffer.ctypes.data
+        end = start + region.nbytes
+        assert region.base is buffer and start % 64 == 0
+        assert (buffer[start - 16 : start] == 0xAB).all()
+        assert (buffer[end : end + 16] == 0xAB).all()
+    _assert_rollouts_equal(unpack_rollout_group(packed).rollouts, group.rollouts)

@@ -19,6 +19,7 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
+from torchtitan.rl.torch_transport_rdma import RDMAProbe
 from torchtitan.rl.trainer.microbatch_group_reader import ReplicaColumn
 from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
 
@@ -58,6 +59,10 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         await super().sync_log_step(step, relative_step)
+
+    @concurrent_endpoint
+    async def check_rdma_probes(self, probes: list[RDMAProbe]) -> None:
+        await super().check_rdma_probes(probes)
 
     @concurrent_endpoint
     async def receive_replica_column(self, column: ReplicaColumn) -> None:

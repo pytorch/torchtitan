@@ -252,6 +252,7 @@ def _build_trainer(layout: str) -> Trainer:
         pad_id=EOS,
         temperature=1.0,
         vision_processor=VISION_PROCESSOR,
+        rollout_groups_by_rdma=False,
     )
 
 

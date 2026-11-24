@@ -15,6 +15,10 @@ step plan, and broadcasts each packed microbatch group to the replica's other ra
 Every rank of a replica trains on the same microbatches, so packing once per replica instead
 of once per rank saves the pp * cp * tp - 1 other ranks' CPU, and they need neither the rollouts
 nor the builder. Image files travel packed; every rank turns them into pixel values itself.
+
+Rollout groups that stay in their rollout workers (`BaseRolloutWorker.Config.rdma_min_group_bytes`)
+reach the leader as handles; before packing the first microbatch group, the leader reads the
+regions its column names from every worker at once (`read_packed_rollout_group_handles`).
 """
 
 from __future__ import annotations
@@ -25,17 +29,20 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch.distributed as dist
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.rollout.packed_group import unpack_rollout_group
+from torchtitan.rl.rollout.packed_group_handle import read_packed_rollout_group_handles
 
 if TYPE_CHECKING:
     from torchtitan.rl.rollout.packed_group import PackedRolloutGroup
+    from torchtitan.rl.rollout.packed_group_handle import PackedRolloutGroupHandle
     from torchtitan.rl.rollout.types import RolloutTurnID
+    from torchtitan.rl.torch_transport_rdma import RDMAByteBuffers
     from torchtitan.rl.trainer.batcher import MicrobatchPacker, TrainingMicrobatch
     from torchtitan.rl.trainer.training_sample_builder import (
         TrainingSample,
@@ -53,11 +60,13 @@ class ReplicaColumn:
     """What a DP replica's leader packs: its column of the step plan and the rollouts it names.
 
     Example:
-        # DP rank 1 of 2, one microbatch per group; its specs come from 2 rollouts of group 7
+        # DP rank 1 of 2, one microbatch per group; its specs come from rollouts 0 and 2 of
+        # group 7 (by value) and rollout 1 of group 9 (in its rollout worker)
         ReplicaColumn(
-            microbatch_groups=[[[spec_7_0, spec_7_2]], [[spec_7_0_turn_1]]],
+            microbatch_groups=[[[spec_7_0, spec_7_2]], [[spec_9_1]]],
             # The controller stores each trainable group's packed bytes (`pack_rollout_group`).
             rollout_groups=[packed_group_7.select({0, 2})],
+            rollout_group_handles=[handle_9.select({1})],
         )
     """
 
@@ -68,6 +77,10 @@ class ReplicaColumn:
     rollout_groups: list[PackedRolloutGroup]
     """Each group the column names, packed, with only the rollouts it names
     (`PackedRolloutGroup.select`)."""
+
+    rollout_group_handles: list[PackedRolloutGroupHandle] = field(default_factory=list)
+    """Each group the column names that stays in its rollout worker: where the rollouts it names
+    and their images sit there (`PackedRolloutGroupHandle.select`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +129,7 @@ class MicrobatchGroupReader:
         column: ReplicaColumn | None,
         training_sample_builder: TrainingSampleBuilder,
         microbatch_packer: MicrobatchPacker,
+        rdma_byte_buffers: RDMAByteBuffers | None = None,
     ) -> None:
         # The replica's rank 0 is its leader.
         assert column is not None or replica_group is not None
@@ -125,8 +139,13 @@ class MicrobatchGroupReader:
         # them, so the caller must not hold `column` past this call.
         self._microbatch_groups = None if column is None else column.microbatch_groups
         self._rollout_groups = [] if column is None else list(column.rollout_groups)
+        self._rollout_group_handles = (
+            [] if column is None else list(column.rollout_group_handles)
+        )
         self._training_sample_builder = training_sample_builder
         self._microbatch_packer = microbatch_packer
+        # Reads the column's handles; set on leaders when groups go by RDMA.
+        self._rdma_byte_buffers = rdma_byte_buffers
         # The leader's materialized samples, [group][microbatch] -> samples in packing order;
         # each group's leave as it is packed.
         self._samples_by_group: deque[list[list[TrainingSample]]] | None = None
@@ -134,9 +153,12 @@ class MicrobatchGroupReader:
         # Set once the leader fails to pack, on every rank: later groups raise it without a
         # broadcast, so no rank waits for a group the others never send.
         self._leader_error: str | None = None
-        # Total times, hidden or not; final once a pass ends. `pack_s` is the leader's, on every
-        # rank of the replica; `broadcast_s` is this rank's.
+        # Total times, hidden or not; final once a pass ends. `pack_s` and `read_s` (with
+        # `read_bytes`) are the leader's, on every rank of the replica; `broadcast_s` is this
+        # rank's.
         self.pack_s = 0.0
+        self.read_s = 0.0
+        self.read_bytes = 0
         self.broadcast_s = 0.0
 
     def __len__(self) -> int:
@@ -189,15 +211,17 @@ class MicrobatchGroupReader:
                 self._leader_error = f"{type(error).__name__}: {error}"
                 self._send(_LeaderError(self._leader_error))
                 raise
-            # With the leader's packing time so far, so every rank reports it (under PP, only
-            # the last stage reports, and the leader is in stage 0).
-            self._send((microbatch_group, self.pack_s))
+            # With the leader's packing and read times so far, so every rank reports them
+            # (under PP, only the last stage reports, and the leader is in stage 0).
+            self._send((microbatch_group, self.pack_s, self.read_s, self.read_bytes))
         # On this thread too, so it overlaps training when the engine reads lazily.
         return [microbatch.preprocess_images() for microbatch in microbatch_group]
 
     def _pack(
         self, index: int, microbatch_groups: list[list[list[TrainingSampleSpec]]]
     ) -> list[TrainingMicrobatch]:
+        if self._samples_by_group is None:
+            self._read_rollout_group_handles()
         start = time.perf_counter()
         if self._samples_by_group is None:
             samples = iter(self._materialize(microbatch_groups))
@@ -217,6 +241,24 @@ class MicrobatchGroupReader:
         ]
         self.pack_s += time.perf_counter() - start
         return microbatch_group
+
+    def _read_rollout_group_handles(self) -> None:
+        """Read the regions the column's handles name from their rollout workers, all reads in
+        flight together; the groups then unpack like those sent by value."""
+        if not self._rollout_group_handles:
+            return
+        assert self._rdma_byte_buffers is not None
+        start = time.perf_counter()
+        self._rollout_groups.extend(
+            read_packed_rollout_group_handles(
+                self._rollout_group_handles, self._rdma_byte_buffers
+            )
+        )
+        self.read_s += time.perf_counter() - start
+        self.read_bytes += sum(
+            handle.num_bytes for handle in self._rollout_group_handles
+        )
+        self._rollout_group_handles = []
 
     def _materialize(
         self, microbatch_groups: list[list[list[TrainingSampleSpec]]]
@@ -249,7 +291,7 @@ class MicrobatchGroupReader:
         return [samples_by_id.pop(spec.rollout_id) for spec in specs]
 
     def _send(
-        self, value: tuple[list[TrainingMicrobatch], float] | _LeaderError
+        self, value: tuple[list[TrainingMicrobatch], float, float, int] | _LeaderError
     ) -> None:
         if self._replica_group is None:
             return
@@ -259,9 +301,9 @@ class MicrobatchGroupReader:
 
     def _receive(self) -> list[TrainingMicrobatch]:
         start = time.perf_counter()
-        received: list[tuple[list[TrainingMicrobatch], float] | _LeaderError | None] = [
-            None
-        ]
+        received: list[
+            tuple[list[TrainingMicrobatch], float, float, int] | _LeaderError | None
+        ] = [None]
         dist.broadcast_object_list(received, group=self._replica_group, group_src=0)
         self.broadcast_s += time.perf_counter() - start
         value = received[0]
@@ -271,5 +313,5 @@ class MicrobatchGroupReader:
                 f"The DP replica's leader failed to pack a microbatch group: {value.message}"
             )
         assert value is not None
-        microbatch_group, self.pack_s = value
+        microbatch_group, self.pack_s, self.read_s, self.read_bytes = value
         return microbatch_group

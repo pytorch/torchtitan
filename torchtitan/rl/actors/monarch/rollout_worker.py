@@ -25,9 +25,18 @@ from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.monarch.rdma_object import MonarchRDMAObject
 from torchtitan.rl.rollout.finished_group import finish_rollout_group
 from torchtitan.rl.rollout.packed_group import pack_rollout_group, PackedRolloutGroup
+from torchtitan.rl.rollout.packed_group_handle import (
+    PackedRolloutGroupHandle,
+    RolloutGroupBuffers,
+)
 from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroupSummary
+from torchtitan.rl.torch_transport_rdma import (
+    make_rdma_probe,
+    RDMAByteBuffers,
+    RDMAProbe,
+)
 
 
 class RolloutWorkerActor(Actor):
@@ -54,6 +63,16 @@ class RolloutWorkerActor(Actor):
                 "register_rdma_object": MonarchRDMAObject.register,
             }
         self._worker = worker_config.build(**worker_kwargs)
+        # Large training groups stay here, packed, until the controller releases them.
+        self._group_buffers: RolloutGroupBuffers | None = None
+        self._rdma_byte_buffers: RDMAByteBuffers | None = None
+        self._rdma_probe: RDMAProbe | None = None
+        if worker_config.rdma_min_group_bytes is not None:
+            self._rdma_byte_buffers = RDMAByteBuffers()
+            self._group_buffers = RolloutGroupBuffers(
+                min_bytes=worker_config.rdma_min_group_bytes,
+                buffers=self._rdma_byte_buffers,
+            )
 
     @concurrent_endpoint
     async def setup_async(
@@ -84,10 +103,11 @@ class RolloutWorkerActor(Actor):
         group_size: int,
         sampling: Any,
         is_validation: bool,
-    ) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
+    ) -> tuple[RolloutGroupSummary, PackedRolloutGroup | PackedRolloutGroupHandle]:
         """Returns the scored group, with its rollout metrics and recorder lines
-        (`finish_rollout_group`), packed (`pack_rollout_group`): its summary for the batcher and
-        its bytes for the trainer."""
+        (`finish_rollout_group`), packed: its summary for the batcher and its bytes for the
+        trainer, or a handle to them when a training group stays here in a registered buffer
+        (`BaseRolloutWorker.Config.rdma_min_group_bytes`)."""
         # The worker's time in the call. The controller's `rollout_group` span times the whole
         # call, so the difference is the hop's transfer, serialization and dispatch time.
         with sl.log_trace_span("run_group"):
@@ -99,11 +119,32 @@ class RolloutWorkerActor(Actor):
                 group_size=group_size,
                 sampling=sampling,
             )
-            return pack_rollout_group(
-                finish_rollout_group(
-                    group, is_validation=is_validation, encoder=self._encoder
-                )
+            group = finish_rollout_group(
+                group, is_validation=is_validation, encoder=self._encoder
             )
+            # Validation groups go by value: the controller reads only their summaries.
+            if is_validation or self._group_buffers is None:
+                return pack_rollout_group(group)
+            return self._group_buffers.pack(group)
+
+    @concurrent_endpoint
+    async def release_groups(self, group_ids: list[int]) -> None:
+        """Return the buffers of the released groups kept here to the pool."""
+        assert self._group_buffers is not None
+        self._group_buffers.release(group_ids)
+
+    @concurrent_endpoint
+    async def make_rdma_probe(self) -> RDMAProbe:
+        """A small buffer for every trainer DP replica leader to read at setup."""
+        assert self._rdma_byte_buffers is not None and self._rdma_probe is None
+        self._rdma_probe = make_rdma_probe(self._rdma_byte_buffers)
+        return self._rdma_probe
+
+    @concurrent_endpoint
+    async def drop_rdma_probe(self) -> None:
+        assert self._rdma_byte_buffers is not None and self._rdma_probe is not None
+        self._rdma_byte_buffers.release(self._rdma_probe.buffer)
+        self._rdma_probe = None
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:

@@ -10,6 +10,8 @@ import asyncio
 import random
 from types import SimpleNamespace
 
+import pytest
+
 from renderers import (
     ParsedResponse,
     PlaceholderRange,
@@ -25,7 +27,7 @@ from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rdma_object import RDMAImageFiles
 from torchtitan.rl.rollout import Prompt, PromptImage, RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
-from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, MessageEnvRolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
@@ -445,3 +447,10 @@ def test_group_keeps_each_image_file_once_until_its_last_generate_call() -> None
     # 2 siblings x 2 turns read one registered file, dropped after the group.
     assert [p.images[0].data for p in read_prompts] == [image.data] * 4
     assert len(registered) == 1 and registered[0].dropped
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_rdma_min_group_bytes_must_be_none_or_positive(value: int) -> None:
+    config = SimpleNamespace(rdma_min_image_bytes=None, rdma_min_group_bytes=value)
+    with pytest.raises(ValueError, match="rdma_min_group_bytes must be None or >= 1"):
+        BaseRolloutWorker.Config.__post_init__(config)
