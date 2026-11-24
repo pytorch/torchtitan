@@ -25,7 +25,8 @@ from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
-from torchtitan.rl.rollout.rollouter import RolloutWorkerRoles
+from torchtitan.rl.rollout.rollouter import BaseRolloutWorker, RolloutWorkerRoles
+from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.tools.utils import get_visible_devices_env_var
 
@@ -493,11 +494,18 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
     assert all(mesh.visible_devices == [] for mesh in meshes.values())
 
 
-class _MarkerWorker:
+class _MarkerWorker(BaseRolloutWorker):
     """Its `close` leaves a file: the test can't read a worker process's memory."""
 
     def __init__(self, marker_dir: str) -> None:
+        # No rubric or advantage estimator: this worker never scores.
         self.marker_dir = marker_dir
+
+    async def setup_async(self, **kwargs) -> None:
+        pass
+
+    async def run_group(self, *, group_id: int, **kwargs) -> RolloutGroup:
+        return RolloutGroup(group_id=group_id, rollouts=[])
 
     async def close(self) -> None:
         pathlib.Path(self.marker_dir, f"closed-{os.getpid()}").touch()
@@ -512,6 +520,9 @@ class _MarkerWorkerConfig:
 
 
 def test_the_close_endpoint_reaches_each_worker_process(tmp_path):
+    """Before `setup_async` builds the workers, as after a failed setup, `close` has nothing to close
+    and returns. After it, `close` reaches each worker process."""
+
     async def run():
         system = MonarchActorSystem(MonarchActorSystem.Config())
         # The worker processes can't import this test module, so ship the fakes by value.
@@ -522,6 +533,21 @@ def test_the_close_endpoint_reaches_each_worker_process(tmp_path):
                 num_workers=2,
                 num_threads=1,
                 worker_roles=RolloutWorkerRoles(),
+            )
+            await asyncio.gather(
+                *(host_workers.close.call() for host_workers in workers.by_host)
+            )
+            assert list(tmp_path.glob("closed-*")) == []
+            await asyncio.gather(
+                *(
+                    host_workers.setup_async.call(
+                        tokenizer_config=None,
+                        renderer_config=None,
+                        hf_assets_path="",
+                        paths_on_every_host=[],
+                    )
+                    for host_workers in workers.by_host
+                )
             )
             await asyncio.gather(
                 *(host_workers.close.call() for host_workers in workers.by_host)

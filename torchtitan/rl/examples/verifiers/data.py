@@ -12,6 +12,10 @@ from typing import Any
 
 import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
+from verifiers.v1.tasksets.harbor import HarborConfig
+
+# TODO: import `cache_dir` from a public Verifiers module once one exports it. A Verifiers bump may move it.
+from verifiers.v1.tasksets.harbor.taskset import cache_dir
 from verifiers.v1.utils.loaders import load_taskset
 
 from torchtitan.rl.examples.verifiers.worker_setup import register_local_taskset_alias
@@ -51,6 +55,14 @@ class VerifiersTaskDataset(RLDataset):
         def __post_init__(self) -> None:
             if self.num_tasks is not None and self.num_tasks <= 0:
                 raise ValueError("num_tasks must be positive")
+
+        @property
+        def paths_on_every_host(self) -> list[str]:
+            # A Harbor taskset's samples hold each task's dir in the controller's Harbor cache, e.g.
+            # /home/me/.cache/harbor/local_tmax_v1/<task>. A worker grades the task from that dir.
+            if isinstance(self.verifiers_taskset, HarborConfig):
+                return [str(cache_dir(self.verifiers_taskset))]
+            return []
 
     def __init__(self, config: Config) -> None:
         verifiers_taskset_config = config.verifiers_taskset.model_copy(

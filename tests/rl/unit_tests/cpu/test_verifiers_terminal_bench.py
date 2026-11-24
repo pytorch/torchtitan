@@ -8,10 +8,13 @@
 
 import asyncio
 import pickle
+import re
+import socket
 import subprocess
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,9 +22,9 @@ pytest.importorskip("verifiers")
 
 import verifiers.v1 as vf
 
-from renderers import CustomRendererConfig
+from renderers import CustomRendererConfig, Qwen35RendererConfig
 
-from torchtitan.components.renderer import RenderersConfigAdapter
+from torchtitan.components.renderer import from_renderers, RenderersConfigAdapter
 from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.rl.controller.controller import Controller
@@ -31,10 +34,12 @@ from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
     TerminalBenchTerminusHarnessConfig,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
     _terminal_bench_rollouter_config,
 )
 from verifiers.v1.runtimes import ProgramResult
+from verifiers.v1.tasksets.harbor import taskset as harbor_taskset
 from verifiers.v1.trace import Timing
 from verifiers.v1.utils.loaders import load_harness, resolve_env_config
 
@@ -263,6 +268,102 @@ print(type(env.taskset).__name__, type(load_harness(env.config.agent.harness))._
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert result.stdout.split() == ["TerminalTaskset", "TerminalBenchTerminusHarness"]
+
+
+def _write_one_task_dataset(cache_dir: Path, *, verifier_toml: str = "") -> Path:
+    """Write a one-task Harbor dataset `local/one_task@v1` under `cache_dir`, and return its task dir."""
+    task_dir = cache_dir / "local_one_task_v1" / "fix-parser"
+    task_dir.mkdir(parents=True)
+    (task_dir / "instruction.md").write_text("Fix the parser.\n")
+    (task_dir / "task.toml").write_text(
+        '[task]\nname = "test/fix-parser"\n[environment]\ndocker_image = "example/tmax:1"\n'
+        + verifier_toml
+    )
+    return task_dir
+
+
+def test_a_worker_refuses_a_task_whose_tests_are_missing_on_its_host(
+    tmp_path, monkeypatch
+) -> None:
+    """A worker rebuilds each task from its sample, on the worker's host. Grading reads the task's
+    `tests/` there, so the rebuild raises when they are missing."""
+    monkeypatch.setattr(harbor_taskset, "CACHE", tmp_path)
+    task_dir = _write_one_task_dataset(tmp_path)
+    (task_dir / "tests").mkdir()
+    (task_dir / "tests" / "test.sh").write_text("exit 0\n")
+    config = _rollouter_config("local/one_task@v1", "local/other_task@v1")
+    # The controller loads the dataset. The sample holds the task's directory on this host.
+    sample = next(iter(config.training_dataloader.dataset.build()))
+    # Building a worker sets VF_RUN_ID; this makes monkeypatch remove it after the test.
+    monkeypatch.setenv("VF_RUN_ID", "")
+    worker = config.worker.build()
+    # Another host: the same path holds no tests/.
+    (task_dir / "tests").rename(task_dir / "tests_elsewhere")
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            f"{task_dir / 'tests'} is missing on host {socket.gethostname()}."
+        ),
+    ):
+        asyncio.run(
+            worker.run_group(
+                generate_fn=AsyncMock(),
+                release_session_fn=AsyncMock(),
+                sample=sample,
+                group_id=0,
+                group_size=1,
+                sampling=SamplingConfig(),
+            )
+        )
+
+
+def test_a_task_whose_verifier_image_holds_its_tests_needs_no_local_tests(
+    tmp_path, monkeypatch
+) -> None:
+    """A separate verifier whose image carries `/tests` never reads the local `tests/`, so the
+    task builds without them."""
+    monkeypatch.setattr(harbor_taskset, "CACHE", tmp_path)
+    _write_one_task_dataset(
+        tmp_path,
+        verifier_toml=(
+            '[verifier]\nenvironment_mode = "separate"\n'
+            '[verifier.environment]\ndocker_image = "example/verifier-with-tests:1"\n'
+        ),
+    )
+    config = _rollouter_config("local/one_task@v1", "local/other_task@v1")
+    sample = next(iter(config.training_dataloader.dataset.build()))
+    task_data = harbor_taskset.HarborData.model_validate(sample.verifiers_task_data)
+    assert task_data.verifier_image == "example/verifier-with-tests:1"
+    taskset.TerminalTask(data=task_data)
+
+
+def test_a_worker_whose_docker_hangs_fails_at_setup(tmp_path, monkeypatch) -> None:
+    """The recipe's agents run in Docker on the worker's host. When `docker version` gets no
+    answer there, the worker's setup raises before any server starts."""
+    # Building a worker sets VF_RUN_ID; this makes monkeypatch remove it after the test.
+    monkeypatch.setenv("VF_RUN_ID", "")
+    worker = _rollouter_config(TRAIN_DATASET, EVAL_DATASET).worker.build()
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text("#!/bin/sh\nexec /bin/sleep 5\n")
+    fake_docker.chmod(0o755)
+    # Only the fake `docker` is on PATH.
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(
+        "torchtitan.rl.examples.verifiers.rollouter._DOCKER_VERSION_TIMEOUT_S", 0.2
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            f"`docker version` got no answer in 0.2 s on host {socket.gethostname()}."
+        ),
+    ):
+        asyncio.run(
+            worker.setup_async(
+                tokenizer_config=None,
+                renderer_config=from_renderers(Qwen35RendererConfig()),
+                hf_assets_path="unused",
+            )
+        )
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:

@@ -276,6 +276,45 @@ also needs vLLM's XPU platform to accept `FLEX_ATTENTION`
 and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` in the launch
 environment: expandable segments invalidate the memory oneCCL registers.
 
+## Rollout workers on more than one host
+
+By default, rollout workers spread over the generators' hosts: `rollouter.worker_roles` sets
+`generator=True` and leaves the other roles at None (see `RolloutWorkerRoles` in
+`torchtitan/rl/rollout/rollouter.py`). Each worker runs its env on its own host, so whatever a
+worker reads must be reachable from every host that runs workers:
+
+| A worker reads | Make it reachable | Examples |
+| --- | --- | --- |
+| Files, by path | Put them in a shared folder: a filesystem mounted at the same path on every host, e.g. a home directory shared over NFS. As a last fallback, copy them to that path on each host. Nothing checks that the copies match. | the model's tokenizer (`hf_assets_path`), Geometry3K and SLAKE images, Terminal-Bench's Harbor cache |
+| A service at 127.0.0.1 | Serve it on an address every host can reach, or keep the workers on the controller's host (`rollouter.worker_roles.generator=None`, `rollouter.worker_roles.controller=True`). A worker that can't reach Search-R1's retriever gets empty search results. It logs a warning, and the rollout still trains. | Search-R1's retriever |
+| A local sandbox runtime | Run it on every host, e.g. a Docker daemon, or keep the workers on the controller's host. A Verifiers worker whose agents run in Docker fails the job at start on a host without it. | Terminal-Bench |
+
+A relative path resolves from each worker's working directory. `SlurmLauncher` runs each node's
+processes from the submit directory, so that directory must resolve to the same files on every node
+(see [Launchers](./actors/monarch/README.md#launchers)).
+
+Each rollout worker sets `OMP_NUM_THREADS=1` (unless the host's env sets it), so that if worker code
+runs torch or numpy math, it uses 1 thread instead of one per CPU.
+
+Each dataset config has a `paths_on_every_host` property: the paths its samples point at. The
+dataset computes it from its own fields, so you don't set it. E.g. SLAKE's returns its `data_dir`, so
+an override of `data_dir` moves the check with it. Each worker checks the training dataset's paths
+when it starts. A host without one fails the job at start, and the error names the path and the host.
+
+When a file is still missing on a worker's host, e.g. in a partial copy:
+
+- An image file: the rollout ends `ERROR_INFRA` and is not trained. The log names the host (example
+  below).
+- The tokenizer (`hf_assets_path`): a `MessageEnv` worker's setup fails, so the job fails at start.
+- A Terminal-Bench task's `tests/`: the group fails and is not trained. The error names the path and
+  the host.
+
+Example, a SLAKE image:
+
+```text
+rollout group=12/rollout=3 failed: ERROR_INFRA | FileNotFoundError: [Errno 2] No such file or directory: '/data/slake/imgs/xmlab1/source.jpg' | ... | host=gpu-7
+```
+
 ## Trainer/generator consistency
 
 Install the batch-invariant kernels shown in [Prerequisites](#prerequisites), then follow the [bitwise parity guide](./BITWISE_PARITY.md) for configuration, supported layouts, verification, and limitations.
