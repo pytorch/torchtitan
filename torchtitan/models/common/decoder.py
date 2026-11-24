@@ -4,10 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
 import spmd_types as spmd
@@ -72,23 +71,6 @@ class TransformerBlock(Module):
         feed_forward: FeedForward.Config
         attention_norm: Module.Config
         ffn_norm: Module.Config
-
-
-def _equal_ignoring_param_init(a: object, b: object) -> bool:
-    """Whether two configs are equal apart from parameter initialization.
-
-    Layers often differ only in depth-scaled ``param_init``, which does not
-    change FLOPs.
-    """
-    if dataclasses.is_dataclass(a) and type(a) is type(b):
-        return all(
-            field.name == "param_init"
-            or _equal_ignoring_param_init(
-                getattr(a, field.name), getattr(b, field.name)
-            )
-            for field in dataclasses.fields(a)
-        )
-    return a == b
 
 
 class Decoder(BaseModel):
@@ -201,11 +183,25 @@ class Decoder(BaseModel):
             parameter_flops_per_token = active_parameter_flops_per_token(
                 model, excluded_submodules=excluded_submodules
             )
+
+            def equal_ignoring_param_init(a: object, b: object) -> bool:
+                # Layers often differ only in depth-scaled param_init, which
+                # does not change FLOPs.
+                if is_dataclass(a) and type(a) is type(b):
+                    return all(
+                        field.name == "param_init"
+                        or equal_ignoring_param_init(
+                            getattr(a, field.name), getattr(b, field.name)
+                        )
+                        for field in fields(a)
+                    )
+                return a == b
+
             # Layers repeat a few attention configs; count each distinct one once.
             attention_counts: list[tuple[Attention.Config, int]] = []
             for _, attention, _, _ in self.traverse(Attention.Config):
                 for i, (seen, count) in enumerate(attention_counts):
-                    if _equal_ignoring_param_init(seen, attention):
+                    if equal_ignoring_param_init(seen, attention):
                         attention_counts[i] = (seen, count + 1)
                         break
                 else:
