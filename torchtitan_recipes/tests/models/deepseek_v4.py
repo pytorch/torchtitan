@@ -35,8 +35,8 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.mtp import MTPCrossEntropyLoss
 from torchtitan.models.deepseek_v4 import build_model_config, DeepSeekV4Model
-from torchtitan.models.deepseek_v4.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
@@ -359,11 +359,13 @@ def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
 def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
+    parallelism: ParallelismConfig | None = None,
     muon_ns_steps: int = 10,
     muon_ns_coefficients: _NSCoefficientSchedule = _DEFAULT_NS_COEFFICIENTS,
 ) -> Trainer.Config:
     num_mtp_layers = 1
-    parallelism = ParallelismConfig(expert_parallel_degree=1)
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=1)
     model_config = build_model_config(
         "debugmodel",
         seq_len=seq_len,
@@ -399,6 +401,7 @@ def deepseek_v4_mtp_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             steps=10,
         ),
         parallelism=parallelism,

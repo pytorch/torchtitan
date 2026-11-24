@@ -31,9 +31,9 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.common.mtp import MTPCrossEntropyLoss
 
 from torchtitan.models.deepseek_v3 import build_model_config
-from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer

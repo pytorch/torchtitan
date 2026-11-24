@@ -637,7 +637,7 @@ class TestTransformModel(unittest.TestCase):
                 )
 
     def test_transforms_mtp_layers(self):
-        from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+        from torchtitan.models.common.mtp import MTPDecoder
         from torchtitan_recipes.tests.models.deepseek_v3 import (
             deepseek_v3_debugmodel_mtp,
         )
