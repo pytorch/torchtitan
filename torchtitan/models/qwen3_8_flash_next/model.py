@@ -368,6 +368,36 @@ class Qwen38FlashNextModel(Qwen35Model):
             aux_loss_denominators=aux_loss_denominators,
         )
 
+    def forward_embeddings(  # pyrefly: ignore [bad-override]
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        document_positions: torch.Tensor,
+        ple_input_ids: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """`forward` from the ``(T, D)`` input embeddings, which every residual stream
+        starts from. For the RL generator, which merges image embeddings into the token
+        embeddings itself.
+
+        PLE still reads the token IDs, image placeholders included (``ple_input_ids``),
+        and each token's 1D ``document_positions``: M-RoPE ``positions`` give back
+        neither.
+        """
+        return self._forward_streams(
+            h.repeat(1, self.num_streams),
+            positions,
+            attention_metadata,
+            document_positions=document_positions,
+            ple_input_ids=ple_input_ids,
+            ple_routing=None,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
+
     def _forward_streams(
         self,
         x_TC: torch.Tensor,

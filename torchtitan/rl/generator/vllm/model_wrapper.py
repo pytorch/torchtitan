@@ -93,6 +93,7 @@ def _replace_vllm_layer_configs(model_config):
             inner = VLLMQSAInnerAttention.Config(
                 compress_ratio=attention_cfg.inner_attention.compress_ratio,
                 indexer_loss=attention_cfg.inner_attention.indexer_loss,
+                chunk_size=attention_cfg.inner_attention.chunk_size,
                 layer_idx=layer_idx,
                 num_kv_heads=attention_cfg.n_kv_heads,
                 head_dim=attention_cfg.head_dim,

@@ -9,6 +9,7 @@ import dataclasses
 import math
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -27,6 +28,10 @@ from torchtitan.models.qwen3_5 import (
     build_model_config,
     QWEN3_5_VISION_PROCESSOR_KWARGS,
 )
+from torchtitan.models.qwen3_8_flash_next import (
+    build_model_config as build_flash_next_model_config,
+    Qwen38FlashNextMultimodalModel,
+)
 from torchtitan.rl.generator.vllm.multimodal_wrapper import (
     _ImageMultiModalProcessor,
     _ImageProcessingInfo,
@@ -38,6 +43,7 @@ from torchtitan.rl.generator.vllm.multimodal_wrapper import (
 from torchtitan.rl.generator.vllm.registry import model_config_to_hf_config_dict
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 from vllm import SamplingParams
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.transformers_utils.config import PretrainedConfig, uses_mrope
 from vllm.v1.core.sched import output as vllm_scheduler_output
@@ -86,6 +92,53 @@ def test_embed_input_ids_writes_image_embeddings_over_placeholders() -> None:
     expected[[1, 2]] = 10.0
     expected[4] = 20.0
     assert torch.equal(embeds, expected)
+
+
+@pytest.mark.parametrize("vllm_built_metadata", [True, False])
+def test_flash_next_forward_passes_token_ids_and_request_positions(
+    vllm_built_metadata,
+) -> None:
+    """Flash-Next's PLE reads the token IDs, image placeholders included, and each
+    token's 1D position in its request, which M-RoPE positions do not give back. vLLM's
+    profiling runs build no attention metadata; PLE ignores the positions there."""
+    assert requires_raw_input_tokens(VLLMMultimodalModelWrapper)
+    wrapper = object.__new__(VLLMMultimodalModelWrapper)
+    model = mock.create_autospec(Qwen38FlashNextMultimodalModel, instance=True)
+    object.__setattr__(wrapper, "model", model)
+    object.__setattr__(
+        wrapper,
+        "parallelism_context",
+        SimpleNamespace(activate_spmd=contextlib.nullcontext),
+    )
+    object.__setattr__(wrapper, "_dist_moe_runtime", None)
+    # Two requests: 2 tokens of a decode at positions 6-7, then a prompt's first 3
+    # tokens, the last 2 image placeholders (7), then a padding row.
+    request_positions = torch.tensor([6, 7, 0, 1, 2, 0])
+    object.__setattr__(
+        wrapper,
+        "_flash_next_indexer",
+        SimpleNamespace(
+            request_positions=lambda num_tokens: (
+                request_positions if vllm_built_metadata else None
+            )
+        ),
+    )
+    input_ids = torch.tensor([4, 5, 1, 7, 7, 0])
+    positions = torch.tensor(
+        [[9, 10, 0, 1, 1, 0], [9, 10, 0, 1, 2, 0], [9, 10, 0, 1, 1, 0]]
+    )
+    inputs_embeds = torch.randn(6, 4)
+
+    wrapper.forward(input_ids, positions, inputs_embeds)
+
+    ((embeds, rope_positions), kwargs) = model.forward_embeddings.call_args
+    assert embeds is inputs_embeds
+    assert torch.equal(rope_positions, positions.T)
+    assert kwargs["ple_input_ids"] is input_ids
+    assert torch.equal(
+        kwargs["document_positions"],
+        request_positions if vllm_built_metadata else positions[0],
+    )
 
 
 def _image_prompt(image_paths) -> Prompt:
@@ -281,10 +334,19 @@ def test_profiling_uses_the_vision_processors_largest_grid():
     assert dummy["mm_hashes"]["image"][0] != dummy["mm_hashes"]["image"][1]
 
 
-def test_hf_config_declares_mrope_only_for_image_prompts():
-    config = build_model_config(
-        "0.8B_mm", seq_len=256, attn_backend="varlen", parallelism=ParallelismConfig()
-    )
+@pytest.mark.parametrize("model", ["qwen3_5", "qwen3_8_flash_next"])
+def test_hf_config_declares_mrope_only_for_image_prompts(model):
+    if model == "qwen3_5":
+        config = build_model_config(
+            "0.8B_mm",
+            seq_len=256,
+            attn_backend="varlen",
+            parallelism=ParallelismConfig(),
+        )
+    else:
+        config = build_flash_next_model_config(
+            "debugmodel_mm", seq_len=256, parallelism=ParallelismConfig()
+        )
 
     text = PretrainedConfig.from_dict(model_config_to_hf_config_dict(config))
     image = PretrainedConfig.from_dict(
