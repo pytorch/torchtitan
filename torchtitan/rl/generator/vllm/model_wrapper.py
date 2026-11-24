@@ -336,17 +336,6 @@ class VLLMModelWrapper(Module):
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
 
-    def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
-        """Publish how many of this step's tokens are real, for the padding mask.
-
-        vLLM pads a step (CUDA-graph capture size, data-parallel equalization)
-        before the model runs. The runner calls this with the unpadded count. It
-        is a device write with no host sync, so it can run before every graph
-        replay. A no-op for models without Dist-MoE.
-        """
-        if self._num_valid_tokens is not None:
-            self._num_valid_tokens.fill_(num_valid_tokens)
-
     def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int:
         """Return the Dist-MoE row count every EP rank passes in this step.
 
@@ -376,8 +365,7 @@ class VLLMModelWrapper(Module):
         max_num_batched_tokens: int,
         device: torch.device,
     ) -> None:
-        """Build the Dist-MoE runtime (see ``build_dist_moe_runtime``) and the
-        device scalar of each step's real token count."""
+        """Build the Dist-MoE runtime (see ``build_dist_moe_runtime``)."""
         tp = self.parallelism_context.tp
         if self._expert_sequence_parallel_size != tp and any(
             isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
@@ -396,16 +384,6 @@ class VLLMModelWrapper(Module):
             device=device,
             max_num_tokens_per_step=max_num_batched_tokens,
         )
-        self._num_valid_tokens: torch.Tensor | None = None
-        if self._dist_moe_runtime is not None:
-            # The runner writes each step's real token count here before the
-            # forward runs, and forward builds the padding mask from it on the
-            # device, so CUDA-graph replay sees the current count. The address must
-            # stay fixed from before capture. Until a step publishes, every token
-            # counts as real.
-            self._num_valid_tokens = torch.full(
-                (), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
-            )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
@@ -498,21 +476,25 @@ class VLLMModelWrapper(Module):
 
         Call once per forward.
         """
-        # Rows past the real token count are padding (true for padding). Only
-        # the MoE reads this mask: Dist-MoE routes those rows to expert -1.
-        # Attention takes its metadata from vLLM, which already excludes padding.
+        # Only Dist-MoE reads the padding mask: padding rows go to expert -1.
         if self._dist_moe_runtime is None:
             return {}
-        assert self._num_valid_tokens is not None
+
+        # True for the rows vLLM added: padding to a CUDA-graph size (the same on every DP
+        # replica), or an idle DP rank's dummy batch. vLLM refills this buffer before every
+        # step, so a CUDA-graph replay reads the current mask.
+        padding_mask = get_forward_context().is_padding
+        assert padding_mask is not None, "vLLM set no ForwardContext.is_padding"
+
+        # The rows `_pad_step_to_tp` added to reach a multiple of TP are padding too.
+        num_padding_rows = num_tokens - padding_mask.shape[0]
+        if num_padding_rows:
+            padding_mask = F.pad(padding_mask, (0, num_padding_rows), value=True)
+
         self._dist_moe_runtime.set_num_local_input_tokens_per_call(
             self._dist_moe_num_local_input_tokens(num_tokens)
         )
-        return {
-            "padding_mask": torch.arange(
-                num_tokens, device=self._num_valid_tokens.device
-            )
-            >= self._num_valid_tokens
-        }
+        return {"padding_mask": padding_mask}
 
     def compute_logits(
         self,
