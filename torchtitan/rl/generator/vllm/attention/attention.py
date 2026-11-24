@@ -70,11 +70,6 @@ class _FA4PageSize:
             and torch.cuda.get_device_capability()[0] == 10
         ):
             return [16] if is_in_batch_invariant_mode() else [128]
-        # vLLM main passes kv_cache_spec; the vLLM nightly on PyTorch's index
-        # (9f03b51) takes no argument.
-        # TODO: always forward it once that nightly includes vllm-project/vllm#53175.
-        if kv_cache_spec is None:
-            return super().get_supported_kernel_block_sizes()
         return super().get_supported_kernel_block_sizes(kv_cache_spec)
 
 

@@ -24,9 +24,7 @@ this one covers `gpu_fetch`.
 Mooncake needs `mooncake-transfer-engine-cuda13==0.3.14` (installed by
 `scripts/install_rl_env.sh`) and a PyTorch nightly from 2026-11-10 or later
 (https://github.com/pytorch/pytorch/pull/203623; older ones can drop a
-completed read and time out). The vLLM wheel pinned by
-`scripts/install_rl_env.sh` pins torch 2026-11-07, which is too old. TODO:
-drop this note once that pin moves past 2026-11-10. Without
+completed read and time out). Without
 https://github.com/pytorch/pytorch/pull/204113, host memory on other NUMA nodes
 uses node 0's NICs, which can cut read bandwidth several times. On IPv6-only
 hosts set `MC_USE_IPV6=1`; Mooncake's handshake otherwise resolves peer

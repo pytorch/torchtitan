@@ -39,9 +39,8 @@ def apply_env_defaults() -> None:
         )
     for key, value in RL_ENV_DEFAULTS.items():
         os.environ.setdefault(key, value)
-    # TODO: remove this mirror after updating pinned vLLM and its legacy readers.
-    # 9f03b510c restores max_split_size_mb from the legacy name; fixed upstream:
-    # https://github.com/vllm-project/vllm/pull/58430
+    # TODO: remove this mirror once vLLM's KV-connector check reads expandable_segments
+    # from PYTORCH_ALLOC_CONF too: https://github.com/vllm-project/vllm/pull/54351
     os.environ.setdefault(
         "PYTORCH_CUDA_ALLOC_CONF",
         os.environ["PYTORCH_ALLOC_CONF"],

@@ -54,9 +54,9 @@ own environment on top of the RL environment, without replacing PyTorch:
 
 ```bash
 uv venv --python 3.12 .venv-sglang && source .venv-sglang/bin/activate
-# The RL environment: PyTorch and vLLM nightlies (batch-invariant mode uses vLLM's
-# batch-invariant bmm), TorchStore and FlashAttention; then SGLang at the verified
-# commit, keeping the RL environment's PyTorch.
+# The RL environment: the PyTorch nightly and a vLLM release (batch-invariant mode
+# uses vLLM's batch-invariant bmm), TorchStore and FlashAttention; then SGLang at the
+# verified commit, keeping the RL environment's PyTorch.
 scripts/install_rl_env.sh --sglang
 ```
 

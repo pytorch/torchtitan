@@ -26,7 +26,7 @@ from torchtitan.tools.utils import device_type
 class TorchTitanCudagraphDispatcher(CudagraphDispatcher):
     """Give decode batches their own FULL graphs, apart from prefill and mixed batches.
 
-    vLLM at 9f03b51 keys plain FULL graphs by token count only: four one-token
+    vLLM keys plain FULL graphs by token count only: four one-token
     decodes replay the mixed-batch graph captured with ``max_query_len = 4``.
     Decode needs its own graph:
       - Attention Gym linear attention (GDN/KDA) runs different decode kernels.
