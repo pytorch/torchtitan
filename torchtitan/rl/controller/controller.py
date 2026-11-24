@@ -463,6 +463,9 @@ class Controller(Configurable):
                     f"rollouter.rollouts_per_worker ({rollouts_per_worker}). Please raise "
                     "rollouter.rollouts_per_worker or lower async_loop.num_samples_per_prompt."
                 )
+            # The config loader reruns only this top-level `__post_init__`, so check the worker roles
+            # again: a recipe line may leave no role True after the roles were built.
+            self.rollouter.worker_roles.__post_init__()
             # TODO: support "gpu_fetch" by reading into generator GPU memory
             # (https://github.com/pytorch/torchtitan/issues/6070).
             if (

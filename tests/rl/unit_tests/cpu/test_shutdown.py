@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import logging
 import os
 import pathlib
 import sys
@@ -24,6 +25,7 @@ from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
+from torchtitan.rl.rollout.rollouter import RolloutWorkerRoles
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.tools.utils import get_visible_devices_env_var
 
@@ -453,6 +455,7 @@ def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
             trainer=mesh_a,
             generators=[mesh_a, mesh_a, mesh_b, mesh_b, mesh_b, mesh_b],
             gpus_per_node=4,
+            controller_on_first_trainer_host=False,
         ),
         num_generators=6,
     )
@@ -482,6 +485,7 @@ def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
                 trainer=meshes["A"],
                 generators=[meshes[name] for name in layout],
                 gpus_per_node=4,
+                controller_on_first_trainer_host=False,
             ),
             num_generators=len(layout),
         )
@@ -517,14 +521,58 @@ def test_the_close_endpoint_reaches_each_worker_process(tmp_path):
                 _MarkerWorkerConfig(str(tmp_path)),
                 num_workers=2,
                 num_threads=1,
+                worker_roles=RolloutWorkerRoles(),
             )
-            await workers.close.call()
+            await asyncio.gather(
+                *(host_workers.close.call() for host_workers in workers.by_host)
+            )
             await system.stop_rollout_workers()
         finally:
             cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
 
     asyncio.run(run())
     assert len(list(tmp_path.glob("closed-*"))) == 2
+
+
+def test_stop_rollout_workers_stops_every_host_at_once_when_one_fails(caplog):
+    """Each stop waits until every stop has started, so stopping one host after another would
+    hang. Host 0's stop raises as soon as it is called."""
+    started: list[str] = []
+
+    class _FailingMesh:
+        def stop(self):
+            raise RuntimeError("host is gone")
+
+    class _BarrierMesh:
+        def __init__(self, name: str, all_started: asyncio.Event) -> None:
+            self.name = name
+            self.all_started = all_started
+
+        async def stop(self):
+            started.append(self.name)
+            if len(started) == 2:
+                self.all_started.set()
+            await self.all_started.wait()
+
+    async def run() -> MonarchActorSystem:
+        all_started = asyncio.Event()
+        system = MonarchActorSystem(MonarchActorSystem.Config())
+        system._rollout_worker_meshes = [
+            _FailingMesh(),
+            _BarrierMesh("host 1", all_started),
+            _BarrierMesh("host 2", all_started),
+        ]
+        await asyncio.wait_for(system.stop_rollout_workers(), timeout=5)
+        return system
+
+    with caplog.at_level(logging.ERROR, logger=monarch_system.__name__):
+        system = asyncio.run(run())
+
+    assert started == ["host 1", "host 2"]
+    assert [record.getMessage() for record in caplog.records] == [
+        "rollout worker mesh 0 failed to stop"
+    ]
+    assert system._rollout_worker_meshes == []
 
 
 def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch):
