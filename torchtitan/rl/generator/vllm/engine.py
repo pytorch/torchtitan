@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,10 +43,7 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
-from torchtitan.rl.generator.vllm.multimodal_wrapper import (
-    image_prompt_to_engine_input,
-    keep_prefix_cached_image_data,
-)
+from torchtitan.rl.generator.vllm.multimodal_wrapper import image_prompt_to_engine_input
 from torchtitan.rl.generator.vllm.registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -109,6 +105,8 @@ def _validate_platform(
     """Reject what TorchTitan's vLLM path supports only on CUDA (and ROCm)."""
     if device_type == "cuda":
         return
+    # XPU runs vLLM's own worker (`TORCHTITAN_WORKER_CLS`), which lacks TorchTitan's
+    # FULL decode graphs; lifting this check needs TorchTitan's worker there first.
     if config.cuda_graph.mode != "NONE":
         raise ValueError(
             f"vLLM CUDA graphs need CUDA; set cuda_graph.mode='NONE' on {device_type}."
@@ -265,8 +263,6 @@ class VLLMEngine(GenerationEngine):
                     output_dir=output_dir,
                 )
             )
-        if vision_processor is not None:
-            keep_prefix_cached_image_data()
         logger.info("Initializing LLMEngine from EngineArgs...")
         self._engine = LLMEngine.from_engine_args(
             engine_args, stat_loggers=stat_loggers
@@ -292,7 +288,8 @@ class VLLMEngine(GenerationEngine):
         vision_processor: VisionProcessor.Config | None,
     ) -> None:
         """Process-wide vLLM setup before the engine build: register the TorchTitan model
-        and config parser with vLLM, and select vLLM's model runner."""
+        and config parser with vLLM, and in batch-invariant mode swap vLLM's sampler
+        kernels for the trainer's PyTorch ops."""
         register_to_vllm(
             model,
             parallelism=parallelism,
@@ -302,7 +299,6 @@ class VLLMEngine(GenerationEngine):
             model_state_dict_load_mode=model_state_dict_load_mode,
             vision_processor=vision_processor,
         )
-        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
         if batch_invariant:
             force_trainer_logprobs_for_batch_invariance()
 

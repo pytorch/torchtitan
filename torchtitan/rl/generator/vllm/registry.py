@@ -68,8 +68,10 @@ TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 TORCHTITAN_MODEL_TYPE = "torchtitan"
 
 # Selects TorchTitan's worker, whose runner adds FULL decode graphs to FULL mode.
+# XPU keeps vLLM's own worker ("auto"): VLLMEngine runs it without CUDA graphs
+# (`_validate_platform`).
 TORCHTITAN_WORKER_CLS = (
-    "torchtitan.rl.generator.vllm.worker.TorchTitanXPUWorker"
+    "auto"
     if device_type == "xpu"
     else "torchtitan.rl.generator.vllm.worker.TorchTitanGPUWorker"
 )

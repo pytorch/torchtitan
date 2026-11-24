@@ -432,7 +432,7 @@ class SGLangEngine(GenerationEngine):
             # SGLang's default for this backend (its 128-token pages are for its own
             # FA4 backend). 128-token pages would put batch-invariant decode on FA4's
             # SwapAB kernel, which does not match prefill bitwise (see vLLM's
-            # _FA4PageSize).
+            # _FlashAttentionPageSize).
             page_size=1,
             # Smaller `priority` runs first and is preempted last; EngineRequest.group_id
             # (-1 for all validation) puts older groups first (see its docstring).

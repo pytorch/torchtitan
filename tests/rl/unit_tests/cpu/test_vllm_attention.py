@@ -48,19 +48,30 @@ def test_kv_page_size_follows_flash_impl(
         assert backend.get_preferred_block_size(16) == page_size
 
 
-@pytest.mark.parametrize("batch_invariant, page_size", [(False, 128), (True, 16)])
-def test_fa4_splits_hybrid_kv_blocks_into_pages(batch_invariant, page_size):
-    """A hybrid model's KV block, aligned to its linear-attention state, splits into FA4 pages.
+@pytest.mark.parametrize(
+    "flash_impl, capability, batch_invariant, page_size",
+    [
+        ("FA4", (10, 0), False, 128),
+        ("FA4", (10, 0), True, 16),
+        ("FA3", (9, 0), False, 1152),
+        ("FA3", (9, 0), True, 16),
+    ],
+)
+def test_hybrid_kv_blocks_split_into_flash_attention_pages(
+    flash_impl, capability, batch_invariant, page_size
+):
+    """A hybrid model's 1152-token KV block splits into kernel pages, or stays one page.
 
-    Batch-invariant mode needs 16-token pages: a whole 1152-token page would admit SwapAB.
+    Batch-invariant mode needs 16-token pages: one 1152-token page would put FA4's decode
+    on SwapAB, or give FA3's long prefills (not its decode) 128-key TMA tiles.
     """
     backend = vllm_attention.TorchTitanVarlenInnerAttentionBackend
     with (
         patch.object(
-            vllm_attention, "get_cuda_flash_attention_impl", return_value="FA4"
+            vllm_attention, "get_cuda_flash_attention_impl", return_value=flash_impl
         ),
         patch.object(
-            vllm_attention.torch.cuda, "get_device_capability", return_value=(10, 0)
+            vllm_attention.torch.cuda, "get_device_capability", return_value=capability
         ),
         patch.object(
             vllm_attention, "is_in_batch_invariant_mode", return_value=batch_invariant

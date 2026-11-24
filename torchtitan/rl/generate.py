@@ -135,7 +135,6 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
     set_batch_invariance(gen_config.debug.batch_invariant)
     if gen_config.debug.batch_invariant:
         force_trainer_logprobs_for_batch_invariance()
@@ -147,6 +146,9 @@ def generate() -> None:
         f"Tensor Parallel Size: {gen_config.parallelism.tensor_parallel_degree}"
     )
     logger.debug(f"Expert Parallel Enabled: {enable_ep}")
+
+    # TODO: run VLLMEngine's platform checks (`_validate_platform` in
+    # generator/vllm/engine.py) here too; off CUDA this script skips them.
 
     # Create EngineArgs from config
     engine_kwargs = dict(

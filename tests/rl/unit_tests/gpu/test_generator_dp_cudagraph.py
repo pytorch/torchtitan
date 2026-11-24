@@ -31,7 +31,6 @@ from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
 from vllm import SamplingParams
-from vllm.config import CUDAGraphMode
 from vllm.sampling_params import RequestOutputKind
 
 from tests.rl.unit_tests.gpu.test_bitwise_parity import (
@@ -91,7 +90,7 @@ def _world_size() -> int:
 
 @contextlib.contextmanager
 def _dp_engine(config):
-    """Build the generator's engine; yield it, its dispatch records and the largest decode graph."""
+    """Build the generator's engine; yield it, its FULL-graph replays and the largest decode graph."""
     generator = config.generator
     temporary_dump_folder = None
     if not dist.is_initialized():
@@ -108,17 +107,20 @@ def _dp_engine(config):
     records = []
 
     def instrument(worker):
-        runner = worker.model_runner
-        original = runner._determine_batch_execution_and_padding
+        manager = worker.model_runner.cudagraph_manager
+        original = manager.run_fullgraph
 
-        def record(num_tokens, *args, **kwargs):
-            result = original(num_tokens, *args, **kwargs)
-            mode, descriptor = result[:2]
-            records.append((mode, descriptor.num_tokens, descriptor.uniform))
-            return result
+        def record(descriptor):
+            is_decode_graph = descriptor.uniform_token_count is not None
+            records.append((descriptor.num_tokens, is_decode_graph))
+            return original(descriptor)
 
-        runner._determine_batch_execution_and_padding = record
-        return runner.cudagraph_dispatcher.max_decode_capture_size
+        manager.run_fullgraph = record
+        return max(
+            descriptor.num_tokens
+            for descriptor in manager.graphs
+            if descriptor.uniform_token_count is not None
+        )
 
     try:
         (max_decode_capture_size,) = engine.collective_rpc(instrument)
@@ -183,18 +185,14 @@ def test_vllm_dp_decode_graphs_with_prefilling_peer():
         )
 
         assert beside_prefill == alone
-        assert any(
-            mode == CUDAGraphMode.FULL and uniform for mode, _, uniform in alone_records
-        ), alone_records
+        assert any(is_decode for _, is_decode in alone_records), alone_records
         if dist.get_rank() != 0:
             # Padded to rank 0's long-prompt chunk, past the largest decode graph: the
             # mixed graph. (A rank's own short prefill also replays a mixed graph.)
             assert max_decode_capture_size < LONG_PROMPT_TOKENS
             assert any(
-                mode == CUDAGraphMode.FULL
-                and num_tokens >= LONG_PROMPT_TOKENS
-                and not uniform
-                for mode, num_tokens, uniform in records
+                num_tokens >= LONG_PROMPT_TOKENS and not is_decode
+                for num_tokens, is_decode in records
             ), records
 
 
@@ -244,8 +242,6 @@ def test_vllm_dp_linear_attention_full_graphs():
         assert max_decode_capture_size < LONG_PROMPT_TOKENS
         for phase_records in (busy_records, records):
             assert any(
-                mode == CUDAGraphMode.FULL
-                and num_tokens >= LONG_PROMPT_TOKENS
-                and not uniform
-                for mode, num_tokens, uniform in phase_records
+                num_tokens >= LONG_PROMPT_TOKENS and not is_decode
+                for num_tokens, is_decode in phase_records
             ), phase_records
