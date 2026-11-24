@@ -15,10 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict_saver import _stateful_to_state_dict
 from torch.distributed.checkpoint.stateful import Stateful
+from torch.distributed.tensor import DTensor
+from torch.utils import _pytree as pytree
 from torch_checkpointing.barriers import DefaultStoreBarrierConfig
 from torch_checkpointing.checkpoint_layout import LayoutInfo, SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
@@ -75,6 +78,41 @@ _DEFAULT_ITEM_SPEC = ItemSpec(requires_copy=False)
 
 # Logger the backend emits its checkpoint events and metrics on.
 CHECKPOINTING_LOGGER_NAME = "torch_checkpointing"
+
+
+def _backend_state_dict(states: dict[str, Any]) -> dict[str, Any]:
+    """Flatten ``states`` for torch_checkpointing, with storage-backed tensors.
+
+    A quantized FSDP parameter (``_ShardedFSDPTensor``, bare or as a DTensor
+    local tensor) has no storage: ``data_ptr()`` is 0. Its data is the shard
+    that ``__get_tensor_shard__`` returns, so pass that shard instead. Without
+    this, a save writes uninitialized memory for such a parameter, and a load
+    dedupes all of them as one aliased tensor and fills only the last one.
+
+    TODO: torchtitan works around torch_checkpointing not honoring
+    ``__get_tensor_shard__``, as DCP does. Remove this once it does.
+    <issue link>
+    """
+
+    def storage_backed(tensor: torch.Tensor) -> torch.Tensor:
+        local = tensor._local_tensor if isinstance(tensor, DTensor) else tensor
+        if not hasattr(local, "__get_tensor_shard__"):
+            return tensor
+        shard = local.__get_tensor_shard__(None)
+        if not isinstance(tensor, DTensor):
+            return shard
+        return DTensor.from_local(
+            shard,
+            tensor.device_mesh,
+            tensor.placements,
+            run_check=False,
+            shape=tensor.shape,
+            stride=tensor.stride(),
+        )
+
+    return pytree.tree_map_only(
+        torch.Tensor, storage_backed, _stateful_to_state_dict(states)
+    )
 
 
 class _BackendCheckpointStorage:
@@ -376,7 +414,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # values and resume from a model that is not the one that was saved.
         # exclude_from_loading is applied by _states_to_load, so anything still
         # in `states` here is genuinely required.
-        state_dict = _stateful_to_state_dict(states)
+        state_dict = _backend_state_dict(states)
         if from_hf:
             assert self.sd_adapter is not None
             # TODO: Load exports named after another item, e.g. diffusers' Flux
@@ -433,7 +471,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         # Prewarm on a step we are not saving, so the first real save does not
         # pay for pinned-buffer allocation.
         if not should_save and self._should_prewarm():
-            self._manager.prewarm_staging(_stateful_to_state_dict(self.states))
+            self._manager.prewarm_staging(_backend_state_dict(self.states))
             self._prewarmed = True
         if not should_save:
             return False
@@ -457,7 +495,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         else:
             self.save_future = self._manager.save(
                 self._create_checkpoint_id(curr_step),
-                _stateful_to_state_dict(self.states),
+                _backend_state_dict(self.states),
             )
             self._prewarmed = True
 
@@ -608,7 +646,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         try:
             manager.save(
                 input_checkpoint_id,
-                _stateful_to_state_dict(states),
+                _backend_state_dict(states),
             )
         finally:
             manager.close()
