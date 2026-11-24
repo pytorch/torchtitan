@@ -20,7 +20,10 @@ import torch.distributed as dist
 from torch.export import register_dataclass
 
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.context_parallel import cp_all_gather_tensors
+from torchtitan.distributed.context_parallel import (
+    cp_all_gather_tensors,
+    ulysses_all_gather_groups,
+)
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
@@ -55,6 +58,24 @@ _TOKEN_DIM = 0
 _HEAD_DIM = 1
 
 _GlobalAttentionMetadataT = TypeVar("_GlobalAttentionMetadataT")
+
+
+def _repeat_kv_heads(
+    k_THK: torch.Tensor, v_THV: torch.Tensor, num_head_shards: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Copy each KV head to adjacent slots when there are fewer KV heads than
+    head shards, so after a Ulysses all-to-all each rank holds the single KV
+    head that its GQA query heads use."""
+    num_kv_heads = k_THK.shape[_HEAD_DIM]
+    if num_kv_heads >= num_head_shards:
+        return k_THK, v_THV
+    num_copies = num_head_shards // num_kv_heads
+    return (
+        k_THK.repeat_interleave(num_copies, dim=_HEAD_DIM),
+        v_THV.repeat_interleave(num_copies, dim=_HEAD_DIM),
+    )
+
+
 _LocalAttentionMetadataT = TypeVar("_LocalAttentionMetadataT")
 
 
@@ -275,9 +296,23 @@ register_dataclass(AllGatherKVVarlenAttentionMetadata)
 class AllGatherKVVarlen(
     CPInnerAttention[VarlenAttentionMetadata, AllGatherKVVarlenAttentionMetadata],
 ):
-    """Share K/V all-gather CP logic across the varlen variants."""
+    """Share K/V all-gather CP logic across the varlen variants.
+
+    With ``ulysses_degree``, CP splits into Ulysses groups of that many
+    consecutive CP ranks and K/V all-gather groups across them. Only K/V cross
+    groups. For CP 16 on two 8-GPU nodes with ``ulysses_degree=8``::
+
+        (T/16, H) --Ulysses all-to-all (in node)--> (T/2, H/8)
+                  --K/V all-gather (across nodes)--> K/V (T, H/8)
+                  --varlen attention, Q (T/2) x K/V (T)-->
+                  --Ulysses all-to-all back--> (T/16, H)
+
+    Head-tail balancing over all CP ranks also gives each Ulysses group a
+    balanced head and tail of the sequence.
+    """
 
     reduce_dtype: torch.dtype
+    ulysses_degree: int | None
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config):
@@ -355,35 +390,30 @@ class AllGatherKVVarlen(
             window_size=varlen_metadata.window_size,
         )
 
-    def forward(
+    def _attend_gathered_kv(
         self,
         q_THK: torch.Tensor,
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
         attention_metadata: AllGatherKVVarlenAttentionMetadata,
+        first_cp_rank: int,
+        cp_size: int,
         **kwargs,
     ) -> torch.Tensor:
-        if not isinstance(attention_metadata, AllGatherKVVarlenAttentionMetadata):
-            raise ValueError(
-                f"{type(self).__name__} requires AllGatherKVVarlenAttentionMetadata, "
-                f"but got {type(attention_metadata).__name__}."
-            )
-        assert isinstance(self, VarlenInnerAttention)
-        k_THK, v_THV = cp_all_gather_tensors(
-            (k_THK, v_THV),
-            reduce_dtype=self.reduce_dtype,
-        )
+        """Attend local Q to the gathered K/V, one contiguous Q chunk at a time.
 
+        ``q_THK`` holds the token shards of CP ranks ``first_cp_rank``,
+        ``first_cp_rank + 1``, ... in order, and ``k_THK`` / ``v_THV`` all
+        ``cp_size`` shards in CP-rank order.
+        """
+        assert isinstance(self, VarlenInnerAttention)
         left = attention_metadata.window_size[0]
         # A chunk needs at most one document length of earlier keys.
         max_document_length = attention_metadata.max_k
         max_lookback = (
             max_document_length if left == -1 else min(left, max_document_length)
         )
-        cp_group = spmd_mesh_group(MeshAxisName.CP)
-        assert cp_group is not None
-        cp_rank = dist.get_rank(cp_group)
         varlen_forward = self._forward_varlen
 
         def run_chunk(q_chunk_THK: torch.Tensor, q_start: int) -> torch.Tensor:
@@ -403,12 +433,17 @@ class AllGatherKVVarlen(
                 **kwargs,
             )
 
+        shard_len = k_THK.shape[0] // cp_size
+        cp_ranks = range(first_cp_rank, first_cp_rank + q_THK.shape[0] // shard_len)
         inverse_permutation = attention_metadata.inverse_permutation
+        out_chunks = []
         if inverse_permutation is None:
-            # No load balancer: Q is one contiguous shard.
-            out_THV = run_chunk(q_THK, cp_rank * q_THK.shape[0])
+            # No load balancer: each CP rank holds one contiguous shard.
+            for i, cp_rank in enumerate(cp_ranks):
+                q_shard_THK = q_THK[i * shard_len : (i + 1) * shard_len]
+                out_chunks.append(run_chunk(q_shard_THK, cp_rank * shard_len))
         else:
-            # Head-tail load balancer.
+            # Head-tail load balancer: each CP rank holds a head and a tail chunk.
             gathered_k_THK, gathered_v_THV = k_THK, v_THV
             with spmd.no_typecheck():
                 k_THK = gathered_k_THK.index_select(0, inverse_permutation)
@@ -417,13 +452,84 @@ class AllGatherKVVarlen(
                 spmd.assert_type_like(k_THK, gathered_k_THK)
                 spmd.assert_type_like(v_THV, gathered_v_THV)
 
-            chunk_len = q_THK.shape[0] // 2
-            head_start = cp_rank * chunk_len
-            global_len = q_THK.shape[0] * cp_group.size()
-            tail_start = global_len - (cp_rank + 1) * chunk_len
-            head_out_THV = run_chunk(q_THK[:chunk_len], head_start)
-            tail_out_THV = run_chunk(q_THK[chunk_len:], tail_start)
-            out_THV = torch.cat((head_out_THV, tail_out_THV))
+            chunk_len = shard_len // 2
+            global_len = k_THK.shape[0]
+            for i, cp_rank in enumerate(cp_ranks):
+                head_THK = q_THK[i * shard_len : i * shard_len + chunk_len]
+                tail_THK = q_THK[i * shard_len + chunk_len : (i + 1) * shard_len]
+                out_chunks.append(run_chunk(head_THK, cp_rank * chunk_len))
+                out_chunks.append(
+                    run_chunk(tail_THK, global_len - (cp_rank + 1) * chunk_len)
+                )
+        return out_chunks[0] if len(out_chunks) == 1 else torch.cat(out_chunks)
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
+        attention_metadata: AllGatherKVVarlenAttentionMetadata,
+        **kwargs,
+    ) -> torch.Tensor:
+        if not isinstance(attention_metadata, AllGatherKVVarlenAttentionMetadata):
+            raise ValueError(
+                f"{type(self).__name__} requires AllGatherKVVarlenAttentionMetadata, "
+                f"but got {type(attention_metadata).__name__}."
+            )
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        assert cp_group is not None
+        cp_rank = dist.get_rank(cp_group)
+        ulysses_degree = self.ulysses_degree
+        ulysses_group = None
+        if ulysses_degree is None:
+            k_THK, v_THV = cp_all_gather_tensors(
+                (k_THK, v_THV),
+                reduce_dtype=self.reduce_dtype,
+            )
+            first_cp_rank = cp_rank
+        else:
+            # TODO: model the two CP sub-axes in SPMD types.
+            if spmd.is_type_checking():
+                raise NotImplementedError(
+                    "ulysses_degree does not support SPMD type checking."
+                )
+            ulysses_group, all_gather_group = ulysses_all_gather_groups(
+                cp_group, ulysses_degree
+            )
+            k_THK, v_THV = _repeat_kv_heads(k_THK, v_THV, ulysses_degree)
+            # Within a group, shard heads instead of tokens.
+            q_THK, k_THK, v_THV = (
+                spmd.redistribute(
+                    x, ulysses_group, src=spmd.S(_TOKEN_DIM), dst=spmd.S(_HEAD_DIM)
+                )
+                for x in (q_THK, k_THK, v_THV)
+            )
+            # Across groups, gather K/V in CP-rank order.
+            k_THK, v_THV = (
+                spmd.redistribute(
+                    x,
+                    all_gather_group,
+                    src=spmd.S(_TOKEN_DIM),
+                    dst=spmd.R,
+                    backward_options={"op_dtype": self.reduce_dtype},
+                )
+                for x in (k_THK, v_THV)
+            )
+            first_cp_rank = cp_rank - cp_rank % ulysses_degree
+        out_THV = self._attend_gathered_kv(
+            q_THK,
+            k_THK,
+            v_THV,
+            attention_metadata=attention_metadata,
+            first_cp_rank=first_cp_rank,
+            cp_size=cp_group.size(),
+            **kwargs,
+        )
+        if ulysses_group is not None:
+            return spmd.redistribute(
+                out_THV, ulysses_group, src=spmd.S(_HEAD_DIM), dst=spmd.S(_TOKEN_DIM)
+            )
         if kwargs.get("out_transform") is None and spmd.is_type_checking():
             spmd.assert_type(
                 out_THV,
@@ -446,10 +552,15 @@ class AllGatherKVVarlenInnerAttention(
     ):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
         """Dtype of the backward reduce-scatter."""
+        ulysses_degree: int | None = None
+        """Shard heads over groups of this many consecutive CP ranks before
+        the K/V all-gather; ``None`` all-gathers over all CP ranks. Set it to
+        the CP ranks per node so that only K/V cross nodes."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+        self.ulysses_degree = config.ulysses_degree
 
 
 class AllGatherKVSlidingWindowVarlenInnerAttention(
@@ -465,10 +576,15 @@ class AllGatherKVSlidingWindowVarlenInnerAttention(
     ):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
         """Dtype of the backward reduce-scatter."""
+        ulysses_degree: int | None = None
+        """Shard heads over groups of this many consecutive CP ranks before
+        the K/V all-gather; ``None`` all-gathers over all CP ranks. Set it to
+        the CP ranks per node so that only K/V cross nodes."""
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+        self.ulysses_degree = config.ulysses_degree
 
 
 class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetadataT]):
@@ -515,13 +631,7 @@ class UlyssesInnerAttention(Ulysses[_GlobalAttentionMetadataT]):
             raise RuntimeError(
                 "CP attention requires an active multi-rank CP mesh axis."
             )
-        num_kv_heads = k_THK.shape[_HEAD_DIM]
-        if num_kv_heads < cp_group.size():
-            # Copy each KV head to adjacent slots, so after the all-to-all each
-            # rank holds the single KV head that its GQA query heads use.
-            num_copies = cp_group.size() // num_kv_heads
-            k_THK = k_THK.repeat_interleave(num_copies, dim=_HEAD_DIM)
-            v_THV = v_THV.repeat_interleave(num_copies, dim=_HEAD_DIM)
+        k_THK, v_THV = _repeat_kv_heads(k_THK, v_THV, cp_group.size())
         # Shard heads instead of tokens: (T/cp, H, *) -> (T, H/cp, *).
         q_THK, k_THK, v_THV = (
             spmd.redistribute(

@@ -15,6 +15,7 @@ from typing import Any, cast, TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 from spmd_types import SpmdType
 
 # TODO(acisseJZhong): Move these implementations into TorchTitan to avoid
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cp_all_gather_tensors",
+    "ulysses_all_gather_groups",
     "ContextParallelLoadBalancer",
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
@@ -69,6 +71,43 @@ def cp_all_gather_tensors(
         )
         for tensor in tensors
     )
+
+
+_ULYSSES_ALL_GATHER_GROUPS: dict[
+    tuple[tuple[int, ...], int], tuple[dist.ProcessGroup, dist.ProcessGroup]
+] = {}
+
+
+def ulysses_all_gather_groups(
+    cp_group: dist.ProcessGroup, ulysses_degree: int
+) -> tuple[dist.ProcessGroup, dist.ProcessGroup]:
+    """Split the CP group into Ulysses and K/V all-gather groups.
+
+    A Ulysses group is ``ulysses_degree`` consecutive CP ranks; an all-gather
+    group is the ranks at the same position in every Ulysses group. Built on
+    first use and cached; only the CP ranks synchronize.
+
+    TODO: Build these as DeviceMesh axes once CP supports sub-axes.
+    """
+    cp_ranks = tuple(dist.get_process_group_ranks(cp_group))
+    key = (cp_ranks, ulysses_degree)
+    if key not in _ULYSSES_ALL_GATHER_GROUPS:
+        # validate_context_parallel checks ulysses_degree at config time.
+        assert len(cp_ranks) % ulysses_degree == 0
+        cp_rank = dist.get_rank(cp_group)
+        start = cp_rank - cp_rank % ulysses_degree
+        ulysses_group = dist.new_group(
+            list(cp_ranks[start : start + ulysses_degree]),
+            use_local_synchronization=True,
+        )
+        all_gather_group = dist.new_group(
+            list(cp_ranks[cp_rank % ulysses_degree :: ulysses_degree]),
+            use_local_synchronization=True,
+        )
+        assert isinstance(ulysses_group, dist.ProcessGroup)
+        assert isinstance(all_gather_group, dist.ProcessGroup)
+        _ULYSSES_ALL_GATHER_GROUPS[key] = (ulysses_group, all_gather_group)
+    return _ULYSSES_ALL_GATHER_GROUPS[key]
 
 
 class ContextParallelLoadBalancer(Configurable, ABC):
