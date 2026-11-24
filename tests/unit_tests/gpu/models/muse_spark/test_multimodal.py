@@ -10,11 +10,15 @@ from torchtitan.models.muse_spark import build_model_config
 from torchtitan.models.muse_spark.state_dict_adapter import MuseSparkStateDictAdapter
 
 
-def _build_model():
+def _build_model(dtype: torch.dtype = torch.float32):
     config = build_model_config("debugmodel_mm", seq_len=8)
     for _, linear, _, _ in config.traverse(Linear.Config, recurse=True):
         linear.inplace_wgrad_accum = False
-    model = config.build().to(device="cuda")
+    # Cast on meta: buffers keep the dtype they are built in.
+    with torch.device("meta"):
+        model = config.build()
+    model.to(dtype)
+    model.to_empty(device="cuda")
     model.init_states()
     return model
 
@@ -59,7 +63,9 @@ def test_dummy_media_preserves_text_and_runs_backward():
 
 
 def test_checkpoint_restores_next_optimizer_step(tmp_path):
-    model = _build_model()
+    # The forward reaches HiMidLoLinear (router gates, the LM head), which needs bf16
+    # weights, as FSDP's mixed precision would give it.
+    model = _build_model(torch.bfloat16)
     adapter = MuseSparkStateDictAdapter(model.config, hf_assets_path=None)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, foreach=False)
     tokens = torch.arange(8, device="cuda")
@@ -74,7 +80,7 @@ def test_checkpoint_restores_next_optimizer_step(tmp_path):
     )
     expected_logits, expected_loss = _train_step(model, optimizer, tokens)
 
-    restored_model = _build_model()
+    restored_model = _build_model(torch.bfloat16)
     restored_optimizer = torch.optim.AdamW(
         restored_model.parameters(), lr=0.01, foreach=False
     )

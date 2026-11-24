@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import FullPrecisionLinearTransform
 from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     split_module,
@@ -38,6 +39,8 @@ def test_stage_outputs_gradients_and_checkpoint_keys(num_stages):
     torch.manual_seed(0)
     num_tokens = 128
     model_config = config_registry.deepseek_v4_debugmodel(seq_len=num_tokens).model
+    # On CPU the router gates run as FullPrecisionLinear (HiMidLoLinear is CUDA-only).
+    model_config = FullPrecisionLinearTransform().transform(model_config)
     with torch.device("meta"):
         model = model_config.build().double()
     model.to_empty(device="cpu")

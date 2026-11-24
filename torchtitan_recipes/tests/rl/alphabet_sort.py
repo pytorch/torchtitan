@@ -29,6 +29,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
+    FullPrecisionLinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.models.common.attention import VarlenInnerAttention
@@ -199,9 +200,11 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    # Local compile regions do not support batch-invariant mode.
+    # Local compile regions do not support batch-invariant mode; nor does
+    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
+        FullPrecisionLinearTransform().transform(model_config)
     return Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
@@ -447,9 +450,11 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    # Local compile regions do not support batch-invariant mode.
+    # Local compile regions do not support batch-invariant mode; nor does
+    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
+        FullPrecisionLinearTransform().transform(model_config)
     return Controller.Config(
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
@@ -613,9 +618,11 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
-    # Local compile regions do not support batch-invariant mode.
+    # Local compile regions do not support batch-invariant mode; nor does
+    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
     for model_config in (config.trainer.model, config.generator.model):
         model_config.local_compile.regions = []
+        FullPrecisionLinearTransform().transform(model_config)
     return config
 
 
@@ -744,6 +751,9 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
     )
+    # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        FullPrecisionLinearTransform().transform(model_config)
     return config
 
 

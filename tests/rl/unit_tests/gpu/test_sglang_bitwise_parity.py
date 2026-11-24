@@ -62,7 +62,7 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
-from torchtitan.config.transform import apply_transforms
+from torchtitan.config.transform import apply_transforms, FullPrecisionLinearTransform
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.dist_moe import DistMoeRuntime
@@ -567,9 +567,11 @@ def _debug_model_config(
         generator_parallelism=generator_parallelism,
         **kwargs,
     )
-    # Local compile regions do not support batch-invariant mode.
+    # Local compile regions do not support batch-invariant mode; nor does
+    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
+        FullPrecisionLinearTransform().transform(model_config)
     config.trainer = dataclasses.replace(
         config.trainer, model=trainer_model, parallelism=trainer_parallelism
     )
@@ -664,9 +666,11 @@ def _kimi_k3_debug_dp2_tp2_ep4_config() -> Controller.Config:
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
-    # Local compile regions do not support batch-invariant mode.
+    # Local compile regions do not support batch-invariant mode; nor does
+    # HiMidLoLinear (router gates, the fp32 lm_head), which becomes FullPrecisionLinear.
     for model_config in (trainer_model, generator_model):
         model_config.local_compile.regions = []
+        FullPrecisionLinearTransform().transform(model_config)
     config.trainer = dataclasses.replace(
         config.trainer, model=trainer_model, parallelism=trainer_parallelism
     )

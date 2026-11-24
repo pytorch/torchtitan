@@ -32,10 +32,14 @@ class HiMidLoLinear(Linear):
     Forward: bf16 input and weight, a bf16 GEMM that accumulates in fp32, fp32 output.
     Backward: approximates an fp32 backward with bf16 GEMMs, and returns grad_weight in fp32.
 
-    Falls back to slower fp32 matmuls when:
-    (a) the input is not on CUDA,
-    (b) the input or the weight is not bf16, or
-    (c) batch-invariant mode is on.
+    An fp32 input is cast to bf16 inside the op and takes the same bf16 GEMMs; its grad_input
+    is returned in fp32, not rounded to bf16. Use it when the gradient flowing back into the
+    input must keep fp32 precision, e.g. an fp32 hidden state before an LM head.
+
+    Requires a CUDA input, a bf16 weight (e.g. FSDP mixed precision with a bf16
+    ``param_dtype``) and a bf16 or fp32 input, outside batch-invariant mode; anything else
+    raises. For fp32 matmuls (CPU, fp32 weights, batch-invariant mode) use
+    ``FullPrecisionLinear``.
 
     Accuracy and timings: https://github.com/pytorch/torchtitan/pull/4923
     """
@@ -89,34 +93,29 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         ``torch.mm(..., out_dtype=torch.float32)`` has no autograd formula ("derivative for
         aten::mm is not implemented"), hence this Function:
 
-            input (bf16) --+
-                           +--> bf16 GEMM, fp32 accumulate --> output (fp32)
-            weight (bf16) -+
+            input (bf16, or fp32 cast to bf16) --+
+                                                 +--> bf16 GEMM, fp32 accumulate --> output (fp32)
+            weight (bf16) -----------------------+
 
         The product of two bf16 numbers is exact in fp32, so upcasting input and weight first
         would add no precision, only an fp32 copy of the weight. Accumulating in fp32 is enough.
+        The cast of an fp32 input happens here, not before the op, so autograd records the fp32
+        input and passes the backward's fp32 grad_input through unrounded.
         """
         weight_OD = weight.flatten(0, -2)
+        _check_bf16_gemm_operands(input_TD, weight_OD)
         ctx.weight_shape = weight.shape
-        ctx.use_bf16_gemm = (
-            # aten::mm.dtype (bf16 inputs, fp32 output) is only implemented for CUDA/ROCm.
-            input_TD.is_cuda
-            and input_TD.dtype == weight_OD.dtype == torch.bfloat16
-            # TODO: batch-invariant mode can't use this op (cuBLAS's out_dtype GEMM isn't
-            # batch-invariant), so it takes the slow fallback. A bf16-input, fp32-output matmul
-            # in batch_invariant_ops would let it take the optimized path.
-            and not is_in_batch_invariant_mode()
-        )
+        # The dtype grad_input is returned in: autograd casts a gradient to its input's dtype.
+        ctx.input_dtype = input_TD.dtype
         ctx.num_pieces = num_pieces
+        # No-op for a bf16 input. The bf16 copy is what the GEMMs read, here and in backward.
+        input_TD = input_TD.to(torch.bfloat16)
         ctx.save_for_backward(input_TD, weight_OD)
         # Kept on ctx rather than saved: backward needs this exact parameter object to read and
         # clear its .grad, and saved-tensor hooks may unpack a different one. A leaf parameter
         # does not reference its graph, so this forms no cycle.
         ctx.weight_param = weight if inplace_wgrad_accum else None
-        if ctx.use_bf16_gemm:
-            return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
-        # Slow fallback: upcast the input and weight to fp32.
-        return torch.mm(input_TD.float(), weight_OD.float().T)
+        return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
 
     @staticmethod
     # Some methods may need the gradient of a gradient. This backward calls torch.mm(out_dtype=),
@@ -133,7 +132,8 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
             grad_output:  fp32, because the output was fp32
 
         We want, accumulated in fp32:
-            grad_input  = grad_output @ weight     rounded once to the input's dtype
+            grad_input  = grad_output @ weight     rounded once to the input's dtype (an fp32
+                                                   input gets it unrounded)
             grad_weight = grad_output.T @ input    returned in fp32
 
         How can we do it fast, with close to fp32 precision?
@@ -203,25 +203,18 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         """
         input_TD, weight_OD = ctx.saved_tensors
         needs_grad_input, needs_grad_weight, _, _ = ctx.needs_input_grad
-        # .float() is a no-op unless autocast made the fallback's output bf16.
+        # .float() is a no-op unless autocast made the output bf16.
         grad_output_TO = grad_output_TO.float()
         num_tokens, out_features = grad_output_TO.shape
 
-        if not ctx.use_bf16_gemm:  # cases (a)-(c) in HiMidLoLinear
-            grad_input_TD, grad_weight_OD = _fp32_backward(
-                grad_output_TO,
-                input_TD,
-                weight_OD,
-                needs_grad_input=needs_grad_input,
-                needs_grad_weight=needs_grad_weight,
-            )
         # For speed, stack the pieces along the smaller dim (see "Stacking").
-        elif out_features > num_tokens:
+        if out_features > num_tokens:
             grad_input_TD, grad_weight_OD = _wide_backward(
                 grad_output_TO,
                 input_TD,
                 weight_OD,
                 num_pieces=ctx.num_pieces,
+                input_dtype=ctx.input_dtype,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
                 weight_param=ctx.weight_param,
@@ -232,6 +225,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 input_TD,
                 weight_OD,
                 num_pieces=ctx.num_pieces,
+                input_dtype=ctx.input_dtype,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
             )
@@ -246,29 +240,29 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         return grad_input_TD, grad_weight_OD, None, None
 
 
-def _fp32_backward(
-    grad_output_TO: torch.Tensor,
-    input_TD: torch.Tensor,
-    weight_OD: torch.Tensor,
-    *,
-    needs_grad_input: bool,
-    needs_grad_weight: bool,
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    """Slow fallback: upcast the input and weight, then fp32 matmuls for both gradients.
-
-    In batch-invariant mode, batch_invariant_ops' Triton matmul runs them in TF32.
-    """
-    grad_input_TD = grad_weight_OD = None
-    if needs_grad_input:
-        grad_input_TD = torch.mm(grad_output_TO, weight_OD.float()).to(input_TD.dtype)
-    if needs_grad_weight:
-        # Unlike _wide_backward, this never adds into the running weight.grad in place. In
-        # practice this path runs in batch-invariant mode, where batch_invariant_ops overrides
-        # only aten::mm and aten::addmm: addmm(out=weight.grad) dispatches to the un-overridden
-        # aten::addmm.out, whose cuBLAS reduction over tokens is not batch-invariant, and its
-        # aten::addmm override only takes a 1D bias.
-        grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
-    return grad_input_TD, grad_weight_OD
+def _check_bf16_gemm_operands(input_TD: torch.Tensor, weight_OD: torch.Tensor) -> None:
+    """Raise unless the bf16 GEMMs apply: CUDA, a bf16 weight, a bf16 or fp32 input, and no
+    batch-invariant mode."""
+    # aten::mm.dtype (bf16 inputs, fp32 output) is only implemented for CUDA/ROCm.
+    if not input_TD.is_cuda:
+        reason = f"its input is on {input_TD.device.type}, not CUDA"
+    elif weight_OD.dtype != torch.bfloat16:
+        reason = (
+            f"its weight is {weight_OD.dtype}, not bf16 (set a bf16 param_dtype in mixed "
+            "precision)"
+        )
+    elif input_TD.dtype not in (torch.bfloat16, torch.float32):
+        reason = f"its input is {input_TD.dtype}, not bf16 or fp32"
+    # TODO: cuBLAS's out_dtype GEMM isn't batch-invariant. A bf16-input, fp32-output matmul
+    # in batch_invariant_ops would let batch-invariant mode use HiMidLoLinear too.
+    elif is_in_batch_invariant_mode():
+        reason = "batch-invariant mode is on"
+    else:
+        return
+    raise ValueError(
+        f"HiMidLoLinear runs bf16 GEMMs, but {reason}. Use FullPrecisionLinear for fp32 "
+        "matmuls."
+    )
 
 
 def _wide_backward(
@@ -277,6 +271,7 @@ def _wide_backward(
     weight_OD: torch.Tensor,
     *,
     num_pieces: int,
+    input_dtype: torch.dtype,
     needs_grad_input: bool,
     needs_grad_weight: bool,
     weight_param: torch.Tensor | None,
@@ -284,8 +279,9 @@ def _wide_backward(
     """More outputs than tokens (e.g. an LM head): stack the pieces along tokens and copy the
     input (see "Stacking" in ``backward``).
 
-    ``weight_param`` is the parameter whose running gradient grad_weight is added into in place,
-    or None when ``inplace_wgrad_accum`` is off."""
+    ``input_dtype`` is the dtype of the op's input, which grad_input is returned in;
+    ``input_TD`` is its bf16 copy. ``weight_param`` is the parameter whose running gradient
+    grad_weight is added into in place, or None when ``inplace_wgrad_accum`` is off."""
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 
@@ -304,7 +300,7 @@ def _wide_backward(
         # https://github.com/vllm-project/vllm/pull/55899.
         grad_input_PTD = torch.mm(stacked_PTO, weight_OD, out_dtype=torch.float32)
         grad_input_PTD = grad_input_PTD.unflatten(0, (num_pieces, num_tokens))
-        grad_input_TD = grad_input_PTD.sum(dim=0).to(input_TD.dtype)
+        grad_input_TD = grad_input_PTD.sum(dim=0).to(input_dtype)
 
     # ==== grad_weight: one GEMM of the stack against P copies of the input ====
     if needs_grad_weight:
@@ -345,11 +341,13 @@ def _narrow_backward(
     weight_OD: torch.Tensor,
     *,
     num_pieces: int,
+    input_dtype: torch.dtype,
     needs_grad_input: bool,
     needs_grad_weight: bool,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """More tokens than outputs (e.g. a router): stack the pieces along out_features and copy
-    the weight (see "Stacking" in ``backward``)."""
+    the weight (see "Stacking" in ``backward``). ``input_dtype`` is the dtype of the op's
+    input, which grad_input is returned in; ``input_TD`` is its bf16 copy."""
     out_features = grad_output_TO.shape[1]
     grad_input_TD = grad_weight_OD = None
 
@@ -358,7 +356,16 @@ def _narrow_backward(
 
     # ==== grad_input: one GEMM of the stack against P copies of the weight ====
     if needs_grad_input:
-        grad_input_TD = torch.mm(stacked_TPO, torch.cat([weight_OD] * num_pieces))
+        # The GEMM sums the pieces in its fp32 accumulator and rounds once on output. A bf16
+        # input wants that single rounding to bf16; an fp32 input keeps the fp32 sum, at twice
+        # the output bytes, so only then.
+        stacked_weight_POD = torch.cat([weight_OD] * num_pieces)
+        if input_dtype == torch.float32:
+            grad_input_TD = torch.mm(
+                stacked_TPO, stacked_weight_POD, out_dtype=torch.float32
+            )
+        else:
+            grad_input_TD = torch.mm(stacked_TPO, stacked_weight_POD)
 
     # ==== grad_weight: one small GEMM per piece, added in fp32 ====
     # Unlike _wide_backward, this never adds into the running weight.grad in place. The gradient

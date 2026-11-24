@@ -20,6 +20,7 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import CommConfig
+from torchtitan.config.transform import FullPrecisionLinearTransform
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
@@ -162,8 +163,10 @@ def test_vllm_dp_decode_graphs_with_prefilling_peer():
         attn_backend="varlen",
         parallelism=generator.parallelism.to_training(),
     )
-    # Local compile regions do not support batch-invariant mode.
+    # Local compile regions do not support batch-invariant mode; nor does HiMidLoLinear
+    # (the router gates), which becomes FullPrecisionLinear.
     generator.model.local_compile.regions = []
+    FullPrecisionLinearTransform().transform(generator.model)
     generator.engine.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
     generator.gpu_memory_limit = 0.5
 

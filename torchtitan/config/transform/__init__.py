@@ -12,6 +12,7 @@ from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexTransform
 from .context_parallel import ContextParallelTransform
 from .disable_moe_load_balancing import DisableMoELoadBalancingTransform
+from .full_precision_linear import FullPrecisionLinearTransform
 from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
 from .quantization import (
@@ -34,6 +35,7 @@ __all__ = [
     "TokenDispatcherTransform",
     "BatchInvariantFlexTransform",
     "DisableMoELoadBalancingTransform",
+    "FullPrecisionLinearTransform",
     "LMHeadFP32OutputTransform",
     "LoRATransform",
     "MXFP8GroupedLinearTransform",
