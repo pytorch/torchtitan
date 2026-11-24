@@ -24,6 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.spmd_types import disable_dense_sp
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
@@ -363,6 +364,10 @@ class Qwen35VisionEncoder(Module):
         Processes both images and videos. Each visual item has a ``(t, h, w)``
         patch grid, and all valid patches are packed into one sequence.
 
+        In batch-invariant mode each item is encoded alone. FlexInnerAttention
+        tiles the packed sequence from its start, so an item's tiles, and with them
+        the rounding of its features, would depend on the items packed before it.
+
         Args:
             pixel_values: Packed patches ``(total_num_patches, patch_dim)``.
             grid_thw: Grid dimensions ``(num_vision, 3)`` for
@@ -375,17 +380,38 @@ class Qwen35VisionEncoder(Module):
         # One host sync for the whole forward: read the (N, 3) grid to CPU ints
         # so every per-item loop below builds shapes without a device sync.
         grids = grid_thw.tolist()  # [[t, h, w], ...]
-        segment_lengths = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        )
+        num_patches = [t * h * w for t, h, w in grids]
         total_tokens = pixel_values.shape[0]
-        expected_tokens = sum(t * h * w for t, h, w in grids)
+        expected_tokens = sum(num_patches)
         if total_tokens != expected_tokens:
             raise ValueError(
                 f"pixel_values contains {total_tokens} patches but grid_thw "
                 f"describes {expected_tokens}."
             )
+        if is_in_batch_invariant_mode() and len(grids) > 1:
+            return torch.cat(
+                [
+                    self._encode_packed(
+                        item_pixel_values, [grid], grid_thw[index : index + 1]
+                    )
+                    for index, (item_pixel_values, grid) in enumerate(
+                        zip(pixel_values.split(num_patches), grids, strict=True)
+                    )
+                ]
+            )
+        return self._encode_packed(pixel_values, grids, grid_thw)
 
+    def _encode_packed(
+        self,
+        pixel_values: torch.Tensor,
+        grids: list[list[int]],
+        grid_thw: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode the items of ``grid_thw`` (host copy ``grids``) as one packed
+        sequence, each frame attending only to itself."""
+        segment_lengths = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        )
         x = self.patch_embed(pixel_values)
         learned_pos_TD, positions_TC = self.compute_position_embeddings(grids)
         x = x + learned_pos_TD
@@ -395,7 +421,7 @@ class Qwen35VisionEncoder(Module):
         with spmd.no_typecheck():
             attention_mask = create_block_diagonal_mask(
                 segment_lengths,
-                total_tokens,
+                pixel_values.shape[0],
                 x.device,
             )
 
