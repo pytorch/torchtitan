@@ -317,8 +317,9 @@ class VLLMEngine(GenerationEngine):
             if config.num_speculative_tokens > 0 and not fa4_takes_query_len_in_heads():
                 # Without query_len_in_heads, fp8 verify rows would take the decode + fp32-tail
                 # path of `_verify_rows_as_decode`, which no engine run has measured with drafts.
-                # TODO: once a released FA4 takes query_len_in_heads, raise the FA4 floor and drop
-                # this check. DiffKV layers (V head dim != K's) take the tail path already.
+                # TODO: once a released FA4 takes query_len_in_heads (Dao-AILab/flash-attention#3217),
+                # raise the FA4 floor and drop this check. DiffKV layers (V head dim != K's) take
+                # the tail path already.
                 raise RuntimeError(
                     f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
                     "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "

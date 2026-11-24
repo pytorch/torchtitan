@@ -475,7 +475,6 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         num_queries_per_kv = num_heads // num_kv_heads
         page_size = key_cache.shape[1]
 
-        # ======== Keys every token sees: one decode row of n x heads per row ========
         # Heads ordered (KV head, token, head in group), so FA4's GQA maps each to its KV head.
         query_by_kv_head = query.view(
             num_rows, query_len, num_kv_heads, num_queries_per_kv, head_dim
@@ -483,6 +482,8 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         cu_seqlens_q = torch.arange(
             num_rows + 1, device=query.device, dtype=torch.int32
         )
+
+        # ======== fp8 with query_len_in_heads: one call; FA4 hides each token's later keys ========
         # query_len_in_heads runs only on SwapAB, which a DiffKV layer's V head dim can refuse.
         # TODO: two reorder copies (q, out) cost ~9 us per layer (26 rows, GB300). bf16 rows
         # could take this call once torch's varlen API passes query_len_in_heads.
@@ -518,6 +519,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             )
             return output
 
+        # ======== Keys every token sees: one decode row of n x heads per row ========
         num_shared_keys = (attn_metadata.seq_lens - (query_len - 1)).clamp_(min=0)
         shared_out = output.new_empty(
             num_rows, num_kv_heads * query_len * num_queries_per_kv, head_dim_v

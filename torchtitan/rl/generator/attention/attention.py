@@ -75,8 +75,8 @@ def paged_varlen_attention_out(
         # TODO: FA4 4.0.0b40's SwapAB decode kernel takes only fp16/bf16 (SwapABPolicy.rejection
         # in flash_attn/cute/config.py), so fp8 decode (and MTP verify rows) run FA4's standard
         # kernel, 1.2x slower than bf16 SwapAB when requests share prefix pages (GB300). An FA4
-        # with fp8 SwapAB picks it here unchanged: 1.7x faster than bf16 SwapAB on that load.
-        # Upstream FA4 PR to file.
+        # with fp8 SwapAB (Dao-AILab/flash-attention#3217) picks it here unchanged: 1.7x faster
+        # than bf16 SwapAB on that load.
         from flash_attn.cute.interface import _flash_attn_fwd, TensorwiseScales
 
         window_left, window_right = window_size
