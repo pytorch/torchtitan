@@ -365,6 +365,9 @@ class GlobalBalancer(MicrobatchBalancer):
         class _PinningUnpickler(pickle.Unpickler):
             def find_class(self, module: str, name: str) -> Any:
                 found = super().find_class(module, name)
+                # TODO: relies on torch's private tensor pickle layout
+                # (_rebuild_tensor_v2); if it changes, received tensors silently
+                # stay pageable and the trainer's H2D copy becomes synchronous.
                 if (module, name) == ("torch._utils", "_rebuild_tensor_v2"):
                     return lambda *args: found(*args).pin_memory()
                 return found

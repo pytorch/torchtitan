@@ -175,8 +175,9 @@ class Trainer(Configurable):
         if parallelism_context.dp_enabled:
             dp_mesh = parallelism_context.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
+            dp_ranks = torch.distributed.get_process_group_ranks(dp_mesh.get_group())
         else:
-            dp_degree, dp_rank = 1, 0
+            dp_degree, dp_rank, dp_ranks = 1, 0, None
 
         # metrics logging
         self.metrics_processor = config.metrics.build(
@@ -229,13 +230,7 @@ class Trainer(Configurable):
             max_context_length=config.model.max_context_length,
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             vision_processor=self.vision_processor,
-            dp_ranks=(
-                torch.distributed.get_process_group_ranks(
-                    parallelism_context.get_mesh("dp").get_group()
-                )
-                if parallelism_context.dp_enabled
-                else None
-            ),
+            dp_ranks=dp_ranks,
         )
 
         try:
