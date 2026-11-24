@@ -210,7 +210,8 @@ def _batch_queue(num_batches: int) -> asyncio.Queue:
     """Batch `i` trains groups 5i..5i+4 (num_prompts_per_train_step=5), one microbatch of their
     rollout 0, plus one untrainable group."""
     queue: asyncio.Queue = asyncio.Queue()
-    for _ in range(num_batches):
+    for batch_index in range(num_batches):
+        trainable_group_ids = list(range(5 * batch_index, 5 * batch_index + 5))
         queue.put_nowait(
             _batch(
                 trainable_group_ids,

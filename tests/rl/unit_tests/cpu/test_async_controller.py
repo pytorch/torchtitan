@@ -790,9 +790,9 @@ def test_windowed_fifo_takes_within_anchored_window() -> None:
         for group_id in (1, 2, 3, 4):
             await _finalize(buffer, group_id)
 
-        assert (await buffer.take_finalized()).group_id == 1
-        assert (await buffer.take_finalized()).group_id == 2
-        assert (await buffer.take_finalized()).group_id == 3
+        assert (await buffer.take_finalized()).group.group_id == 1
+        assert (await buffer.take_finalized()).group.group_id == 2
+        assert (await buffer.take_finalized()).group.group_id == 3
 
         taker = asyncio.create_task(buffer.take_finalized())
         await asyncio.sleep(0)
@@ -801,8 +801,8 @@ def test_windowed_fifo_takes_within_anchored_window() -> None:
         await _finalize(buffer, 0)
         await asyncio.sleep(0)
         assert taker.done()
-        assert taker.result().group_id == 0
-        assert (await buffer.take_finalized()).group_id == 4
+        assert taker.result().group.group_id == 0
+        assert (await buffer.take_finalized()).group.group_id == 4
 
     asyncio.run(run())
 
@@ -823,7 +823,7 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
             taker = asyncio.create_task(buffer.take_finalized())
             await asyncio.sleep(0)
             assert taker.done()
-            assert taker.result().group_id == expected_group_id
+            assert taker.result().group.group_id == expected_group_id
 
         # The remaining wait is for generation (nothing finalized), not for the head g0.
         taker = asyncio.create_task(buffer.take_finalized())
@@ -834,7 +834,7 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
         await _finalize(buffer, 6)
         await asyncio.sleep(0)
         assert taker.done()
-        assert taker.result().group_id == 6
+        assert taker.result().group.group_id == 6
 
     asyncio.run(run())
 
