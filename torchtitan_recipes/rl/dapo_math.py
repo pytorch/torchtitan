@@ -27,11 +27,7 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 
-from torchtitan.config.transform import (
-    apply_transforms,
-    ContextParallelTransform,
-    LMHeadFP32OutputConverter,
-)
+from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed.activation_remat import ActivationRematConfig
 from torchtitan.models.common.attention import (
@@ -183,6 +179,7 @@ def _qwen3_4b_dapo_math_config(
             # A minimum factor of 1 keeps the learning rate constant.
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
@@ -334,6 +331,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
             ),
             parallelism=trainer_parallelism,
@@ -425,7 +423,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         "30B-A3B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
     )
@@ -457,7 +454,6 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
                 "timing/validate",
             ],
         ),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -479,9 +475,11 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
-                # Pack several rollouts per microbatch (a multiple of
-                # max_total_tokens).
-                num_tokens_per_microbatch_per_dp_rank=4 * max_total_tokens,
+                preprocess_microbatch_groups_lazily=True,
+                # Pack two rollouts per microbatch (a multiple of
+                # max_total_tokens). With FP32 parameters and optimizer
+                # states, four run out of memory on the four trainer GPUs.
+                num_tokens_per_microbatch_per_dp_rank=2 * max_total_tokens,
             ),
             dist_moe_runtime=DistMoeRuntime.Config(scratch_capacity_factor=4.0),
             parallelism=trainer_parallelism,

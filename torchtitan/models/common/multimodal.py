@@ -13,15 +13,13 @@ packed-bank row for every placeholder token.
 """
 
 from dataclasses import dataclass
-from typing import cast, Self
+from typing import cast
 
 import spmd_types as spmd
 import torch
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 
@@ -88,36 +86,13 @@ class MultimodalModel(Decoder):
                 estimate(input_dict) for estimate in encoder_estimates
             )
 
-    def parallelize(
-        self,
-        *,
-        parallelism_context: ParallelismContext,
-        precision: PrecisionConfig,
-        parallelism: ParallelismConfig,
-        local_compile: LocalCompileConfig,
-        activation_remat: ActivationRematConfig | None,
-        dump_folder: str,
-    ) -> Self:
-        # Bind local implementations early; torch.compile traces on first use.
-        local_compile.apply()
-        with parallelism_context.activate_spmd():
-            self._parallelize(parallelism_context)
-            encoders = [
-                encoder
-                for encoder_fqn in self.multimodal_encoder_fqns
-                if (encoder := getattr(self, encoder_fqn)) is not None
-            ]
-            if activation_remat is not None:
-                activation_remat.apply(self)
-                for encoder in encoders:
-                    activation_remat.apply(encoder)
-
-            self._apply_fsdp(
-                parallelism_context=parallelism_context,
-                precision=precision,
-                parallelism=parallelism,
-            )
-        return self
+    def _remat_block_container_fqns(self) -> list[str]:
+        encoder_containers = [
+            f"{encoder_fqn}.layers"
+            for encoder_fqn in self.multimodal_encoder_fqns
+            if getattr(self, encoder_fqn) is not None
+        ]
+        return [*encoder_containers, *super()._remat_block_container_fqns()]
 
     def _apply_fsdp(
         self,

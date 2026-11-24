@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Checks that staging, the read plan and the reads move every element of a
-generator shard from the right trainer rank to the right place, across trainer
-FSDP/HSDP and generator TP shardings, over an in-process fake transport."""
+"""Checks that staging, the read plan, the reads and the load move every
+element of a generator shard from the right trainer rank to the right place,
+across trainer FSDP/HSDP and generator TP shardings, over an in-process fake
+transport."""
 
 import asyncio
 import itertools
@@ -104,13 +105,13 @@ def _transfer(
     preserve_dtype_keys=frozenset(),
 ):
     """Register and stage each trainer rank's ``{key: (local tensor, box)}``, then
-    connect and read each generator rank's ``{key: (box, dtype)}``; returns the
-    generator ranks' state dicts."""
+    connect, read and load each generator rank's ``{key: (box, dtype)}``; returns
+    the generator ranks' loaded state dicts."""
     boxes = {}
     monkeypatch.setattr(
         m,
         "_global_offset_and_local_shape",
-        lambda tensor, placements=None: boxes[id(tensor)],
+        lambda tensor: boxes[id(tensor)],
     )
     config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
 
@@ -150,13 +151,17 @@ def _transfer(
         trainer.stage(sd)
         trainers.append(trainer)
 
+    loaded_sds = []
     for rank, sd in enumerate(generator_sds):
         generator = ModelStateDictTransport(config)
         generator.connect_generator(
             sd, sources=sources, rank=rank, generator_index=generator_index
         )
         asyncio.run(generator.read())
-    return generator_sds
+        loaded = {key: torch.full_like(tensor, -1) for key, tensor in sd.items()}
+        generator.copy_prefetched_(loaded)
+        loaded_sds.append(loaded)
+    return loaded_sds
 
 
 def _transfer_w(monkeypatch, trainer_locals, generator_boxes, *, dtype, **kwargs):
@@ -199,8 +204,8 @@ def test_hsdp_to_tp(monkeypatch, generator_tp, generator_dim, generator_index):
 
 @pytest.mark.parametrize("generator_tp,generator_dim", [(1, 1), (2, 1), (2, 2)])
 def test_stacked_pieces(monkeypatch, generator_tp, generator_dim):
-    # A stacked [2, F, D] weight sharded on F is read in one run per stacked
-    # linear.
+    # A stacked [2, F, D] weight sharded on F: each [2, F/4, ...] piece spans
+    # both stacked linears, so it is read packed and unpacked on load.
     full = torch.arange(2 * 8 * 6, dtype=torch.float32).reshape(2, 8, 6)
     generator_boxes = _boxes(full.shape, generator_tp, generator_dim)
     outputs = _transfer_w(
@@ -349,7 +354,7 @@ def _fsdp_over_tp(full, mesh, dim):
 
 class TestStageDTensors(DTensorTestBase):
     """Stages real FSDP 2 x TP 2 DTensors on 4 gloo ranks and reads them into
-    generator TP 2 shards, checking restaging and the boxes against the shards
+    generator TP 2 shards, checking packing and the boxes against the shards
     DTensor and FSDP2 actually hold."""
 
     @property
@@ -374,9 +379,8 @@ class TestStageDTensors(DTensorTestBase):
             "col": torch.arange(8 * 6, dtype=torch.float32).reshape(8, 6) + 1000,
             # Stacked [2, F, D] w13: FSDP over TP on dim 1.
             "w13": torch.arange(2 * 8 * 6, dtype=torch.float32).reshape(2, 8, 6) + 2000,
-            # Restaged to (Shard(0), Shard(0)) for the generator split on dim
-            # 0: 2 rows leave 2 ranks without pieces, which must still join the
-            # redistribute.
+            # Row-parallel with 2 rows: split on dim 0, the generator holds one
+            # row, so column pieces are still read in place.
             "small": torch.arange(2 * 6, dtype=torch.float32).reshape(2, 6) + 3000,
         }
         sd = {
@@ -393,15 +397,15 @@ class TestStageDTensors(DTensorTestBase):
             patch.object(
                 m,
                 "_global_offset_and_local_shape",
-                lambda tensor, placements=None: boxes.get(id(tensor))
-                or global_offset_and_local_shape(tensor, placements),
+                lambda tensor: boxes.get(id(tensor))
+                or global_offset_and_local_shape(tensor),
             ),
         ):
-            # Generator TP dims per key: as its trainer TP (staged as is), and
-            # all on dim 0 (row and small restaged).
-            for dims, staged in (
-                ({"row": 1, "col": 0, "w13": 1, "small": 1}, None),
-                (dict.fromkeys(full, 0), (Shard(0), Shard(0))),
+            # Generator TP dims per key, and the keys read packed: as its
+            # trainer TP, and all on dim 0.
+            for dims, packed in (
+                ({"row": 1, "col": 0, "w13": 1, "small": 1}, {"w13"}),
+                (dict.fromkeys(full, 0), {"row"}),
             ):
                 rank_layouts = [
                     {
@@ -413,13 +417,6 @@ class TestStageDTensors(DTensorTestBase):
                     }
                     for rank in range(2)
                 ]
-                for key in ("row", "small"):
-                    self.assertEqual(
-                        m._staged_placements(
-                            sd[key], [layout[key] for layout in rank_layouts]
-                        ),
-                        staged,
-                    )
                 config = ModelStateDictTransport.Config()
                 trainer = ModelStateDictTransport(config)
                 source = trainer.register_trainer_source(
@@ -442,9 +439,12 @@ class TestStageDTensors(DTensorTestBase):
                         generator_sd, sources=sources, rank=rank, generator_index=0
                     )
                     asyncio.run(generator.read())
+                    self.assertEqual(set(generator._packed), packed)
+                    loaded = {key: torch.zeros(s.shape) for key, s in layout.items()}
+                    generator.copy_prefetched_(loaded)
                     for key, shard in layout.items():
                         torch.testing.assert_close(
-                            generator_sd[key],
+                            loaded[key],
                             full[key][_index(shard.offset, shard.shape)],
                             rtol=0,
                             atol=0,

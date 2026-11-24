@@ -11,7 +11,7 @@ weight and quantizes activations and gradients to NVFP4 on the fly via TorchAO's
 ``nvfp4_training`` kernels (NVIDIA Blackwell / sm_100+, CUDA only). Under FSDP,
 the NVFP4 weight operands are cached for the current unshard lifetime.
 
-Like :class:`MXFP8LinearConverter`, this is a pure leaf swap: it inherits the
+Like :class:`MXFP8LinearTransform`, this is a pure leaf swap: it inherits the
 model's stock colwise/rowwise sharding and changes only the GEMM. Under tensor
 parallelism the block boundary keeps its stock bf16 collectives (all-gather /
 reduce-scatter); NVFP4 does not move fp4 codes over the wire.
@@ -356,7 +356,7 @@ class NVFP4Linear(Linear):
                     raise ValueError(
                         f"NVFP4 requires {name} divisible by {_NVFP4_GEMM_ALIGNMENT}; "
                         f"got {name}={value}. NVFP4 cannot quantize this Linear; "
-                        "exclude it from the converter fqns."
+                        "exclude it from the transform fqns."
                     )
 
         def build(self, **kwargs):

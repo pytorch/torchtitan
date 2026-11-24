@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import gc
+import json
 import logging
 import os
 import time
@@ -37,7 +38,7 @@ from sglang.srt.managers.scheduler import (
     Scheduler,
 )
 from sglang.srt.model_executor.model_runner import ModelRunner
-from sglang.srt.runtime_context import publish, SpawnRanks
+from sglang.srt.runtime_context import get_parallel, publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils.common import next_power_of_2
@@ -81,7 +82,9 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "model_config_parser",
         "skip_tokenizer_init",
         "dtype",
+        "mamba_track_interval",
         "tp_size",
+        "attn_dp_size",
         "mem_fraction_static",
         "max_running_requests",
         "context_length",
@@ -104,6 +107,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         # not count the requests the engine holds back (see
         # SGLangEngine._awaiting_prefill).
         "max_queued_requests",
+        "enable_unified_memory",
     }
 )
 
@@ -116,9 +120,7 @@ class SGLangEngine(GenerationEngine):
     identical decisions, as the engine loop's SPMD contract requires. ``step()`` runs one
     iteration of SGLang's overlap event loop, so the CPU schedules the next batch while
     the GPU runs the current one, and returns the requests whose results that iteration
-    processed. For linear attention (GDN, KDA) models, whose radix cache of recurrent
-    states disables overlap without SGLang's extra_buffer strategy (not registered,
-    see the README), it runs one iteration of SGLang's normal event loop instead.
+    processed.
 
     See ``GenerationEngine`` for the build arguments and the threading contract.
     """
@@ -166,6 +168,43 @@ class SGLangEngine(GenerationEngine):
                     "extra_server_args cannot set ServerArgs that TorchTitan controls: "
                     f"{owned_keys}"
                 )
+            # A HiCache storage backend (L3) outlives a run and a new run's policy
+            # versions (the cache salts) restart at 0, so a run could read KV that
+            # another run's weights computed. Only Mooncake has a verified key
+            # prefix that scopes keys to a run (extra_backend_tag).
+            storage_backend = self.extra_server_args.get("hicache_storage_backend")
+            if storage_backend not in (None, "mooncake"):
+                raise ValueError(
+                    "TorchTitan allows only the 'mooncake' HiCache storage backend "
+                    f"(SGLang supports more), got {storage_backend!r}: only Mooncake "
+                    "has a verified key prefix that scopes keys to a run "
+                    "(extra_backend_tag), and without one a run could read KV that "
+                    "another run's weights computed"
+                )
+            if storage_backend == "mooncake":
+                extra_config = json.loads(
+                    self.extra_server_args.get("hicache_storage_backend_extra_config")
+                    or "{}"
+                )
+                if not extra_config.get("extra_backend_tag"):
+                    raise ValueError(
+                        "The Mooncake HiCache storage backend needs an "
+                        "'extra_backend_tag' (the Store key prefix that scopes keys "
+                        "to a run) in hicache_storage_backend_extra_config (a JSON "
+                        "string)"
+                    )
+                if "master_server_address" in extra_config:
+                    raise ValueError(
+                        "Remove master_server_address from "
+                        "hicache_storage_backend_extra_config: the controller starts "
+                        "the job's Mooncake master on its host and sets this address "
+                        "for every generator (got "
+                        f"{extra_config['master_server_address']!r})"
+                    )
+
+        @property
+        def uses_mooncake_store(self) -> bool:
+            return self.extra_server_args.get("hicache_storage_backend") == "mooncake"
 
     def __init__(
         self,
@@ -184,6 +223,7 @@ class SGLangEngine(GenerationEngine):
         reset_kv_cache_on_model_state_dict_load: bool,
         model_state_dict_load_mode: ModelStateDictLoadMode,
         vision_processor: VisionProcessor.Config | None,
+        mooncake_master_address: str | None,
         rank: int,
         generator_name: str,
         output_dir: str,
@@ -194,16 +234,23 @@ class SGLangEngine(GenerationEngine):
                 "SGLangEngine serves text prompts only; image prompts "
                 "(Controller.Config.vision_processor) need VLLMEngine."
             )
-        if parallelism.data_parallel_degree != 1:
-            # TODO(https://github.com/sgl-project/sglang/issues/48476): SGLang builds
-            # one torch world per data-parallel replica; run DP replicas in one world by
-            # building SGLang's TP groups over it.
-            raise ValueError(
-                "SGLangEngine supports data_parallel_degree=1 only; run more "
-                "generators to scale out"
-            )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        # Reset mode clears KV at each weight load instead of salting requests by
+        # policy version, but SGLang's KV reset (flush_cache) clears GPU and host
+        # memory, not the storage backend: unsalted requests would read KV that
+        # earlier weights computed.
+        # TODO(https://github.com/pytorch/torchtitan/pull/5953): drop with the
+        # reset mode.
+        if (
+            config.extra_server_args.get("hicache_storage_backend") is not None
+            and reset_kv_cache_on_model_state_dict_load
+        ):
+            raise ValueError(
+                "A HiCache storage backend requires "
+                "reset_kv_cache_on_model_state_dict_load=False: SGLang's KV reset "
+                "does not clear the storage backend"
+            )
         if config.extra_server_args.get("enable_hierarchical_cache") and any(
             isinstance(layer.attention, KDA.Config) for layer in model.layers
         ):
@@ -245,11 +292,13 @@ class SGLangEngine(GenerationEngine):
             # MASTER_PORT); SGLang then builds its groups over this world.
             torch.accelerator.set_device_index(int(os.environ["LOCAL_RANK"]))
             dist.init_process_group(init_method="env://")
-        if dist.get_world_size() != parallelism.tensor_parallel_degree:
+        self._dp_size = parallelism.data_parallel_degree
+        world_size = self._dp_size * parallelism.tensor_parallel_degree
+        if dist.get_world_size() != world_size:
             raise ValueError(
-                f"SGLangEngine needs one process per TP rank, got world size "
-                f"{dist.get_world_size()} for tensor_parallel_degree "
-                f"{parallelism.tensor_parallel_degree}"
+                f"SGLangEngine needs one process per DP and TP rank, got world size "
+                f"{dist.get_world_size()} for data_parallel_degree {self._dp_size} "
+                f"and tensor_parallel_degree {parallelism.tensor_parallel_degree}"
             )
 
         # TODO(https://github.com/sgl-project/sglang/issues/48460): importing SGLang
@@ -284,6 +333,7 @@ class SGLangEngine(GenerationEngine):
             gpu_memory_limit=gpu_memory_limit,
             max_num_batched_tokens=max_num_batched_tokens,
             debug=debug,
+            mooncake_master_address=mooncake_master_address,
         )
         publish(
             server_args,
@@ -294,6 +344,9 @@ class SGLangEngine(GenerationEngine):
                 gpu_id=torch.accelerator.current_device_index(),
             ),
         )
+        # SGLang's attention-DP rank, so the Generator's check of data_parallel_rank
+        # verifies that this rank's request slice matches its attention-TP group.
+        self._dp_rank = get_parallel().attn_dp_rank
         logger.info("Building the SGLang scheduler...")
         self._scheduler = Scheduler(server_args, PortArgs.init_new(server_args))
         # TODO(https://github.com/sgl-project/sglang/issues/48474): SGLang has no option
@@ -332,15 +385,7 @@ class SGLangEngine(GenerationEngine):
         self._awaiting_prefill: dict[
             tuple[int, str | None, tuple[int, ...]], tuple[Req, list[Req]]
         ] = {}
-        # Linear attention models don't hold requests. Without SGLang's extra_buffer
-        # strategy, SGLang saves a linear attention state only at the end of a
-        # cached prefix. A request with the same prompt still computes the prompt's
-        # last token, which needs the state one token earlier, so it can reuse
-        # nothing, and holding it would only delay it.
-        self._hold_shared_prompts = not has_linear_attention
-        # SGLang turns overlap scheduling off only for linear attention models (see
-        # step()).
-        if not self._scheduler.enable_overlap and not has_linear_attention:
+        if not self._scheduler.enable_overlap:
             raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
         self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
@@ -360,6 +405,7 @@ class SGLangEngine(GenerationEngine):
         gpu_memory_limit: float,
         max_num_batched_tokens: int | None,
         debug: DebugConfig,
+        mooncake_master_address: str | None,
     ) -> ServerArgs:
         """Build SGLang's ``ServerArgs`` (see ``GenerationEngine`` for the arguments)."""
         server_kwargs: dict[str, Any] = dict(
@@ -370,12 +416,19 @@ class SGLangEngine(GenerationEngine):
             # Token-in-token-out: prompts and outputs are token ids.
             skip_tokenizer_init=True,
             dtype=param_dtype,
-            tp_size=parallelism.tensor_parallel_degree,
+            # Data parallelism runs as SGLang's attention DP: one SGLang instance whose
+            # TP group is the world, with a TP-wide attention group per DP rank. SGLang
+            # steps every DP rank together, an idle one with an empty batch, as the
+            # EP collectives across DP ranks need.
+            tp_size=parallelism.data_parallel_degree
+            * parallelism.tensor_parallel_degree,
+            attn_dp_size=parallelism.data_parallel_degree,
             # SGLang sizes weights and the KV pool to this fraction and leaves activations
             # little room on top: at 0.8, Qwen3-0.6B (TP 2) peaks at 81% of GPU memory,
             # as with vLLM's gpu_memory_utilization=0.8.
             mem_fraction_static=gpu_memory_limit,
-            max_running_requests=max_num_seqs,
+            # SGLang splits these over its DP ranks; the engine's are per DP rank.
+            max_running_requests=max_num_seqs * parallelism.data_parallel_degree,
             context_length=model.max_context_length + CONTEXT_LENGTH_MARGIN,
             attention_backend=TORCHTITAN_VARLEN_ATTENTION_BACKEND,
             # SGLang's default for this backend (its 128-token pages are for its own
@@ -393,11 +446,25 @@ class SGLangEngine(GenerationEngine):
             # session is released, so its next turn finds it: eviction takes
             # unreferenced KV first, and referenced KV only when nothing else is left.
             enable_session_radix_cache=True,
+            # Linear attention (GDN, KDA) models: while decoding, SGLang's extra_buffer
+            # prefix cache snapshots each request's state every 64 tokens. A session's
+            # next turn resumes from the previous turn's last snapshot, so it
+            # recomputes at most the previous turn's last 63 tokens (up to 255 with
+            # SGLang's default of 256). KDA needs a multiple of 64: its decode
+            # snapshots assume an empty replay state.
+            mamba_track_interval=64,
             disable_cuda_graph=self.config.cuda_graph == "none",
             # The wrapper loads its weights when SGLang builds it.
             skip_server_warmup=True,
             log_level="warning",
         )
+        if any(
+            isinstance(layer.attention, LinearAttention.Config)
+            for layer in model.layers
+        ):
+            # KV and GDN / KDA states share one pool, so memory one does not use can
+            # hold the other (see the README). SGLang builds it for hybrid models only.
+            server_kwargs["enable_unified_memory"] = True
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
             # dominates small prefills. SGLang runs a prefill batch eagerly if it
@@ -412,7 +479,9 @@ class SGLangEngine(GenerationEngine):
         else:
             server_kwargs["disable_prefill_cuda_graph"] = True
         if max_num_batched_tokens is not None:
-            server_kwargs["chunked_prefill_size"] = max_num_batched_tokens
+            server_kwargs["chunked_prefill_size"] = (
+                max_num_batched_tokens * parallelism.data_parallel_degree
+            )
         if debug.seed is not None:
             server_kwargs["random_seed"] = debug.seed
             # SGLang samples with each request's seed only in deterministic mode,
@@ -425,6 +494,14 @@ class SGLangEngine(GenerationEngine):
             server_kwargs.keys() - _TORCHTITAN_SERVER_ARGS
         )
         server_kwargs.update(self.config.extra_server_args)
+        if mooncake_master_address is not None:
+            extra_config = json.loads(
+                server_kwargs["hicache_storage_backend_extra_config"]
+            )
+            extra_config["master_server_address"] = mooncake_master_address
+            server_kwargs["hicache_storage_backend_extra_config"] = json.dumps(
+                extra_config
+            )
         return ServerArgs(**server_kwargs)
 
     def _init_event_loop(self) -> None:
@@ -434,8 +511,6 @@ class SGLangEngine(GenerationEngine):
         # API to run its loop one iteration at a time.
         scheduler = self._scheduler
         scheduler._war_barrier_enabled = is_war_barrier_enabled()
-        if not scheduler.enable_overlap:
-            return
         scheduler.enable_skip_finishing_decode = True
         scheduler.result_queue = deque()
         # The schedule stream must differ from the forward stream to overlap them.
@@ -449,11 +524,11 @@ class SGLangEngine(GenerationEngine):
 
     @property
     def data_parallel_size(self) -> int:
-        return 1
+        return self._dp_size
 
     @property
     def data_parallel_rank(self) -> int:
-        return 0
+        return self._dp_rank
 
     @property
     def prefetched_model_state_dict(self) -> dict[str, torch.Tensor] | None:
@@ -479,8 +554,7 @@ class SGLangEngine(GenerationEngine):
         holding, SGLang would prefill a rollout group's samples in one batch and
         each would compute the whole prompt, because SGLang caches a request's KV
         only after its prefill. SGLang's own parallel sampling (n > 1) prefills
-        the prompt once first for the same reason. Linear attention models do not
-        hold requests (see ``_hold_shared_prompts``).
+        the prompt once first for the same reason.
         """
         sglang_requests = []
         rejected: list[tuple[str, Exception]] = []
@@ -553,17 +627,16 @@ class SGLangEngine(GenerationEngine):
             if req.rid in admitted:
                 self._output_collector.admit(req, arrival_times[req.rid])
                 queued[req.rid] = req
-        if self._hold_shared_prompts:
-            held = set()
-            # In admission order, so every TP rank picks the same leaders.
-            for req in queued.values():
-                key = (req.priority, req.cache_salt, tuple(req.origin_input_ids))
-                if key in self._awaiting_prefill:
-                    self._awaiting_prefill[key][1].append(req)
-                    held.add(req.rid)
-                else:
-                    self._awaiting_prefill[key] = (req, [])
-            self._scheduler.waiting_queue.take(lambda req: req.rid in held)
+        held = set()
+        # In admission order, so every TP rank picks the same leaders.
+        for req in queued.values():
+            key = (req.priority, req.cache_salt, tuple(req.origin_input_ids))
+            if key in self._awaiting_prefill:
+                self._awaiting_prefill[key][1].append(req)
+                held.add(req.rid)
+            else:
+                self._awaiting_prefill[key] = (req, [])
+        self._scheduler.waiting_queue.take(lambda req: req.rid in held)
         for finished, abort_message in self._output_collector.take():
             if finished.request_id in admitted:
                 assert (
@@ -607,33 +680,38 @@ class SGLangEngine(GenerationEngine):
         return params
 
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running or held, or finished and not
-        yet returned by ``step()``."""
-        return (
+        """Whether any admitted request of any DP rank is still running or held, or
+        finished and not yet returned by ``step()``.
+
+        With data parallelism, a collective over all ranks: each ``step()`` is one, so
+        every DP rank steps until all are done, as vLLM's DP engines do.
+        """
+        unfinished = (
             bool(self._finished)
             or bool(self._awaiting_prefill)
             or not self._scheduler.is_fully_idle()
         )
+        if self._dp_size == 1:
+            return unfinished
+        # NOTE: a CPU (gloo) all-reduce on every call, i.e. every step, over the DP x
+        # TP world: SGLang's attention DP has no DP-only group. VLLMEngine (vLLM's
+        # has_unfinished_requests) does the same over vLLM's DP group.
+        flag = torch.tensor([unfinished], dtype=torch.int32)
+        dist.all_reduce(
+            flag, op=dist.ReduceOp.MAX, group=get_parallel().tp_group.cpu_group
+        )
+        return bool(flag.item())
 
     def step(self) -> list[FinishedRequest]:
-        """Run one iteration of SGLang's event loop, a TP collective, and return the
-        requests whose results it processed."""
+        """Run one iteration of SGLang's event loop, a collective over all DP and TP
+        ranks, and return the requests whose results it processed."""
         scheduler = self._scheduler
         # As SGLang's own event loops; the model's TP all-reduces take their fast
         # path only with grad mode off.
         with torch.no_grad(), scheduler.device_module.StreamContext(
             scheduler.schedule_stream
         ):
-            if scheduler.enable_overlap:
-                _overlap_event_loop_iteration(scheduler)
-            else:
-                # TODO(https://github.com/sgl-project/sglang/issues/48463): SGLang's
-                # radix cache keeps linear attention states with its no_buffer
-                # strategy, which runs only without overlap scheduling, so SGLang
-                # turns overlap off for these models. Its extra_buffer strategy keeps
-                # overlap, but needs the kernels to write state snapshots at
-                # intermediate positions (see register_to_sglang).
-                _normal_event_loop_iteration(scheduler)
+            _overlap_event_loop_iteration(scheduler)
             # When SGLang processes a prefill's results, it appends the request's
             # first output token and inserts the prompt's KV into its radix cache.
             # So once a leader has an output token (or has finished), queue its
@@ -847,29 +925,6 @@ def _metrics_inputs(
         num_generation_tokens=num_generation_tokens,
         num_preemptions=req.retraction_count,
     )
-
-
-def _normal_event_loop_iteration(scheduler: Scheduler) -> None:
-    """One iteration of ``Scheduler.event_loop_normal``, without receiving requests.
-
-    The engine loop admits requests through ``add_requests`` instead.
-    """
-    # TODO(https://github.com/sgl-project/sglang/issues/48472): SGLang has no public
-    # single-iteration API; this mirrors the loop body of the pinned SGLang version and
-    # must be kept in sync with it.
-    scheduler.increment_scheduler_iterations()
-    plan = scheduler.get_next_batch_to_run(
-        running_batch=scheduler.running_batch, last_batch=scheduler.last_batch
-    )
-    scheduler.running_batch = plan.running_batch
-    batch = plan.batch_to_run
-    scheduler.cur_batch_for_debug = batch
-    if batch:
-        scheduler.process_batch_result(batch, scheduler.run_batch(batch))
-    else:
-        scheduler._sched_idled = True
-        scheduler.on_idle()
-    scheduler.last_batch = batch
 
 
 def _overlap_event_loop_iteration(scheduler: Scheduler) -> None:
