@@ -19,9 +19,9 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan_recipes.decision.loss import AnswerTokenLoss
 from torchtitan_recipes.decision.prepare_data import LETTERS, render
 from torchtitan_recipes.decision.qwen3 import (
-    AnswerTokenLoss,
     DecisionLetterProcessor,
     qwen3_1_7b_decision,
 )

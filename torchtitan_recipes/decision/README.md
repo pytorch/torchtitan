@@ -69,3 +69,32 @@ base -> fine-tuned.
 "Answered" is the largest fraction of questions, taken most-confident first,
 whose error rate stays at or below 5%. These are in-distribution results: test
 questions come from the same source datasets as training.
+
+## Candidate-distribution fine-tuning
+
+This recipe fine-tunes **Qwen3.5**, using GS1-format `request`/`targets`
+records and sampled distribution NLL plus weighted expected multiclass Brier.
+
+- `prepare_distribution_data.py` selects text questions and aligns targets by candidate ID.
+- `distribution.py` contains the processor, loss, and `qwen3_5_distribution` config.
+- `evaluate.py` evaluates the Jev recipe using its prompt format.
+
+Both recipes use letter-slot scoring and share `AnswerTokenLoss`. Jev uses
+a gold letter with full-vocabulary cross-entropy. The distribution recipe
+samples letters from soft targets and scores only the valid candidates.
+
+```bash
+python scripts/download_hf_assets.py --repo_id Qwen/Qwen3.5-0.8B-Base --assets tokenizer safetensors config
+python -m torchtitan_recipes.decision.prepare_distribution_data --input /path/to/train.jsonl
+NGPU=2 MODULE=torchtitan_recipes.decision.distribution CONFIG=qwen3_5_distribution ./run_train.sh
+```
+
+Preparation accepts a JSONL file with one `request` and `targets` object per
+line. Each question target supplies `candidate_ids` and `distribution`. The
+distribution-v4.5 export used for validation is local to the GS1 project.
+
+On one A800, Qwen3.5-0.8B-Base completed 10 optimizer steps and exported its
+final weights. The run used 3,000 sampled questions (preparation seed 0),
+8,192 tokens per microbatch, and accelerator graphs disabled. Training loss
+was 1.93938 at step 1 and 1.50018 at step 10. Held-out calibration and
+comparisons with full-vocabulary CE remain to be measured.

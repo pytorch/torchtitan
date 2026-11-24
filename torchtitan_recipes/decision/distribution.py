@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Experimental Qwen3.5 training on GS1-format candidate distributions."""
+"""Qwen3.5 training on GS1-format candidate distributions."""
 
 import math
 from dataclasses import dataclass
@@ -37,7 +37,8 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
-from torchtitan_recipes.decision.qwen3 import AnswerTokenLoss
+
+from .loss import AnswerTokenLoss
 
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 MIN_CANDIDATES = 2
@@ -128,6 +129,10 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
             raise ValueError("brier_weight must be finite and nonnegative")
         candidate_token_ids = config.candidate_token_ids
         if candidate_token_ids is None:
+            if config.tokenizer_path is None:
+                raise ValueError(
+                    "A tokenizer path is required to resolve answer tokens"
+                )
             tokenizer = HuggingFaceTokenizer(tokenizer_path=config.tokenizer_path)
             encoded = [
                 tokenizer.encode(f" {letter}", add_bos=False, add_eos=False)
@@ -143,8 +148,9 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
             raise ValueError("Expected distinct token IDs for A through Z")
         self.candidate_token_ids = candidate_token_ids
         self.brier_weight = config.brier_weight
-        self._candidate_ids_by_device: dict[str, torch.Tensor] = {}
-        self._candidate_positions_by_device: dict[str, torch.Tensor] = {}
+        self._candidates_by_device: dict[
+            torch.device, tuple[torch.Tensor, torch.Tensor]
+        ] = {}
 
     def __call__(
         self,
@@ -154,14 +160,14 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
-        device_key = str(pred.device)
-        candidate_ids = self._candidate_ids_by_device.get(device_key)
-        positions = self._candidate_positions_by_device.get(device_key)
-        if candidate_ids is None:
-            candidate_ids = torch.tensor(self.candidate_token_ids, device=pred.device)
-            positions = torch.arange(MAX_CANDIDATES, device=pred.device)
-            self._candidate_ids_by_device[device_key] = candidate_ids
-            self._candidate_positions_by_device[device_key] = positions
+        candidates = self._candidates_by_device.get(pred.device)
+        if candidates is None:
+            candidates = (
+                torch.tensor(self.candidate_token_ids, device=pred.device),
+                torch.arange(MAX_CANDIDATES, device=pred.device),
+            )
+            self._candidates_by_device[pred.device] = candidates
+        candidate_ids, positions = candidates
         logits = pred.index_select(-1, candidate_ids).float()
         valid = labels != IGNORE_INDEX
         class_ids = labels.masked_fill(~valid, 0)

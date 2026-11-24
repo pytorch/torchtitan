@@ -13,11 +13,9 @@ README.md for commands and results.
 """
 
 from dataclasses import dataclass
-from typing import Any
 
 import grain
 import numpy as np
-import torch
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import (
@@ -28,11 +26,7 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.data.dataset import SampleProcessor, TextSequence
 from torchtitan.components.data.types import DatasetBuildContext
-from torchtitan.components.loss import (
-    ChunkedLossWrapper,
-    CrossEntropyLoss,
-    IGNORE_INDEX,
-)
+from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
@@ -51,6 +45,8 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
+
+from .loss import AnswerTokenLoss
 
 
 class DecisionLetterProcessor(SampleProcessor):
@@ -82,53 +78,6 @@ class DecisionLetterProcessor(SampleProcessor):
         labels = np.full(len(prompt), IGNORE_INDEX, dtype=np.int64)
         labels[-1] = answer[0]
         return TextSequence(input_ids=np.asarray(prompt, dtype=np.int64), labels=labels)
-
-
-class AnswerTokenLoss(ChunkedLossWrapper):
-    """Apply lm_head and the loss only at supervised positions.
-
-    Gathering a fixed number of positions keeps shapes static for CUDA graphs
-    and skips lm_head and cross-entropy over the ~99% of positions whose labels
-    are ``IGNORE_INDEX``. ``DecisionLetterProcessor`` supervises one token per
-    row and packing caps documents per microbatch at ``max_num_documents``, so
-    setting ``max_num_supervised = max_num_documents`` is enough. An on-device
-    assert catches a violation instead of silently dropping supervised tokens.
-
-    The gathered rows go through ``ChunkedLossWrapper.__call__``, which applies
-    lm_head and the loss with its FSDP and loss-parallel handling.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ChunkedLossWrapper.Config):
-        max_num_supervised: int
-        """Upper bound on supervised positions per microbatch."""
-        num_chunks: int = 1
-        """The gathered rows are few, so they are not chunked further."""
-
-    def __init__(self, config: Config):
-        super().__init__(config)
-        self.max_num_supervised = config.max_num_supervised
-
-    def __call__(
-        self,
-        pred: torch.Tensor,
-        labels: torch.Tensor,
-        global_loss_token_counts: torch.Tensor | None = None,
-        **loss_inputs: Any,
-    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        is_supervised_T = labels != IGNORE_INDEX
-        torch._assert_async(
-            is_supervised_T.sum() <= self.max_num_supervised,
-            "more supervised positions than max_num_supervised",
-        )
-        # Unused slots hold -1: they gather the last row and get ignored labels.
-        index_S = torch.nonzero_static(
-            is_supervised_T, size=self.max_num_supervised, fill_value=-1
-        ).squeeze(-1)
-        labels_S = labels[index_S].masked_fill(index_S < 0, IGNORE_INDEX)
-        return super().__call__(
-            pred[index_S], labels_S, global_loss_token_counts, **loss_inputs
-        )
 
 
 def qwen3_1_7b_decision(parallelism: ParallelismConfig | None = None) -> Trainer.Config:

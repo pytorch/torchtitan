@@ -26,7 +26,9 @@ def _text(value: Any) -> str:
 def _contains_media(value: Any) -> bool:
     if isinstance(value, dict):
         kind = value.get("type")
-        if kind in ("image", "video") and any(key in value for key in ("image", "path", "url", "data")):
+        if kind in ("image", "video") and any(
+            key in value for key in ("image", "path", "url", "data")
+        ):
             return True
         return any(_contains_media(item) for item in value.values())
     if isinstance(value, list):
