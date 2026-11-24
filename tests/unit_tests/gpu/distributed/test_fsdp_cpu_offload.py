@@ -197,7 +197,7 @@ class TestCPUOffloadRandomInit(DTensorTestBase):
             linear = nn.Linear(32, 64, bias=False)
         mesh = self.build_device_mesh()
         fully_shard(linear, mesh=mesh, offload_policy=CPUOffloadPolicy())
-        # trainer.py materializes the whole model on CPU under cpu offload.
+        # TrainingEngine materializes the whole model on CPU under cpu offload.
         linear.to_empty(device="cpu")
         weight = linear.weight
         tracker = torch.distributed.tensor._random._rng_tracker

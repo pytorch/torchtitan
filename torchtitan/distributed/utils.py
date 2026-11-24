@@ -278,11 +278,12 @@ def dtensor_rng_tracker_off(mesh: DeviceMesh) -> Iterator[None]:
     shard because CPU offload requires ``dp_shard`` in
     ``debug.distinct_seed_mesh_axes``.
     """
-    # TODO: drop once OffsetBasedRNGTracker advances the CPU generator for CPU
-    # local shards: <pytorch issue link>
+    # TODO: drop once DTensor's RNG supports CPU local shards:
+    # https://github.com/pytorch/pytorch/pull/196072
     dtensor_random = torch.distributed.tensor._random
     saved = dtensor_random._rng_tracker
     # DTensor creates an enabled tracker on the first random op if none exists.
+    # The tracker only reads the mesh's device type.
     tracker = saved or dtensor_random.OffsetBasedRNGTracker(mesh, run_state_sync=False)
     enabled = tracker.distribute_region_enabled
     dtensor_random._rng_tracker = tracker

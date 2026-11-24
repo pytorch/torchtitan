@@ -181,7 +181,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 or self.parallelism.context_parallel_degree > 1
             ):
                 # Init draws from per-rank CPU seeds, which differ only along
-                # distinct_seed_mesh_axes, so TP/CP shards would be identical.
+                # distinct_seed_mesh_axes. TP and CP each hold both sharded and
+                # replicated params (MoE router gate is Replicate(tp); multimodal
+                # encoders are FSDP-sharded over dp_shard only, so Replicate(cp)),
+                # so no choice of distinct axes initializes both correctly.
                 raise ValueError(
                     "parallelism.fsdp_enable_cpu_offloading does not support "
                     "tensor_parallel_degree > 1 or context_parallel_degree > 1: "
@@ -464,7 +467,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
 
-        init_shards_on_cpu = (
+        # Under create_seed_checkpoint the params are plain tensors, not DTensors.
+        init_dtensor_params_on_cpu = (
             self.config.parallelism.fsdp_enable_cpu_offloading
             and not create_seed_checkpoint
         )
@@ -473,9 +477,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 model_part.to_empty(device=init_device)
                 with torch.no_grad(), (
                     dist_utils.dtensor_rng_tracker_off(
-                        self.parallelism_context.world_mesh
+                        self.parallelism_context.spmd_dense_mesh()
                     )
-                    if init_shards_on_cpu
+                    if init_dtensor_params_on_cpu
                     else contextlib.nullcontext()
                 ):
                     model_part.init_weights(buffer_device=buffer_device)
