@@ -54,6 +54,12 @@ heavy as it is.
 
 # TODO: group-local balancing, which plans within blocks of data-parallel ranks
 # instead of all of them, to bound the gather and the plan on very large jobs.
+# TODO: plan from a global view of the data sources instead of moving
+# microbatches. If every rank knew every rank's document lengths, each could
+# compute the same plan and read only its own rows: no all-gather, no exchange,
+# and no copy sent to every CP peer. Blocked today: lengths are only known after
+# tokenizing and packing, and streaming sources are split per rank
+# (sources.py, split_dataset_by_node); needs a precomputed length index.
 
 import logging
 import pickle
