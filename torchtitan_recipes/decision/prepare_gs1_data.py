@@ -24,10 +24,14 @@ def _text(value: Any) -> str:
 
 
 def _contains_media(value: Any) -> bool:
-    return isinstance(value, list) and any(
-        isinstance(item, dict) and item.get("type") in ("image", "video")
-        for item in value
-    )
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if kind in ("image", "video") and any(key in value for key in ("image", "path", "url", "data")):
+            return True
+        return any(_contains_media(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_media(item) for item in value)
+    return False
 
 
 def flatten_record(row: dict[str, Any]) -> list[dict[str, Any]]:

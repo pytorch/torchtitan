@@ -93,6 +93,17 @@ def test_structured_type_metadata_is_text() -> None:
     assert len(flatten_record(record)) == 1
 
 
+def test_nested_media_content_is_filtered() -> None:
+    record = {
+        "request": {
+            "state": {"frames": [{"type": "image", "path": "frame.png"}]},
+            "questions": {},
+        },
+        "targets": {},
+    }
+    assert flatten_record(record) == []
+
+
 def test_processor_carries_candidate_count_and_samples_target_label() -> None:
     context = DatasetBuildContext(
         tokenizer=_Tokenizer(),
