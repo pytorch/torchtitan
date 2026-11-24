@@ -16,10 +16,11 @@ Detailed diagram:
 _data_input_loop                                      _rollout_loop[N] (group workers)
 +--------------------------------------------------+  +--------------------------------------------------+
 | group_buffer.wait_for_slot()                     |  | work = group_buffer.claim_next()                  |
-| index, sample = rollouter.get_training_sample()  |  | group = rollouter.run_group_rollouts(work.sample) |
-| work = RolloutGroupWork(group_id, sample)        |  | group_buffer.finalize_work(group)                 |
-| group_buffer.add_work(work)                      |  +-----------------------+--------------------------+
-+-----------------------+--------------------------+                          ^ |
+| index, sample = rollouter.get_training_sample()  |  | group = rollouter.run_group_rollouts(work)        |
+| work = RolloutGroupWork(group_id, sample)        |  | recorder.append_lines(group.recorder_lines)       |
+| group_buffer.add_work(work)                      |  | group_buffer.finalize_work(group)                 |
++-----------------------+--------------------------+  +-----------------------+--------------------------+
+                        |                                                     ^ |
                         |                                                     | |
                         | adds work entry                                     | | updates same entry
                         v                                                     | v
@@ -119,7 +120,6 @@ from torchtitan.rl.actors.system import ActorSystem, TrainerHandle
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
-    compute_rollout_metrics,
     MetricsTimer,
 )
 from torchtitan.rl.controller.work_buffer import (
@@ -850,6 +850,7 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
+                rollout_recorder_config=config.rollout_recorder,
                 vision_processor_config=config.vision_processor,
             )
 
@@ -927,6 +928,7 @@ class Controller(Configurable):
                     group_id=group_id,
                     group_size=num_samples_per_prompt,
                     sampling=sampling,
+                    is_validation=True,
                 )
                 for group_id, sample in zip(group_ids, samples, strict=True)
             ),
@@ -948,16 +950,12 @@ class Controller(Configurable):
                 continue
             rollout_groups.append(result)
 
-        metrics = compute_rollout_metrics(
-            prefix="validation",
-            rollouts=[
-                rollout for group in rollout_groups for rollout in group.rollouts
-            ],
-        )
+        # The rollout workers computed each group's metrics (`finish_rollout_group`).
+        metrics = [metric for group in rollout_groups for metric in group.metrics]
         # Training logs the same turn metrics, so prefix validation's to keep them apart in W&B:
         #   generator/queue_time_ms -> validation_generator/queue_time_ms
         #   math_verify/timeouts    -> validation_math_verify/timeouts
-        # compute_rollout_metrics already names every other key validation/* or validation_reward*.
+        # The workers already named every other key validation/* or validation_reward*.
         for index, metric in enumerate(metrics):
             if not metric.key.startswith("validation"):
                 metrics[index] = m.Metric(f"validation_{metric.key}", metric.value)
@@ -1014,7 +1012,8 @@ class Controller(Configurable):
             step=step,
         )
 
-        self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
+        for group in rollout_groups:
+            self.rollout_recorder.append_lines(group.recorder_lines)
 
         t_validate_s = time.perf_counter() - t_validate_start
         validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
@@ -1263,7 +1262,8 @@ class Controller(Configurable):
         """Generate + score one group at a time; a failed group becomes an empty group + a failure metric.
 
         Staleness is bounded by the buffer's active-slot budget. Raw rollouts are recorded before any drop,
-        so dropped groups stay inspectable on disk.
+        so dropped groups stay inspectable on disk. The rollout worker computes the group's rollout metrics
+        and encodes its recorder lines (see `finish_rollout_group`).
 
         consumes: a WAITING RolloutGroupWork (group_buffer.claim_next)
             waits for:    a claimable WAITING entry
@@ -1286,16 +1286,11 @@ class Controller(Configurable):
                         group_id=work.group_id,
                         group_size=self.config.async_loop.num_samples_per_prompt,
                         sampling=self._sampling,
+                        is_validation=False,
                     )
-                group.metrics = compute_rollout_metrics(
-                    prefix="rollout", rollouts=group.rollouts
-                )
-
-                # save rollout for inspection
-                self.rollout_recorder.record(
-                    is_validation=False,
-                    rollout_groups=[group],
-                )
+                # save rollout for inspection; nothing downstream reads the lines
+                self.rollout_recorder.append_lines(group.recorder_lines)
+                group.recorder_lines = ""
             except Exception:
                 logger.exception(f"rollout group {work.group_id} failed; dropping")
                 group = RolloutGroup(
