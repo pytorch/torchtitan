@@ -451,26 +451,26 @@ class TestFTCheckpointManager(unittest.TestCase):
         )
 
 
-class _FSDPModuleWithParamGroups(FSDPModule, nn.Module):
-    """Use the real FSDP hook setter with only its parameter-group state."""
+class _FSDPModuleRecordingAllReduceHook(FSDPModule, nn.Module):
+    """An FSDP module that records the all-reduce hook set on it."""
 
     def __new__(cls, *args, **kwargs):
         # FSDPModule.__new__ normally reconstructs the original unwrapped class.
         return object.__new__(cls)
 
-    def __init__(self, param_groups):
+    def __init__(self):
         super().__init__()
-        self.fsdp_state = SimpleNamespace(_fsdp_param_groups=param_groups)
+        self.all_reduce_hook = None
 
-    def _get_fsdp_state(self):
-        return self.fsdp_state
+    def set_all_reduce_hook(self, hook, *, stream=None):
+        self.all_reduce_hook = hook
 
 
 class TestFTManager(unittest.TestCase):
-    def test_multi_group_fsdp_installs_cross_replica_hook_on_every_group(self):
-        dense_group = SimpleNamespace(_all_reduce_hook=None)
-        expert_group = SimpleNamespace(_all_reduce_hook=None)
-        model = nn.Sequential(_FSDPModuleWithParamGroups([dense_group, expert_group]))
+    def test_async_quorum_installs_cross_replica_hook_on_every_fsdp_module(self):
+        dense = _FSDPModuleRecordingAllReduceHook()
+        experts = _FSDPModuleRecordingAllReduceHook()
+        model = nn.Sequential(dense, experts)
         ft_manager = TorchFTManager(TorchFTManager.Config(enable=False))
         ft_manager._manager = mock.sentinel.manager
         ft_manager.use_async_quorum = True
@@ -480,11 +480,11 @@ class TestFTManager(unittest.TestCase):
 
         ft_manager.maybe_set_all_reduce_hook([model])
 
-        self.assertIsNotNone(dense_group._all_reduce_hook)
-        self.assertIsNotNone(expert_group._all_reduce_hook)
+        self.assertIsNotNone(dense.all_reduce_hook)
+        self.assertIsNotNone(experts.all_reduce_hook)
         with mock.patch.object(dist, "all_reduce") as all_reduce:
-            dense_group._all_reduce_hook(dense_gradient)
-            expert_group._all_reduce_hook(expert_gradient)
+            dense.all_reduce_hook(dense_gradient)
+            experts.all_reduce_hook(expert_gradient)
 
         self.assertEqual(
             all_reduce.call_args_list,

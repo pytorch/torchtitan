@@ -29,7 +29,11 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
     disable_active_parametrization,
     MixedPrecisionPolicy as SimpleFSDPMixedPrecisionPolicy,
 )
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization._fsdp_tensor import (  # noqa: E402
+    _ShardedFSDPTensor,
+    _unsharded_inner_tensors,
+    _UnshardedFSDPTensor,
+)
 from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
 from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
     _LinearShardedTensorWithMXFP8Compute,
@@ -49,15 +53,30 @@ pytestmark = [
 ]
 
 
-def _get_weight_param(linear):
-    state = fully_shard.state(linear)
-    param_group = state._fsdp_param_group
-    assert param_group is not None
-    return next(
-        param
-        for param in param_group.fsdp_params
-        if param._module_info.param_name == "weight"
-    )
+class _FSDPWeightBuffers:
+    """Records the tensors that FSDP owns for the weight's all-gather extension
+    and frees on reshard: the all-gather outputs passed to
+    ``fsdp_post_all_gather`` and the unsharded inner tensors of the weight it
+    returns or refills."""
+
+    def __init__(self) -> None:
+        self.all_gather_outputs: tuple[torch.Tensor, ...] = ()
+        self.unsharded_inner_tensors: tuple[torch.Tensor, ...] = ()
+        self._fsdp_post_all_gather = _ShardedFSDPTensor.fsdp_post_all_gather
+
+        def fsdp_post_all_gather(tensor, all_gather_outputs, *args, **kwargs):
+            result = self._fsdp_post_all_gather(
+                tensor, all_gather_outputs, *args, **kwargs
+            )
+            unsharded = kwargs["out"] if result is None else result[0]
+            self.all_gather_outputs = tuple(all_gather_outputs)
+            self.unsharded_inner_tensors = _unsharded_inner_tensors(unsharded.operands)
+            return result
+
+        _ShardedFSDPTensor.fsdp_post_all_gather = fsdp_post_all_gather
+
+    def remove(self) -> None:
+        _ShardedFSDPTensor.fsdp_post_all_gather = self._fsdp_post_all_gather
 
 
 def _run_reshard_after_forward(
@@ -75,6 +94,7 @@ def _run_reshard_after_forward(
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    fsdp_buffers = _FSDPWeightBuffers()
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
         linear = (
@@ -109,34 +129,34 @@ def _run_reshard_after_forward(
             requires_grad=True,
         )
         output_MN = linear(input_MK)
-        weight_param = _get_weight_param(linear)
-        inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+        inner_tensor_ids = tuple(map(id, fsdp_buffers.unsharded_inner_tensors))
         assert isinstance(
             linear.weight.to_local(), _LinearShardedTensorWithMXFP8Compute
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
 
         output_MN.sum().backward()
         assert isinstance(
             linear.weight.to_local(), _LinearShardedTensorWithMXFP8Compute
         )
-        assert tuple(map(id, weight_param._unsharded_inner_tensors)) == inner_tensor_ids
+        assert tuple(map(id, fsdp_buffers.unsharded_inner_tensors)) == inner_tensor_ids
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
     finally:
+        fsdp_buffers.remove()
         dist.destroy_process_group()
 
 
@@ -165,6 +185,7 @@ def _run_pp_cache_lifecycle(
         return original_quantize_weight(weight_NK)
 
     mxfp8_tensor._quantize_mxfp8_weight = counted_quantize_weight
+    fsdp_buffers = _FSDPWeightBuffers()
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
         linear = (
@@ -202,24 +223,23 @@ def _run_pp_cache_lifecycle(
         ]
         outputs = [linear(input_MK) for input_MK in inputs]
         assert num_quantize_calls == 1, num_quantize_calls
-        weight_param = _get_weight_param(linear)
         assert isinstance(linear.weight, _UnshardedFSDPTensor)
         assert linear.weight.operands is not None
-        assert len(weight_param._unsharded_inner_tensors) == 3
+        assert len(fsdp_buffers.unsharded_inner_tensors) == 3
         operands = linear.weight.operands
         assert operands is not None
         assert (
             operands.weight_qdata_dgrad_NK.data_ptr()
             == operands.weight_qdata_fprop_KN.data_ptr()
         )
-        inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+        inner_tensor_ids = tuple(map(id, fsdp_buffers.unsharded_inner_tensors))
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() > 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
 
         outputs[0].sum().backward()
@@ -228,11 +248,11 @@ def _run_pp_cache_lifecycle(
         assert linear.weight.operands is not None
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() > 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
 
         linear.set_is_last_backward(True)
@@ -245,28 +265,29 @@ def _run_pp_cache_lifecycle(
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
 
         output_MN = linear(inputs[0].detach())
         assert num_quantize_calls == 2
         assert isinstance(linear.weight, _UnshardedFSDPTensor)
         assert linear.weight.operands is not None
-        assert tuple(map(id, weight_param._unsharded_inner_tensors)) == inner_tensor_ids
+        assert tuple(map(id, fsdp_buffers.unsharded_inner_tensors)) == inner_tensor_ids
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() > 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
         output_MN.sum().backward()
     finally:
+        fsdp_buffers.remove()
         mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
         dist.destroy_process_group()
 
@@ -295,6 +316,7 @@ def _run_accelerator_graph_cache_lifecycle(
         return original_quantize_weight(weight_NK)
 
     mxfp8_tensor._quantize_mxfp8_weight = counted_quantize_weight
+    fsdp_buffers = _FSDPWeightBuffers()
     try:
         mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
         linear = (
@@ -340,17 +362,16 @@ def _run_accelerator_graph_cache_lifecycle(
         forward_backward(input_MK)
         torch.cuda.synchronize()
         assert num_quantize_calls == 1
-        weight_param = _get_weight_param(linear)
         cache_addresses = tuple(
-            tensor.data_ptr() for tensor in weight_param._unsharded_inner_tensors
+            tensor.data_ptr() for tensor in fsdp_buffers.unsharded_inner_tensors
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert all(
             tensor.untyped_storage().size() > 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
 
         graphed_step = AcceleratorGraphWrapper(
@@ -375,12 +396,12 @@ def _run_accelerator_graph_cache_lifecycle(
         assert graphed_step._graph is not None
         assert num_quantize_calls == 1
         assert (
-            tuple(tensor.data_ptr() for tensor in weight_param._unsharded_inner_tensors)
+            tuple(tensor.data_ptr() for tensor in fsdp_buffers.unsharded_inner_tensors)
             == cache_addresses
         )
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param.all_gather_outputs
+            for tensor in fsdp_buffers.all_gather_outputs
         )
         assert not torch.equal(captured_output_MN, replay_output_MN)
 
@@ -388,9 +409,10 @@ def _run_accelerator_graph_cache_lifecycle(
         linear.reshard()
         assert all(
             tensor.untyped_storage().size() == 0
-            for tensor in weight_param._unsharded_inner_tensors
+            for tensor in fsdp_buffers.unsharded_inner_tensors
         )
     finally:
+        fsdp_buffers.remove()
         mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
         accelerator_graph_teardown()
         dist.destroy_process_group()

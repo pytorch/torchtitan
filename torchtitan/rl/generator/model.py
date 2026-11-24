@@ -9,7 +9,7 @@ initial weights, and loads model state dicts into it. Shared by every engine's m
 wrapper; the wrappers replace the attention layers before the build."""
 
 import logging
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import spmd_types as spmd
@@ -27,7 +27,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
-from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.decoder import Decoder
@@ -579,16 +578,6 @@ class ModelStateDictLoader:
             fetch({key: self._model.get_buffer(key) for key in self._buffer_keys})
 
 
-def _sharded_param_storages(module: FSDPModule) -> Iterator[torch.Tensor]:
-    """Yield the sharded parameter tensors of ``module``'s FSDP group."""
-    for param_group in module._get_fsdp_state()._fsdp_param_groups:
-        for param in param_group.fsdp_params:
-            sharded_data = param._sharded_param_data
-            if isinstance(sharded_data, _ShardedFSDPTensor):
-                sharded_data = sharded_data._tensor
-            yield sharded_data
-
-
 def _reshard(module: FSDPModule) -> None:
     """Reshard ``module``'s FSDP group, first finishing a forward it was left in.
 
@@ -601,7 +590,7 @@ def _reshard(module: FSDPModule) -> None:
       the load's all-gather would not wait for device work the load queued on the
       current stream to fill the group's sharded buffers.
     """
-    complete_fsdp_grouped_forward(module, None)
+    module.complete_grouped_forward()
     module.reshard()
 
 
@@ -626,15 +615,12 @@ def _restore_sharded_params(
 
     The group may already read as sharded: resharding (`_reshard`, FSDP's state_dict
     and load_state_dict pre-hooks) marks it sharded without allocating the storage.
-    `alloc_storage` checks the storage size itself and leaves allocated storage as is.
+    `_restore_sharded_params` leaves allocated storage as is.
     """
-    from torch.distributed.fsdp._fully_shard._fsdp_param import alloc_storage
-
-    # TODO: replace this with FSDPModule._restore_sharded_params(), and the refill below
+    # TODO: use a public FSDP API once there is one, and replace the refill below
     # with an FSDP reshard that keeps the data (fills each shard from the unsharded
     # parameter); the refill reads private FSDPParam fields and repeats FSDP's chunking.
-    for sharded_data in _sharded_param_storages(module):
-        alloc_storage(sharded_data)
+    module._restore_sharded_params()
     # TODO: each load still refills and all-gathers the frozen parameters of a group
     # that also has trainable ones (e.g. a decoder layer under LoRA). This rewrites
     # their unsharded weights with the same values. Find a way to skip this work.
@@ -662,13 +648,10 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
 
     The unshard is explicit because CUDA graph replays skip FSDP's forward pre-hook.
     """
-    from torch.distributed.fsdp._fully_shard._fsdp_param import free_storage
-
     with torch.inference_mode():
         module.unshard()
-        # TODO: replace this with FSDPModule._free_sharded_params()
-        for sharded_data in _sharded_param_storages(module):
-            free_storage(sharded_data)
+        # TODO: use a public FSDP API once there is one.
+        module._free_sharded_params()
 
 
 def _fsdp_load_groups(
