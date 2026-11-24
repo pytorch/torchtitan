@@ -7,19 +7,15 @@
 from .flavors import (
     build_model_config,
     DeepSeekV3Model,
+    DeepSeekV3MTPBlock,
     DeepSeekV3Router,
     MODEL_FLAVORS,
-    MTPCrossEntropyLoss,
-    MTPDecoder,
-    MTPTransformerBlock,
 )
 
 __all__ = [
     "DeepSeekV3Model",
+    "DeepSeekV3MTPBlock",
     "DeepSeekV3Router",
     "MODEL_FLAVORS",
-    "MTPCrossEntropyLoss",
-    "MTPDecoder",
-    "MTPTransformerBlock",
     "build_model_config",
 ]

@@ -21,7 +21,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.config import Configurable
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
+from torchtitan.models.common.mtp import get_mtp_token_counts
 
 
 # Page-locked microbatches let the trainer issue an async host-to-device copy; a copy

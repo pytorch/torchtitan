@@ -109,8 +109,8 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
     share one NVLink domain.
 
     Data: SLAKE's English closed and open questions, with the Muse Spark SLAKE SFT recipe's
-    short-answer instruction. Validation: greedy answers on the English test questions
-    before the first and after the last training step.
+    short-answer instruction. Validation: answers on the English test questions before the
+    first and after the last training step.
     """
     max_total_tokens = 8192
     trainer_parallelism = ParallelismConfig(
@@ -187,6 +187,7 @@ def rl_muse_spark_816b_a42b_slake_lora_gb300(
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
             ),
             parallelism=trainer_parallelism,

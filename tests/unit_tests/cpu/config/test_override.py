@@ -435,7 +435,14 @@ class TestOverride(_IsolatedRegistryTestCase):
 
         target = f"{__name__}.swap"
         parent_cfg = ParentComponent.Config(
-            children=[DerivedComponent.Config(), ComponentA.Config()],
+            children=[
+                ComponentA.Config(),
+                ComponentA.Config(),
+                ComponentA.Config(),
+                DerivedComponent.Config(),
+                ComponentA.Config(),
+                ComponentA.Config(),
+            ],
         )
         config = OverrideConfig(imports=[(target, {"extra": 256})])
 
@@ -446,18 +453,22 @@ class TestOverride(_IsolatedRegistryTestCase):
             [record.getMessage() for record in logs.records],
             [
                 f"[Override] {target}: ComponentA.Config -> ComponentB.Config with extra=256"
-                " matched=2 fqns=['child', 'children.1']",
+                " matched=6 fqns=['child', 'children.{0..2,4,5}']",
                 f"[Override] {target}: DerivedComponent.Config -> ComponentB.Config with extra=256"
-                " matched=1 fqns=['children.0']",
-                "Applied 3 override(s)",
+                " matched=1 fqns=['children.3']",
+                "Applied 7 override(s)",
             ],
         )
         self.assertEqual(
             replacements,
             [
                 f"[Override] {target}: child ComponentA.Config -> ComponentB.Config with extra=256",
-                f"[Override] {target}: children.0 DerivedComponent.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.0 ComponentA.Config -> ComponentB.Config with extra=256",
                 f"[Override] {target}: children.1 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.2 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.3 DerivedComponent.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.4 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.5 ComponentA.Config -> ComponentB.Config with extra=256",
             ],
         )
 
