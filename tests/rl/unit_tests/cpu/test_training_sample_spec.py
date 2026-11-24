@@ -337,6 +337,34 @@ def test_decide_reads_lengths_and_keeps_the_filters_and_metrics() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "prompt_prefix_len, prompt_delta_token_ids, match",
+    [
+        # The full prompt as the delta: `split_prompt` stores (3, [7]).
+        (0, [1, 2, 200, 7], "could reuse more"),
+        # Past the previous turn's end: its prompt + completion has 3 tokens.
+        (5, [7], "previous turn has only 3"),
+    ],
+)
+def test_building_a_rollout_that_breaks_split_prompt_raises(
+    prompt_prefix_len: int, prompt_delta_token_ids: list[int], match: str
+) -> None:
+    """The prompt prefix checks read token values, so sample building runs them."""
+    rollout = _rollout(0, [([1, 2], [-0.5]), ([1, 2, 200, 7], [-0.5])])
+    builder = _builder()
+    specs = builder.rollout_to_training_sample_specs(
+        rollout, rollout_turn_lengths(rollout), num_mtp_layers=0
+    )
+    rollout.turns[1] = dataclasses.replace(
+        rollout.turns[1],
+        prompt_prefix_len=prompt_prefix_len,
+        prompt_delta_token_ids=np.array(prompt_delta_token_ids, dtype=np.int32),
+    )
+
+    with pytest.raises(ValueError, match=match):
+        builder.rollout_to_training_samples(rollout, training_sample_specs=specs)
+
+
 def test_decide_drops_failed_untrainable_and_zero_std_groups() -> None:
     builder = _builder()
 
@@ -463,39 +491,3 @@ def test_the_step_trigger_frees_each_groups_arrays_before_the_next_materializes(
     assert batch is not None
     # Groups materialize in id order; each one's arrays are gone before the next starts.
     assert num_alive_at_materialize == [3, 2, 1]
-
-
-@pytest.mark.parametrize(
-    "prompt_prefix_len, prompt_delta_token_ids, match",
-    [
-        # The full prompt as the delta: `split_prompt` stores (3, [3]).
-        (0, [1, 2, 200, 3], "could reuse more"),
-        # Past the previous turn's end: its prompt + completion has 3 tokens.
-        (9, [3], "previous turn has only 3"),
-    ],
-)
-def test_add_group_checks_the_prompt_prefixes_of_rollouts_it_drops(
-    prompt_prefix_len: int, prompt_delta_token_ids: list[int], match: str
-) -> None:
-    """The prompt prefix checks run on every rollout of a group before any filter: here on a
-    zero-std group, which trains nothing, whose rollout reuses fewer tokens than it could or
-    more than there are."""
-    batcher = Batcher.Config().build(
-        num_tokens_per_microbatch_per_dp_rank=64,
-        max_context_length=64,
-        num_prompts_per_train_step=1,
-        dp_degree=1,
-        pad_id=0,
-        temperature=1.0,
-    )
-    malformed = _rollout(0, [([1, 2], [-0.1]), ([1, 2, 200, 3], [-0.2])], reward=1.0)
-    malformed.turns[1].prompt_prefix_len = prompt_prefix_len
-    malformed.turns[1].prompt_delta_token_ids = np.array(
-        prompt_delta_token_ids, dtype=np.int32
-    )
-    group = RolloutGroup(
-        group_id=0, rollouts=[malformed, _rollout(1, [([1, 2], [-0.1])], reward=1.0)]
-    )
-
-    with pytest.raises(ValueError, match=match):
-        batcher.add_group(rollout_group=group)

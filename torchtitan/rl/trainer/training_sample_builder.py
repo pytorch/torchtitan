@@ -25,7 +25,12 @@ from renderers import PlaceholderRange
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup
-from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID, RolloutTurnLengths
+from torchtitan.rl.rollout.types import (
+    check_prompt_prefixes,
+    PromptImage,
+    RolloutTurnID,
+    RolloutTurnLengths,
+)
 
 
 @dataclass(kw_only=True, slots=True)
@@ -406,8 +411,8 @@ class TrainingSampleBuilder(Configurable):
             #    spec 1: turns 3-4, token_ids=[P2,C4,E4,C5],        loss_mask=[0,1,0,1]
             #            rollout_id.turn_id=3, min_policy_version=6, max_policy_version=7
 
-        The check that reads token values (a prefix that could reuse one more token) runs
-        before, on every rollout of the group (`check_prompt_prefixes`).
+        The prompt prefix checks read token values (`check_prompt_prefixes`), so
+        `rollout_to_training_samples` runs them.
 
         Args:
             rollout: The scored rollout; reads its ids, advantage, policy versions, prompt prefix
@@ -442,13 +447,6 @@ class TrainingSampleBuilder(Configurable):
 
             prompt_prefix_len = rollout_turn.prompt_prefix_len
             num_prompt_tokens = prompt_prefix_len + lengths.num_prompt_delta_tokens
-            # Too many: e.g. prev = [0, 1, 2, 3] has 4 tokens; a turn can't reuse 6.
-            if prompt_prefix_len > prev_len:
-                raise ValueError(
-                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} "
-                    f"reuses {prompt_prefix_len} tokens, but the previous turn has only "
-                    f"{prev_len}; build it with `split_prompt`"
-                )
             # Delta images sit in the delta, at full-prompt positions; an offset inside the
             # delta (e.g. 1 instead of prefix + 1) would put image embeddings on other tokens.
             for placeholder in rollout_turn.prompt_delta_image_placeholders:
@@ -538,6 +536,10 @@ class TrainingSampleBuilder(Configurable):
         The pass carries the previous turn's prompt + completion forward, so a sample's prompt
         is that, cut to the shared prefix, then its first turn's delta.
 
+        It first checks the rollout's prompt prefixes (`check_prompt_prefixes`), as sample
+        building did before the batcher split. A rollout that breaks the `split_prompt` contract
+        raises `ValueError`, which stops the run.
+
         Args:
             rollout: The full rollout (with arrays).
             training_sample_specs: Specs of this rollout, made by
@@ -545,6 +547,7 @@ class TrainingSampleBuilder(Configurable):
         """
         if not training_sample_specs:
             return []
+        check_prompt_prefixes(rollout)
         specs_by_first_turn_id: dict[int, list[tuple[int, TrainingSampleSpec]]] = {}
         for position, spec in enumerate(training_sample_specs):
             specs_by_first_turn_id.setdefault(spec.rollout_id.turn_id, []).append(

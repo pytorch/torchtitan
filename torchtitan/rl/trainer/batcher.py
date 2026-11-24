@@ -33,7 +33,6 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rdma_object import RDMAMicrobatch, RegisterRDMAObject
 from torchtitan.rl.rollout.types import (
-    check_prompt_prefixes,
     PromptImage,
     rollout_turn_lengths,
     RolloutGroup,
@@ -467,9 +466,6 @@ class Batcher(Configurable):
             batcher.add_group(rollout_group=group1)  # -> (TrainerStepBatch, True)
         """
         with sl.log_trace_span("batcher_decide"):
-            # Token values are read only here and when materializing.
-            for rollout in rollout_group.rollouts:
-                check_prompt_prefixes(rollout)
             training_sample_spec_group = self._training_sample_builder.decide(
                 rollout_group=rollout_group,
                 turn_lengths=tuple(map(rollout_turn_lengths, rollout_group.rollouts)),
