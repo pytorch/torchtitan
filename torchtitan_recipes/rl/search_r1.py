@@ -83,7 +83,6 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
         worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardExactMatch.Config(weight=1.0)],
-                truncation_reward=0.0,
             ),
             message_env=SearchR1Env.Config(),
             token_env=TokenEnv.Config(
@@ -389,7 +388,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
-        # TODO: bf16 logits. LMHeadFP32OutputConverter can't convert Muse Glimmer's
+        # TODO: bf16 logits. LMHeadFP32OutputTransform can't convert Muse Glimmer's
         # SoftCappedLinear head; it needs a HiMidLoLinear-based variant with the soft cap.
         fp32_lm_head=False,
     )

@@ -27,7 +27,7 @@ from torchtitan.config.configs import (
     PrecisionConfig,
     TrainingConfig,
 )
-from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import (
     maybe_apply_numa_binding,
     ParallelismContext,
@@ -45,10 +45,6 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.distributed.flex_shard_fsdp import (
-    flex_shard_bucket,
-    validate_flex_shard_training,
-)
 from torchtitan.distributed.fsdp import maybe_store_frozen_params_in_param_dtype_
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
@@ -249,6 +245,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "are enabled: set sdc_replayer.num_replays=1 or "
                         "training.disable_accelerator_graphs=True."
                     )
+            # The sharding backend's model checks run in
+            # validate_model_training_config (config/validation.py), which
+            # doesn't receive the checkpointer or optimizers, so its trainer
+            # checks run here.
+            self.parallelism.fsdp_backend.build().validate_trainer(
+                checkpointer=self.checkpointer,
+                optim=self.optim,
+                trainer=type(self)._owner,
+            )
 
     config: Config
     device: torch.device
@@ -291,10 +296,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         output_dir: str,
     ) -> None:
         torch._C._log_api_usage_once("torchtitan.train")
-        if isinstance(config.parallelism.fsdp_backend, FlexShardConfig):
-            # Temporary: remove each rejection as FlexShard catches up, and this
-            # call once it supports everything FSDP2 does.
-            validate_flex_shard_training(config, model_config)
 
         self.config = config
         self.model_config = model_config
@@ -483,11 +484,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.loss_fn.set_lm_head(
                 lm_head,
                 # Creating a seed checkpoint doesn't shard the model.
-                flex_shard_bucket=(
-                    flex_shard_bucket(model, "lm_head")
-                    if self.parallelism_context.flex_shard_enabled
-                    and not create_seed_checkpoint
-                    else None
+                partial_backwards=(
+                    None
+                    if create_seed_checkpoint
+                    else self.parallelism_context.sharding_backend.partial_backwards(
+                        model, "lm_head"
+                    )
                 ),
             )
             model_with_lm_head._skip_lm_head = True
