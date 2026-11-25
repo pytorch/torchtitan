@@ -152,8 +152,8 @@ class RolloutSampleRecorder(Configurable):
 class RolloutSampleEncoder:
     """Encode rollouts into `RolloutSampleRecorder` JSONL lines.
 
-    Runs where the full groups are: in each rollout worker for training groups, and in the
-    controller's recorder for validation groups.
+    Runs where the full groups are: in each rollout worker, for training and validation groups
+    alike (`finish_rollout_group`).
 
     Example:
 
