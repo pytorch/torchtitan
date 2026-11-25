@@ -638,6 +638,63 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             )
 
 
+class TestBuildOptimizerMeshes(unittest.TestCase):
+    """build_optimizer_meshes creates every slice on every rank.
+
+    Fake PG, rank 5 of 8.
+    """
+
+    def setUp(self):
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+
+        dist.init_process_group("fake", store=FakeStore(), rank=5, world_size=8)
+
+    def tearDown(self):
+        dist.destroy_process_group()
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_creates_every_slice_and_returns_one_mesh_per_rank_set(self):
+        # Dense (pp, dp_shard, tp) = (2, 2, 2): rank = 4 * pp + 2 * dp_shard + tp.
+        # Sparse (pp, edp_shard, ep) = (2, 2, 2) has the same edp_shard slices.
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=2,
+            ep=2,
+            world_size=8,
+            enable_sequence_parallel=False,
+        )
+        parallelism_context.build_mesh()
+        with patch.object(dist, "new_group", wraps=dist.new_group) as new_group:
+            meshes = parallelism_context.build_optimizer_meshes(
+                [("dp_shard", "tp"), ("dp_shard",), ("edp_shard",)]
+            )
+
+        # Rank 5 (stage 1) also creates stage 0's groups, so group creation
+        # stays in the same order on every rank whichever stage it owns.
+        self.assertEqual(
+            [call.args[0] for call in new_group.call_args_list],
+            [[0, 1, 2, 3], [4, 5, 6, 7], [0, 2], [1, 3], [4, 6], [5, 7]],
+        )
+        # edp_shard covers the same ranks as dp_shard, so it adds no mesh.
+        self.assertEqual(
+            [(mesh.mesh_dim_names, mesh.mesh.tolist()) for mesh in meshes],
+            [(("dp_shard_tp",), [4, 5, 6, 7]), (("dp_shard",), [5, 7])],
+        )
+        dp_shard_tp = meshes[0]
+        # Not registered on the root, so DTensor never picks it up.
+        self.assertNotIn(
+            "dp_shard_tp",
+            parallelism_context._global_meshes["dense"]
+            ._get_root_mesh()
+            ._flatten_mapping,
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid mesh axis combination"):
+            parallelism_context.build_optimizer_meshes([("dp_shard", "ep")])
+
+
 class TestDenseStorageAxes(DTensorTestBase):
     """Dense storage mesh axes exposed by ParallelismContext."""
 

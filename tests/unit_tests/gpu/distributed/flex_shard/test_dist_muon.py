@@ -12,8 +12,9 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch import nn
-from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, OffloadPolicy
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -26,6 +27,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.components.optim.optimizer import DistMuon as ConfigurableDistMuon
 from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
@@ -45,7 +47,21 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
-from torchtitan.distributed.utils import build_alternative_fsdp_mesh
+from torchtitan.distributed.parallelism_context import ParallelismContext
+
+
+def _flat_mesh(mesh: DeviceMesh) -> DeviceMesh:
+    """1D mesh with its own group over every rank of ``mesh``, in mesh order.
+
+    Every rank calls this once, so it suits a mesh that spans the whole world.
+    """
+    ranks = mesh.mesh.flatten().tolist()
+    return DeviceMesh.from_group(
+        dist.new_group(ranks),
+        mesh.device_type,
+        mesh=torch.tensor(ranks),
+        mesh_dim_names=("_".join(mesh.mesh_dim_names or ()),),
+    )
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -62,16 +78,38 @@ class TestDistMuon(DTensorTestBase):
         return "cuda"
 
     @with_comms(eager_init=True)
-    def test_build_alternative_fsdp_mesh_creates_capped_nccl_group(self):
-        mesh = init_device_mesh(
-            self.device_type,
-            (1, self.world_size),
-            mesh_dim_names=("dp_replicate", "dp_shard"),
+    def test_capped_transport_uses_isolated_nccl_group(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
-        parent_group = mesh.get_group("dp_shard")
-        replicate_group = mesh.get_group("dp_replicate")
-        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
-        redistribution_group = redistribution_mesh.get_group("dp_shard")
+        mesh = parallelism_context.get_mesh("dp_shard")
+        parent_group = mesh.get_group()
+        parameter = nn.Parameter(
+            distribute_tensor(
+                torch.ones(4, 4, device=self.device_type), mesh, (Shard(0),)
+            )
+        )
+        optimizer = ConfigurableDistMuon.Config(
+            pattern=".*",
+            compute_sharding_by_fqn={
+                "matrix": ComputeLayout(
+                    {"dp_shard": Owned()}, compute_dtype=torch.bfloat16
+                )
+            },
+            bucket_configs=[BucketConfig(patterns=("matrix",))],
+            max_nccl_ctas_for_comms=8,
+        ).build(
+            params=[{"params": [parameter], "param_names": ["matrix"]}],
+            parallelism_context=parallelism_context,
+        )
+        redistribution_group = optimizer._bucket_plans[0].group.process_group
         redistribution_backend = redistribution_group._get_backend(
             torch.device(self.device_type, self.rank)
         )
@@ -83,10 +121,6 @@ class TestDistMuon(DTensorTestBase):
         self.assertEqual(redistribution_backend.options.config.split_share, 0)
 
         self.assertIsNot(redistribution_group, parent_group)
-        self.assertIs(
-            redistribution_mesh.get_group("dp_replicate"),
-            replicate_group,
-        )
         self.assertEqual(
             torch.distributed.get_process_group_ranks(redistribution_group),
             torch.distributed.get_process_group_ranks(parent_group),
@@ -131,8 +165,7 @@ class TestDistMuon(DTensorTestBase):
             (1, self.world_size),
             mesh_dim_names=("dp_replicate", "dp_shard"),
         )
-        redistribution_mesh = build_alternative_fsdp_mesh(mesh, max_ctas=8)
-        redistribution_group = redistribution_mesh.get_group("dp_shard")
+        redistribution_group = mesh.get_group("dp_shard")
         device = torch.device(self.device_type, self.rank)
 
         def make_parameter(value: torch.Tensor) -> torch.nn.Parameter:
@@ -175,7 +208,6 @@ class TestDistMuon(DTensorTestBase):
                     BucketConfig(
                         patterns=("layers.0.*",),
                         name="layers.0",
-                        mesh=redistribution_mesh,
                     )
                 ],
                 lr=lr,
@@ -717,7 +749,380 @@ class TestDistMuonCpuOffload(DTensorTestBase):
             )
 
 
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestDistMuonTensorParallelCudaGraph(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_tp_storage_matches_unsharded_update_in_cuda_graph(self):
+        """Check whole matrices, head blocks, and expert matrices exactly once."""
+        torch.manual_seed(42)
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, 2),
+            mesh_dim_names=("dp_shard", "tp"),
+        )
+        device = torch.device(self.device_type, self.rank)
+        lr = 0.03
+        weight_decay = 0.2
+        matrix_rows = 2
+
+        values = {
+            "layers.0.per_head": (
+                torch.arange(36, device=device).reshape(12, 3).float().div_(13)
+            ),
+            "layers.0.whole": (
+                torch.arange(16, device=device).reshape(4, 4).float().div_(11)
+            ),
+            "layers.0.experts": (
+                torch.arange(24, device=device).reshape(4, 3, 2).float().div_(7)
+            ),
+        }
+        placements = {
+            "layers.0.per_head": (
+                _StridedShard(0, split_factor=mesh["tp"].size()),
+                Shard(0),
+            ),
+            "layers.0.whole": (Shard(0), Shard(1)),
+            "layers.0.experts": (Shard(0), Shard(1)),
+        }
+        parameters = {
+            fqn: torch.nn.Parameter(
+                distribute_tensor(value.clone(), mesh, placements[fqn])
+            )
+            for fqn, value in values.items()
+        }
+        gradients = {
+            fqn: value.clone().mul_(0.37).add_(0.2).sin_()
+            for fqn, value in values.items()
+        }
+        for fqn, parameter in parameters.items():
+            parameter.grad = distribute_tensor(
+                gradients[fqn].clone(),
+                mesh,
+                placements[fqn],
+            )
+
+        transport_mesh = _flat_mesh(mesh)
+        optimizer = DistMuon(
+            [
+                {
+                    "params": list(parameters.values()),
+                    "param_names": list(parameters),
+                }
+            ],
+            compute_sharding_by_fqn={
+                "layers.0.per_head": ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": BlockShard(0, (matrix_rows,)),
+                        "tp": BlockShard(0, (matrix_rows,)),
+                    },
+                    compute_dtype=torch.bfloat16,
+                ),
+                "layers.0.whole": ComputeLayout(
+                    shardings_by_mesh_axis={
+                        "dp_shard": Owned(),
+                        "tp": Owned(),
+                    },
+                    compute_dtype=torch.bfloat16,
+                ),
+                "layers.0.experts": ComputeLayout(
+                    shardings_by_mesh_axis={"dp_shard": Shard(0), "tp": Shard(0)},
+                    compute_dtype=torch.bfloat16,
+                ),
+            },
+            bucket_configs=[
+                BucketConfig(patterns=("layers.0.per_head", "layers.0.whole")),
+                BucketConfig(patterns=("layers.0.experts",)),
+            ],
+            transport_meshes=(transport_mesh,),
+            lr=lr,
+            weight_decay=weight_decay,
+            momentum=0.0,
+            nesterov=False,
+            ns_steps=2,
+        )
+        transport_group = transport_mesh.get_group()
+        plan = optimizer._bucket_plans[0]
+        self.assertIs(plan.group.process_group, transport_group)
+        self.assertIs(plan.storage_to_compute_schedule.process_group, transport_group)
+        self.assertIs(plan.compute_to_storage_schedule.process_group, transport_group)
+
+        captured_compute_by_fqn: dict[str, torch.Tensor] = {}
+
+        def matrix_dependent_direction(tensor, matrix_shape):
+            matrices = tensor.reshape(-1, *matrix_shape)
+            return matrices.cumsum(dim=-2).cumsum(dim=-1).reshape_as(tensor)
+
+        def make_direction(compute_layout, compute):
+            matrix_shape = (
+                (matrix_rows, compute_layout.param.shape[-1])
+                if type(compute_layout.compute_sharding) is BlockShard
+                else tuple(compute_layout.param.shape[-2:])
+            )
+            # Match the NS conversion even when the local scratch is FP32.
+            prepared = compute.to(torch.bfloat16)
+            captured_compute_by_fqn[compute_layout.fqn] = prepared.detach().clone()
+            compute.copy_(matrix_dependent_direction(prepared, matrix_shape))
+
+        with mock.patch.object(
+            optimizer,
+            "_compute_update",
+            side_effect=make_direction,
+        ):
+            optimizer.step()
+            for fqn, parameter in parameters.items():
+                original = distribute_tensor(values[fqn].clone(), mesh, placements[fqn])
+                with torch.no_grad():
+                    parameter.to_local().copy_(original.to_local())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                optimizer.step()
+            graph.replay()
+
+        compute_shapes = {
+            "layers.0.per_head": (matrix_rows, values["layers.0.per_head"].shape[1]),
+            "layers.0.whole": values["layers.0.whole"].shape,
+            "layers.0.experts": values["layers.0.experts"].shape[1:],
+        }
+        for fqn, matrix_shape in compute_shapes.items():
+            expected_matrices = (
+                gradients[fqn].to(torch.bfloat16).reshape(-1, *matrix_shape)
+            )
+            matrix_match_counts = torch.zeros(
+                expected_matrices.shape[0],
+                dtype=torch.int64,
+                device=device,
+            )
+            captured_compute = captured_compute_by_fqn.get(fqn)
+            if captured_compute is not None and captured_compute.numel():
+                captured_matrices = captured_compute.reshape(-1, *matrix_shape)
+                matches = (
+                    captured_matrices.flatten(1)[:, None]
+                    == expected_matrices.flatten(1)[None]
+                ).all(dim=-1)
+                self.assertTrue(matches.any(dim=1).all())
+                matrix_match_counts.add_(matches.sum(dim=0))
+            dist.all_reduce(matrix_match_counts)
+            torch.testing.assert_close(
+                matrix_match_counts,
+                torch.ones_like(matrix_match_counts),
+            )
+
+        for fqn, parameter in parameters.items():
+            expected = values[fqn].mul(1 - lr * weight_decay)
+            expected_direction = matrix_dependent_direction(
+                gradients[fqn].to(torch.bfloat16), compute_shapes[fqn]
+            ).to(values[fqn].dtype)
+            expected.add_(
+                expected_direction,
+                alpha=-_adjust_muon_learning_rate(lr, None, compute_shapes[fqn]),
+            )
+            torch.testing.assert_close(
+                parameter.full_tensor(),
+                expected,
+                rtol=0,
+                atol=0,
+            )
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
+class TestDistMuonMatchesUnshardedMuon(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 4
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @parametrize(
+        "mesh_shape",
+        [
+            subtest((4, 1), name="dp_only"),
+            subtest((1, 4), name="tp_only"),
+            subtest((2, 2), name="dp_tp"),
+        ],
+    )
+    @with_comms
+    def test_mixed_bucket_matches_unsharded_muon(self, mesh_shape: tuple[int, int]):
+        """Each DP/TP storage layout matches unsharded ``torch.optim.Muon``.
+
+        The first bucket mixes whole matrices and head blocks of two sizes.
+        ``a_replicated`` is TP-replicated: each region is received from one
+        holder but returned to every TP holder. It sorts first in the bucket, so
+        returned fragments written in place would overwrite the later
+        parameters' unread input; the shared bucket must match per-parameter
+        buckets exactly. Experts keep their DP ownership and use their own
+        bucket.
+        """
+        torch.manual_seed(42)
+        block_rows = (8, 4)
+        shapes = {
+            "a_replicated": (8, 16),
+            "b_whole": (16, 32),
+            "c_heads": (24, 16),
+            "d_experts": (4, 8, 4),
+        }
+        values = {
+            fqn: torch.randn(shape, device="cuda") for fqn, shape in shapes.items()
+        }
+        gradients = [
+            {fqn: torch.randn(shape, device="cuda") for fqn, shape in shapes.items()}
+            for _ in range(2)
+        ]
+        hyperparameters = {
+            "lr": 0.02,
+            "weight_decay": 0.1,
+            "momentum": 0.95,
+            "nesterov": True,
+            "adjust_lr_fn": "match_rms_adamw",
+        }
+        owned = ComputeLayout(
+            shardings_by_mesh_axis={"dp_shard": Owned(), "tp": Owned()},
+            compute_dtype=torch.bfloat16,
+        )
+        compute_sharding_by_fqn = {
+            "a_replicated": owned,
+            "b_whole": owned,
+            "c_heads": ComputeLayout(
+                shardings_by_mesh_axis={
+                    "dp_shard": BlockShard(0, block_rows),
+                    "tp": BlockShard(0, block_rows),
+                },
+                compute_dtype=torch.bfloat16,
+            ),
+            "d_experts": ComputeLayout(
+                shardings_by_mesh_axis={"dp_shard": Shard(0), "tp": Shard(0)},
+                compute_dtype=torch.bfloat16,
+            ),
+        }
+
+        mesh = init_device_mesh("cuda", mesh_shape, mesh_dim_names=("dp_shard", "tp"))
+        tp_degree = mesh_shape[1]
+        # TP shards head rows first and FSDP shards within each TP shard, as
+        # when both shard the same dimension.
+        head_placements = (
+            (Shard(0), Replicate())
+            if tp_degree == 1
+            else (_StridedShard(0, split_factor=tp_degree), Shard(0))
+        )
+        placements = {
+            "a_replicated": (Shard(0), Replicate()),
+            "b_whole": (Shard(0), Shard(1)),
+            "c_heads": head_placements,
+            "d_experts": (Shard(0), Shard(1)),
+        }
+
+        def make_parameters():
+            return {
+                fqn: nn.Parameter(
+                    distribute_tensor(value.clone(), mesh, placements[fqn])
+                )
+                for fqn, value in values.items()
+            }
+
+        parameters = make_parameters()
+        # One bucket per parameter keeps every compute input unshared, so it is
+        # the exact, GEMM-schedule-independent reference for the shared bucket.
+        separate_parameters = make_parameters()
+        transport_mesh = _flat_mesh(mesh)
+        dense_patterns = ("a_replicated", "b_whole", "c_heads")
+
+        def build(transport_meshes, parameters=parameters, separate=False):
+            dense_buckets = (
+                [BucketConfig(patterns=(fqn,)) for fqn in dense_patterns]
+                if separate
+                else [BucketConfig(patterns=dense_patterns)]
+            )
+            return DistMuon(
+                [
+                    {
+                        "params": list(parameters.values()),
+                        "param_names": list(parameters),
+                    }
+                ],
+                compute_sharding_by_fqn=compute_sharding_by_fqn,
+                bucket_configs=[*dense_buckets, BucketConfig(patterns=("d_experts",))],
+                transport_meshes=transport_meshes,
+                **hyperparameters,
+            )
+
+        # FlexShard only consumes caller-created groups: neither the
+        # missing-mesh error nor construction may create one.
+        caller_owns_groups = AssertionError("caller owns groups")
+        with (
+            mock.patch.object(DeviceMesh, "_flatten", side_effect=caller_owns_groups),
+            mock.patch.object(dist, "new_group", side_effect=caller_owns_groups),
+            mock.patch.object(dist, "split_group", side_effect=caller_owns_groups),
+        ):
+            if min(mesh_shape) > 1:
+                with self.assertRaisesRegex(ValueError, "needs a transport mesh"):
+                    build(())
+            optimizer = build((transport_mesh,))
+            separate_optimizer = build(
+                (transport_mesh,), parameters=separate_parameters, separate=True
+            )
+
+        def split(fqn, tensor):
+            if fqn == "c_heads":
+                return tensor.split(block_rows * 2)
+            if fqn == "d_experts":
+                return tensor.unbind()
+            return (tensor,)
+
+        references = {
+            fqn: [nn.Parameter(matrix.clone()) for matrix in split(fqn, value)]
+            for fqn, value in values.items()
+        }
+        reference_optimizer = torch.optim.Muon(
+            [reference for group in references.values() for reference in group],
+            **hyperparameters,
+        )
+        for step_gradients in gradients:
+            for fqn in values:
+                for parameter in (parameters[fqn], separate_parameters[fqn]):
+                    parameter.grad = distribute_tensor(
+                        step_gradients[fqn].clone(), mesh, placements[fqn]
+                    )
+                for reference, gradient in zip(
+                    references[fqn], split(fqn, step_gradients[fqn]), strict=True
+                ):
+                    reference.grad = gradient.clone()
+            optimizer.step()
+            separate_optimizer.step()
+            reference_optimizer.step()
+
+        for fqn, parameter in parameters.items():
+            torch.testing.assert_close(
+                parameter.full_tensor(),
+                separate_parameters[fqn].full_tensor(),
+                rtol=0,
+                atol=0,
+                msg=f"{fqn} differs between shared and per-parameter buckets",
+            )
+            expected = [reference.detach() for reference in references[fqn]]
+            # Head blocks and experts run batched BF16 Newton-Schulz, which can
+            # differ from per-matrix calls across GEMM schedules: allow 2e-2 of
+            # the lr-normalized update per step, as the tests above do.
+            batched = fqn in ("c_heads", "d_experts")
+            torch.testing.assert_close(
+                parameter.full_tensor(),
+                torch.stack(expected) if fqn == "d_experts" else torch.cat(expected),
+                rtol=0,
+                atol=len(gradients) * 2e-2 * hyperparameters["lr"] if batched else 0,
+                msg=fqn,
+            )
+
+
 instantiate_parametrized_tests(TestDistMuon)
+instantiate_parametrized_tests(TestDistMuonMatchesUnshardedMuon)
 
 
 if __name__ == "__main__":
