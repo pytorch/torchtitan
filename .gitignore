@@ -51,3 +51,7 @@ CLAUDE_CONTEXT/
 
 # Lychee (link checker) cache
 .lycheecache
+
+# Run state written into the launch directory
+.monarch/
+/structured_logs/
