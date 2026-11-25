@@ -308,13 +308,9 @@ class VLLMEngine(GenerationEngine):
             )
 
         if config.kv_cache_dtype == "fp8":
-            import flash_attn.cute
-
-            # An FA4 copy earlier on PYTHONPATH replaces the installed one: log which one runs.
-            logger.info(
-                f"fp8 KV cache: flash_attn.cute from {flash_attn.cute.__file__}"
-            )
             if config.num_speculative_tokens > 0 and not fa4_takes_query_len_in_heads():
+                import flash_attn.cute
+
                 # Without query_len_in_heads, fp8 verify rows would take the decode + fp32-tail
                 # path of `_verify_rows_as_decode`, which no engine run has measured with drafts.
                 # TODO: once a released FA4 takes query_len_in_heads (Dao-AILab/flash-attention#3217),

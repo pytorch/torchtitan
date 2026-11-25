@@ -10,6 +10,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from torchtitan.rl.generator.attention.attention import fa4_takes_query_len_in_heads
+from torchtitan.rl.generator.vllm.attention import attention as vllm_attention
 from torchtitan.rl.generator.vllm.attention.attention import (
     _MIN_VERIFY_ROWS_ON_DECODE_KERNEL,
     TorchTitanVarlenInnerAttentionImpl,
@@ -24,14 +26,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize(
+    "kv_cache_dtype, fp8_verify_call",
+    [("auto", None), ("fp8", "one_call"), ("fp8", "decode_and_tail")],
+    ids=["auto", "fp8-one-call", "fp8-decode-and-tail"],
+)
 @pytest.mark.parametrize("max_seq_len", [131072, 262144])
 @pytest.mark.parametrize(
     "query_lens, seq_lens, is_uniform_verify",
     [
         # 8 rows of 1 + 3 tokens; the 30k row gets KV splits; a padded row (seq_len 0).
         ([4] * 8, [4, 130, 1000, 257, 30_000, 0, 513, 2_048], True),
-        # Fewer than 8 verify rows: FA4's varlen call.
+        # Fewer than 8 verify rows: FA4's varlen call, unless fp8 rows run as one call.
         ([4, 4, 4], [130, 30_000, 257], True),
         # A 1-token row: FA4's varlen call.
         ([4, 4, 1], [130, 30_000, 257], False),
@@ -39,7 +45,13 @@ pytestmark = pytest.mark.skipif(
     ids=["verify", "few_rows", "mixed"],
 )
 def test_forward_matches_causal_attention(
-    query_lens, seq_lens, is_uniform_verify, max_seq_len, kv_cache_dtype
+    query_lens,
+    seq_lens,
+    is_uniform_verify,
+    max_seq_len,
+    kv_cache_dtype,
+    fp8_verify_call,
+    monkeypatch,
 ):
     """Each query token attends causally to its row's keys, through the impl's dispatch.
 
@@ -47,8 +59,16 @@ def test_forward_matches_causal_attention(
     K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
     writes them; the reference runs on the dequantized values.
     """
-    takes_decode_kernel = (
-        is_uniform_verify and len(query_lens) >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
+    # Both fp8 verify paths run with any FA4: the one-call path needs `query_len_in_heads`.
+    if fp8_verify_call == "one_call" and not fa4_takes_query_len_in_heads():
+        pytest.skip("this FA4's forward takes no query_len_in_heads")
+    if fp8_verify_call == "decode_and_tail":
+        monkeypatch.setattr(
+            vllm_attention, "fa4_takes_query_len_in_heads", lambda: False
+        )
+    is_one_call = fp8_verify_call == "one_call" and is_uniform_verify
+    takes_decode_kernel = is_uniform_verify and (
+        is_one_call or len(query_lens) >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
     )
 
     torch.manual_seed(0)
@@ -136,9 +156,19 @@ def test_forward_matches_causal_attention(
         patch.object(
             impl, "_verify_rows_as_decode", wraps=impl._verify_rows_as_decode
         ) as verify_rows_as_decode,
+        patch.object(
+            vllm_attention,
+            "paged_varlen_attention_out",
+            wraps=vllm_attention.paged_varlen_attention_out,
+        ) as attention_calls,
     ):
         impl.forward(layer, query, None, None, stored_cache, metadata, output=output)
     assert verify_rows_as_decode.called == takes_decode_kernel
+    query_lens_in_heads = [
+        call.kwargs.get("query_len_in_heads", 1)
+        for call in attention_calls.call_args_list
+    ]
+    assert (4 in query_lens_in_heads) == is_one_call
 
     for row, (num_queries, num_keys) in enumerate(zip(query_lens, seq_lens)):
         if num_keys == 0:

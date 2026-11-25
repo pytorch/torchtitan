@@ -58,7 +58,7 @@ def paged_varlen_attention_out(
             dequantization scales (q, k, v). Runs FA4's fp8 forward (SM100 family only).
         query_len_in_heads: fp8 single-token rows only: each KV head's query heads hold this
             many tokens, token-major; token j sees keys up to
-            ``seqused_k - query_len_in_heads + j``. Needs `fa4_takes_query_len_in_heads`.
+            ``seqused_k - query_len_in_heads + j``. Needs ``fa4_takes_query_len_in_heads``.
 
     Returns:
         The written ``out[:num_tokens]``, and the logsumexp with ``return_lse``.

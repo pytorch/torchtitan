@@ -384,9 +384,17 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             max_seqlen_q == self.verify_query_len
             and num_actual_tokens == max_seqlen_q * seqused_k.shape[0]
         )
+        # fp8 rows run as one SwapAB call where FA4 takes query_len_in_heads: 0.47-0.92x the varlen
+        # call's time at 1-7 rows (head dim 256, GB300), so no row cutoff. query_len_in_heads runs
+        # only on SwapAB, which a DiffKV layer's V head dim can refuse; other rows add the fp32 tail.
+        is_one_call = (
+            descales is not None
+            and value_cache.shape[-1] == self.head_size
+            and fa4_takes_query_len_in_heads()
+        )
         if (
             is_uniform_verify
-            and seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
+            and (is_one_call or seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL)
             and current_flash_attention_impl() == "FA4"
             and sliding_window_size == (-1, 0)
             and self.out_transform is None
@@ -399,6 +407,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
                 value_cache,
                 attn_metadata,
                 descales=descales,
+                is_one_call=is_one_call,
             )
 
         if (
@@ -456,6 +465,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         value_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
         descales: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        is_one_call: bool = False,
     ) -> torch.Tensor:
         """Attention of a verify step, every row `n` query tokens, on FA4's decode kernel.
 
@@ -468,9 +478,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
             merge                        logsumexp of the two parts
 
-        With fp8 ``descales`` (q, k, v):
+        With fp8 `descales` (q, k, v):
 
-            FA4 takes query_len_in_heads   one decode call over keys 0 .. L-1; FA4 hides
+            `is_one_call`                  one decode call over keys 0 .. L-1; FA4 hides
                                            key L-4+i from the tokens before token i
             otherwise                      the decode call applies them; the tail dequantizes
         """
@@ -491,14 +501,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         )
 
         # ======== fp8 with query_len_in_heads: one call; FA4 hides each token's later keys ========
-        # query_len_in_heads runs only on SwapAB, which a DiffKV layer's V head dim can refuse.
         # TODO: two reorder copies (q, out) cost ~9 us per layer (26 rows, GB300). bf16 rows
         # could take this call once torch's varlen API passes query_len_in_heads.
-        if (
-            descales is not None
-            and head_dim_v == head_dim
-            and fa4_takes_query_len_in_heads()
-        ):
+        if is_one_call:
             out_by_kv_head = output.new_empty(
                 num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v
             )
