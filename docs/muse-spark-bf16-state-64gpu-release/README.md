@@ -71,7 +71,7 @@ Updates 71..90, rank 0.
 | Saved activations | Attention and MoE projection regions kept on the GPU | Attention regions and block inputs offloaded to pinned host memory, except in the last block |
 | Dist-MoE | About 17 GiB activation slot (capacity factor 0.25) | 70 GiB slot (BF16); 40 GiB per live slot and the staged expert pipeline (MXFP8) |
 | Optimizer state and reductions | FP32 Adam moments; FP32 gradient reductions | BF16 Adam moments; BF16 gradient reductions |
-| FSDP | NCCL collectives; default resharding | Symmetric-memory collectives; default resharding |
+| FSDP | NCCL collectives; default resharding | Symmetric-memory collectives; default resharding (BF16), reshard after forward always (MXFP8) |
 | Norms and LM head | Eager | MXFP8 only: pre-norms write the branch dtype, the post-expert norm is fused into the Dist-MoE combine, MXFP8 LM head with FP32 output and composed loss, compiled post-gate router, softcap and cross entropy |
 | Tokenizer | Test tokenizer | Muse Spark Open tokenizer |
 
@@ -107,7 +107,7 @@ comparable.
 | Optimizer | Fused AdamW; lr 5e-5 (router gate 6.25e-6); betas 0.9 / 0.95; eps 1e-8; weight decay 0; gradient clip 1.0; BF16 moments on the GPU |
 | LR schedule | 10 warmup steps, cosine decay, minimum factor 0.1 |
 | Memory policy | Selective activation remat: attention and Dist-MoE regions saved, everything else recomputed. Attention regions and block inputs offloaded to pinned host memory, except in the last block. |
-| FSDP | Symmetric-memory collectives; default resharding |
+| FSDP | Symmetric-memory collectives; default resharding (BF16), `fsdp_reshard_after_forward="always"` (MXFP8) |
 | CUDA graphs | Training graphs per microbatch group and a CUDA graph for the optimizer step |
 | Environment | `NCCL_NVLS_ENABLE=1`; `PYTORCH_ALLOC_CONF=pinned_max_round_threshold_mb:1`; MXFP8 adds `NCCL_MIN_CTAS=1`, `NCCL_MAX_CTAS=8` and binds local ranks 0,1 to NUMA node 0 and 2,3 to NUMA node 1 |
 
@@ -121,8 +121,8 @@ comparable.
 | torch_remat | `71905a6e60123a9adadd4d0cd5acae4e3cb8ba88` | `6c05e8d8d6895a60dcc02674af0774b28155b5af` |
 | attention-gym | v0.0.20 (`7adfbadb06c30eeea82dc3f050ae25512d44088e`) plus the unmodified commit of [attention-gym#651](https://github.com/meta-pytorch/attention-gym/pull/651) (`d08fdce601ef0ea6c925e970442b3dda26e79752`); the PR head alone lacks modules this TorchTitan revision imports | same |
 
-The BF16 candidate recipe in `torchtitan_recipes/models/muse_spark.py` and the
-CP1 recipe of #6352 encode the measured candidate configurations.
+The candidate recipes in `torchtitan_recipes/models/muse_spark.py` encode the
+measured candidate configurations.
 
 ## Reproducing
 
@@ -156,15 +156,35 @@ Each recipe runs 100 updates; compute TPS as the mean over updates 71..90.
 
 ### MXFP8 stacked recipe
 
-The MXFP8 candidate needs open PRs in TorchTitan and Dist-MoE. Build TorchTitan
-from #6352 and cherry-pick #6369 and #6371 on top:
+This PR is stacked on #6352. The measured MXFP8 candidate also needs two open
+TorchTitan PRs and one open Dist-MoE PR. Cherry-pick #6369 and #6371 on top of
+this PR:
 
 ```bash
-git fetch origin pull/6352/head pull/6369/head pull/6371/head
-git checkout 48a3ed8f48950977dd908c9f6ea53626a9851947  # #6352
-git cherry-pick 90605bffb  # #6369: pre-norms write the branch dtype
-git cherry-pick 62ca7bc10  # #6371: fused post-expert norm
+git fetch origin pull/6346/head:pr-6346 pull/6369/head:pr-6369 pull/6371/head:pr-6371
+git checkout pr-6346
+git cherry-pick pr-6369  # pre-norms write the branch dtype
+git cherry-pick pr-6371  # fused post-expert norm
 ```
+
+The MXFP8 recipe, `muse_spark_816b_a42b_dist_moe_mxfp8_spmd_64_benchmark_cp1`,
+comes from #6352 and is in `torchtitan_recipes/models/muse_spark.py` here. It
+starts from the MXFP8 benchmark of #6252
+(`_muse_spark_816b_dist_moe_spmd_64_benchmark`) with
+`context_parallel_degree=1` and changes:
+
+| Setting | Value |
+|---|---|
+| Layout | DP64 x CP1 x EP64, no TP or PP; one 32K microbatch per rank per update |
+| FSDP | `fsdp_reshard_after_forward="always"`; BF16 parameters and gradient reductions (`param_dtype`, `reduce_dtype`) |
+| Optimizer | Fused AdamW; `moment_dtype="bfloat16"`; `moment_cpu_offload_fraction=0.0` |
+| Dist-MoE | `activation_slot_bytes=40 GiB` (total per live slot, including required saved state); `activation_slot_capacity_factor=None`; `scratch_capacity_factor=1.0` |
+| LM head and loss | `mxfp8_lm_head`: MXFP8 operands with native FP32 GEMM output; loss in 8 chunks with FP32 scale and softcap |
+| Local compile | Adds the `muse_softcap_ce` and `moe_router_topk` regions |
+| Debug | `deterministic=True` |
+
+Everything else (forced routing, `c4_test`, remat and offload regions, CUDA
+graphs, symmetric memory) is inherited from the #6252 MXFP8 benchmark.
 
 Install Dist-MoE from dist_moe#18, which adds
 `dist_moe.InputScaledRMSNormPostprocess` used by #6371:
