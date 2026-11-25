@@ -44,7 +44,7 @@ For a memory-bound op: ideal = (bytes of every input read once + every output wr
 
 - Profile eager, regions and block compile on the same inputs. Group kernels by family (GEMM, attention, norm, cat/copy, pointwise, reduction, scatter/gather, sort).
 - The regions-vs-block diff is your list of glue that a region could still take. Typical leftovers: cat kernels (`CatArrayBatchedCopy`), broadcast muls, `index_put`/scatter backward, casts, standalone adds.
-- Before calling a kernel "outside the region", check its parent in the trace (the `Torch-Compiled Region` range). An ATen kernel inside a region is an Inductor fallback (complex mul, `topk`, custom ops): it needs a rewrite (symptoms.md), not a bigger region. We once missed RoPE's complex mul (2 x 212 µs) by calling it outside.
+- Before calling a kernel "outside the region", check its parent in the trace (the `Torch-Compiled Region` range). An ATen kernel inside a region is an Inductor fallback (complex mul, `topk`, custom ops): it needs a rewrite (symptoms.md), not a bigger region. We once missed RoPE's complex mul (2 x 212 µs) by calling it outside. When a region barely helps, look for such a fallback before rejecting it: Qwen3.5's router region as written kept ATen `topk` (617 -> 579 µs); with argmax rounds it reached 437, 301 with the aux-loss sums.
 - When two fixes each look neutral, try them together: rewrites and Inductor options interact (patterns.md 1).
 - Look for host syncs: `torch.cuda.set_sync_debug_mode("warn")`, `cudaStreamSynchronize` and DtoH memcpy in the trace. Boolean-mask indexing, `.item()`, `.tolist()`, `repeat_interleave` without `output_size`, and blocking copies from pageable or pinned memory all sync.
 - Always measure CUDA-graph replay too (whole fwd+bwd captured after warmup): replay ≈ kernel time + a few µs per kernel. If a variant can't be captured (host sync, data-dependent shape), say why.
@@ -53,7 +53,8 @@ For a memory-bound op: ideal = (bytes of every input read once + every output wr
 
 - **On a shared GPU,** wrap each fresh-process run in a wait-for-quiet-GPU + retry loop (poll `nvidia-smi`, rerun contaminated rows); that gave clean numbers. When the GPU never goes quiet, interleaved A/B inside one process still gave correct relative deltas under 2.3x contention.
 
-- **Screen in one process, confirm in three.** In-process A/B (variants interleaved) is good for ranking. Cited numbers are medians of 3 fresh processes.
+- **Screen in one process, confirm once.** In-process A/B (variants interleaved) is good for ranking. Cited numbers come from one fresh process, two at most if noisy; don't rerun 6x to confirm a timing.
+- **Minimal tests and steps.** Add only the tests the change needs. Run the fewest steps that answer the question: 3 if 3 is enough, not 20 or 100.
 - **Busy shared GPU and many branches:** a full fresh-process matrix per branch may not fit. A fallback we used: clean 3-process medians for main vs the final stack, plus single-run per-branch deltas labelled "indicative".
 - **Host-bound regimes.** At 4k tokens per rank, eager plus many small kernels can be host-bound; walls swung 1.5-3x with other agents' CPU load. Report GPU kernel time alongside wall, and an interleaved in-process A/B to show a region's calls pay for their host cost.
 - **Record per row:** wall and kernel time, kernel count, peak memory, graph count, foreign GPU processes, commit hash.
