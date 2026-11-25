@@ -23,6 +23,7 @@ from typing import Any, Literal
 import torch
 import torch.distributed as dist
 import triton
+from sglang.srt.layers.sampler import SGLANG_RETURN_ORIGINAL_LOGPROB
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchTokenIDOutput,
@@ -236,6 +237,12 @@ class SGLangEngine(GenerationEngine):
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        if SGLANG_RETURN_ORIGINAL_LOGPROB:
+            raise ValueError(
+                "SGLANG_RETURN_ORIGINAL_LOGPROB makes SGLang return logprobs before "
+                "temperature, but the trainer's importance ratio needs the logprobs of the "
+                "distribution SGLang samples from: unset it."
+            )
         # Reset mode clears KV at each weight load instead of salting requests by
         # policy version, but SGLang's KV reset (flush_cache) clears GPU and host
         # memory, not the storage backend: unsalted requests would read KV that
