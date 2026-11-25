@@ -101,7 +101,8 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
             validation=ValidationConfig(),
-        )
+        ),
+        rollouter=SimpleNamespace(worker=SimpleNamespace(rdma_min_group_bytes=None)),
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0
@@ -140,6 +141,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
         sync_log_step=sync_log_step,
         commit_training_sample_ids=lambda group_ids: None,
         state_dict=lambda: {},
+        release_groups=lambda group_ids: events.append(f"release_groups {group_ids}"),
     )
     controller._group_buffer = SimpleNamespace(
         metrics=lambda: [], release_active_groups=release_active_groups
@@ -251,6 +253,29 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
         "pull 2",
         "release 5 trained",
     ]
+
+
+def test_trained_groups_go_to_the_workers_once_their_step_releases_their_slots() -> None:
+    """When groups can stay in the rollout workers, a step's trained group ids go to every
+    worker only after its `forward_backward` returned (every leader read is done) and the pull
+    released their slots. By value (the other tests), nothing goes to the workers."""
+    events: list[str] = []
+    controller = _controller(events)
+    controller.config.rollouter.worker.rdma_min_group_bytes = 1
+
+    _run(controller, num_training_steps=2)
+
+    # Batch 0 trains groups 0..4, batch 1 groups 5..9.
+    releases = [event for event in events if event.startswith("release_groups")]
+    assert releases == [
+        "release_groups [0, 1, 2, 3, 4]",
+        "release_groups [5, 6, 7, 8, 9]",
+    ]
+    assert events.index("release_groups [0, 1, 2, 3, 4]") > events.index("fwd_bwd 1")
+    assert (
+        events.index("release_groups [0, 1, 2, 3, 4]")
+        == events.index("release 5 trained") + 1
+    )
 
 
 def test_forward_backward_waits_for_the_previous_push() -> None:

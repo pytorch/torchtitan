@@ -15,6 +15,10 @@ getting it in the message.
   services use only this module.
 - Prompt image files (`BaseRolloutWorker.Config.rdma_min_image_bytes`): `RDMAImageFiles` keeps a
   group's large files in the rollout worker, and generator rank 0 reads each `RDMAPrompt`.
+
+Rollout groups to the trainer take another path, torch transport directly
+(`rl/torch_transport_rdma.py`, `BaseRolloutWorker.Config.rdma_min_group_bytes`): its leaders read
+byte ranges of pooled buffers, which this interface's whole-value reads do not offer.
 """
 
 from __future__ import annotations

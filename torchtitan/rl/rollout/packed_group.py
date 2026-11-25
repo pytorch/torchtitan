@@ -26,7 +26,9 @@ import functools
 import math
 import pickle
 import struct
+from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
@@ -36,6 +38,9 @@ from torchtitan.rl.rollout.types import (
     RolloutGroup,
     RolloutGroupSummary,
 )
+
+if TYPE_CHECKING:
+    from torchtitan.rl.rollout.packed_group_handle import PackedRolloutGroupHandle
 
 # Every region, and every array in a rollout region, starts at a multiple of this many bytes.
 _ALIGNMENT = 64
@@ -95,31 +100,38 @@ class PackedRolloutGroup:
         """Only the rollouts in `rollout_ids` (by `Rollout.rollout_id`) and the image files they
         show, with no copy: the same region arrays, fewer of them. What a DP replica leader
         gets: a group's rollouts can train on several replicas."""
-        kept = [
-            index
-            for index, rollout_id in enumerate(self.rollout_ids)
-            if rollout_id in rollout_ids
-        ]
-        if len(kept) == len(self.rollout_ids):
-            return self
-        image_hashes = {
-            hash_value
-            for index in kept
-            for hash_value in self.rollout_image_hashes[index]
-        }
-        return PackedRolloutGroup(
-            group_id=self.group_id,
-            rollout_ids=tuple(self.rollout_ids[index] for index in kept),
-            rollout_regions=tuple(self.rollout_regions[index] for index in kept),
-            rollout_image_hashes=tuple(
-                self.rollout_image_hashes[index] for index in kept
-            ),
-            image_regions={
-                hash_value: region
-                for hash_value, region in self.image_regions.items()
-                if hash_value in image_hashes
-            },
-        )
+        selected = selected_rollout_fields(self, rollout_ids)
+        return self if selected is None else replace(self, **selected)
+
+
+def selected_rollout_fields(
+    group: PackedRolloutGroup | PackedRolloutGroupHandle, rollout_ids: set[int]
+) -> dict[str, Any] | None:
+    """The fields `group.select(rollout_ids)` replaces: its rollouts in `rollout_ids` and the
+    regions of the images they show. None when every rollout is kept. Both kinds of packed
+    group select this way; they differ only in what a region is (bytes or a byte range)."""
+    kept = [
+        index
+        for index, rollout_id in enumerate(group.rollout_ids)
+        if rollout_id in rollout_ids
+    ]
+    if len(kept) == len(group.rollout_ids):
+        return None
+    image_hashes = {
+        hash_value for index in kept for hash_value in group.rollout_image_hashes[index]
+    }
+    return {
+        "rollout_ids": tuple(group.rollout_ids[index] for index in kept),
+        "rollout_regions": tuple(group.rollout_regions[index] for index in kept),
+        "rollout_image_hashes": tuple(
+            group.rollout_image_hashes[index] for index in kept
+        ),
+        "image_regions": {
+            hash_value: region
+            for hash_value, region in group.image_regions.items()
+            if hash_value in image_hashes
+        },
+    }
 
 
 @functools.cache
@@ -129,6 +141,9 @@ def _field_names(turn_type: type) -> tuple[str, ...]:
 
 def pack_rollout_group(
     group: RolloutGroup,
+    *,
+    allocate: Callable[[int], np.ndarray] = functools.partial(np.zeros, dtype=np.uint8),
+    region_padding: int = 0,
 ) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
     """Split `group` into its summary and its bytes: the bytes go into one buffer, with each
     rollout pickled into its region, so `unpack_rollout_group` rebuilds the rollouts.
@@ -139,6 +154,11 @@ def pack_rollout_group(
     costs more to pickle and unpickle, and unpacking replaces it anyway). The envs read each
     image file once per rollout, so a group of G rollouts holds G equal copies; the buffer keeps
     one per `hash_value`.
+
+    `allocate(num_bytes)` returns the uint8 buffer to write into (by default a new zeroed one);
+    only headers, arrays and image files are written, so alignment gaps keep what it held.
+    `region_padding` bytes before and after every region stay outside it, for the caller's own
+    markers (`packed_group_handle.py`).
 
     Example:
         summary, packed = pack_rollout_group(group)
@@ -200,8 +220,8 @@ def pack_rollout_group(
             protocol=pickle.HIGHEST_PROTOCOL,
         )
         arrays_offset = _align(_METADATA_LENGTH.size + len(metadata))
-        start = _align(position)
-        position = start + arrays_offset + num_array_bytes
+        start = _align(position + region_padding)
+        position = start + arrays_offset + num_array_bytes + region_padding
         rollout_image_hashes.append(
             tuple(
                 dict.fromkeys(
@@ -214,7 +234,7 @@ def pack_rollout_group(
         rollout_payloads.append(
             (
                 start,
-                position - start,
+                arrays_offset + num_array_bytes,
                 metadata,
                 arrays_offset,
                 rollout_layout,
@@ -223,11 +243,11 @@ def pack_rollout_group(
         )
     image_spans = {}
     for hash_value, data in image_data.items():
-        start = _align(position)
-        position = start + len(data)
+        start = _align(position + region_padding)
+        position = start + len(data) + region_padding
         image_spans[hash_value] = start
 
-    buffer = np.zeros(position, dtype=np.uint8)
+    buffer = allocate(position)
     rollout_regions = []
     for (
         start,
