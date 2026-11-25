@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch_remat as remat
 
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.mtp import MTPCrossEntropyLoss as MTPLoss, roll_mtp_sequence
 from torchtitan.models.deepseek_v3.mtp import DeepSeekV3MTPBlock
@@ -78,7 +79,7 @@ class Glm5MTPTransformerBlock(DeepSeekV3MTPBlock):
         else:
             ffn_TD = self.feed_forward(self.ffn_norm(h_TD))
         remat.recompute_needs_tensor(ffn_TD)
-        return self.mtp_norm(h_TD + ffn_TD)
+        return maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h_TD + ffn_TD))
 
 
 __all__ = ["Glm5MTPTransformerBlock", "MTPLoss", "roll_mtp_sequence"]

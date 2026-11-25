@@ -623,7 +623,7 @@ class Glm5Model(DeepSeekV3Model):
                 indices_by_source[source] = indices_TS
         pre_norm_hidden_TD = hidden_TD
         if not kl_only:
-            hidden_TD = self.norm(hidden_TD) if self.norm is not None else hidden_TD
+            hidden_TD = self._pre_lm_head_norm_and_gather(hidden_TD)
         if self.mtp_layers:
             if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
                 raise ValueError(
