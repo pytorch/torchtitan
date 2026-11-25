@@ -73,7 +73,7 @@ if TYPE_CHECKING:
 
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim import Optim
-    from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+    from torchtitan.config import DebugConfig, PrecisionConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.fsdp import ShardingUnit
     from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
@@ -560,12 +560,8 @@ class FlexShardBackend(ShardingBackend):
         model_config: "BaseModel.Config",
         *,
         parallelism: "ParallelismConfig",
-        training: "TrainingConfig",
         debug: "DebugConfig",
     ) -> None:
-        from torchtitan.distributed.accelerator_graph import (
-            accelerator_graphs_supported,
-        )
         from torchtitan.models.base.module import Module
         from torchtitan.models.common.decoder import Decoder
         from torchtitan.models.common.moe import MoE, RoutedExperts
@@ -662,10 +658,7 @@ class FlexShardBackend(ShardingBackend):
                 entry = f"{feature} with expert parallelism"
                 if entry not in unsupported:
                     unsupported.append(entry)
-        if not training.disable_accelerator_graphs and accelerator_graphs_supported():
-            unsupported.append(
-                "accelerator graphs (set training.disable_accelerator_graphs=True)"
-            )
+
         if debug.spmd_typechecking:
             unsupported.append("debug.spmd_typechecking")
         _raise_if_unsupported(unsupported)

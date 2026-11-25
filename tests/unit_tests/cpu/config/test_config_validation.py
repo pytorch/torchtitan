@@ -300,7 +300,6 @@ def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
     # than silently shard with FSDP2.
     def validate(config):
         config.parallelism.fsdp_backend = FlexShardBackend.Config()
-        config.training.disable_accelerator_graphs = True
         validate_model_training_config(
             config.model,
             parallelism=config.parallelism,
@@ -360,7 +359,6 @@ def test_flex_shard_rejects_checkpointers_that_drop_shard_layouts(
     # whole tensor, without an error.
     config = llama3_debugmodel()
     config.parallelism.fsdp_backend = FlexShardBackend.Config()
-    config.training.disable_accelerator_graphs = True
     config.checkpointer = checkpointer
     if unsupported is None:
         config.__post_init__()
