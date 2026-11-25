@@ -62,6 +62,7 @@ def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
     """Attention Gym chunk-kernel options for `q`: the fused kernels, for every input."""
     # TODO: bring back backend="warpdrive" once it is causally consistent at long packed lengths. Under its old name
     # "cudnn" it was not (Qwen3.8-27B, 78k tokens, pos 562: full -1.91, prefix -10.35; fused -0.0146), though its GDN
-    # fwd+bwd was 1.9-2.1x faster than fused on GB300. KDA's is unchecked. No Attention Gym issue is filed yet.
+    # fwd+bwd was 1.9-2.1x faster than fused on GB300. KDA's is unchecked. No Attention Gym issue yet: file one with
+    # this repro and link it here.
     del q
     return KernelOptions(backend="fused")
