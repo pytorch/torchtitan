@@ -398,7 +398,7 @@ def muse_spark_816b_a42b_dapo_math_gb300_config(
 
 
 def _qwen3_30b_a3b_dapo_math_8k_config(
-    *, expert_precision: Literal["bf16", "mxfp8"]
+    *, expert_precision: Literal["bf16", "mxfp8", "nvfp4_w4a16"]
 ) -> Controller.Config:
     """Build the shared Qwen3-30B-A3B-Base DAPO-Math configuration with Dist-MoE experts.
 
@@ -523,7 +523,11 @@ def _qwen3_30b_a3b_dapo_math_8k_config(
         generator_transform = DistMoeTransform(
             expert_precision="mxfp8",
             block_scaled_config=BlockScaledConfig(pipeline="mega"),
-            mxfp8_mega_fused_inference=True,
+            mega_fused_inference=True,
+        )
+    elif expert_precision == "nvfp4_w4a16":
+        generator_transform = DistMoeTransform(
+            expert_precision="nvfp4_w4a16", mega_fused_inference=True
         )
     else:
         generator_transform = DistMoeTransform(expert_precision=expert_precision)
@@ -542,3 +546,11 @@ def rl_dapo_qwen3_30b_a3b_math_8k_mxfp8() -> Controller.Config:
     The generator uses the Mega pipeline with fused SwiGLU inference weights.
     """
     return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="mxfp8")
+
+
+def rl_dapo_qwen3_30b_a3b_math_8k_nvfp4_w4a16() -> Controller.Config:
+    """Qwen3-30B-A3B-Base, 8K responses, 32 prompts x 16 samples per step, NVFP4 W4A16 Dist-MoE experts.
+
+    The generator runs dist_moe's fused W4A16 Mega kernel.
+    """
+    return _qwen3_30b_a3b_dapo_math_8k_config(expert_precision="nvfp4_w4a16")

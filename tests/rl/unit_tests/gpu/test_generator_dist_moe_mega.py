@@ -4,8 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""One-GPU vLLM generator test for MXFP8 Mega Dist-MoE inference weights."""
+"""One-GPU vLLM generator test for MXFP8 and NVFP4 W4A16 Mega Dist-MoE inference weights."""
 
+import dataclasses
 import gc
 import math
 import os
@@ -28,6 +29,7 @@ from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.dist_moe import (
     _dist_moe as dist_moe,
+    DistMoeRoutedExperts,
     DistMoeRuntime,
     MXFP8DistMoeRoutedExperts,
 )
@@ -41,6 +43,7 @@ from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 from vllm import SamplingParams
 from vllm.config import CUDAGraphMode
+from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 from vllm.model_executor.model_loader import utils as model_loader_utils
 from vllm.sampling_params import RequestOutputKind
 
@@ -52,8 +55,8 @@ from tests.rl.unit_tests.gpu.test_bitwise_parity import (
 )
 
 
-def _mxfp8_generator_config() -> Controller.Config:
-    """Build a one-GPU debug MoE generator with MXFP8 Mega inference weights."""
+def _mega_generator_config(expert_precision: str) -> Controller.Config:
+    """Build a one-GPU debug MoE generator with Mega inference weights."""
     config = rl_grpo_qwen3_moe_debug_varlen()
     generator_parallelism = InferenceParallelismConfig(
         data_parallel_degree=1,
@@ -83,7 +86,11 @@ def _mxfp8_generator_config() -> Controller.Config:
             DistMoeTransform(
                 expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(pipeline="mega"),
-                mxfp8_mega_fused_inference=True,
+                mega_fused_inference=True,
+            )
+            if expert_precision == "mxfp8"
+            else DistMoeTransform(
+                expert_precision="nvfp4_w4a16", mega_fused_inference=True
             )
         ],
     )
@@ -136,12 +143,14 @@ def _trainer_model(wrapper, state_dict: dict[str, torch.Tensor]) -> SimpleNamesp
     )
 
 
-def _operands(experts) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """Return each expert weight's FSDP-managed qdata and FPROP scale."""
+def _operands(experts) -> list[torch.Tensor]:
+    """Return each expert weight's FSDP-managed, non-empty inference operands."""
     return [
-        (weight.operands.qdata, weight.operands.fprop_scale)
+        tensor
         for module in experts.values()
         for weight in (module.w13.weight, module.w2.weight)
+        for field in dataclasses.fields(weight.operands)
+        if (tensor := getattr(weight.operands, field.name)).numel()
     ]
 
 
@@ -173,7 +182,7 @@ def _check_inference_operands(engine) -> None:
     """Check the experts' inference operands across FULL-graph weight loads.
 
     - The engine replays FULL CUDA graphs rather than running eagerly
-    - Every MXFP8 expert uses the Mega fused inference weights (no DGRAD
+    - Every expert uses the Mega fused inference weights (for MXFP8, no DGRAD
       scales) from the first unshard
     - Each weight load refills the same operand tensors at the same addresses
     - The operand contents and generated logprobs follow the loaded weights,
@@ -187,7 +196,7 @@ def _check_inference_operands(engine) -> None:
     experts = {
         name: module
         for name, module in wrapper.model.named_modules()
-        if isinstance(module, MXFP8DistMoeRoutedExperts)
+        if isinstance(module, DistMoeRoutedExperts)
     }
     assert experts
     for module in experts.values():
@@ -196,7 +205,8 @@ def _check_inference_operands(engine) -> None:
             # The wrapper already unsharded the weights, so their operands come
             # from the first preparation
             assert isinstance(weight, _UnshardedFSDPTensor)
-            assert weight.operands.dgrad_scale.numel() == 0
+            if isinstance(module, MXFP8DistMoeRoutedExperts):
+                assert weight.operands.dgrad_scale.numel() == 0
 
     weights_a = _state_dict_with_random_experts(wrapper, experts, seed=0)
     weights_b = _state_dict_with_random_experts(wrapper, experts, seed=1)
@@ -205,28 +215,26 @@ def _check_inference_operands(engine) -> None:
     # The CUDA graphs captured at engine startup read these exact tensors and
     # addresses, so every load must refill them in place.
     operands = _operands(experts)
-    data_ptrs = [(q.data_ptr(), s.data_ptr()) for q, s in operands]
+    data_ptrs = [tensor.data_ptr() for tensor in operands]
 
     # Reuse the trainer weight sync, which loads through the generator's
     # weight-load path.
     _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_a), engine)
-    contents_a = [(q.clone(), s.clone()) for q, s in _operands(experts)]
+    contents_a = [tensor.clone() for tensor in _operands(experts)]
     logprobs_a = _generate(engine, prompt_ids, "weights_a")
 
     _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_b), engine)
-    for (q, s), (q_a, s_a) in zip(_operands(experts), contents_a, strict=True):
-        assert not torch.equal(q, q_a)
-        assert not torch.equal(s, s_a)
+    for tensor, tensor_a in zip(_operands(experts), contents_a, strict=True):
+        assert not torch.equal(tensor, tensor_a)
     logprobs_b = _generate(engine, prompt_ids, "weights_b")
 
     _sync_trainer_weights_to_vllm(_trainer_model(wrapper, weights_a), engine)
     logprobs_a_again = _generate(engine, prompt_ids, "weights_a_again")
 
-    for (q, s), (q_0, s_0), ptrs in zip(
+    for tensor, tensor_0, data_ptr in zip(
         _operands(experts), operands, data_ptrs, strict=True
     ):
-        assert q is q_0 and s is s_0
-        assert (q.data_ptr(), s.data_ptr()) == ptrs
+        assert tensor is tensor_0 and tensor.data_ptr() == data_ptr
     assert logprobs_b != logprobs_a
     assert logprobs_a_again == logprobs_a
 
@@ -235,13 +243,15 @@ def _check_inference_operands(engine) -> None:
     not torch.cuda.is_available() or not has_cuda_capability(10, 0),
     reason="Dist-MoE requires an SM100-or-newer GPU",
 )
-def test_vllm_generator_enables_mxfp8_mega_inference_weights():
-    """The generator serves MXFP8 Mega experts with Mega fused inference weights.
+@pytest.mark.parametrize("expert_precision", ["mxfp8", "nvfp4_w4a16"])
+def test_vllm_generator_refills_mega_inference_weights(expert_precision: str):
+    """The generator serves Mega experts with Mega fused inference weights.
 
-    With ``mxfp8_mega_fused_inference``, every MXFP8 expert's operands
-    have no DGRAD scales from the first unshard. Under FULL CUDA graphs, weight
-    loads refill those retained operands in place: their objects stay fixed
-    while their contents and the generated logprobs follow the loaded weights.
+    With ``mega_fused_inference``, every expert's operands are inference
+    operands (for MXFP8, no DGRAD scales) from the first unshard. Under FULL
+    CUDA graphs, weight loads refill those retained operands in place: their
+    objects stay fixed while their contents and the generated logprobs follow
+    the loaded weights.
     """
     world_size = (
         dist.get_world_size()
@@ -251,13 +261,13 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
     if world_size != 1:
         pytest.skip(f"requires exactly 1 GPU, got {world_size}")
 
-    config = _mxfp8_generator_config()
+    config = _mega_generator_config(expert_precision)
     owns_process_group = not dist.is_initialized()
     temporary_dump_folder = None
     engine = None
     try:
         if owns_process_group:
-            temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_mxfp8_")
+            temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_mega_")
             dist_utils.init_distributed(CommConfig(), base_folder=temporary_dump_folder)
         _clear_cached_model_class()
         register_to_vllm(
@@ -279,8 +289,9 @@ def test_vllm_generator_enables_mxfp8_mega_inference_weights():
         _clear_cached_model_class()
         gc.collect()
         torch.cuda.empty_cache()
-        # A process group provided by an earlier test or fixture stays alive.
+        # A process group provided by an earlier test or fixture stays alive. An
+        # owned one goes with vLLM's groups on it, for the next parametrization.
         if owns_process_group and dist.is_initialized():
-            dist.destroy_process_group()
+            cleanup_dist_env_and_memory()
         if temporary_dump_folder is not None:
             shutil.rmtree(temporary_dump_folder, ignore_errors=True)

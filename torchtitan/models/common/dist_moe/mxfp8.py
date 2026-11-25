@@ -130,7 +130,7 @@ class _DistMoeMXFP8ShardedTensorBase(_ShardedFSDPTensor):
     Args:
         mega_fused_inference: Prepare expert weights for the generator's
             fused SwiGLU Mega inference kernel (see
-            ``DistMoeTransform.mxfp8_mega_fused_inference``).
+            ``DistMoeTransform.mega_fused_inference``).
     """
 
     def __init__(
@@ -237,7 +237,7 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
                 and ``kernel_config`` is an expert-only CuTe tuning override.
             mega_fused_inference: Prepare expert weights for the
                 generator's fused SwiGLU Mega inference kernel (see
-                ``DistMoeTransform.mxfp8_mega_fused_inference``).
+                ``DistMoeTransform.mega_fused_inference``).
         """
 
         block_scaled_config: dist_moe.BlockScaledConfig = field(
