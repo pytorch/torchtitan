@@ -54,6 +54,8 @@ class VerifiersGenerationMetadata:
     metrics: list[m.Metric]
     """Metrics from every generation in the rollout, merged with `m.fold`."""
 
+    # TODO: glibc keeps freed top-k arrays: at k=128 a rollout worker held ~4.5 KiB per in-flight token (rows: 1 KiB).
+    # Setting M_MMAP_THRESHOLD to 256 KiB in rollout workers fixed it in a CPU repro; not yet checked in a run.
     topk_by_generation: dict[
         tuple[int, tuple[int, ...]], tuple[np.ndarray, np.ndarray]
     ] = field(default_factory=dict)

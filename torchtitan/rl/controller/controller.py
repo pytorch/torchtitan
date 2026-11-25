@@ -543,7 +543,7 @@ class Controller(Configurable):
 
             # TODO: let a loss config declare that it takes top-k rows (e.g. a ClassVar on Loss.Config)
             # and check that here, so a new such loss needs no controller edit and no import of it.
-            # Not done in this port: it changes the Loss.Config interface every loss shares.
+            # Not done yet: it changes the Loss.Config interface every loss shares.
             loss_config = self.trainer.loss
             if isinstance(loss_config, ChunkedLossWrapper.Config):
                 loss_config = loss_config.loss_fn
