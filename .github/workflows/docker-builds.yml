@@ -36,10 +36,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - docker-image-name: torchtitan-ubuntu-22.04-clang12
-          - docker-image-name: torchtitan-ubuntu-22.04-clang12
-            image-tag-prefix: rl
-          - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
+          # Temporarily scoped to xpu only while bringing up the XPU CI job on
+          # huxue/xpu-ci, so workflow_dispatch doesn't also rebuild cuda/rocm.
+          # Restore the other entries before merging into main.
+          # - docker-image-name: torchtitan-ubuntu-22.04-clang12
+          # - docker-image-name: torchtitan-ubuntu-22.04-clang12
+          #   image-tag-prefix: rl
+          # - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
           - docker-image-name: torchtitan-xpu-ubuntu-24.04-py3
     # BuildKit runs out of cluster on the OSDC BuildKit pool, so this runner only
     # streams the (small) .ci/docker context and waits.
