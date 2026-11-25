@@ -101,7 +101,9 @@ class ParallelismConfig:
     (``torchtitan/distributed/flex_shard_backend.py``) applies FlexShard
     (meta-pytorch/flex_shard), with one ``fsdp2_compatible`` bucket per unit
     FSDP2 would shard, so training from the same parameters is bitwise identical
-    to FSDP2. It rejects what it doesn't support yet.
+    to FSDP2. It rejects what it doesn't support yet. See
+    ``torchtitan/distributed/FLEX_SHARD_FSDP.md`` for everything it supports and
+    rejects.
     """
 
     tensor_parallel_degree: int = 1

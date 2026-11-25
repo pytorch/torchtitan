@@ -20,6 +20,7 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     MLAAttention,
@@ -86,6 +87,12 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
             )
         ],
     )
+
+
+def llama3_debugmodel_fsdp2_tp2_cp2_flex_shard() -> Trainer.Config:
+    config = llama3_debugmodel_fsdp2_tp2_cp2()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
+    return config
 
 
 def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
@@ -164,6 +171,12 @@ def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
             parallelism=ParallelismConfig(expert_parallel_degree=8),
         )
     )
+
+
+def deepseek_v3_debugmodel_fsdp8_ep8_flex_shard() -> Trainer.Config:
+    config = deepseek_v3_debugmodel_fsdp8_ep8()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
+    return config
 
 
 def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
@@ -659,6 +672,21 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             loss_compare_seed_config=llama3_debugmodel,
         ),
         IntegrationTestDefinition(
+            configs=[llama3_debugmodel_fsdp2_tp2_cp2_flex_shard],
+            test_descr="Llama 3 FlexShard+TP+CP",
+            test_name="llama3_flex_shard+tp+cp",
+            ngpu=8,
+            # FSDP2's golden. From the same weights, FlexShard trains bitwise
+            # identical to FSDP2, but the two initialize shards differently, so
+            # the twin loads the seed checkpoint FSDP2's golden was made from.
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/llama3.txt"
+            ),
+            loss_compare_seed_config=llama3_debugmodel,
+            # The runner skips the seed checkpoint under Fake PG.
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
             configs=[llama3_debugmodel_region_ac_fsdp2_tp2_cp2],
             test_descr="Llama 3 FSDP+TP+CP+ActivationRematConfig",
             test_name="llama3_fsdp+tp+cp+region_ac",
@@ -698,6 +726,18 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/{gpu_arch}/deepseek_v3.txt"
             ),
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_fsdp8_ep8_flex_shard],
+            test_descr="DeepSeek V3 FlexShard+EP",
+            test_name="deepseek_v3_flex_shard+ep",
+            ngpu=8,
+            # As for llama3_flex_shard+tp+cp.
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/deepseek_v3.txt"
+            ),
+            loss_compare_seed_config=deepseek_v3_debugmodel_fsdp8_ep8,
+            use_real_pg=True,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4],
