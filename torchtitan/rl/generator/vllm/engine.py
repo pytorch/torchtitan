@@ -306,24 +306,25 @@ class VLLMEngine(GenerationEngine):
                 "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
                 "with kernels the trainer does not run"
             )
+        if (
+            config.kv_cache_dtype == "fp8"
+            and config.num_speculative_tokens > 0
+            and not fa4_takes_query_len_in_heads()
+        ):
+            import flash_attn.cute
 
-        if config.kv_cache_dtype == "fp8":
-            if config.num_speculative_tokens > 0 and not fa4_takes_query_len_in_heads():
-                import flash_attn.cute
-
-                # Without query_len_in_heads, fp8 verify rows would take the decode + fp32-tail
-                # path of `_verify_rows_as_decode`, which no engine run has measured with drafts.
-                # TODO: once a released FA4 takes query_len_in_heads (Dao-AILab/flash-attention#3217),
-                # raise the FA4 floor and drop this check. DiffKV layers (V head dim != K's) take
-                # the tail path already.
-                raise RuntimeError(
-                    f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
-                    "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "
-                    f"flash_attn.cute comes from {flash_attn.cute.__file__}. Install an FA4 with "
-                    "query_len_in_heads (Dao-AILab/flash-attention#3217), or set "
-                    "num_speculative_tokens=0 or kv_cache_dtype='auto'"
-                )
-
+            # Without query_len_in_heads, fp8 verify rows would take the decode + fp32-tail
+            # path of `_verify_rows_as_decode`, which no engine run has measured with drafts.
+            # TODO: once a released FA4 takes query_len_in_heads (Dao-AILab/flash-attention#3217),
+            # raise the FA4 floor and drop this check. DiffKV layers (V head dim != K's) take
+            # the tail path already.
+            raise RuntimeError(
+                f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
+                "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "
+                f"flash_attn.cute comes from {flash_attn.cute.__file__}. Install an FA4 with "
+                "query_len_in_heads (Dao-AILab/flash-attention#3217), or set "
+                "num_speculative_tokens=0 or kv_cache_dtype='auto'"
+            )
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
             _enable_breakable_cuda_graphs()
         if config.num_speculative_tokens > 0 and vision_processor is not None:
