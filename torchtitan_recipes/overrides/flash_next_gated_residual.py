@@ -100,14 +100,14 @@ class FusedGatedResidual(GatedResidual):
         )
         proj_TP = F.linear(x_norm_TC, proj_weight_PC)
         remat.recompute_needs_tensor(proj_TP)
-        mix_TR = F.silu(proj_TP[:, :rank] / self.num_streams)
+        mix_TR = self.mix_activation(proj_TP[:, :rank], self.num_streams)
         remat.recompute_needs_tensor(mix_TR)
         up_TC = self.input_mix_weight_up(mix_TR)
         remat.recompute_needs_tensor(up_TC)
         mixed_TD = self.read_streams(up_TC, x_norm_TC, self.num_streams)
         if inject is None:
             return mixed_TD
-        write_TS = 2 * (proj_TP[:, rank:num_proj] / self.num_streams).sigmoid()
+        write_TS = self.write_gates(proj_TP[:, rank:num_proj], self.num_streams)
         return mixed_TD, x_TC, write_TS
 
 

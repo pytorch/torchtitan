@@ -78,6 +78,18 @@ class GatedResidual(Module):
 
     @staticmethod
     @local_compile("gated_residual", batch_invariant=True)
+    def mix_activation(down_TR: torch.Tensor, num_streams: int) -> torch.Tensor:
+        """SiLU of the down projection scaled by ``1 / num_streams``."""
+        return F.silu(down_TR / num_streams)
+
+    @staticmethod
+    @local_compile("gated_residual", batch_invariant=True)
+    def write_gates(inject_TS: torch.Tensor, num_streams: int) -> torch.Tensor:
+        """Per-stream write gates in (0, 2)."""
+        return 2 * (inject_TS / num_streams).sigmoid()
+
+    @staticmethod
+    @local_compile("gated_residual", batch_invariant=True)
     def read_streams(
         read_logits_TC: torch.Tensor, x_norm_TC: torch.Tensor, num_streams: int
     ) -> torch.Tensor:
@@ -94,7 +106,7 @@ class GatedResidual(Module):
         # their outputs.
         down_TR = self.input_mix_weight_down(x_norm_TC)
         remat.recompute_needs_tensor(down_TR)
-        mix_TR = F.silu(down_TR / self.num_streams)
+        mix_TR = self.mix_activation(down_TR, self.num_streams)
         remat.recompute_needs_tensor(mix_TR)
         up_TC = self.input_mix_weight_up(mix_TR)
         remat.recompute_needs_tensor(up_TC)
@@ -103,7 +115,7 @@ class GatedResidual(Module):
             return mixed_TD
         inject_TS = self.block_inject_weight(x_norm_TC)
         remat.recompute_needs_tensor(inject_TS)
-        write_TS = 2 * (inject_TS / self.num_streams).sigmoid()
+        write_TS = self.write_gates(inject_TS, self.num_streams)
         return mixed_TD, x_TC, write_TS
 
 
