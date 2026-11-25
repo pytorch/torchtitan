@@ -48,6 +48,7 @@ class TestMuonPlanConstruction(unittest.TestCase):
         parameter: torch.nn.Parameter,
         *,
         bucket_config: BucketConfig,
+        transport_meshes: tuple[DeviceMesh, ...] = (),
     ) -> DistMuon:
         with patch.object(_BucketedRedistributionRuntime, "reserve_buffers"):
             return DistMuon(
@@ -64,6 +65,7 @@ class TestMuonPlanConstruction(unittest.TestCase):
                     )
                 },
                 bucket_configs=[bucket_config],
+                transport_meshes=transport_meshes,
             )
 
     def test_fixed_work_changes_placement_and_plan_reuse(self):
@@ -126,41 +128,33 @@ class TestMuonPlanConstruction(unittest.TestCase):
             [((1, 4, 4), 0), ((1, 2, 4), 16)],
         )
 
-    def test_bucket_mesh_requires_matching_named_axis(self):
+    def test_transport_mesh_is_selected_by_ranks(self):
         mesh, parameter = self._make_1d_parameter()
-        wrong_axis_mesh = DeviceMesh.from_group(
-            [mesh.get_group()],
-            "cpu",
-            mesh=mesh.mesh,
-            mesh_dim_names=("other",),
-        )
 
-        with self.assertRaisesRegex(ValueError, "missing redistribution axis"):
-            self._build_single_parameter_optimizer(
-                parameter,
-                bucket_config=BucketConfig(
-                    patterns=(self._FQN,),
-                    mesh=wrong_axis_mesh,
-                ),
+        def transport_mesh(ranks: list[int]) -> DeviceMesh:
+            return DeviceMesh.from_group(
+                dist.new_group(ranks),
+                "cpu",
+                mesh=torch.tensor(ranks),
+                mesh_dim_names=("any_name",),
             )
 
-    def test_bucket_mesh_requires_matching_rank_order(self):
-        mesh, parameter = self._make_1d_parameter()
-        reversed_mesh = DeviceMesh.from_group(
-            [mesh.get_group()],
-            "cpu",
-            mesh=mesh.mesh.flip(0),
-            mesh_dim_names=("dp_shard",),
+        bucket_config = BucketConfig(patterns=(self._FQN,))
+        other_ranks = self._build_single_parameter_optimizer(
+            parameter,
+            bucket_config=bucket_config,
+            transport_meshes=(transport_mesh([0]),),
         )
-
-        with self.assertRaisesRegex(ValueError, "does not match"):
-            self._build_single_parameter_optimizer(
-                parameter,
-                bucket_config=BucketConfig(
-                    patterns=(self._FQN,),
-                    mesh=reversed_mesh,
-                ),
-            )
+        self.assertIs(
+            other_ranks._bucket_plans[0].group.process_group, mesh.get_group()
+        )
+        matching = transport_mesh([0, 1])
+        same_ranks = self._build_single_parameter_optimizer(
+            parameter, bucket_config=bucket_config, transport_meshes=(matching,)
+        )
+        self.assertIs(
+            same_ranks._bucket_plans[0].group.process_group, matching.get_group()
+        )
 
 
 if __name__ == "__main__":

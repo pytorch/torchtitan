@@ -15,14 +15,16 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import socket
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
+import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
@@ -489,6 +491,75 @@ class ParallelismContext:
                 f"Ensure the corresponding parallelism axes are {enabled_str}."
             )
         return mesh
+
+    def build_optimizer_meshes(
+        self,
+        axes_list: Sequence[tuple[str, ...]],
+        *,
+        backend: str | None = None,
+        pg_options: Any = None,
+    ) -> tuple[DeviceMesh, ...]:
+        """Create 1D meshes for optimizer communication (DistMuon's all-to-all).
+
+        Creates a new group, with ``backend`` and ``pg_options``, for every slice
+        of each ``axes`` in ``axes_list``, and returns this rank's meshes, one per
+        distinct rank set. Axes covering the same ranks (e.g. ``dp_shard`` and
+        ``edp_shard`` with dp_shard=2, tp=2, ep=2) share one mesh, so callers
+        match meshes by ranks, not names. The meshes are not registered on the
+        root mesh, so DTensor and FSDP never use them.
+
+        Collective over the world: every rank, whichever pipeline stage it
+        owns, must make the same calls in the same order.
+
+        Example: dp_shard=2, tp=2, ranks ``[[0, 1], [2, 3]]``,
+        ``axes_list=[("dp_shard", "tp"), ("dp_shard",)]`` creates groups
+        ``[0, 1, 2, 3]``, ``[0, 2]`` and ``[1, 3]``; rank 1 gets
+        ``(dp_shard_tp [0, 1, 2, 3], dp_shard [1, 3])``.
+        """
+        if not self._single_axis_meshes:
+            self.build_mesh()
+        rank = dist.get_rank()
+        created_rank_sets: set[tuple[int, ...]] = set()
+        meshes = []
+        for axes in axes_list:
+            global_mesh = next(
+                (
+                    mesh
+                    for mesh in (
+                        self._global_meshes["dense"],
+                        self._global_meshes["sparse"],
+                    )
+                    if set(axes) <= set(mesh.mesh_dim_names or ())
+                ),
+                None,
+            )
+            if global_mesh is None or len(set(axes)) != len(axes):
+                raise ValueError(f"Invalid mesh axis combination {axes}.")
+            axis_names = global_mesh.mesh_dim_names or ()
+            mesh_axes = [axis_names.index(axis) for axis in axes]
+            # Move the requested axes last: each row is one slice's ranks.
+            slices = global_mesh.mesh.movedim(
+                mesh_axes, list(range(-len(axes), 0))
+            ).reshape(-1, math.prod(global_mesh.mesh.shape[i] for i in mesh_axes))
+            for ranks in map(tuple, slices.tolist()):
+                # Slices of different axes with the same ranks share a group.
+                if ranks in created_rank_sets:
+                    continue
+                created_rank_sets.add(ranks)
+                group = dist.new_group(
+                    list(ranks), backend=backend, pg_options=pg_options
+                )
+                if rank in ranks:
+                    assert isinstance(group, dist.ProcessGroup)
+                    meshes.append(
+                        DeviceMesh.from_group(
+                            group,
+                            device_type,
+                            mesh=torch.tensor(ranks),
+                            mesh_dim_names=("_".join(axes),),
+                        )
+                    )
+        return tuple(meshes)
 
     @contextlib.contextmanager
     def activate_spmd(self, *, typechecking: bool = False) -> Iterator[None]:
