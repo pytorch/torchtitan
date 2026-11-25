@@ -395,7 +395,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             Names keep the config plain data for ``to_dict()`` and JSON
             serialization, since ``SDPBackend`` is a pybind11 enum.
             Deterministic mode skips cuDNN, whose backward is not
-            deterministic.
+            deterministic, and so does a backward through the lse that an
+            ``out_transform`` consumes, which only Flash with FA4 supports.
         """
 
         @property
