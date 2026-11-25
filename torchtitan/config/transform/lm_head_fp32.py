@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model-config converter for an fp32-output lm_head."""
+"""Model transform for an fp32-output lm_head."""
 
 from dataclasses import dataclass, fields
 from typing import Literal
@@ -13,12 +13,13 @@ from torchtitan.models.common.linear import Linear
 
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
-from .converter import ModelConfigConverter
+from .base import ModelConfigTransform
 
-__all__ = ["LMHeadFP32OutputConverter"]
+__all__ = ["LMHeadFP32OutputTransform"]
 
 
-class LMHeadFP32OutputConverter(ModelConfigConverter):
+@dataclass(kw_only=True, slots=True)
+class LMHeadFP32OutputTransform(ModelConfigTransform):
     """Swap the decoder lm_head's ``Linear.Config`` to ``HiMidLoLinear.Config``.
 
     Only the lm_head changes. The same model config backs the trainer and the vLLM
@@ -27,20 +28,15 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
 
     _TARGET = "lm_head"
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        backward_mode: Literal["hi_mid", "hi_mid_lo"] = "hi_mid"
-        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs.
-        "hi_mid_lo" is exact, but slower (1.1-1.5x backward), and the gain may be too small to
-        notice. It matters most for small out_features, e.g. a router, not an LM head: the GEMM's
-        own rounding grows with out_features and hides the gain."""
+    backward_mode: Literal["hi_mid", "hi_mid_lo"] = "hi_mid"
+    """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs.
+    "hi_mid_lo" is exact, but slower (1.1-1.5x backward), and the gain may be too small to
+    notice. It matters most for small out_features, e.g. a router, not an LM head: the GEMM's
+    own rounding grows with out_features and hides the gain."""
 
-    def __init__(self, config: Config):
-        self.config = config
-
-    def convert(self, model_config):
+    def transform(self, model):
         found = False
-        for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
+        for fqn, linear_config, parent, attr in model.traverse(Linear.Config):
             if fqn.rsplit(".", 1)[-1] != self._TARGET:
                 continue
             found = True
@@ -49,14 +45,16 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
                 continue
             if type(linear_config) is not Linear.Config:
                 raise ValueError(
-                    f"LMHeadFP32OutputConverter only converts a plain Linear.Config, but "
+                    f"LMHeadFP32OutputTransform only converts a plain Linear.Config, but "
                     f"{fqn!r} is a {type(linear_config).__qualname__}, whose extra fields "
-                    "or forward (e.g. a logit soft cap) HiMidLoLinear would drop."
+                    "or forward (e.g. quantization or a logit soft cap) HiMidLoLinear "
+                    "would drop. If a quantization transform converted it, exclude "
+                    f"{self._TARGET!r} with that transform's fqns."
                 )
             kwargs = {
                 f.name: getattr(linear_config, f.name) for f in fields(linear_config)
             }
-            kwargs["backward_mode"] = self.config.backward_mode
+            kwargs["backward_mode"] = self.backward_mode
             new_config = HiMidLoLinear.Config(**kwargs)
             if isinstance(parent, list):
                 parent[attr] = new_config
@@ -64,10 +62,10 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
                 setattr(parent, attr, new_config)
         if not found:
             raise ValueError(
-                f"LMHeadFP32OutputConverter found no Linear named {self._TARGET!r} in "
+                f"LMHeadFP32OutputTransform found no Linear named {self._TARGET!r} in "
                 "the model config. The torchtitan decoder names its output projection "
                 f"{self._TARGET!r} (see torchtitan/models/common/decoder.py)."
             )
-        if "fp32_to_bf16_split" not in model_config.local_compile.regions:
-            model_config.local_compile.regions.append("fp32_to_bf16_split")
-        return model_config
+        if "fp32_to_bf16_split" not in model.local_compile.regions:
+            model.local_compile.regions.append("fp32_to_bf16_split")
+        return model

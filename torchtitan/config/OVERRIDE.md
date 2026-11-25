@@ -9,9 +9,8 @@ This is the reference for how the mechanism works and how to write overrides.
 
 Torchtitan has a config-driven build system: every component defines a nested
 `Config` dataclass and `config.build()` constructs the owning object. Swapping a
-component currently works through model config converters and transforms,
-which traverse the model config tree and replace `Config` nodes before model
-construction.
+component currently works through model config transforms, which traverse
+the model config tree and replace `Config` nodes before model construction.
 
 That works well for in-repo, first-class features, but it requires editing the
 repo for *every* alternative implementation. The override mechanism removes that
@@ -77,7 +76,7 @@ tree and replaces matching nodes with the factory's output.
   model.
 - **Minimal surface.** The whole mechanism lives in
   `torchtitan/config/override.py`, reusing the `Configurable.Config.traverse()` +
-  replace pattern that quantization converters and the LoRA transform already use.
+  replace pattern that the quantization and LoRA transforms already use.
 
 ## How It Works
 
@@ -91,28 +90,35 @@ example); no `triton_rope.py` is shipped. It is a valid override: each attention
 module owns a `rope` submodule (a `RoPE.Config`), so swapping in a custom RoPE is
 an ordinary component override.
 
+The example targets `ComplexRoPE.Config`, the format its kernel implements. RoPE
+formats read `positions` differently (1D ids for text, `(T, 2)` coordinates for
+the vision RoPEs), so target the format you replace; `target=RoPE.Config` would
+match all of them. Vision attention works the same way:
+`VisionAttention.Config.rope` holds a `ComplexVisionRoPE.Config` or a
+`CosSinVisionRoPE.Config`.
+
 ```python
 from dataclasses import dataclass
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.rope import RoPE
+from torchtitan.models.common.rope import ComplexRoPE
 
 
-class TritonRoPE(RoPE):
+class TritonRoPE(ComplexRoPE):
     """RoPE applied with a Triton kernel (illustrative)."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(RoPE.Config):
+    class Config(ComplexRoPE.Config):
         block_size: int = 128
 
     def __init__(self, config: Config): ...
     def forward(self, query, key, positions=None): ...
 
 
-@override(target=RoPE.Config,
+@override(target=ComplexRoPE.Config,
           description="Triton rotary embedding, ~2x faster on A100+")
-def triton_rope(cfg: RoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
-    # `derive` copies every field shared with RoPE.Config; the factory states
+def triton_rope(cfg: ComplexRoPE.Config, *, block_size: int = 128) -> TritonRoPE.Config:
+    # `derive` copies every field shared with ComplexRoPE.Config; the factory states
     # only its deltas. See "Deriving the replacement config" below. `block_size`
     # defaults to 128 but can be tuned per config tree via a per-entry kwarg
     # (see "Optional per-entry kwargs" below).
@@ -137,14 +143,14 @@ This matters for version-robustness. Hand-copying couples a factory to the
 target's field set at the time it was written:
 
 ```python
-# Fragile: RoPE.Config has many fields (theta, scaling, rope_factor, beta_fast,
+# Fragile: ComplexRoPE.Config has many fields (theta, scaling, sharding_config,
 # ...); hand-copying only some silently drops the rest to their defaults — and a
 # field added later would be dropped too, with no error.
 return TritonRoPE.Config(
     dim=cfg.dim, max_context_length=cfg.max_context_length,
                          theta=cfg.theta, scaling=cfg.scaling)
 
-# Robust: every RoPE.Config field (including ones added later, inherited by the
+# Robust: every ComplexRoPE.Config field (including ones added later, inherited by the
 # subclass TritonRoPE.Config) is copied automatically; only block_size is a delta.
 return derive(cfg, TritonRoPE.Config, block_size=128)
 ```
@@ -225,12 +231,13 @@ In `Trainer.__init__`, before any component is built:
    re-traversed). An override that changes a module's sharding contract must set
    the replacement's `sharding_config`; `derive()` preserves it when the contract
    is unchanged.
-7. Log every replacement.
+7. Log one line per distinct (override, source class -> replacement class,
+   kwargs) group, with the match count and folded indexed FQN ranges
+   (matching `format_config()`). `apply_overrides()` returns one line per
+   replaced node.
 
 ```
-INFO: [Override] fused_swiglu: model.layers.0.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
-INFO: [Override] fused_swiglu: model.layers.1.feed_forward DenseFeedForward.Config -> DenseFeedForward.Config
-...
+INFO: [Override] fused_swiglu: DenseFeedForward.Config -> DenseFeedForward.Config matched=32 fqns=['model.layers.{0..31}.feed_forward']
 INFO: Applied 32 override(s)
 ```
 
@@ -244,8 +251,8 @@ Settings that must differ between the RL trainer and generator (for example the
 MoE token dispatcher) belong in per-role model config transforms instead. Preserving the full path (rather
 than resetting to bare model names) lets per-node conflict detection recognize
 a whole-model override as an ancestor of a component override. (This differs
-from converter `filter_fqns`, which are bare because converters traverse the
-model config directly.)
+from quantization transform `fqns`, which are bare because transforms traverse
+the model config directly.)
 
 ### External packages
 
@@ -370,39 +377,39 @@ in by targeting `OptimizersContainer.Config` without editing a recipe
 function. The model config itself is a valid target for a whole-model swap
 because it is a `Configurable.Config` subclass.
 
-## Interaction with Converters and Transforms
+## Interaction with Transforms
 
-In-repo quantization converters run first inside `build_model_config()` during
-config construction. Model config transforms such as LoRA run afterward when
-the recipe calls `apply_transforms`. Overrides run later in `Trainer.__init__`
-and see the post-converter, post-transform tree. The order is deliberate:
-in-repo conversions run against known core configs, and overrides layer on top.
+In-repo model config transforms such as quantization and LoRA run during
+config construction, when the recipe calls `apply_transforms`. Overrides run
+later in `Trainer.__init__` and see the post-transform tree. The order is
+deliberate: in-repo transforms run against known core configs, and overrides
+layer on top.
 
-Conversely, converter-style transforms *can* be expressed as overrides (a
-factory that rewrites a `Config`), so external code does not need the converter
-machinery.
+Conversely, a transform that rewrites `Config` nodes *can* be expressed as an
+override (a factory that rewrites a `Config`), so external code does not need
+the transform machinery.
 
-| Override Target | Conflicts with a converter? | Notes |
-|-----------------|------------------------------|-------|
-| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
+| Override Target | Conflicts with quantization or LoRA? | Notes |
+|-----------------|--------------------------------------|-------|
+| RoPE / DenseFeedForward / MoE / RMSNorm / inner attention | No | Neither touches these |
+| GroupedLinear.Config | Possibly | Quantization transforms can rewrite this |
 | Linear.Config | Yes | Quantization and LoRA can replace these |
 
-Where a converter already rewrote a node, target that node by location with
+Where a transform already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific
-layers the converter left as plain `Linear.Config`). Field/type-based exclusion
+layers the transform left as plain `Linear.Config`). Field/type-based exclusion
 -- "skip instances already turned into a quantized config" -- is not expressible
 with FQN globs alone and motivates the future predicate selector.
 
-### Override vs. converter: which to use
+### Override vs. transform: which to use
 
-Converters are the right home for **core, broadly-applicable transforms that
+Transforms are the right home for **core, broadly-applicable rewrites that
 preserve a property we guarantee** (e.g. batch-invariance, which is largely
 op-level and must hold across the model). Overrides exist for an *unblocking*
 purpose: swapping in an alternative implementation. By design we make **no
 promise that any core property survives an arbitrary override** — that is the
 override author's responsibility. So features like batch-invariant mode stay
-converters, not overrides.
+transforms, not overrides.
 
 ## Checkpoint Compatibility
 
@@ -531,4 +538,4 @@ is the point of the design.
 
 - **Predicate `fqns` selector.** A `(fqn, cfg) -> bool` selector to complement
   the glob strings, enabling field/type-based selection (e.g. skipping linears a
-  converter already turned into a quantized config).
+  quantization transform already turned into a quantized config).

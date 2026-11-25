@@ -116,8 +116,12 @@ class Attention(Module):
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"
 
-        def flops_per_token(self, seq_len: int) -> int:
-            """Training attention contractions, excluding parameter-based work."""
+        def flops(self, positions: torch.Tensor) -> int:
+            """Training attention contractions, excluding parameter-based work.
+
+            ``positions`` holds each non-padding query's position in its
+            document, e.g. ``[0, 1, 2, 0, 1]`` for documents of lengths 3 and 2.
+            """
             raise NotImplementedError(type(self).__qualname__)
 
 
@@ -228,28 +232,25 @@ class GQAttention(Attention):
                     f"n_kv_heads ({n_kv_heads})"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
             head_dim = self.head_dim or self.dim // self.n_heads
-            return quadratic_attention_flops_per_token(
+            # A causal query at document position p attends to p + 1 keys.
+            num_keys = positions + 1
+            if isinstance(
+                self.inner_attention,
+                (
+                    SlidingWindowFlexInnerAttention.Config,
+                    SlidingWindowVarlenInnerAttention.Config,
+                ),
+            ):
+                num_keys = num_keys.clamp(max=self.inner_attention.sliding_window_size)
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=head_dim,
                 v_head_dim=head_dim,
-                seq_len=seq_len,
-                sliding_window_size=(
-                    self.inner_attention.sliding_window_size
-                    if isinstance(
-                        self.inner_attention,
-                        (
-                            SlidingWindowFlexInnerAttention.Config,
-                            SlidingWindowVarlenInnerAttention.Config,
-                        ),
-                    )
-                    else None
-                ),
+                num_keys=num_keys,
             )
 
     def __init__(self, config: Config):
@@ -391,8 +392,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
         )
         """ Backend priority order for varlen_attn, as ``SDPBackend`` member
             names, applied via ``sdpa_kernel(..., set_priority=True)``.
-            Names keep the config plain data: ``SDPBackend`` is a pybind11
-            enum, which ``pprint`` (``--print-config``) cannot format.
+            Names keep the config plain data for ``to_dict()`` and JSON
+            serialization, since ``SDPBackend`` is a pybind11 enum.
             Deterministic mode skips cuDNN, whose backward is not
             deterministic.
         """

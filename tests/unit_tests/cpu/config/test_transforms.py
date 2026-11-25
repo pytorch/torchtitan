@@ -8,7 +8,7 @@
 
 import copy
 import unittest
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, fields, replace
 
 import spmd_types as spmd
 
@@ -18,8 +18,12 @@ from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     ContextParallelTransform,
     convert_config_type,
+    LMHeadFP32OutputTransform,
     LoRATransform,
     ModelConfigTransform,
+    MXFP8LinearTransform,
+    NVFP4LinearTransform,
+    QuantizationTransform,
     TokenDispatcherTransform,
     transform_model_config_,
     TransformRelations,
@@ -55,6 +59,7 @@ from torchtitan.models.common.linear.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
+from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.moe.token_dispatcher import (
     AllToAllTokenDispatcher,
@@ -632,7 +637,7 @@ class TestTransformModel(unittest.TestCase):
                 )
 
     def test_transforms_mtp_layers(self):
-        from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+        from torchtitan.models.common.mtp import MTPDecoder
         from torchtitan_recipes.tests.models.deepseek_v3 import (
             deepseek_v3_debugmodel_mtp,
         )
@@ -823,6 +828,132 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                     LoRATransform(),
                 ],
             )
+
+
+class _RecordedQuantization(QuantizationTransform):
+    def transform(self, model):
+        _Record.order.append("quantization")
+        return model
+
+
+class _RecordedLoRA(LoRATransform):
+    def transform(self, model):
+        _Record.order.append("lora")
+        return model
+
+
+class _StandInQuantizedLinear(Linear):
+    """Stands in for a quantized Linear such as MXFP8Linear, which needs torchao
+    and an SM100 GPU."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+
+@dataclass(kw_only=True, slots=True)
+class _StandInLinearQuantization(QuantizationTransform):
+    """Converts the stock projection configs whose FQN contains one of ``fqns``,
+    as MXFP8LinearTransform does."""
+
+    fqns: list[str] = field(default_factory=list)
+
+    def transform(self, model):
+        stock_config_types = (
+            Linear.Config,
+            ColumnParallelLinear.Config,
+            RowParallelLinear.Config,
+        )
+        targets = [
+            entry
+            for entry in model.traverse(Linear.Config)
+            if type(entry[1]) in stock_config_types
+            and any(target_fqn in entry[0] for target_fqn in self.fqns)
+        ]
+        for _fqn, config, parent, attr in targets:
+            new_config = _StandInQuantizedLinear.Config(
+                **{f.name: getattr(config, f.name) for f in fields(Linear.Config)}
+            )
+            if isinstance(parent, list):
+                parent[attr] = new_config
+            else:
+                setattr(parent, attr, new_config)
+        return model
+
+
+class TestQuantizationAndLMHeadRelations(unittest.TestCase):
+    @staticmethod
+    def _model_config():
+        from torchtitan.models.llama3 import build_model_config
+
+        return build_model_config("debugmodel", parallelism=ParallelismConfig())
+
+    def test_quantization_runs_before_lora(self):
+        _Record.order = []
+
+        transform_model_config_(
+            self._model_config(), [_RecordedLoRA(), _RecordedQuantization()]
+        )
+
+        self.assertEqual(_Record.order, ["quantization", "lora"])
+
+    def test_fp32_lm_head_runs_before_lora(self):
+        # After LoRA, lm_head is a frozen subclass of Linear.Config, which
+        # LMHeadFP32OutputTransform rejects.
+        model = transform_model_config_(
+            self._model_config(),
+            [
+                LoRATransform(rank=2, alpha=4.0, target_modules=["wqkv", "wo"]),
+                LMHeadFP32OutputTransform(),
+            ],
+        )
+
+        self.assertIsInstance(model.lm_head, HiMidLoLinear.Config)
+
+    def test_quantization_composes_with_fp32_lm_head(self):
+        quantization = _StandInLinearQuantization(fqns=["layers."])
+        for transforms in (
+            [LMHeadFP32OutputTransform(), quantization],
+            [quantization, LMHeadFP32OutputTransform()],
+        ):
+            model = transform_model_config_(self._model_config(), transforms)
+
+            self.assertIsInstance(model.lm_head, HiMidLoLinear.Config)
+            layer_linears = [
+                linear_config
+                for fqn, linear_config, _, _ in model.traverse(Linear.Config)
+                if fqn.startswith("layers.")
+            ]
+            self.assertTrue(layer_linears)
+            for linear_config in layer_linears:
+                self.assertIsInstance(linear_config, _StandInQuantizedLinear.Config)
+
+    def test_fp32_lm_head_rejects_a_quantized_lm_head(self):
+        # Quantization runs first in either order, so the lm_head transform
+        # finds the quantized lm_head.
+        quantization = _StandInLinearQuantization(fqns=["lm_head"])
+        for transforms in (
+            [LMHeadFP32OutputTransform(), quantization],
+            [quantization, LMHeadFP32OutputTransform()],
+        ):
+            with self.assertRaisesRegex(
+                ValueError, "is a _StandInQuantizedLinear.Config"
+            ):
+                transform_model_config_(self._model_config(), transforms)
+
+    def test_dense_quantization_conflicts_with_async_tensor_parallel(self):
+        for quantization in (MXFP8LinearTransform(), NVFP4LinearTransform()):
+            with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                transform_model_config_(
+                    self._model_config(),
+                    [
+                        AsyncTensorParallelTransform(
+                            enable_sequence_parallel=True,
+                            disable_inplace_wgrad_accum=True,
+                        ),
+                        quantization,
+                    ],
+                )
 
 
 if __name__ == "__main__":

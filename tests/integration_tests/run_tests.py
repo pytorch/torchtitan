@@ -232,13 +232,14 @@ def run_single_test(
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
 
     # When running in parallel, pin each test to a disjoint subset of physical
-    # GPUs. Setting both CUDA_/HIP_VISIBLE_DEVICES makes this a no-op for the
-    # architecture that does not apply.
+    # GPUs. Setting CUDA_/HIP_VISIBLE_DEVICES and ZE_AFFINITY_MASK together
+    # makes this a no-op for the two architectures that do not apply.
     base_env = os.environ.copy()
     if gpu_ids is not None:
         visible = ",".join(map(str, gpu_ids))
         base_env["CUDA_VISIBLE_DEVICES"] = visible
         base_env["HIP_VISIBLE_DEVICES"] = visible
+        base_env["ZE_AFFINITY_MASK"] = visible
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
     base_env.pop("COMM_BACKEND", None)
@@ -558,18 +559,19 @@ def main():
     parser.add_argument(
         "--gpu_arch_type",
         default="cuda",
-        choices=["cuda", "rocm"],
-        help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+        choices=["cuda", "rocm", "xpu"],
+        help="GPU architecture type: 'cuda', 'rocm' or 'xpu'.",
     )
     parser.add_argument(
         "--gpu_arch",
         default=None,
-        choices=["a10g", "h100", "b200", "mi350x"],
+        choices=["a10g", "h100", "b200", "mi350x", "pvc"],
         help=(
             "Specific GPU model, used to select the matching golden numerics "
-            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
-            "otherwise, so a caller can't silently resolve ROCm goldens "
-            "under an A10G path by omitting this flag."
+            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm, 'pvc' for "
+            "--gpu_arch_type=xpu, and 'a10g' otherwise, so a caller can't "
+            "silently resolve ROCm/XPU goldens under an A10G path by "
+            "omitting this flag."
         ),
     )
     parser.add_argument(
@@ -629,7 +631,7 @@ def main():
     )
     args = parser.parse_args()
     if args.gpu_arch is None:
-        args.gpu_arch = "mi350x" if args.gpu_arch_type == "rocm" else "a10g"
+        args.gpu_arch = {"rocm": "mi350x", "xpu": "pvc"}.get(args.gpu_arch_type, "a10g")
 
     try:
         test_suites = _parse_test_suites(args.test_suite)

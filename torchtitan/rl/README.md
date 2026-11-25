@@ -19,28 +19,35 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 | Hardware | Integration Tests | Unit Tests |
 | --- | --- | --- |
 | CPU | - | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
-| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
+| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL H100 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_h100.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_h100.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
+
+See the [RL test cadence and manual-run instructions](../../tests/README.md#running-unit-tests)
+for the H100/B200 standalone checks and daily GRPO suites.
 
 ## Model support
 
 Supported entries completed a two-step end-to-end RL run with a representative
 debug model, including rollout generation, training, and the model state dict transfer to the generators.
 Generator DP and TP were tested together at degree 2; EP was tested at degree 4
-for MoE models. Generator sequence parallelism was disabled.
+for MoE models. Generator sequence parallelism was disabled. DeepSeek V3 and
+Kimi K3 were tested on H100 with two generators at TP=1 and no EP; their MLA decode
+and KDA kernels need SM90+. Image prompts were run end to end with Qwen3.5-0.8B on
+Geometry3K (`rl_grpo_qwen3_5_0_8b_geometry3k`) and Muse Spark 816B-A42B on SLAKE
+(`rl_muse_spark_816b_a42b_slake_lora_gb300`).
 
 | Model | RL support |
 |---|---|
 | Llama 3 | ✅ Supported |
 | Muse Glimmer | ✅ Supported |
-| Muse Spark | ✅ Supported (text only) |
+| Muse Spark | ✅ Supported (text and image) |
 | Qwen 3 | ✅ Supported |
-| Qwen 3.5/3.6/3.8 | ✅ Supported (text only) |
+| Qwen 3.5/3.6/3.8 | ✅ Supported (text and image) |
 | GPT-OSS | ✅ Supported |
-| DeepSeek V3 | Not supported |
+| DeepSeek V3 | ✅ Supported (SM90+) |
 | DeepSeek V4 | Support coming soon |
 | FLUX | Not supported |
 | Kimi K2.7 | Not supported |
-| Kimi K3 | Support coming soon |
+| Kimi K3 | ✅ Supported (SM90+) |
 
 ## Architecture
 
@@ -122,6 +129,7 @@ rollouter = Rollouter.Config(
     validation_dataset=MyValidationDataset.Config(),
     worker=MessageEnvRolloutWorker.Config(
         message_env=MyEnv.Config(),
+        token_env=TokenEnv.Config(max_rollout_tokens=32768),
         rubric=Rubric.Config(
             reward_fns=[RewardCorrect.Config(weight=1.0)]
         ),
@@ -225,9 +233,9 @@ GPUs such as A100. Flags documented in the script header select another CUDA
 tag (`--cuda`), force Flash Attention versions (`--flash-attn`), or install
 `nvcc` for FlashInfer's JIT when no CUDA toolkit is present (`--nvcc`).
 
-Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
-(SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the
-`attn-gym[linear,cudnn]` dependency installs them.
+Gated DeltaNet (Qwen3.5) runs Attention Gym's warpdrive chunk kernels on Blackwell
+(SM100/SM103) and its fused kernels elsewhere. TorchTitan's pinned
+`attn-gym[linear]` dependency installs them.
 
 **NOTE:** The pre-built vLLM wheels are built for CUDA 13.2, though they should
 work with most older CUDA versions. A vLLM nightly must match the PyTorch
@@ -257,6 +265,17 @@ python -m torchtitan.rl.train \
 ## Run on SLURM
 
 See [Launchers](./actors/monarch/README.md#launchers).
+
+## Run on Intel XPU
+
+The stock RL path runs on Intel GPUs (XPU) with flex attention models. Off CUDA,
+the generator rejects at startup what only CUDA supports: varlen attention, MLA
+with a compressed cache, GDN/KDA linear attention, vLLM CUDA graphs (set
+`cuda_graph.mode="NONE"`) and `debug.batch_invariant`. Flex attention on XPU
+also needs vLLM's XPU platform to accept `FLEX_ATTENTION`
+(vllm-project/vllm#69044). Set `PYTORCH_ALLOC_CONF=expandable_segments:False`
+and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` in the launch
+environment: expandable segments invalidate the memory oneCCL registers.
 
 ## Trainer/generator consistency
 

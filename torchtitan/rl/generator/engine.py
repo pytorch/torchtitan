@@ -56,14 +56,21 @@ class GenerationEngine(Configurable, abc.ABC):
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         vision_processor: Preprocesses image prompts' files (`PromptImage.data`). None:
             text only; requests with images are rejected.
+        mooncake_master_address: ``host:port`` of the Mooncake Store master the
+            controller started when ``config.uses_mooncake_store``, else None.
         rank: Global rank of this process.
-        generator_name: Name of the generator, for engine metrics.
+        generator_name: Name of the generator, unique within a run and shared by its
+            ranks; names engine metrics and per-generator connector resources.
         output_dir: Output directory, for engine metrics.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        @property
+        def uses_mooncake_store(self) -> bool:
+            """Whether the generators share a Mooncake Store. The controller then
+            starts its master and builds the engines with its address."""
+            return False
 
     @property
     @abc.abstractmethod
@@ -91,7 +98,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @abc.abstractmethod
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running."""
+        """Whether requests or their remaining engine work need more steps.
+
+        All ranks must call this together before stepping: implementations may
+        synchronize local work so every rank makes the same continue/idle decision.
+        """
 
     @abc.abstractmethod
     def step(self) -> list[FinishedRequest]:
