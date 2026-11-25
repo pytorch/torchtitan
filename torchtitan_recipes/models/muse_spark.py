@@ -662,9 +662,9 @@ def apply_gb300_lora_dist_moe(
 
     Sets local compile of the loss only, remat that saves the Dist-MoE save
     regions, the Dist-MoE runtime budgets and 1800 s comm timeouts, drops the
-    fused SwiGLU override import, sets the checkpointer's
-    ``model_param_checkpoint_type_map`` from ``lora`` so step checkpoints leave
-    out the frozen base, then applies the Dist-MoE and LoRA transforms.
+    fused SwiGLU override import, applies the Dist-MoE and LoRA transforms, then
+    sets the checkpointer's ``model_param_checkpoint_type_map`` from ``lora`` so
+    step checkpoints leave out the frozen base.
     """
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
@@ -681,14 +681,15 @@ def apply_gb300_lora_dist_moe(
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
     config.override.imports = []
+    config = apply_transforms(
+        config,
+        [DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False), lora],
+    )
     if config.checkpointer is not None:
         config.checkpointer.model_param_checkpoint_type_map = CallableFunction.Config(
             fn=lora.param_checkpoint_type
         )
-    return apply_transforms(
-        config,
-        [DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False), lora],
-    )
+    return config
 
 
 def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
