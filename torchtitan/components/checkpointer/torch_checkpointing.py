@@ -58,7 +58,6 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
-    build_model_views,
     EMA,
     export_state_dict,
     FilesystemCheckpointStorage,
@@ -279,9 +278,11 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self._storage = FilesystemCheckpointStorage()
         self.interval = config.interval
         self._validate_extra_state_keys(extra_states)
-        model, self._resume_base_view, self._fresh_start_view = build_model_views(
-            model_parts, config
-        )
+        (
+            model,
+            self._resume_base_model_view,
+            self._fresh_start_model_view,
+        ) = self._build_model_views(model_parts, config)
         self.states = dict(extra_states)
         self.states.update(
             {
@@ -418,9 +419,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                 hf_manager.close()
             states[MODEL].load_state_dict(self.sd_adapter.from_hf(hf_state))
         else:
-            # TODO: Without checkpointer.model_key_location, initializing a LoRA
-            # model from a native base checkpoint fails here: the checkpoint
-            # lacks the new adapter parameters.
             # An initial_load_path may be on other storage than the folder,
             # which the folder's manager cannot read.
             manager = self._manager

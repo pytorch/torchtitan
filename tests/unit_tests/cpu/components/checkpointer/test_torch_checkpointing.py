@@ -1600,8 +1600,9 @@ class _TinyLoRA(nn.Module):
         self.register_buffer("count", torch.rand(1))
 
 
-class TorchCheckpointingModelKeyLocationTest(unittest.TestCase):
-    """Real backend save/load with model_key_location on a world-size-1 group."""
+class TorchCheckpointingParamCheckpointTypeMapTest(unittest.TestCase):
+    """Real backend save/load with model_param_checkpoint_type_map on a
+    world-size-1 group."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1630,7 +1631,7 @@ class TorchCheckpointingModelKeyLocationTest(unittest.TestCase):
         folder: str,
         model: nn.Module,
         *,
-        model_key_location=None,
+        param_checkpoint_type=None,
         initial_load_path: str | None = None,
     ) -> TorchCheckpointingManager:
         config = TorchCheckpointingManager.Config(
@@ -1640,8 +1641,10 @@ class TorchCheckpointingModelKeyLocationTest(unittest.TestCase):
             last_save_model_only=False,
             initial_load_path=initial_load_path,
         )
-        if model_key_location is not None:
-            config.model_key_location = CallableFunction.Config(fn=model_key_location)
+        if param_checkpoint_type is not None:
+            config.model_param_checkpoint_type_map = CallableFunction.Config(
+                fn=param_checkpoint_type
+            )
         return config.build(
             model_parts=[model],
             optimizers=_Stateful(torch.zeros(1)),
@@ -1670,11 +1673,11 @@ class TorchCheckpointingModelKeyLocationTest(unittest.TestCase):
         manager.close()
         base = os.path.join(self.base_folder, "base", "step-0")
 
-        location = LoRATransform(trainable_modules=["vision"]).model_key_location
+        location = LoRATransform(trainable_modules=["vision"]).param_checkpoint_type
         model = _TinyLoRA()
         lora_init = model.lora_a.weight.clone()
         manager = self._build_manager(
-            "run", model, model_key_location=location, initial_load_path=base
+            "run", model, param_checkpoint_type=location, initial_load_path=base
         )
         # A fresh start reads the "base" and "checkpoint" params and buffers
         # from the base; the "new" adapter keeps its initial value.
@@ -1697,7 +1700,7 @@ class TorchCheckpointingModelKeyLocationTest(unittest.TestCase):
 
         resumed = _TinyLoRA()
         manager = self._build_manager(
-            "run", resumed, model_key_location=location, initial_load_path=base
+            "run", resumed, param_checkpoint_type=location, initial_load_path=base
         )
         self.assertTrue(manager.load())
         self.assertTrue(torch.equal(resumed.proj.weight, base_model.proj.weight))

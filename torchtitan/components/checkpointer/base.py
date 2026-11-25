@@ -16,6 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, cast, Literal, Protocol, runtime_checkable
 
 import torch
@@ -41,6 +42,23 @@ LR_SCHEDULER = "lr_scheduler"
 DATALOADER = "dataloader"
 TRAIN_STATE = "train_state"
 EMA = "ema"
+
+
+class ParamCheckpointType(StrEnum):
+    """Where a model parameter is loaded from and saved to; see
+    ``BaseCheckpointManager.Config.model_param_checkpoint_type_map``."""
+
+    BASE = "base"
+    """Not saved; every load reads it from the base, e.g. frozen pretrained
+    weights."""
+
+    CHECKPOINT = "checkpoint"
+    """Saved; a fresh start reads it from the base, a resume from the checkpoint,
+    e.g. pretrained weights that are trained."""
+
+    NEW = "new"
+    """Saved; a fresh start keeps its initial value, a resume reads it from the
+    checkpoint, e.g. LoRA adapters."""
 
 
 def purge_thread(
@@ -117,7 +135,8 @@ class ModelWrapper(Stateful):
            are refreshed in place to keep their storage stable while their values
            track the current parameters.
 
-    With ``key_filter``, the wrapper holds only the state dict keys it accepts.
+    With ``state_dict_key_filter``, the wrapper holds only the state dict keys
+    it accepts.
 
     Notes:
         - Calling `load_state_dict` updates the underlying modules and
@@ -131,10 +150,10 @@ class ModelWrapper(Stateful):
         self,
         model: nn.Module | list[nn.Module],
         *,
-        key_filter: Callable[[str], bool] | None = None,
+        state_dict_key_filter: Callable[[str], bool] | None = None,
     ) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
-        self.key_filter = key_filter
+        self.state_dict_key_filter = state_dict_key_filter
         self.cached_state_dict = self._get_state_dict()
 
     def _get_state_dict(self) -> dict[str, Any]:
@@ -143,7 +162,7 @@ class ModelWrapper(Stateful):
             k: v
             for model in self.model
             for k, v in model.state_dict().items()
-            if self.key_filter is None or self.key_filter(k)
+            if self.state_dict_key_filter is None or self.state_dict_key_filter(k)
         }
 
     def state_dict(self) -> dict[str, Any]:
@@ -168,52 +187,6 @@ class ModelWrapper(Stateful):
             model.load_state_dict(state_dict, strict=False)
         # Refresh the cache so state_dict() reflects the freshly loaded values.
         self.cached_state_dict = self._get_state_dict()
-
-
-def build_model_views(
-    model_parts: list[nn.Module], config: BaseCheckpointManager.Config
-) -> tuple[ModelWrapper, ModelWrapper | None, ModelWrapper | None]:
-    """Split the model state by ``config.model_key_location``.
-
-    Returns three views, each with every buffer:
-    - what step checkpoints hold and a resume reads: "checkpoint" and "new"
-      params;
-    - what a resume reads from the base first: "base" params;
-    - what a fresh start reads from the base: "base" and "checkpoint" params.
-    The last two are None when ``model_key_location`` is None.
-    """
-    if config.model_key_location is None:
-        return ModelWrapper(model_parts), None, None
-    # Checked here, not in Config.__post_init__: recipes set the field after
-    # building the config.
-    if not (config.initial_load_path or config.initial_load_in_hf):
-        raise ValueError(
-            "model_key_location requires initial_load_path or initial_load_in_hf "
-            "to load the 'base' parameters."
-        )
-    if not config.initial_load_model_only:
-        raise ValueError("model_key_location requires initial_load_model_only=True.")
-    model_key_location = config.model_key_location.build()
-    params = {
-        canonical_fqn(name): param
-        for part in model_parts
-        for name, param in part.named_parameters(remove_duplicate=False)
-    }
-    keys: dict[str, set[str]] = {"base": set(), "checkpoint": set(), "new": set()}
-    for key in params:
-        keys[model_key_location(key)].add(key)
-    trainable = sorted(key for key in keys["base"] if params[key].requires_grad)
-    if trainable:
-        raise ValueError(
-            "model_key_location puts trainable parameters in 'base', so "
-            f"checkpoints would not save them: {trainable[:5]}"
-        )
-    saved = keys["checkpoint"] | keys["new"]
-    return (
-        ModelWrapper(model_parts, key_filter=lambda key: key not in keys["base"]),
-        ModelWrapper(model_parts, key_filter=lambda key: key not in saved),
-        ModelWrapper(model_parts, key_filter=lambda key: key not in keys["new"]),
-    )
 
 
 def export_state_dict(
@@ -330,10 +303,10 @@ class BaseCheckpointManager(Configurable, ABC):
     purge_thread: threading.Thread | None
     purge_queue: queue.Queue[str | None]
     _storage: CheckpointStorage
-    # What a resume and a fresh start read from the base with model_key_location,
-    # or None when it is not set.
-    _resume_base_view: ModelWrapper | None = None
-    _fresh_start_view: ModelWrapper | None = None
+    # What a resume and a fresh start read from the base with
+    # model_param_checkpoint_type_map, or None when it is not set.
+    _resume_base_model_view: ModelWrapper | None = None
+    _fresh_start_model_view: ModelWrapper | None = None
 
     _STEP_DIR_PATTERN = r"step-(0|[1-9]\d*)"
 
@@ -365,13 +338,72 @@ class BaseCheckpointManager(Configurable, ABC):
                 "parameters (e.g. LoRA) yet: the export would drop the LoRA adapters."
             )
 
+    @staticmethod
+    def _build_model_views(
+        model_parts: list[nn.Module], config: BaseCheckpointManager.Config
+    ) -> tuple[ModelWrapper, ModelWrapper | None, ModelWrapper | None]:
+        """Split the model state by ``config.model_param_checkpoint_type_map``.
+
+        Returns three views, each with every buffer:
+        - what step checkpoints hold and a resume reads: CHECKPOINT and NEW
+          params;
+        - what a resume reads from the base first: BASE params;
+        - what a fresh start reads from the base: BASE and CHECKPOINT params.
+        The last two are None when ``model_param_checkpoint_type_map`` is None.
+        """
+        if config.model_param_checkpoint_type_map is None:
+            return ModelWrapper(model_parts), None, None
+        # Checked here, not in Config.__post_init__: recipes set the field after
+        # building the config.
+        if not (config.initial_load_path or config.initial_load_in_hf):
+            raise ValueError(
+                "model_param_checkpoint_type_map requires initial_load_path or "
+                "initial_load_in_hf to load the BASE parameters."
+            )
+        if not config.initial_load_model_only:
+            raise ValueError(
+                "model_param_checkpoint_type_map requires initial_load_model_only=True."
+            )
+        param_checkpoint_type = config.model_param_checkpoint_type_map.build()
+        params = {
+            canonical_fqn(name): param
+            for part in model_parts
+            for name, param in part.named_parameters(remove_duplicate=False)
+        }
+        keys: dict[ParamCheckpointType, set[str]] = {
+            checkpoint_type: set() for checkpoint_type in ParamCheckpointType
+        }
+        for key in params:
+            keys[ParamCheckpointType(param_checkpoint_type(key))].add(key)
+        trainable = sorted(
+            key for key in keys[ParamCheckpointType.BASE] if params[key].requires_grad
+        )
+        if trainable:
+            raise ValueError(
+                "model_param_checkpoint_type_map puts trainable parameters in BASE, "
+                f"so checkpoints would not save them: {trainable[:5]}"
+            )
+        base = keys[ParamCheckpointType.BASE]
+        new = keys[ParamCheckpointType.NEW]
+        saved = keys[ParamCheckpointType.CHECKPOINT] | new
+        return (
+            ModelWrapper(
+                model_parts, state_dict_key_filter=lambda key: key not in base
+            ),
+            ModelWrapper(
+                model_parts, state_dict_key_filter=lambda key: key not in saved
+            ),
+            ModelWrapper(model_parts, state_dict_key_filter=lambda key: key not in new),
+        )
+
     @torch.no_grad()
     def load(self, step: int = -1) -> bool:
         """Restore state from ``step``, or the latest checkpoint when ``-1``.
 
-        With ``model_key_location``, a fresh start reads every param that is not
-        "new" from the base. A resume reads the "base" params from the base, then
-        the rest from the folder checkpoint. Both read buffers from the base.
+        With ``model_param_checkpoint_type_map``, a fresh start reads every param
+        that is not NEW from the base. A resume reads the BASE params from the
+        base, then the rest from the folder checkpoint. Both read buffers from the
+        base.
         """
         with sl.log_trace_span("checkpoint_load"):
             has_checkpoint_folder = self._storage.isdir(self.folder)
@@ -395,8 +427,8 @@ class BaseCheckpointManager(Configurable, ABC):
                 # The "new" params keep their initialized values.
                 states = (
                     self._states_to_load(self.initial_load_model_only)
-                    if self._fresh_start_view is None
-                    else {MODEL: self._fresh_start_view}
+                    if self._fresh_start_model_view is None
+                    else {MODEL: self._fresh_start_model_view}
                 )
                 loads.append((*base, states))
             else:
@@ -406,18 +438,18 @@ class BaseCheckpointManager(Configurable, ABC):
                         f"checkpointer.load_step={load_step} not found at "
                         f"{checkpoint_id}"
                     )
-                if self._resume_base_view is not None:
+                if self._resume_base_model_view is not None:
                     # Checked before any collective; every rank sees the same
                     # folder and config.
                     if load_step == 0:
                         raise ValueError(
-                            "model_key_location cannot load a step-0 seed "
+                            "model_param_checkpoint_type_map cannot load a step-0 seed "
                             "checkpoint. Remove step-0 from the folder; the base "
                             "supplies the initial weights."
                         )
-                    # build_model_views requires a base.
+                    # _build_model_views requires a base.
                     base = cast(tuple[str, bool], self._resolve_base())
-                    loads.append((*base, {MODEL: self._resume_base_view}))
+                    loads.append((*base, {MODEL: self._resume_base_model_view}))
                 # Fault-tolerance restart: an existing folder checkpoint wins
                 # over initial_* so the same job args can be reused. This is
                 # the normal restart path, so it is logged, not warned about.
@@ -473,8 +505,8 @@ class BaseCheckpointManager(Configurable, ABC):
     def _resolve_base(self) -> tuple[str, bool] | None:
         """The ``(checkpoint_id, from_hf)`` a fresh start loads, or None.
 
-        With ``model_key_location``, every resume also loads the "base" params
-        from it.
+        With ``model_param_checkpoint_type_map``, every resume also loads the BASE
+        params from it.
         """
         from_hf = self.initial_load_in_hf
         if from_hf:
@@ -514,7 +546,7 @@ class BaseCheckpointManager(Configurable, ABC):
 
     def _full_model(self) -> ModelWrapper:
         """The whole model state, for model-only exports."""
-        if self._resume_base_view is None:
+        if self._resume_base_model_view is None:
             return self.states[MODEL]
         return ModelWrapper(self.states[MODEL].model)
 
@@ -751,8 +783,8 @@ class BaseCheckpointManager(Configurable, ABC):
         initial_load_path: str | None = None
         """Optional checkpoint path used when the output checkpoint folder is empty.
 
-        With ``model_key_location``, every load also reads the "base" params from
-        it.
+        With ``model_param_checkpoint_type_map``, every load also reads the BASE
+        params from it.
         """
 
         initial_load_model_only: bool = True
@@ -764,16 +796,17 @@ class BaseCheckpointManager(Configurable, ABC):
         initial_load_in_hf_quantized: bool = False
         """Whether the initial Hugging Face checkpoint uses quantized keys."""
 
-        model_key_location: CallableFunction.Config | None = None
-        """Where each model parameter lives: a function from the canonical FQN to
-        "base", "checkpoint", or "new". The base is ``initial_load_path``, or HF
-        weights with ``initial_load_in_hf``, and is required.
+        model_param_checkpoint_type_map: CallableFunction.Config | None = None
+        """Where each model parameter is loaded from and saved to: a function from
+        the canonical FQN to a ``ParamCheckpointType``. The base is
+        ``initial_load_path``, or HF weights with ``initial_load_in_hf``, and is
+        required.
 
-        - "base": not saved; every load reads it from the base, e.g. frozen
+        - BASE: not saved; every load reads it from the base, e.g. frozen
           pretrained weights.
-        - "checkpoint": saved; a fresh start reads it from the base, a resume from
+        - CHECKPOINT: saved; a fresh start reads it from the base, a resume from
           the checkpoint, e.g. pretrained weights that are trained.
-        - "new": saved; a fresh start keeps its initial value, a resume reads it
+        - NEW: saved; a fresh start keeps its initial value, a resume reads it
           from the checkpoint, e.g. LoRA adapters.
 
         Buffers are saved in step checkpoints. Base loads also read them, so a

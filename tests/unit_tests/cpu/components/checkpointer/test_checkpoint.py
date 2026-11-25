@@ -36,6 +36,7 @@ from torchtitan.components.checkpointer.base import (
     FilesystemCheckpointStorage,
     MODEL,
     ModelWrapper,
+    ParamCheckpointType,
     purge_thread,
 )
 from torchtitan.components.checkpointer.dcp import AsyncMode, CheckpointManager
@@ -1514,7 +1515,7 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.initial_load_in_hf = False
         manager.initial_load_in_hf_quantized = False
         # spec= turns this class attribute into a Mock, which load() treats as set.
-        manager._resume_base_view = None
+        manager._resume_base_model_view = None
         manager.states = {}
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
@@ -2151,8 +2152,9 @@ class _TinyLoRA(nn.Module):
         self.register_buffer("count", torch.rand(1))
 
 
-class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
-    """Real CheckpointManager save/load with model_key_location (no dcp mocking)."""
+class TestCheckpointManagerParamCheckpointTypeMap(unittest.TestCase):
+    """Real CheckpointManager save/load with model_param_checkpoint_type_map
+    (no dcp mocking)."""
 
     @classmethod
     def setUpClass(cls):
@@ -2178,7 +2180,7 @@ class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
         folder,
         model,
         *,
-        model_key_location=None,
+        param_checkpoint_type=None,
         initial_load_path=None,
         initial_load_model_only=True,
     ):
@@ -2191,8 +2193,10 @@ class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
             initial_load_model_only=initial_load_model_only,
         )
         # Set after construction, as recipes do.
-        if model_key_location is not None:
-            config.model_key_location = CallableFunction.Config(fn=model_key_location)
+        if param_checkpoint_type is not None:
+            config.model_param_checkpoint_type_map = CallableFunction.Config(
+                fn=param_checkpoint_type
+            )
         return CheckpointManager(
             config=config,
             model_parts=[model],
@@ -2212,11 +2216,11 @@ class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
         manager.close()
         base = os.path.join(self.base_temp_dir, "base", "step-0")
 
-        location = LoRATransform(trainable_modules=["vision"]).model_key_location
+        location = LoRATransform(trainable_modules=["vision"]).param_checkpoint_type
         model = _TinyLoRA()
         lora_init = model.lora_a.weight.clone()
         manager = self._build_manager(
-            "run", model, model_key_location=location, initial_load_path=base
+            "run", model, param_checkpoint_type=location, initial_load_path=base
         )
         # A fresh start reads the "base" and "checkpoint" params and buffers
         # from the base; the "new" adapter keeps its initial value.
@@ -2241,7 +2245,7 @@ class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
 
         resumed = _TinyLoRA()
         manager = self._build_manager(
-            "run", resumed, model_key_location=location, initial_load_path=base
+            "run", resumed, param_checkpoint_type=location, initial_load_path=base
         )
         self.assertTrue(manager.load())
         self.assertTrue(torch.equal(resumed.proj.weight, base_model.proj.weight))
@@ -2251,26 +2255,28 @@ class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
         self.assertTrue(torch.equal(resumed.count, model.count))
         manager.close()
 
-    def test_invalid_model_key_location_raises(self):
+    def test_invalid_param_checkpoint_type_map_raises(self):
         with self.assertRaisesRegex(ValueError, "requires initial_load_path"):
             self._build_manager(
-                "run", _TinyLoRA(), model_key_location=lambda key: "new"
+                "run",
+                _TinyLoRA(),
+                param_checkpoint_type=lambda key: ParamCheckpointType.NEW,
             )
         with self.assertRaisesRegex(ValueError, "requires initial_load_model_only"):
             self._build_manager(
                 "run",
                 _TinyLoRA(),
-                model_key_location=lambda key: "new",
+                param_checkpoint_type=lambda key: ParamCheckpointType.NEW,
                 initial_load_path="/base",
                 initial_load_model_only=False,
             )
         with self.assertRaisesRegex(
-            ValueError, r"trainable parameters in 'base'.*lora_a\.weight"
+            ValueError, r"trainable parameters in BASE.*lora_a\.weight"
         ):
             self._build_manager(
                 "run",
                 _TinyLoRA(),
-                model_key_location=lambda key: "base",
+                param_checkpoint_type=lambda key: ParamCheckpointType.BASE,
                 initial_load_path="/base",
             )
         # A step-0 seed in the folder holds the init, not the base, so it must
@@ -2282,7 +2288,7 @@ class TestCheckpointManagerModelKeyLocation(unittest.TestCase):
         manager = self._build_manager(
             "seeded",
             _TinyLoRA(),
-            model_key_location=lambda key: "new",
+            param_checkpoint_type=lambda key: ParamCheckpointType.NEW,
             initial_load_path=os.path.join(self.base_temp_dir, "base", "step-0"),
         )
         with self.assertRaisesRegex(ValueError, "cannot load a step-0 seed"):

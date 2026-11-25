@@ -14,6 +14,7 @@ from .base import (
     MODEL,
     ModelWrapper,
     OPTIMIZER,
+    ParamCheckpointType,
     TRAIN_STATE,
 )
 from .dcp import AsyncMode, CheckpointManager
@@ -30,5 +31,6 @@ __all__ = [
     "MODEL",
     "ModelWrapper",
     "OPTIMIZER",
+    "ParamCheckpointType",
     "TRAIN_STATE",
 ]

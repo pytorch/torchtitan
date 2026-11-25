@@ -35,7 +35,6 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
-    build_model_views,
     EMA,
     export_state_dict,
     FilesystemCheckpointStorage,
@@ -155,9 +154,11 @@ class CheckpointManager(BaseCheckpointManager):
         self._storage = FilesystemCheckpointStorage()
 
         self._validate_extra_state_keys(extra_states)
-        model, self._resume_base_view, self._fresh_start_view = build_model_views(
-            model_parts, config
-        )
+        (
+            model,
+            self._resume_base_model_view,
+            self._fresh_start_model_view,
+        ) = self._build_model_views(model_parts, config)
         self.states = dict(extra_states)
         self.states.update(
             {

@@ -662,7 +662,9 @@ def apply_gb300_lora_dist_moe(
 
     Sets local compile of the loss only, remat that saves the Dist-MoE save
     regions, the Dist-MoE runtime budgets and 1800 s comm timeouts, drops the
-    fused SwiGLU override import, then applies the Dist-MoE and LoRA transforms.
+    fused SwiGLU override import, sets the checkpointer's
+    ``model_param_checkpoint_type_map`` from ``lora`` so step checkpoints leave
+    out the frozen base, then applies the Dist-MoE and LoRA transforms.
     """
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
@@ -679,6 +681,10 @@ def apply_gb300_lora_dist_moe(
     config.comm.init_timeout_seconds = 1800
     config.comm.train_timeout_seconds = 1800
     config.override.imports = []
+    if config.checkpointer is not None:
+        config.checkpointer.model_param_checkpoint_type_map = CallableFunction.Config(
+            fn=lora.param_checkpoint_type
+        )
     return apply_transforms(
         config,
         [DistMoeTransform(expert_precision="bf16", inplace_wgrad_accum=False), lora],
@@ -768,11 +774,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
             export_dtype="bfloat16",
         ),
     )
-    lora = _ultradata_lora_sft_transform()
-    config.checkpointer.model_key_location = CallableFunction.Config(
-        fn=lora.model_key_location
-    )
-    config = apply_gb300_lora_dist_moe(config, lora)
+    config = apply_gb300_lora_dist_moe(config, _ultradata_lora_sft_transform())
     # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
