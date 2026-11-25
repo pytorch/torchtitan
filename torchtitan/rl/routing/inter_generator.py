@@ -245,6 +245,12 @@ class InterGeneratorRouter(Configurable):
 
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""
+        # TODO: evaluate if we need this group-level release, since we already release
+        # at the end of every rollout. Two things only this release does today:
+        #   - forget the weight version each group first ran under. The group's later requests are
+        #     tagged with it, so they reuse the group's cached prompt after a weight update
+        #     (`Generator.release_groups`);
+        #   - free the held KV under non-sticky routing (see `release_session`).
         await self._fanout("release_groups", group_ids)
 
     async def close_generators(self) -> list[Any | BaseException]:

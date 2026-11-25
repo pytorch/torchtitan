@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+from torch.export import register_dataclass
 
 from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -95,6 +96,15 @@ class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
                 spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
+# pytree registration is per class; subclasses are not covered by the base.
+register_dataclass(UlyssesLinearAttentionMetadata)
+register_dataclass(ContextParallelLinearAttentionMetadata)
+# TODO: delete once Attention Gym registers ContextParallelRouting:
+# https://github.com/meta-pytorch/attention-gym/issues/850
+if not is_missing_kernel(ContextParallelRouting):
+    register_dataclass(ContextParallelRouting)
+
+
 def prepare_cp_linear_attention_metadata(
     attention_metadata: LinearAttentionMetadata,
     *,
@@ -123,6 +133,12 @@ def prepare_cp_linear_attention_metadata(
             f"{family} metadata preparation requires an active multi-rank CP "
             "mesh axis."
         )
+    # Upper bound on token ranges per rank, so routing shapes stay fixed across
+    # batches: contiguous sharding gives one range, head-tail gives a head and a
+    # tail chunk. PTRR is rejected for linear attention at config time.
+    max_num_fragments = 1 if permutation is None else 2
+    # Each fragment boundary can split one document into two subsequences.
+    max_subsequences = len(cu_seqlens_global) - 1 + max_num_fragments - 1
     routing = ContextParallelRouting.from_fragments(
         cu_seqlens_global=cu_seqlens_global,
         fragments=get_token_fragments(
@@ -132,6 +148,8 @@ def prepare_cp_linear_attention_metadata(
         ),
         cp_rank=dist.get_rank(group),
         device=device,
+        slots=max_num_fragments,
+        max_subsequences=max_subsequences,
         conv_history=attention_metadata.num_conv_history_tokens,
     )
     return ContextParallelLinearAttentionMetadata(

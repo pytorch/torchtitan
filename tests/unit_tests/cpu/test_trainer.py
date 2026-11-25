@@ -23,6 +23,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.optim import GradientClipper, Optim
 from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
+from torchtitan.distributed.sharding_backend import FullyShardBackend
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
@@ -855,7 +856,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
         pp_enabled=False,
         ep_enabled=False,
         get_optional_mesh=lambda name: None,
-        flex_shard_enabled=False,
+        sharding_backend=FullyShardBackend.Config().build(),
     )
     optim.parameters = []
     optim.optimizers = optimizers
@@ -866,7 +867,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
         return torch.tensor(2.0)
 
     with patch(
-        "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
+        "torchtitan.distributed.utils.clip_grad_norm_",
         side_effect=clip_grad_norm,
     ):
         grad_norm = optim._update(torch.tensor(1.0))

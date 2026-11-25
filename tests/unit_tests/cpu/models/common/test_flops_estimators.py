@@ -102,6 +102,7 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
     "family,flavor",
     [
         ("kimi_k2_7", "debugmodel"),
+        ("qwen3_8_flash_next", "debugmodel_mm"),
         ("muse_glimmer", "debugmodel_mm"),
         ("muse_spark", "debugmodel_mm"),
     ],
