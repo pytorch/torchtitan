@@ -14,8 +14,8 @@ from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
+from torchtitan.models.common.mtp import roll_mtp_sequence
 from torchtitan.models.deepseek_v3 import build_model_config
-from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
