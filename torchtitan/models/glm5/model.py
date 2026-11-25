@@ -589,9 +589,11 @@ class Glm5Model(DeepSeekV3Model):
             if index_sources[layer] not in local_layers
         }
         indices_by_source: dict[int, torch.Tensor] = {}
-        aux_loss_denominator = (
-            None if aux_loss_denominators is None else aux_loss_denominators[0]
-        )
+        # Global token counts are trainer bookkeeping, not sharded activations.
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         if external_sources:
             if pipeline_indices_TS is None:
                 raise ValueError("this GLM-5 PP stage requires DSA indices")
@@ -647,11 +649,12 @@ class Glm5Model(DeepSeekV3Model):
                 valid_mask,
                 depth_attention_mask,
             ) in enumerate(depth_inputs, 1):
-                aux_denom = (
-                    None
-                    if aux_loss_denominators is None
-                    else aux_loss_denominators[depth]
-                )
+                with spmd.no_typecheck():
+                    aux_denom = (
+                        None
+                        if aux_loss_denominators is None
+                        else aux_loss_denominators[depth]
+                    )
                 with torch.set_grad_enabled(torch.is_grad_enabled() and not kl_only):
                     mtp_embed = self.tok_embeddings(depth_tokens)
                 mtp_result = layer(
