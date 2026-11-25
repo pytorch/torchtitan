@@ -24,12 +24,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import (
-    DebugConfig,
-    OverrideConfig,
-    PrecisionConfig,
-    TrainingConfig,
-)
+from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -120,7 +115,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
@@ -139,6 +134,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -222,7 +218,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 ),
             ),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
         # like the other debug configs.
@@ -243,6 +239,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             # forward (precision.param_dtype="bfloat16" is the default).
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -313,7 +310,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 ),
             ),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -329,6 +326,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -468,7 +466,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 ),
             ),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -486,6 +484,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             # forward (precision.param_dtype="bfloat16" is the default).
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -545,10 +544,9 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 ),
             ),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -562,6 +560,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -675,10 +674,9 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
-        precision=PrecisionConfig(dtype="bfloat16"),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -692,6 +690,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
             ),
             # Kimi K3 currently supports FSDP data parallelism but not TP.
@@ -787,7 +786,7 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
             ),
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -803,6 +802,7 @@ def rl_grpo_deepseek_v3_debug_varlen(*, seq_len: int = 2048) -> Controller.Confi
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
             ),
             parallelism=trainer_parallelism,
@@ -848,9 +848,6 @@ def _configure_ci(
     config.generator.sampling.max_tokens = max_generated_tokens
     config.generator.gpu_memory_limit = 0.8
     config.metrics.loggers = []
-    config.rollouter.worker.token_env.max_rollout_tokens = (
-        config.trainer.model.max_context_length
-    )
     if use_hf_assets_from_env:
         assets_path = os.environ.get("TORCHTITAN_TEST_HF_ASSETS_PATH")
         if assets_path:
@@ -927,6 +924,8 @@ def rl_grpo_pp2_interleaved1f1b_fsdp2_gen_tp2() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 2
+    # TODO: drop once trainer ranks read RDMA microbatches in pipeline-step groups.
+    config.async_loop.batcher.rdma_min_tensor_bytes = None
     # Tied embeddings cannot be split across pipeline stages, and the generator
     # must hold the same untied weights as the trainer.
     for model_config in (config.trainer.model, config.generator.model):

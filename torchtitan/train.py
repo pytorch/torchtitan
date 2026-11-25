@@ -8,6 +8,7 @@ import logging
 from typing import cast
 
 import torch
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.config import ConfigLoader
 from torchtitan.observability import structured_logger as sl
@@ -18,6 +19,9 @@ from torchtitan.trainer import Trainer
 logger = logging.getLogger(__name__)
 
 
+# On main(), not Trainer methods, so config loading and seed-checkpoint errors
+# also reach the torchelastic error file.
+@record
 def main() -> None:
     """Main entry point for training."""
     init_logger()
@@ -57,7 +61,11 @@ def main() -> None:
             trainer.train()
     except Exception:
         if trainer:
-            trainer.close()
+            try:
+                trainer.close()
+            except Exception:
+                # Keep the original failure as the recorded root cause.
+                logger.exception("trainer.close() failed during error cleanup")
         raise
     else:
         trainer.close()

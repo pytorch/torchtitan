@@ -343,10 +343,11 @@ class KDA(LinearAttention):
                     f"conv_kernel_size must be positive, got {self.conv_kernel_size}"
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
+        def flops(self, positions: torch.Tensor) -> int:
             from torchtitan.models.common.flops import delta_rule_flops_per_token
 
-            return delta_rule_flops_per_token(
+            # The recurrent state has a fixed size, so every query costs the same.
+            return positions.numel() * delta_rule_flops_per_token(
                 num_heads=self.n_heads,
                 key_head_dim=self.head_dim,
                 v_head_dim=self.head_dim,

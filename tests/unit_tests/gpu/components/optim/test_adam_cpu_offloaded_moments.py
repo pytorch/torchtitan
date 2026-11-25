@@ -158,7 +158,8 @@ class TestAdamCPUOffloadedMoments(DTensorTestBase):
             torch._C._accelerator_setAllocatorSettings(
                 "pinned_max_round_threshold_mb:1"
             )
-            self._build(moment_dtype="parameter", fraction=1.0, hidden=1536)
+            # Kept alive so the second build cannot reuse its unrounded blocks.
+            _first = self._build(moment_dtype="parameter", fraction=1.0, hidden=1536)
             torch._C._accelerator_setAllocatorSettings(
                 "pinned_max_round_threshold_mb:1024"
             )

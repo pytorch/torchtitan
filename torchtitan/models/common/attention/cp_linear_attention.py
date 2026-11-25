@@ -6,7 +6,9 @@
 
 """Context-parallel pieces shared by the linear-attention families."""
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -157,3 +159,34 @@ def prepare_cp_linear_attention_metadata(
         num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
         cp_routing=routing,
     )
+
+
+def check_num_head_chunks(num_head_chunks: int) -> None:
+    """Raise unless ``num_head_chunks`` is positive."""
+    if num_head_chunks < 1:
+        raise ValueError(f"num_head_chunks must be positive, got {num_head_chunks}")
+
+
+def chunk_heads(
+    kernel: Callable[..., tuple[torch.Tensor, Any]],
+    inputs_1TH: Sequence[torch.Tensor],
+    num_head_chunks: int,
+    **kwargs: Any,
+) -> torch.Tensor:
+    """Call a CP linear-attention ``kernel`` once per contiguous chunk of heads.
+
+    Heads are independent, so the output is unchanged and each call's kernel
+    workspace shrinks by ``num_head_chunks``. ``inputs_1TH`` are
+    ``[1, T, H, ...]``, key heads first; contiguous chunks keep each value head
+    with its key head.
+
+    TODO(acisseJZhong, meta-pytorch/attention-gym#986): Move into
+    attention-gym so the chunks share one state exchange.
+    """
+    # validate_context_parallel checks this at config time.
+    assert inputs_1TH[0].shape[2] % num_head_chunks == 0
+    if num_head_chunks == 1:
+        return kernel(*inputs_1TH, **kwargs)[0]
+    chunks = zip(*(t.chunk(num_head_chunks, dim=2) for t in inputs_1TH))
+    outputs_1THV = [kernel(*chunk, **kwargs)[0] for chunk in chunks]
+    return torch.cat(outputs_1THV, dim=2)

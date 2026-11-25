@@ -26,7 +26,7 @@ from torchtitan.distributed.accelerator_graph import wrap_with_accelerator_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability.metrics import compute_training_performance_metrics
-from torchtitan.observability.profiler import CuspyProfilerConfig, Profiler
+from torchtitan.observability.profiler import CuspyTraceProfiler, Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import (
@@ -625,21 +625,17 @@ def test_accelerator_graph_wrapper_preserves_structured_args_and_kwargs():
     [
         (Profiler.Config(), None),
         (
-            Profiler.Config(enable_profiling=True, cuspy=CuspyProfilerConfig()),
+            Profiler.Config(trace=CuspyTraceProfiler.Config()),
             {"backend": "cupti", "key_by": "auto"},
         ),
         (
             Profiler.Config(
-                enable_profiling=True,
-                cuspy=CuspyProfilerConfig(enable_event_node_ids=True),
+                trace=CuspyTraceProfiler.Config(enable_event_node_ids=True)
             ),
             {"backend": "cupti", "key_by": "exec"},
         ),
         (
-            Profiler.Config(
-                enable_profiling=True,
-                cuspy=CuspyProfilerConfig(record_py_stacks=True),
-            ),
+            Profiler.Config(trace=CuspyTraceProfiler.Config(record_py_stacks=True)),
             {"backend": "cupti", "key_by": "auto", "record_py_stacks": True},
         ),
     ],
@@ -954,7 +950,10 @@ def no_registered_aux_losses():
 
 @pytest.mark.parametrize("failure_kind", ["none", "oom", "wrapped_oom"])
 def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
-    """An OOM ending train() writes the exit memory snapshot; a normal exit does not."""
+    """train() passes the failure that ended it, or None, to the memory snapshot.
+
+    ``MemorySnapshotProfiler.close`` writes the exit snapshot only on an OOM.
+    """
     oom = torch.OutOfMemoryError("test OOM")
     failure = None
     if failure_kind == "oom":
@@ -964,8 +963,8 @@ def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
         failure = RuntimeError("pipeline failure")
         failure.__cause__ = oom
     profiler = Profiler(Profiler.Config())
-    memory_profiler = MagicMock()
-    profiler.memory_profiler = memory_profiler
+    memory_snapshot = MagicMock()
+    profiler.memory_snapshot = memory_snapshot
     engine = SimpleNamespace(
         num_completed_steps=0,
         load_checkpoint=MagicMock(),
@@ -987,13 +986,13 @@ def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
 
     if failure is None:
         with patch("torchtitan.trainer.torch.distributed.get_rank", return_value=1):
-            Trainer.train.__wrapped__(trainer)
-        memory_profiler.step.assert_not_called()
+            Trainer.train(trainer)
+        memory_snapshot.close.assert_called_once_with(None)
     else:
         with pytest.raises(type(failure)) as excinfo:
-            Trainer.train.__wrapped__(trainer)
+            Trainer.train(trainer)
         assert excinfo.value is failure
-        memory_profiler.step.assert_called_once_with(exit_ctx=True)
+        memory_snapshot.close.assert_called_once_with(failure)
 
 
 @pytest.fixture

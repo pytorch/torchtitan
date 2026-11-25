@@ -38,12 +38,12 @@ from torchtitan.components.loss import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.deepseek_v3.mtp import (
+from torchtitan.models.common.mtp import (
     get_mtp_token_counts,
     MTPCrossEntropyLoss,
-    MTPDecoder,
     roll_mtp_sequence,
 )
+from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3 import build_model_config
 
 
@@ -169,7 +169,7 @@ class TestLoss(unittest.TestCase):
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
         routing_token_counts = torch.tensor([6, 4, 2])  # one per depth
         with patch(
-            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+            "torchtitan.models.common.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
             input_tokens, loss_labels, extra_kwargs, _ = model.preprocess_inputs(
@@ -1011,7 +1011,7 @@ class _AddMTPBlock(nn.Module):
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 
-class _FakeMTPDecoder(MTPDecoder):
+class _FakeMTPDecoder(DeepSeekV3Model):
     def __init__(self, *, skip_lm_head: bool, num_mtp_layers: int = 1):
         nn.Module.__init__(self)
         self._skip_lm_head = skip_lm_head
