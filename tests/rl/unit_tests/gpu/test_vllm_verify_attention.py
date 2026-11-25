@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from torchtitan.rl.generator.vllm.attention.attention import (
-    _MIN_VERIFY_ROWS_ON_DECODE_KERNEL,
     TorchTitanVarlenInnerAttentionImpl,
 )
 from vllm.config import set_current_vllm_config, VllmConfig
@@ -47,9 +46,8 @@ def test_forward_matches_causal_attention(
     K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
     writes them; the reference runs on the dequantized values.
     """
-    takes_decode_kernel = (
-        is_uniform_verify and len(query_lens) >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
-    )
+    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`).
+    takes_decode_kernel = is_uniform_verify and len(query_lens) >= 8
     if kv_cache_dtype == "fp8" and takes_decode_kernel:
         # TODO: drop once `_verify_rows_as_decode` passes the fp8 descales.
         pytest.skip(
