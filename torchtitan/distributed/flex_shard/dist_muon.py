@@ -16,6 +16,7 @@ from typing import Any, cast, Literal, NoReturn, overload
 
 import torch
 from torch import Tensor
+from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor._utils import _compute_local_shape_and_global_offset
 from torch.distributed.tensor.placement_types import _StridedShard
@@ -48,6 +49,7 @@ from .optimizer_reshard import (
     BucketConfig,
     ComputeLayout,
     Owned,
+    StorageLayout,
 )
 
 
@@ -131,6 +133,7 @@ def _initialize_dist_muon(
     *,
     compute_sharding_by_fqn: Mapping[str, ComputeLayout],
     bucket_configs: Sequence[BucketConfig],
+    storage_layout_by_fqn: Mapping[str, StorageLayout],
 ) -> None:
     """Initialize FlexShard for one newly constructed DistMuon.
 
@@ -152,15 +155,15 @@ def _initialize_dist_muon(
             if fqn not in compute_sharding_by_fqn:
                 raise ValueError(f"missing compute sharding for Muon parameter {fqn!r}")
 
-    tensor_device = optimizer._validate_parameter_storage()
+    tensor_device = optimizer._validate_parameter_storage(storage_layout_by_fqn)
     compute_layouts = optimizer._build_parameter_compute_layouts(
-        compute_sharding_by_fqn
+        compute_sharding_by_fqn, storage_layout_by_fqn
     )
     optimizer._specs = _bind_bucket_configs(
         tuple(bucket_configs),
         compute_layouts,
         get_fqn=lambda layout: layout.fqn,
-        get_storage_dtensor=lambda layout: layout.param,
+        get_storage_dtensor=lambda layout: layout.storage,
         requires_redistribution=lambda layout: (not layout.storage_is_compute_ready),
         get_redistribution_storage_mesh_axis=lambda layout: (
             layout.redistribution_storage_mesh_axis
@@ -183,8 +186,12 @@ class DistMuon(Optimizer):
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after resharding is applied. Every configured parameter must
-    have a layout-compatible DTensor gradient before each rank enters
-    ``step()``.
+    have a gradient with its layout before each rank enters ``step()``.
+
+    A parameter is either a DTensor, whose mesh and placements give its
+    storage layout, or a plain local shard with a ``StorageLayout`` in
+    ``storage_layout_by_fqn``. A plain parameter's gradient and momentum are
+    plain tensors with its local shape.
 
     Matrix-batch compute views use batched BF16 kernels. They implement the
     same mathematical update as ``torch.optim.Muon`` running one matrix at a
@@ -230,6 +237,7 @@ class DistMuon(Optimizer):
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
         ns_device: Literal["accelerator"] | None = None,
+        storage_layout_by_fqn: Mapping[str, StorageLayout] | None = None,
     ) -> None:
         self._ns_device = self._resolve_ns_device(ns_device)
         defaults = {
@@ -251,6 +259,7 @@ class DistMuon(Optimizer):
             self,
             compute_sharding_by_fqn=compute_sharding_by_fqn,
             bucket_configs=bucket_configs,
+            storage_layout_by_fqn=storage_layout_by_fqn or {},
         )
 
     @staticmethod
@@ -319,14 +328,25 @@ class DistMuon(Optimizer):
             ):
                 raise ValueError(f"unsupported DistMuon group {group_index}")
 
-    def _validate_parameter_storage(self) -> torch.device:
+    def _validate_parameter_storage(
+        self, storage_layout_by_fqn: Mapping[str, StorageLayout] | None = None
+    ) -> torch.device:
+        storage_layout_by_fqn = storage_layout_by_fqn or {}
         local_devices = set()
         for group in self.param_groups:
-            for param in group["params"]:
-                if not isinstance(param, DTensor):
-                    raise TypeError("DistMuon requires DTensor parameters")
-                local_device = param.to_local().device
-                local_devices.add(local_device)
+            for fqn, param in zip(group["param_names"], group["params"], strict=True):
+                if isinstance(param, DTensor):
+                    if fqn in storage_layout_by_fqn:
+                        raise ValueError(
+                            f"Muon parameter {fqn!r} is a DTensor, whose "
+                            "placements give its storage layout"
+                        )
+                elif fqn not in storage_layout_by_fqn:
+                    raise TypeError(
+                        "DistMuon requires DTensor parameters or a StorageLayout "
+                        f"for each plain one; got none for {fqn!r}"
+                    )
+                local_devices.add(_local(param).device)
         if len(local_devices) != 1:
             raise ValueError("DistMuon requires one device per process")
         return local_devices.pop()
@@ -334,6 +354,7 @@ class DistMuon(Optimizer):
     def _build_parameter_compute_layouts(
         self,
         compute_sharding_by_fqn: Mapping[str, ComputeLayout],
+        storage_layout_by_fqn: Mapping[str, StorageLayout],
     ) -> tuple[_ParameterComputeLayout, ...]:
         parameters = []
         seen_names = set()
@@ -351,9 +372,14 @@ class DistMuon(Optimizer):
         compute_layouts = []
         for group_index, fqn, param in parameters:
             compute_layout = compute_sharding_by_fqn[fqn]
+            storage = (
+                param
+                if isinstance(param, DTensor)
+                else _LocalShardStorage(fqn, param, storage_layout_by_fqn[fqn])
+            )
             resolved_transition = _resolve_storage_to_compute_transition(
                 fqn,
-                param,
+                storage,
                 compute_layout,
             )
             compute_dtype = compute_layout.compute_dtype
@@ -369,10 +395,13 @@ class DistMuon(Optimizer):
                 _ParameterComputeLayout(
                     fqn=fqn,
                     param=param,
+                    storage=storage,
                     group_index=group_index,
-                    storage_mesh_ranks=_device_mesh_ranks(param.device_mesh),
-                    storage_layout_signature=_storage_layout_signature(param),
-                    local_storage_signature=_local_storage_signature(param.to_local()),
+                    storage_mesh_ranks=_device_mesh_ranks(storage.device_mesh),
+                    storage_layout_signature=_storage_layout_signature(storage),
+                    local_storage_signature=_local_storage_signature(
+                        storage.to_local()
+                    ),
                     compute_sharding=resolved_transition.compute_sharding,
                     storage_to_compute_transition=resolved_transition.storage_to_compute_transition,
                     resolved_compute_layout_signature=(
@@ -395,7 +424,7 @@ class DistMuon(Optimizer):
             compute_layouts,
             self._specs,
             get_fqn=lambda item: item.fqn,
-            get_storage_dtensor=lambda item: item.param,
+            get_storage_dtensor=lambda item: item.storage,
             requires_redistribution=lambda item: (not item.storage_is_compute_ready),
             resolve_redistribution_plans=partial(
                 _resolve_muon_redistribution_plans,
@@ -413,11 +442,11 @@ class DistMuon(Optimizer):
             elif type(layout.compute_sharding) is BlockShard:
                 regions = (
                     _dtensor_storage_region_for_participant(
-                        layout.param, layout.param.device_mesh.get_rank()
+                        layout.storage, layout.storage.device_mesh.get_rank()
                     ),
                 )
             else:
-                local_shape = tuple(layout.param.to_local().shape)
+                local_shape = tuple(layout.storage.to_local().shape)
                 regions = (
                     _TensorRegion(
                         offsets=(0,) * len(local_shape),
@@ -462,17 +491,18 @@ class DistMuon(Optimizer):
     def _plan_item_signature(
         self, compute_layout: _ParameterComputeLayout
     ) -> tuple[Any, ...]:
+        storage = compute_layout.storage
         return (
             compute_layout.fqn,
-            tuple(compute_layout.param.shape),
-            tuple(compute_layout.param.stride()),
-            str(compute_layout.param.dtype),
-            compute_layout.param.to_local().device.type,
+            tuple(storage.shape),
+            tuple(storage.stride()),
+            str(storage.dtype),
+            storage.to_local().device.type,
             compute_layout.storage_is_compute_ready,
             compute_layout.compute_sharding,
             compute_layout.resolved_compute_layout_signature,
-            _device_mesh_ranks(compute_layout.param.device_mesh),
-            tuple(map(str, compute_layout.param.placements)),
+            _device_mesh_ranks(storage.device_mesh),
+            tuple(map(str, storage.placements)),
             self._group_signature(compute_layout),
         )
 
@@ -512,7 +542,7 @@ class DistMuon(Optimizer):
             if (
                 changed_parameter_storage_fqn is None
                 and compute_layout.storage_is_compute_ready
-                and _local_storage_signature(compute_layout.param.to_local())
+                and _local_storage_signature(compute_layout.storage.to_local())
                 != compute_layout.local_storage_signature
             ):
                 changed_parameter_storage_fqn = compute_layout.fqn
@@ -520,9 +550,7 @@ class DistMuon(Optimizer):
             grad = compute_layout.param.grad
             if grad is None:
                 missing_gradients.append(compute_layout.fqn)
-            elif not isinstance(grad, DTensor) or not self._has_storage_layout(
-                grad, compute_layout
-            ):
+            elif not self._has_storage_layout(grad, compute_layout):
                 if changed_gradient_storage_fqn is None:
                     changed_gradient_storage_fqn = compute_layout.fqn
             elif gradients is not None:
@@ -558,10 +586,18 @@ class DistMuon(Optimizer):
 
     @staticmethod
     def _has_storage_layout(
-        tensor: DTensor, compute_layout: _ParameterComputeLayout
+        tensor: Tensor, compute_layout: _ParameterComputeLayout
     ) -> bool:
+        if not isinstance(compute_layout.param, DTensor):
+            # A plain parameter's gradient and momentum are plain local shards
+            # laid out as the parameter.
+            return not isinstance(tensor, DTensor) and _local_layout_signature(
+                tensor
+            ) == _local_layout_signature(compute_layout.param)
+        if not isinstance(tensor, DTensor):
+            return False
         mesh_matches = (
-            tensor.device_mesh is compute_layout.param.device_mesh
+            tensor.device_mesh is compute_layout.storage.device_mesh
             or _device_mesh_ranks(tensor.device_mesh)
             == compute_layout.storage_mesh_ranks
         )
@@ -573,16 +609,14 @@ class DistMuon(Optimizer):
         momentum = self.state.get(compute_layout.param, {}).get("momentum_buffer")
         if momentum is None:
             return
-        if not isinstance(momentum, DTensor) or not self._has_storage_layout(
-            momentum, compute_layout
-        ):
+        if not self._has_storage_layout(momentum, compute_layout):
             raise RuntimeError(
                 f"momentum storage layout changed for {compute_layout.fqn!r}"
             )
 
     def _momentum(
-        self, compute_layout: _ParameterComputeLayout, grad: DTensor
-    ) -> DTensor:
+        self, compute_layout: _ParameterComputeLayout, grad: Tensor
+    ) -> Tensor:
         state = self.state[compute_layout.param]
         if "momentum_buffer" not in state:
             state["momentum_buffer"] = torch.zeros_like(
@@ -592,17 +626,14 @@ class DistMuon(Optimizer):
 
     def _local_gradient_and_momentum(
         self, compute_layout: _ParameterComputeLayout
-    ) -> tuple[Tensor, Tensor, DTensor, dict[str, Any]]:
-        grad = cast(DTensor, compute_layout.param.grad)
-        momentum_state = cast(
-            DTensor,
-            self.state[compute_layout.param]["momentum_buffer"],
-        )
-        local_reference = compute_layout.param.to_local()
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Any]]:
+        grad = cast(Tensor, compute_layout.param.grad)
+        momentum_state = self.state[compute_layout.param]["momentum_buffer"]
+        local_reference = compute_layout.storage.to_local()
         if compute_layout.storage_is_compute_ready:
             local_reference = local_reference.detach()
-        local_grad = grad.to_local().view_as(local_reference)
-        local_momentum = momentum_state.to_local().view_as(local_reference)
+        local_grad = _local(grad).view_as(local_reference)
+        local_momentum = _local(momentum_state).view_as(local_reference)
         group = self._group(compute_layout)
         return local_grad, local_momentum, momentum_state, group
 
@@ -654,7 +685,7 @@ class DistMuon(Optimizer):
         self, compute_layout: _ParameterComputeLayout, direction: Tensor
     ) -> None:
         group = self._group(compute_layout)
-        local_param = compute_layout.param.to_local()
+        local_param = compute_layout.storage.to_local()
         if compute_layout.storage_is_compute_ready:
             local_param = local_param.detach()
         row_scale = self._direction_row_scale_by_fqn.get(compute_layout.fqn)
@@ -675,7 +706,7 @@ class DistMuon(Optimizer):
         compute_layout: _ParameterComputeLayout,
     ) -> tuple[torch.Size, torch.dtype, torch.device]:
         assert compute_layout.storage_is_compute_ready
-        tensor = compute_layout.param.to_local().detach()
+        tensor = compute_layout.storage.to_local().detach()
         return tensor.shape, tensor.dtype, tensor.device
 
 
@@ -962,10 +993,77 @@ def _resolve_storage_to_compute_redistribution_requirement(
     return redistribution_storage_mesh_axes
 
 
+class _LocalShardStorage:
+    """A plain local-shard parameter's ``StorageLayout``, read as DistMuon
+    reads a DTensor parameter: global shape, mesh, placements and local
+    tensor. No DTensor is built."""
+
+    __slots__ = ("device_mesh", "placements", "shape", "_local", "_stride")
+
+    def __init__(self, fqn: str, param: Tensor, layout: StorageLayout) -> None:
+        mesh = layout.mesh
+        axis_names = cast(tuple[str, ...], mesh.mesh_dim_names)
+        self.device_mesh = mesh
+        self.placements = tuple(
+            _lower_shard_order_to_strided_shards(
+                mesh,
+                layout.shard_order_by_tensor_dim,
+                {name: axis for axis, name in enumerate(axis_names)},
+                dict(enumerate(layout.placements)),
+            ).values()
+        )
+        self.shape = torch.Size(layout.global_shape)
+        self._stride = _contiguous_strides(self.shape)
+        self._local = param
+        coordinate = mesh.get_coordinate()
+        expected_shape = (
+            None
+            if coordinate is None
+            else _compute_local_shape_and_global_offset(
+                self.shape, mesh.shape, coordinate, self.placements
+            )[0]
+        )
+        if expected_shape is None or tuple(expected_shape) != tuple(param.shape):
+            raise ValueError(
+                f"Muon parameter {fqn!r} has local shape {tuple(param.shape)}, "
+                f"but its StorageLayout gives {expected_shape} on this rank"
+            )
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self._local.dtype
+
+    def stride(self) -> tuple[int, ...]:
+        return self._stride
+
+    def to_local(self) -> Tensor:
+        return self._local
+
+
+def _contiguous_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    strides = []
+    stride = 1
+    for size in reversed(shape):
+        strides.append(stride)
+        stride *= max(size, 1)
+    return tuple(reversed(strides))
+
+
+def _local(tensor: Tensor) -> Tensor:
+    """A DTensor's local shard, or a plain tensor itself."""
+    return tensor.to_local() if isinstance(tensor, DTensor) else tensor
+
+
 @dataclass(frozen=True, slots=True)
 class _ParameterComputeLayout:
     fqn: str
-    param: DTensor
+    param: Tensor
+    # ``param`` if it's a DTensor, else its StorageLayout.
+    storage: DTensor | _LocalShardStorage
     group_index: int
     storage_mesh_ranks: tuple[int, ...]
     storage_layout_signature: tuple[Any, ...]
@@ -980,8 +1078,8 @@ class _ParameterComputeLayout:
     def lr_reference_shape(self) -> tuple[int, ...]:
         """Return the same LR reference shape on every rank."""
         if type(self.compute_sharding) is BlockShard:
-            return (sum(self.compute_sharding.block_sizes), self.param.shape[-1])
-        return self.param.shape[-2:]
+            return (sum(self.compute_sharding.block_sizes), self.storage.shape[-1])
+        return self.storage.shape[-2:]
 
     @property
     def storage_is_compute_ready(self) -> bool:
@@ -1052,7 +1150,7 @@ def _resolve_muon_redistribution_plans(
             None
             if layout.storage_is_compute_ready
             else _dtensor_storage_regions(
-                layout.param,
+                layout.storage,
                 participants,
                 required_storage_mesh_axis=layout.redistribution_storage_mesh_axis,
             )
@@ -1129,7 +1227,7 @@ def _compute_ready_costs(
     ns_steps: int,
 ) -> dict[int, int]:
     """Cost fixed work using DTensor's complete local storage geometry."""
-    param = compute_layout.param
+    param = compute_layout.storage
     costs = {}
     for participant in participants:
         # DTensor resolves repeated and strided storage shardings, unlike the
@@ -1259,8 +1357,8 @@ def _estimate_muon_compute_cost(
 
 
 def _lower_shard_order_to_strided_shards(
-    param: DTensor,
-    compute_layout: ComputeLayout,
+    storage_mesh: DeviceMesh,
+    shard_order_by_tensor_dim: Mapping[int, tuple[str, ...]],
     storage_axis_by_name: Mapping[str, int],
     shardings_by_storage_mesh_axis: Mapping[int, _LoweredComputeSharding],
 ) -> dict[int, _LoweredComputeSharding]:
@@ -1274,7 +1372,7 @@ def _lower_shard_order_to_strided_shards(
     order.
     """
     lowered_shardings = dict(shardings_by_storage_mesh_axis)
-    for tensor_dim, axis_names in compute_layout.shard_order_by_tensor_dim.items():
+    for tensor_dim, axis_names in shard_order_by_tensor_dim.items():
         ordered_mesh_axes = [
             storage_axis_by_name[axis_name]
             for axis_name in axis_names
@@ -1282,7 +1380,7 @@ def _lower_shard_order_to_strided_shards(
         ]
         for order_index, storage_mesh_axis in enumerate(ordered_mesh_axes):
             split_factor = math.prod(
-                param.device_mesh.size(preceding_mesh_axis)
+                storage_mesh.size(preceding_mesh_axis)
                 for preceding_mesh_axis in ordered_mesh_axes[:order_index]
                 if preceding_mesh_axis > storage_mesh_axis
             )
@@ -1390,7 +1488,7 @@ def _resolve_storage_to_compute_transition(
             f"Muon parameter {fqn!r} compute shape "
             f"{tuple(param.shape)} must be a matrix or matrix batch"
         )
-    if torch.is_complex(param) or not local.is_contiguous():
+    if param.dtype.is_complex or not local.is_contiguous():
         _raise_unsupported_layout(fqn)
 
     mesh_axis_names = param.device_mesh.mesh_dim_names
@@ -1417,8 +1515,8 @@ def _resolve_storage_to_compute_transition(
         )
     applicable_compute_shardings_by_storage_mesh_axis = (
         _lower_shard_order_to_strided_shards(
-            param,
-            compute_layout,
+            param.device_mesh,
+            compute_layout.shard_order_by_tensor_dim,
             storage_axis_by_name,
             applicable_compute_shardings_by_storage_mesh_axis,
         )
@@ -1899,7 +1997,7 @@ def _direction_row_scale(
     compute_sharding = compute_layout.compute_sharding
     if type(compute_sharding) is not BlockShard:
         return None
-    param = compute_layout.param
+    param = compute_layout.storage
     reference_ratio = _adjust_muon_learning_rate(
         1.0, adjust_lr_fn, compute_layout.lr_reference_shape
     )
@@ -2016,14 +2114,21 @@ def _local_storage_signature(tensor: Tensor) -> tuple[Any, ...]:
     )
 
 
-def _storage_layout_signature(tensor: DTensor) -> tuple[Any, ...]:
-    local = tensor.to_local()
-    # Empty shards address no elements, and autograd can choose different strides.
-    local_strides = tuple(local.stride()) if local.numel() else ()
+def _storage_layout_signature(
+    tensor: DTensor | _LocalShardStorage,
+) -> tuple[Any, ...]:
     return (
         tuple(tensor.shape),
         tuple(tensor.stride()),
         tensor.placements,
+        *_local_layout_signature(tensor.to_local()),
+    )
+
+
+def _local_layout_signature(local: Tensor) -> tuple[Any, ...]:
+    # Empty shards address no elements, and autograd can choose different strides.
+    local_strides = tuple(local.stride()) if local.numel() else ()
+    return (
         tuple(local.shape),
         local_strides,
         local.dtype,
