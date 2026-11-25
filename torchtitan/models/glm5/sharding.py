@@ -25,7 +25,7 @@ TP = MeshAxisName.TP
 def glm5_attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Keep a GLM attention block on the decoder residual layout."""
     residual = residual_activation_placement(enable_sp=enable_sp)
-    return ShardingConfig(in_src_shardings={"x_TD": residual})
+    return ShardingConfig(input_shardings={"x_TD": residual})
 
 
 def glm5_inner_attention_sharding_config() -> ShardingConfig:
@@ -35,13 +35,10 @@ def glm5_inner_attention_sharding_config() -> ShardingConfig:
     )
 
     config = mla_attention_local_spmd_sharding_config()
-    extra = {
-        "topk_indices_QS": dense_activation_placement(tp=spmd.R, cp=spmd.S(0)),
-    }
-    assert config.in_src_shardings is not None
-    assert config.in_dst_shardings is not None
-    config.in_src_shardings = {**config.in_src_shardings, **extra}
-    config.in_dst_shardings = {**config.in_dst_shardings, **extra}
+    assert config.input_shardings is not None
+    config.input_shardings["topk_indices_QS"] = dense_activation_placement(
+        tp=spmd.R, cp=spmd.S(0)
+    )
     return config
 
 
@@ -49,17 +46,12 @@ def glm5_indexer_sharding_config() -> ShardingConfig:
     """Replicate indexer features on TP before the discrete top-k."""
     activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "hidden_states_TD": activation,
             "q_resid_TR": activation,
             "positions_T": token_id_placement(),
         },
-        in_dst_shardings={
-            "hidden_states_TD": activation,
-            "q_resid_TR": activation,
-            "positions_T": token_id_placement(),
-        },
-        out_src_shardings=activation,
+        output_shardings=activation,
     )
 
 
@@ -72,11 +64,11 @@ def glm5_indexer_topk_sharding_config() -> ShardingConfig:
     )
     key = dense_activation_placement(tp=spmd.R, cp=spmd.R)
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "q_QNH": query_features,
             "k_KH": key,
             "weights_QN": query,
         },
-        out_src_shardings=query,
+        output_shardings=query,
         local_spmd=True,
     )

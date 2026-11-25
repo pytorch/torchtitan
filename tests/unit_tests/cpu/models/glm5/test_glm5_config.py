@@ -443,7 +443,7 @@ class TestGlm5Config(unittest.TestCase):
         )
         sharding_config = cp_config.layers[0].attention.inner_attention.sharding_config
         self.assertEqual(
-            set(sharding_config.in_dst_shardings or {}),
+            set(sharding_config.input_shardings or {}),
             {
                 "q_THK",
                 "kv_c_normed_TL",

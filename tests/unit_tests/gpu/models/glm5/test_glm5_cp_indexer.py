@@ -106,7 +106,7 @@ class TestGlm5CPIndexer(DTensorTestBase):
         selector = config.build()
         selector._parallelize(context)
         sharding = config.sharding_config
-        assert sharding is not None and sharding.in_src_shardings is not None
+        assert sharding is not None and sharding.input_shardings is not None
         with context.activate_spmd(typechecking=True):
             spmd.assert_type(
                 local_k, dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
@@ -137,7 +137,7 @@ class TestGlm5CPIndexer(DTensorTestBase):
             for name, value in (
                 ("q_QNH", q), ("k_KH", gathered_k), ("weights_QN", weights)
             ):
-                spmd.assert_type(value, sharding.in_src_shardings[name])
+                spmd.assert_type(value, sharding.input_shardings[name])
             with patch(
                 "torchtitan.models.glm5.dsa.select_local_topk", wraps=select_local_topk
             ) as kernel:
