@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "build_decoder_stage_io",
+    "DecoderStageIO",
     "get_module_fqns_per_model_part",
     "prepare_pipeline_schedule_for_accelerator_graph",
     "pipeline_llm",
@@ -119,7 +121,7 @@ def pipeline_llm(
                 f"metadata, but {unsupported}. Split stage boundaries between "
                 "decoder blocks or use a real pipeline process group."
             )
-        stage_io = _build_decoder_stage_io(
+        stage_io = build_decoder_stage_io(
             parallelism_context=parallelism_context,
             parallelism=parallelism,
             training=training,
@@ -746,7 +748,7 @@ def _get_pp_rank_to_stage_indices_mapping(
 
 
 @dataclasses.dataclass(frozen=True)
-class _DecoderStageIO:
+class DecoderStageIO:
     """Example tensors describing decoder pipeline boundaries."""
 
     decoder_input: torch.Tensor
@@ -775,7 +777,7 @@ def _unsupported_static_split(
     return None
 
 
-def _build_decoder_stage_io(
+def build_decoder_stage_io(
     *,
     parallelism_context: ParallelismContext,
     parallelism: ParallelismConfig,
@@ -783,7 +785,7 @@ def _build_decoder_stage_io(
     precision: PrecisionConfig,
     model_config: Decoder.Config,
     lm_head_in_loss: bool,
-) -> _DecoderStageIO:
+) -> DecoderStageIO:
     """Build static metadata for tensors crossing decoder stage boundaries."""
     cp_shards = parallelism_context.cp
     num_tokens, cp_remainder = divmod(
@@ -822,7 +824,7 @@ def _build_decoder_stage_io(
             local_vocab_size += tp_rank < remainder
         decoder_output = example(num_tokens, local_vocab_size)
 
-    return _DecoderStageIO(
+    return DecoderStageIO(
         decoder_input=example(num_tokens, dtype=torch.int64),
         hidden=hidden,
         decoder_output=decoder_output.requires_grad_(),
@@ -830,7 +832,7 @@ def _build_decoder_stage_io(
 
 
 def _static_stage_metadata(
-    stage_io: _DecoderStageIO,
+    stage_io: DecoderStageIO,
     stage_idx: int,
     num_stages: int,
 ) -> dict[str, Any]:
@@ -855,7 +857,7 @@ def _pipeline_module_split(
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-    stage_io: _DecoderStageIO | None = None,
+    stage_io: DecoderStageIO | None = None,
 ) -> tuple[list[PipelineStage], list[BaseModel]]:
     """Create pipeline stages based on specified module names for each stage.
 

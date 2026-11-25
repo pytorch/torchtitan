@@ -8,10 +8,13 @@
 the swap of core's stages for AttnRes ones."""
 
 import unittest
+from contextlib import contextmanager
+from unittest.mock import Mock
 
 import torch
 import torch.nn as nn
 from torch.distributed.pipelining import PipelineStage
+from torch.distributed.pipelining._utils import InferenceMode
 from torch.distributed.pipelining.schedules import Schedule1F1B, ScheduleInterleaved1F1B
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -108,6 +111,20 @@ def _get_mesh(*args, **kwargs):
     return None
 
 
+def _linear_stage_metadata(num_stages: int) -> dict[int, dict]:
+    """Static metadata for ``nn.Linear(2, 2)`` stages with one-token microbatches."""
+    value = torch.empty(1, 2, device="meta").requires_grad_()
+    return {
+        index: {
+            "input_args": (value,),
+            "output_args": (value,),
+            "input_grads": (None,) if index == 0 else (value.detach(),),
+            "output_grads": (None,) if index == num_stages - 1 else (value.detach(),),
+        }
+        for index in range(num_stages)
+    }
+
+
 class TestStageSwap(DTensorTestBase):
     """Core's stages are rebuilt as AttnRes stages on the schedule, one rank on gloo."""
 
@@ -141,12 +158,41 @@ class TestStageSwap(DTensorTestBase):
         self.assertIs(new.group, old.group)
         self.assertIs(new._mesh_cache._get_mesh_cb, old._mesh_cache._get_mesh_cb)
         self.assertEqual(new.stage_index_to_group_rank, old.stage_index_to_group_rank)
+        # The declared metadata reaches the rebuilt stage, so no inference pass runs.
+        self.assertFalse(InferenceMode.needs_dynamic(new._user_meta, True))
+
+    @with_comms
+    def test_forward_enters_registered_pipeline_context(self):
+        """Dist-MoE selects each microbatch's activation slot through this context."""
+        entered = []
+
+        @contextmanager
+        def forward_context(info):
+            entered.append((info.stage_index, info.microbatch_index))
+            yield
+
+        stage = AttnResPipelineStage(
+            nn.Linear(2, 2),
+            0,
+            1,
+            torch.device("cpu"),
+            get_mesh=_get_mesh,
+            **_linear_stage_metadata(1)[0],
+        )
+        handle = stage.register_forward_context(forward_context)
+        stage.set_routing(Mock(stage_to_rank={0: 0}), PPRankLocalCache())
+
+        stage.forward_one_chunk(2, (torch.ones(1, 2),))
+        handle.remove()
+        stage.forward_one_chunk(3, (torch.ones(1, 2),))
+
+        self.assertEqual(entered, [(0, 2)])
 
     @with_comms
     def test_single_stage_schedule(self):
         old = self._stage(0, 1)
         schedule = Schedule1F1B(old, n_microbatches=1, loss_fn=_loss)
-        (new,) = _swap_in_attn_res_stages(schedule)
+        (new,) = _swap_in_attn_res_stages(schedule, _linear_stage_metadata(1))
         self._assert_rebuilt(old, new)
         self.assertIs(schedule._stage, new)
 
@@ -154,7 +200,7 @@ class TestStageSwap(DTensorTestBase):
     def test_multi_stage_schedule(self):
         old = [self._stage(index, 2) for index in range(2)]
         schedule = ScheduleInterleaved1F1B(old, n_microbatches=2, loss_fn=_loss)
-        new = _swap_in_attn_res_stages(schedule)
+        new = _swap_in_attn_res_stages(schedule, _linear_stage_metadata(2))
         self.assertEqual(len(new), 2)
         for old_stage, new_stage in zip(old, new, strict=True):
             self._assert_rebuilt(old_stage, new_stage)

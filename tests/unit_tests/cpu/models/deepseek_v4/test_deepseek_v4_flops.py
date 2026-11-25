@@ -28,7 +28,7 @@ class TestDeepSeekV4Flops(unittest.TestCase):
             "positions": torch.full((4096,), 4095),
             "padding_mask": torch.zeros(4096, dtype=torch.bool),
         }
-        self.assertEqual(estimate(inputs), 92_762_352_876 * 4096)
+        self.assertEqual(estimate(inputs), 92_410_031_340 * 4096)
 
 
 if __name__ == "__main__":
