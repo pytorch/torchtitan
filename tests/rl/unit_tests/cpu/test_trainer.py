@@ -6,6 +6,7 @@
 
 import asyncio
 import threading
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
@@ -276,6 +277,7 @@ def test_close_stops_training_engine() -> None:
         )
         trainer.engine = engine
         trainer._resume_state = MirroredState()
+        trainer._started_reader = None
 
         await Trainer.close(trainer)
 
@@ -331,9 +333,10 @@ def _leader(
     """Make `trainer` its replica's only rank, whose column packs to `packed`, in order."""
     trainer._replica_group = None
     trainer._is_replica_leader = True
-    trainer._replica_column = None
+    trainer._replica_columns = deque()
     trainer._rollout_groups_by_rdma = False
     trainer._rdma_byte_buffers = None
+    trainer._started_reader = None
     trainer._num_microbatches_per_group = num_microbatches_per_group
     trainer._training_sample_builder = fake_training_sample_builder
     microbatches = iter(packed)
@@ -423,7 +426,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
         assert isinstance(groups, MicrobatchGroupReader)
         assert trained == [[batch_0], [batch_1]]
-        assert trainer._replica_column is None
+        assert not trainer._replica_columns
         assert trainer._step_num_tokens_per_dp_rank == (
             2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
         )
@@ -529,6 +532,107 @@ def test_forward_backward_without_last_pipeline_stage_returns_no_metrics() -> No
         )
         trainer._reduce_forward_backward_metrics.assert_not_called()
         assert result is None
+
+    asyncio.run(run())
+
+
+def test_start_reading_packs_before_forward_backward_trains_on_it() -> None:
+    """`start_reading` returns at once and the leader packs the next step's first groups on the
+    reader thread before `forward_backward` is called; `forward_backward` then trains on that
+    reader, in order."""
+
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
+        trained = []
+        engine.forward_backward = MagicMock(
+            side_effect=lambda *, microbatch_groups, **kwargs: (
+                trained.extend(microbatch_groups)
+                or ForwardBackwardResult(
+                    loss=torch.tensor(-1.0),
+                    loss_metrics=[[{}], [{}], [{}]],
+                    num_flops=0,
+                )
+            )
+        )
+        trainer.engine = engine
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        microbatches = [_rl_microbatch(token) for token in range(3)]
+        _leader(trainer, [])
+        packed = []
+        first_two_packed = threading.Event()
+
+        def pack_planned(specs, samples):
+            packed.append(threading.current_thread())
+            if len(packed) == 2:
+                first_two_packed.set()
+            return microbatches[len(packed) - 1]
+
+        trainer._microbatch_packer = SimpleNamespace(pack_planned=pack_planned)
+        await trainer.receive_replica_column(_column(3))
+
+        await trainer.start_reading(num_microbatch_groups=3)
+
+        assert not trainer._replica_columns
+        # The groups made ahead of the first one training waits on, and no more.
+        assert first_two_packed.wait(timeout=10)
+        assert len(packed) == 2
+        await Trainer.forward_backward(
+            trainer,
+            num_microbatch_groups=3,
+            global_loss_token_counts=torch.tensor([1]),
+            global_routing_token_counts=torch.tensor([1]),
+        )
+        assert trained == [[microbatch] for microbatch in microbatches]
+        assert all(thread is not threading.main_thread() for thread in packed)
+        assert trainer._started_reader is None
+
+    asyncio.run(run())
+
+
+def test_each_step_trains_on_the_oldest_column() -> None:
+    """With step N+1's column already received during step N (read-ahead), `forward_backward` N
+    trains on column N and `start_reading` takes column N+1. Reversed, step N would pack N+1's
+    specs and divide by plan N's token counts, and nothing else would catch it."""
+
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
+        trained: list[list[int]] = []
+
+        def forward_backward(*, microbatch_groups, **kwargs) -> ForwardBackwardResult:
+            trained.append([int(group[0].input) for group in microbatch_groups])
+            return ForwardBackwardResult(
+                loss=torch.tensor(-1.0), loss_metrics=[[{}], [{}]], num_flops=0
+            )
+
+        engine.forward_backward = MagicMock(side_effect=forward_backward)
+        trainer.engine = engine
+        trainer.config = Trainer.Config(model=MagicMock())
+        trainer.dp_rank = 0
+        _leader(trainer, [])
+        # Each microbatch carries its first sample, i.e. its spec's rollout id.
+        trainer._microbatch_packer = SimpleNamespace(
+            pack_planned=lambda specs, samples: _rl_microbatch(samples[0])
+        )
+
+        async def forward_backward_step() -> None:
+            await Trainer.forward_backward(
+                trainer,
+                num_microbatch_groups=2,
+                global_loss_token_counts=torch.tensor([1]),
+                global_routing_token_counts=torch.tensor([1]),
+            )
+
+        await trainer.receive_replica_column(fake_column([[[0]], [[1]]]))
+        await trainer.receive_replica_column(fake_column([[[10]], [[11]]]))
+        await forward_backward_step()
+        await trainer.start_reading(num_microbatch_groups=2)
+        assert not trainer._replica_columns
+        await forward_backward_step()
+
+        assert trained == [[0, 1], [10, 11]]
 
     asyncio.run(run())
 

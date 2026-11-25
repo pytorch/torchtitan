@@ -63,15 +63,22 @@ class _Endpoint:
         return await self.call(*args, **kwargs)
 
 
-def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
+def _controller(
+    events: list[str], *, on_push=None, on_pull=None, on_forward_backward=None
+) -> Controller:
     """A controller with only the state `_trainer_loop` reads; each actor call appends to `events`."""
     version = 0
 
     async def receive_replica_column(column):
         pass
 
+    async def start_reading(*, num_microbatch_groups):
+        events.append(f"read ahead {version + 2}")
+
     async def forward_backward(**kwargs):
         events.append(f"fwd_bwd {version + 1}")
+        if on_forward_backward is not None:
+            await on_forward_backward()
         return _RankValues({"loss/mean": 1.0})
 
     async def optim_step(**kwargs):
@@ -115,6 +122,7 @@ def _controller(events: list[str], *, on_push=None, on_pull=None) -> Controller:
     trainer = SimpleNamespace(
         sync_log_step=_Endpoint(),
         receive_replica_column=_Endpoint(receive_replica_column),
+        start_reading=_Endpoint(start_reading),
         forward_backward=_Endpoint(forward_backward),
         optim_step=_Endpoint(optim_step),
         push_model_state_dict=_Endpoint(push),
@@ -239,6 +247,8 @@ def test_push_then_pull_then_release_after_each_optimizer_step() -> None:
 
     assert events == [
         "fwd_bwd 1",
+        # Batch 2 is queued: its readers start before step 1's optimizer step.
+        "read ahead 2",
         "optim 1",
         "push start",
         "push end",
@@ -276,6 +286,127 @@ def test_trained_groups_go_to_the_workers_once_their_step_releases_their_slots()
         events.index("release_groups [0, 1, 2, 3, 4]")
         == events.index("release 5 trained") + 1
     )
+
+
+def test_the_next_steps_columns_go_out_during_forward_backward() -> None:
+    """With plan 2 already queued when forward_backward 1 starts, its leaders get their columns
+    while it runs, and every rank starts reading after it returns and before optim_step 1; step 2
+    then trains on the started readers without sending the columns again."""
+    events: list[str] = []
+
+    async def slow_forward_backward():
+        await asyncio.sleep(0.01)
+        events.append("fwd_bwd returns")
+
+    controller = _controller(events, on_forward_backward=slow_forward_backward)
+    leader = controller.trainer.leader_by_dp_rank[0]
+    received_group_ids: list[list[int]] = []
+
+    async def receive_replica_column(column):
+        received_group_ids.append([group.group_id for group in column.rollout_groups])
+        events.append(f"column {column.rollout_groups[0].group_id}")
+
+    leader.receive_replica_column = _Endpoint(receive_replica_column)
+
+    _run(controller, num_training_steps=2)
+
+    assert events[0] == "column 0"
+    assert events.index("column 5") < events.index("fwd_bwd returns")
+    assert (
+        events.index("fwd_bwd returns")
+        < events.index("read ahead 2")
+        < events.index("optim 1")
+    )
+    assert received_group_ids == [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9]]
+    read_ahead = [
+        logged["trainer/read_ahead"].value.value for logged in controller.logged_metrics
+    ]
+    assert read_ahead == [0.0, 1.0]
+    # What stays exposed of the read-ahead is timed in the step that does it. The last step
+    # times an empty one, so every step's accounting (`compute_perf_ratio_metrics`) has it.
+    assert all(
+        "timing/step/read_ahead" in logged for logged in controller.logged_metrics
+    )
+
+
+def test_a_failed_forward_backward_cancels_the_next_steps_send() -> None:
+    """If forward_backward raises while the next step's columns are going out, the send is
+    cancelled instead of outliving the loop."""
+
+    async def failing_forward_backward():
+        # Plan 2 was taken before the gather, and its send is under way.
+        await asyncio.sleep(0.01)
+        raise RuntimeError("forward_backward failed")
+
+    controller = _controller([], on_forward_backward=failing_forward_backward)
+    sent_group_ids: list[int] = []
+
+    async def run() -> None:
+        never = asyncio.Event()
+
+        async def receive_replica_column(column):
+            sent_group_ids.append(column.rollout_groups[0].group_id)
+            if len(sent_group_ids) > 1:
+                await never.wait()  # step 2's column never lands
+
+        controller.trainer.leader_by_dp_rank[0].receive_replica_column = _Endpoint(
+            receive_replica_column
+        )
+        controller.config.async_loop.num_training_steps = 2
+        with pytest.raises(RuntimeError, match="forward_backward failed"):
+            await controller._trainer_loop(_batch_queue(2), num_training_steps=2)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert sent_group_ids == [0, 5]
+        assert [
+            task for task in asyncio.all_tasks() if task is not asyncio.current_task()
+        ] == []
+
+    asyncio.run(run())
+
+
+def test_no_read_ahead_past_the_last_step() -> None:
+    events: list[str] = []
+    controller = _controller(events)
+    queue = _batch_queue(3)
+    controller.config.async_loop.num_training_steps = 2
+
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=2))
+
+    assert [event for event in events if event.startswith("read ahead")] == [
+        "read ahead 2"
+    ]
+    assert queue.qsize() == 1
+
+
+def test_a_shutdown_taken_during_read_ahead_stops_the_next_step() -> None:
+    events: list[str] = []
+    controller = _controller(events)
+    queue = _batch_queue(1)
+    queue.put_nowait(None)
+    controller.config.async_loop.num_training_steps = 3
+
+    asyncio.run(controller._trainer_loop(queue, num_training_steps=3))
+
+    assert [event for event in events if event.startswith(("fwd_bwd", "read"))] == [
+        "fwd_bwd 1"
+    ]
+
+
+def test_a_read_ahead_batchs_policy_age_uses_the_version_it_trains_at() -> None:
+    """Batch 2 is taken during step 1, before optimizer step 1, but its policy age is computed
+    when step 2 consumes it, against policy 1."""
+    events: list[str] = []
+    controller = _controller(events)
+
+    _run(controller, num_training_steps=2)
+
+    ages = [
+        logged["train_batch/policy_age"].value.value
+        / logged["train_batch/policy_age"].value.count
+        for logged in controller.logged_metrics
+    ]
+    assert ages == [0.0, 1.0]
 
 
 def test_forward_backward_waits_for_the_previous_push() -> None:
