@@ -28,6 +28,16 @@ def test_indexer_rejects_unsupported_dimensions_at_config_time(updates):
         replace(config.layers[0].attention.indexer, **updates)
 
 
+@pytest.mark.parametrize("topk", [-1, 4097])
+def test_indexer_rejects_unsupported_topk_before_device_build(topk):
+    config = build_model_config(
+        "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128
+    )
+    indexer = config.layers[0].attention.indexer
+    with pytest.raises(ValueError, match="0<=topk<=4096"):
+        replace(indexer, topk=replace(indexer.topk, index_topk=topk))
+
+
 def test_training_configuration_does_not_mutate_source():
     from torchtitan.models.glm5.flavors import configure_glm5_training
 

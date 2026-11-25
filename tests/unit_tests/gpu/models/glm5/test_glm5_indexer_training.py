@@ -78,7 +78,18 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
     """Model-only DCP handoff must not restore an indexer-only optimizer."""
     if torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("stock fused indexer requires SM90 or newer")
+    _check_bf16_handoff(tmp_path, sparse_supported=True)
 
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is not None,
+                    reason="requires NVIDIA CUDA")
+def test_sm8x_warmup_checkpoint_loads_before_sparse_selector_rejection(tmp_path):
+    if torch.cuda.get_device_capability()[0] != 8:
+        pytest.skip("exercises the SM8x checkpoint and unsupported-selector boundary")
+    _check_bf16_handoff(tmp_path, sparse_supported=False)
+
+
+def _check_bf16_handoff(tmp_path, *, sparse_supported):
     def build(stage, seed):
         config = build_model_config(
             "glm5_2_debugmodel", parallelism=ParallelismConfig(),
@@ -159,6 +170,11 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
         for name, value in snapshot(sparse).items():
             torch.testing.assert_close(value, saved[name], rtol=0, atol=0)
         assert not optimizer.state
+        if not sparse_supported:
+            with pytest.raises(ValueError, match="GLM low-precision DSA indexer requires NVIDIA SM90"):
+                step(sparse, optimizer, "sparse")
+            assert not optimizer.state
+            return
         for _ in range(2):
             step(sparse, optimizer, "sparse")
         assert optimizer.state
