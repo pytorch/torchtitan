@@ -152,7 +152,7 @@ class TestProfilerEnabled(unittest.TestCase):
     def test_cuspy_activity_config(self):
         """Builds real torch Cuspy configs, so torch API changes fail here."""
         config = CuspyTraceProfiler.Config(
-            enable_event_node_ids=True,
+            enable_graph_dependencies=True,
             performance_metrics=["sm__cycles_active.avg"],
             pm_sampling_interval_ms=0.5,
         )
@@ -170,7 +170,7 @@ class TestProfilerEnabled(unittest.TestCase):
         cuspy_config, pm_config = activity[
             torch.profiler.ProfilerActivity.CUDA
         ].profiler_configs
-        self.assertTrue(cuspy_config.enable_event_node_ids)
+        self.assertTrue(cuspy_config.enable_graph_dependencies)
         self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
         self.assertEqual(pm_config.sampling_interval_ms, 0.5)
 

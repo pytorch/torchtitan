@@ -263,9 +263,6 @@ class CuspyTraceProfiler(TraceProfiler):
         enable_graph_dependencies: bool = False
         """Record CUDA graph dependency edges."""
 
-        enable_event_node_ids: bool = False
-        """Associate CUDA events with CUDA graph event-record nodes."""
-
         record_py_stacks: bool = False
         """Record each CUDA graph kernel's Python launch stack at capture and save them
         beside the trace as ``rank{rank}_cuda_graph_py_stacks.json.gz``, keyed by
@@ -315,8 +312,7 @@ class CuspyTraceProfiler(TraceProfiler):
 
         def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
             return get_cuspy_cuda_graph_annotation_config(
-                enable_event_node_ids=self.enable_event_node_ids,
-                record_py_stacks=self.record_py_stacks,
+                record_py_stacks=self.record_py_stacks
             )
 
     _config: Config  # pyrefly: ignore [bad-override]
@@ -344,7 +340,6 @@ class CuspyTraceProfiler(TraceProfiler):
                 enable_cuda_sync_events=config.enable_cuda_sync_events,
                 enable_environment_counters=config.enable_environment_counters,
                 enable_graph_dependencies=config.enable_graph_dependencies,
-                enable_event_node_ids=config.enable_event_node_ids,
             )
         ]
         if config.performance_metrics:

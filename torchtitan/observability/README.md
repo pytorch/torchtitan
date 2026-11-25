@@ -34,7 +34,7 @@ Setting `profiler.trace` to `CuspyTraceProfiler` instead of `KinetoTraceProfiler
 
 * GPU performance metrics sampled with CUPTI PM sampling, e.g. SM activity, DRAM and NVLink bandwidth.
 * GPU power, clock and thermal counters (`enable_environment_counters`).
-* CUDA graph dependency edges and event-node ids.
+* CUDA graph dependency edges (`enable_graph_dependencies`) and graph event-node spans (with `enable_cuda_sync_events`).
 * Perfetto protobuf output (`trace_format="pftrace"`), which is smaller than JSON.
 
 See [`torch.profiler.CuspyConfig`](https://docs.pytorch.org/docs/main/profiler.html#torch.profiler.CuspyConfig) for the underlying options.
