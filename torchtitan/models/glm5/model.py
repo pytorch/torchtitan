@@ -35,7 +35,7 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.flops import quadratic_attention_flops
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.attention import DeepSeekMLAAttention
@@ -43,7 +43,7 @@ from torchtitan.models.deepseek_v3.model import (
     DeepSeekV3Model,
     DeepSeekV3TransformerBlock,
 )
-from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.models.common.mtp import roll_mtp_sequence
 
 from .dsa import DsaMetadata, Glm5DsaIndexer, Glm5SparseAttention, validate_selector_device
 from .state_dict_adapter import Glm5StateDictAdapter
@@ -68,20 +68,20 @@ class Glm5Attention(DeepSeekMLAAttention):
         indexer: Glm5DsaIndexer.Config | None
         index_topk: int
 
-        def flops_per_token(self, seq_len: int) -> int:
+        def flops(self, positions: torch.Tensor) -> int:
             """Useful absorbed attention FLOPs, excluding remat and kernel overhead."""
             leaf = self.inner_attention.inner_attention
             assert isinstance(leaf, Glm5SparseAttention.Config)
             attended_keys = (
-                seq_len
+                positions + 1
                 if leaf.warmup_context_length is not None
-                else min(seq_len, self.index_topk)
+                else (positions + 1).clamp(max=self.index_topk)
             )
-            return quadratic_attention_flops_per_token(
+            return quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
                 v_head_dim=self.kv_lora_rank,
-                seq_len=attended_keys,
+                num_keys=attended_keys,
             )
 
     def __init__(self, config: Config):
@@ -349,68 +349,51 @@ class Glm5Model(DeepSeekV3Model):
                 if isinstance(module, Glm5DsaIndexer) and id(module) not in excluded_ids
             ]
             excluded = (*excluded_submodules, *indexers)
-            if self.indexer_training_stage == "warmup":
-                # KL-only training has no teacher activation backward or LM head.
-                teacher = active_parameter_flops_per_token(
+            warmup = self.indexer_training_stage == "warmup"
+            frozen = self.indexer_training_stage == "frozen"
+            if warmup:
+                projection = active_parameter_flops_per_token(
                     model, excluded_submodules=(*excluded, model.lm_head, model.norm)
                 ) // 3
-                extra = sum(
-                    active_parameter_flops_per_token(module, excluded_submodules=excluded_submodules)
-                    for module in indexers
+            else:
+                projection = 0
+                base = super(Glm5Model.Config, self).build_flops_estimator(
+                    model, seq_len=seq_len, excluded_submodules=excluded
                 )
-                for layer in [*model.layers.values(), *(model.mtp_layers or ())]:
-                    attention = layer.attention
-                    if id(attention) in excluded_ids:
-                        continue
-                    teacher += 2 * attention.n_heads * (
-                        2 * attention.kv_lora_rank + attention.qk_rope_head_dim
-                    ) * seq_len
-                    if attention.indexer not in indexers:
-                        continue
-                    # The KL teacher reuses this block's detached projections.
-                    idx = attention.indexer
-                    extra += (
-                        6 * idx.n_heads * (idx.head_dim + 1)
-                        + 4 * attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim)
-                    ) * seq_len
-                return lambda batch: (teacher + extra) * batch["input"].numel()
-            base = super(Glm5Model.Config, self).build_flops_estimator(
-                model, seq_len=seq_len, excluded_submodules=excluded
-            )
-            extra = 0
-            for module in indexers:
-                projection_flops = active_parameter_flops_per_token(
-                    module, excluded_submodules=excluded_submodules
-                )
-                extra += (
-                    projection_flops // 3
-                    if module.training_stage == "frozen"
-                    else projection_flops
-                )
-                # Discrete selection is forward-only even in trainable stages.
-                # Count QK and head mixing over the full document, not top-k.
-                if module.training_stage != "warmup":
-                    extra += 2 * module.n_heads * (module.head_dim + 1) * seq_len
+            per_key = 0
+            selected_costs: dict[int, int] = {}
             for attention in model.modules():
-                if (
-                    isinstance(attention, Glm5Attention)
-                    and attention.indexer in indexers
-                    and self.indexer_training_stage != "frozen"
-                ):
-                    assert attention.indexer is not None
-                    idx = attention.indexer
-                    selected = (
-                        seq_len
-                        if self.indexer_training_stage == "warmup"
-                        else min(seq_len, idx.topk.index_topk)
+                if not isinstance(attention, Glm5Attention) or id(attention) in excluded_ids:
+                    continue
+                if warmup:
+                    per_key += 2 * attention.n_heads * (
+                        2 * attention.kv_lora_rank + attention.qk_rope_head_dim
                     )
-                    extra += 6 * idx.n_heads * (idx.head_dim + 1) * selected
-                    extra += (
-                        2 * attention.n_heads
-                        * (attention.kv_lora_rank + attention.qk_rope_head_dim)
-                        * selected
-                    )
-            return lambda batch: base(batch) + extra * batch["input"].numel()
+                idx = attention.indexer
+                if idx not in indexers:
+                    continue
+                assert idx is not None
+                proj = active_parameter_flops_per_token(idx, excluded_submodules=excluded_submodules)
+                projection += proj // 3 if frozen else proj
+                mix = idx.n_heads * (idx.head_dim + 1)
+                teacher = attention.n_heads * (attention.kv_lora_rank + attention.qk_rope_head_dim)
+                if warmup:
+                    per_key += 6 * mix + 4 * teacher
+                else:
+                    per_key += 2 * mix
+                    if not frozen:
+                        k = idx.topk.index_topk
+                        selected_costs[k] = selected_costs.get(k, 0) + 6 * mix + 2 * teacher
+
+            def estimate(batch):
+                keys = batch["positions"][~batch["padding_mask"]] + 1
+                total = projection * keys.numel() + per_key * int(keys.sum())
+                total += sum(
+                    cost * int(keys.clamp(max=k).sum()) for k, cost in selected_costs.items()
+                )
+                return total if warmup else base(batch) + total
+
+            return estimate
 
     def get_attention_masks(
         self,

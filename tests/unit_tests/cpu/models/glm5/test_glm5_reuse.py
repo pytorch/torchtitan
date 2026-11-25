@@ -12,7 +12,7 @@ from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
-from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.models.common.mtp import roll_mtp_sequence
 from torchtitan.models.glm5 import build_model_config
 from torchtitan.models.glm5.dsa import DsaMetadata
 

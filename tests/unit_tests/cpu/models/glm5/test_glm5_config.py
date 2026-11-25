@@ -213,14 +213,14 @@ class TestGlm5Config(unittest.TestCase):
                 + attention.qk_rope_head_dim
             )
             self.assertEqual(
-                attention.flops_per_token(topk * 8),
+                attention.flops(torch.tensor([topk * 8 - 1])),
                 6 * attention.n_heads * attention_width * topk,
             )
             self.assertEqual(
-                attention.flops_per_token(topk), attention.flops_per_token(topk * 8)
+                attention.flops(torch.tensor([topk - 1])), attention.flops(torch.tensor([topk * 8 - 1]))
             )
             self.assertLess(
-                attention.flops_per_token(topk // 2), attention.flops_per_token(topk)
+                attention.flops(torch.tensor([topk // 2 - 1])), attention.flops(torch.tensor([topk - 1]))
             )
 
     def test_optimizer_step_rolls_and_clears_aux_metrics(self) -> None:
@@ -328,7 +328,7 @@ class TestGlm5Config(unittest.TestCase):
         self.assertEqual(config.dataloader.num_mtp_layers, 1)
 
     def test_mtp_recipe_exposes_loss_scale(self) -> None:
-        from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss as MTPLoss
+        from torchtitan.models.common.mtp import MTPCrossEntropyLoss as MTPLoss
         from torchtitan_recipes.tests.models.glm5 import (
             glm5_2_debugmodel_mtp,
             glm5_debugmodel,
@@ -417,8 +417,8 @@ class TestGlm5Config(unittest.TestCase):
         total, active = config.get_parameter_counts(model)
         self.assertGreaterEqual(total, active)
         estimator = config.build_flops_estimator(model, seq_len=8)
-        one = estimator({"input": torch.ones(8, dtype=torch.int64)})
-        two = estimator({"input": torch.ones(16, dtype=torch.int64)})
+        one = estimator({"positions": torch.arange(8), "padding_mask": torch.zeros(8, dtype=torch.bool)})
+        two = estimator({"positions": torch.arange(8).repeat(2), "padding_mask": torch.zeros(16, dtype=torch.bool)})
         self.assertGreater(one, 0)
         self.assertEqual(two, 2 * one)
 

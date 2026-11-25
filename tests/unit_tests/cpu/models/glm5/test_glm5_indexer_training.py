@@ -313,7 +313,7 @@ def test_kl_only_value_and_student_gradients_match_dense_oracle(offset):
 
 def test_kl_only_mtp_default_remat_and_sparse_checkpoint_handoff():
     from torchtitan.models.glm5.dsa import DsaMetadata
-    from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+    from torchtitan.models.common.mtp import roll_mtp_sequence
 
     config = build_model_config("glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(),
                                 seq_len=16, indexer_stage="warmup")
@@ -443,7 +443,6 @@ def test_flops_sequence_growth_counts_sparse_attention_and_unique_indexers(stage
     # only full-document indexer scores grow outside the warmup stage.
     short, long = 64, 128
     tokens = 128
-    batch = {"input": torch.ones(tokens, dtype=torch.int64)}
     expected_per_token = 0
     for layer in config.layers:
         attention = layer.attention
@@ -463,7 +462,9 @@ def test_flops_sequence_growth_counts_sparse_attention_and_unique_indexers(stage
                     attention.kv_lora_rank + attention.qk_rope_head_dim
                 )
     estimates = [
-        config.build_flops_estimator(model, seq_len=length)(batch)
+        config.build_flops_estimator(model, seq_len=length)(
+            {"positions": torch.full((tokens,), length - 1), "padding_mask": torch.zeros(tokens, dtype=torch.bool)}
+        )
         for length in (short, long)
     ]
     assert estimates[1] - estimates[0] == (
@@ -504,7 +505,7 @@ def test_flops_match_explicit_dense_layer_operation_budget(stage):
     )
     expected = 128 * (parameter_ops + attention_ops + selection_ops + kl_ops)
     assert config.build_flops_estimator(model, seq_len=128)(
-        {"input": torch.ones(128, dtype=torch.int64)}
+        {"positions": torch.full((128,), 127), "padding_mask": torch.zeros(128, dtype=torch.bool)}
     ) == expected
 
 

@@ -23,7 +23,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform.context_parallel import ContextParallelTransform
 from torchtitan.models.common import (
     ComplexRoPE,
-    Embedding,
+    VocabParallelEmbedding,
     LayerNorm,
     Linear,
     RMSNorm,
@@ -32,7 +32,7 @@ from torchtitan.models.common import (
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.decoder_sharding import (
     lm_head_sharding_config,
-    pre_lm_head_norm_sharding_config,
+    norm_sharding_config,
     replicated_state_sharding_config,
     rope_cache_sharding_config,
     token_embedding_sharding_config,
@@ -314,7 +314,6 @@ def build_debug_model_config(
         dim=qk_rope_head_dim,
         max_context_length=seq_len,
         theta=8_000_000,
-        scaling="none",
     )
     effective_index_sources = index_sources or tuple(range(num_layers))
     return Glm5Model.Config(
@@ -322,7 +321,7 @@ def build_debug_model_config(
         vocab_size=vocab_size,
         dim=dim,
         index_sources=effective_index_sources,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -333,7 +332,7 @@ def build_debug_model_config(
         norm=RMSNorm.Config(
             normalized_shape=dim,
             param_init=_RMS_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=bool(parallelism and parallelism.enable_sequence_parallel)
             ),
         ),
@@ -436,7 +435,6 @@ def _glm5_2_744b_a40b(
         dim=64,
         max_context_length=seq_len,
         theta=8_000_000,
-        scaling="none",
     )
     layers = build_glm5_layers(
         num_layers=num_layers,
@@ -475,7 +473,7 @@ def _glm5_2_744b_a40b(
         vocab_size=vocab_size,
         dim=dim,
         index_sources=index_sources,
-        tok_embeddings=Embedding.Config(
+        tok_embeddings=VocabParallelEmbedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
@@ -487,7 +485,7 @@ def _glm5_2_744b_a40b(
             normalized_shape=dim,
             eps=1e-5,
             param_init=_RMS_NORM_INIT,
-            sharding_config=pre_lm_head_norm_sharding_config(
+            sharding_config=norm_sharding_config(
                 enable_sp=bool(parallelism and parallelism.enable_sequence_parallel)
             ),
         ),

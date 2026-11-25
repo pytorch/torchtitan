@@ -12,20 +12,17 @@ import torch
 import torch_remat as remat
 
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.deepseek_v3.mtp import (
-    MTPCrossEntropyLoss as MTPLoss,
-    MTPTransformerBlock,
-    roll_mtp_sequence,
-)
+from torchtitan.models.common.mtp import MTPCrossEntropyLoss as MTPLoss, roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import DeepSeekV3MTPBlock
 from .dsa import DsaMetadata
 from .model import Glm5TransformerBlock
 
 
-class Glm5MTPTransformerBlock(MTPTransformerBlock):
+class Glm5MTPTransformerBlock(DeepSeekV3MTPBlock):
     """NextN block with explicit remat dependencies for bare tensor consumers."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MTPTransformerBlock.Config):
+    class Config(DeepSeekV3MTPBlock.Config):
         pass
 
     # The GLM attention consumes compact DSA metadata instead of BlockMask.
