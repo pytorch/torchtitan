@@ -25,6 +25,7 @@ apply_env_defaults()
 
 import argparse
 import os
+import sys
 import tempfile
 import time
 
@@ -153,6 +154,15 @@ def generate() -> None:
             )
     finally:
         engine.shutdown()
+        # This script owns its process (in RL, Monarch's ProcMesh.stop() ends it): tear
+        # down vLLM's process groups so the NCCL watchdog doesn't query CUDA events
+        # while the driver unloads. SGLang exits cleanly without it. The vLLM engine
+        # module is imported only when the recipe uses it.
+        vllm_engine = sys.modules.get("torchtitan.rl.generator.vllm.engine")
+        if vllm_engine is not None and isinstance(engine, vllm_engine.VLLMEngine):
+            from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+            cleanup_dist_env_and_memory()
 
 
 if __name__ == "__main__":
