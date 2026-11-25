@@ -373,7 +373,13 @@ class Trainer(Configurable):
         assert self._rdma_byte_buffers is not None
         # The reads block; off the event loop, a read that hangs past the controller's timeout
         # leaves this actor able to answer later calls (e.g. shutdown).
-        await asyncio.to_thread(check_rdma_probes, self._rdma_byte_buffers, probes)
+        await asyncio.to_thread(
+            check_rdma_probes,
+            self._rdma_byte_buffers,
+            probes,
+            reader="The trainer DP replica leader",
+            knob="rdma_min_group_bytes",
+        )
 
     async def receive_replica_column(self, column: ReplicaColumn) -> None:
         """On a DP replica's leader: keep the replica's column of a coming step's plan and the

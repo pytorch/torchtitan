@@ -18,7 +18,7 @@ from torchtitan.rl.observability import metrics as m
 if TYPE_CHECKING:
     # Type-only: importing the generator module here would pull in vLLM at import time.
     from torchtitan.rl.generator.types import SamplingConfig
-    from torchtitan.rl.rdma_object import RDMAPrompt
+    from torchtitan.rl.torch_transport_rdma import RDMAPrompt
 
 
 _TRUNCATED = frozenset(

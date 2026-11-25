@@ -294,7 +294,9 @@ def test_check_rdma_probes_reads_off_the_event_loop(monkeypatch) -> None:
     reads = []
     monkeypatch.setattr(
         "torchtitan.rl.trainer.trainer.check_rdma_probes",
-        lambda buffers, probes: reads.append((buffers, threading.current_thread())),
+        lambda buffers, probes, **_: reads.append(
+            (buffers, threading.current_thread())
+        ),
     )
 
     asyncio.run(trainer.check_rdma_probes(["probe"]))

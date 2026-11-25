@@ -103,6 +103,7 @@ import math
 import os
 import time
 import warnings
+from collections.abc import Awaitable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -138,7 +139,6 @@ from torchtitan.rl.generator.mooncake_master import start_master
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.packed_group import pack_rollout_group, PackedRolloutGroup
 from torchtitan.rl.rollout.packed_group_handle import PackedRolloutGroupHandle
@@ -146,7 +146,7 @@ from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.torch_transport_rdma import RDMAProbe
+from torchtitan.rl.torch_transport_rdma import RDMAProbe, RDMAPrompt
 from torchtitan.rl.trainer.batcher import Batcher, StepPlan
 from torchtitan.rl.trainer.microbatch_group_reader import ReplicaColumn
 from torchtitan.rl.trainer.trainer import Trainer
@@ -334,35 +334,30 @@ def _default_actor_system_config() -> ActorSystem.Config:
 RDMA_PROBE_TIMEOUT_S = 60.0
 
 
-async def check_rdma_probes_on_leaders(
-    leaders: list[Any],
+async def check_rdma_probes_within_timeout(
+    check: Awaitable[None],
     probes: list[RDMAProbe],
     *,
+    reader: str,
+    knob: str,
     timeout_s: float = RDMA_PROBE_TIMEOUT_S,
 ) -> None:
-    """Have every trainer DP replica leader read every rollout worker's probe
-    (`Trainer.check_rdma_probes`), so a broken RDMA path fails at setup, not in the first step.
+    """Await one reader's read of every rollout worker's probe (`Trainer.check_rdma_probes`,
+    `Generator.check_rdma_probes`), so a broken RDMA path fails at setup, not in the first step.
 
     Raises:
-        ValueError: a leader did not finish within ``timeout_s``. A leader whose read fails
+        ValueError: the reader did not finish within ``timeout_s``. A reader whose read fails
             raises its own ``ValueError`` naming the hosts.
     """
-
-    async def check(dp_rank: int, leader: Any) -> None:
-        try:
-            await asyncio.wait_for(leader.check_rdma_probes.call_one(probes), timeout_s)
-        except TimeoutError:
-            hosts = sorted({probe.host for probe in probes})
-            raise ValueError(
-                f"The trainer DP replica leader of DP rank {dp_rank} did not finish reading the "
-                f"rollout worker probes from {hosts} over torch transport within {timeout_s:g} s. "
-                "Check UCX_TLS and UCX_NET_DEVICES, or set "
-                "BaseRolloutWorker.Config.rdma_min_group_bytes=None to send rollout groups by value."
-            ) from None
-
-    await asyncio.gather(
-        *(check(dp_rank, leader) for dp_rank, leader in enumerate(leaders))
-    )
+    try:
+        await asyncio.wait_for(check, timeout_s)
+    except TimeoutError:
+        hosts = sorted({probe.host for probe in probes})
+        raise ValueError(
+            f"{reader} did not finish reading the rollout worker probes from {hosts} over "
+            f"torch transport within {timeout_s:g} s. Check UCX_TLS and UCX_NET_DEVICES, or set "
+            f"BaseRolloutWorker.Config.{knob}=None to send these values in the calls instead."
+        ) from None
 
 
 class Controller(Configurable):
@@ -906,22 +901,6 @@ class Controller(Configurable):
                 vision_processor_config=config.vision_processor,
             )
 
-        if config.rollouter.worker.rdma_min_group_bytes is not None:
-            # Each trainer DP replica leader reads one probe from each rollout worker, so a host
-            # whose RDMA reads fail raises here instead of in the first step.
-            with sl.log_trace_span("rdma_group_probe"):
-                probes = await self._rollouter.make_rdma_probes()
-                await check_rdma_probes_on_leaders(
-                    self.trainer.leader_by_dp_rank, probes
-                )
-                await self._rollouter.drop_rdma_probes()
-            logger.info(
-                "Rollout groups of >= %d bytes stay in the rollout workers; trainer DP "
-                "replica leaders read them over torch transport (UCX_TLS=%s)",
-                config.rollouter.worker.rdma_min_group_bytes,
-                os.environ.get("UCX_TLS"),
-            )
-
         if config.model_state_dict_transport is not None:
             with sl.log_trace_span("model_state_dict_transport_init"):
                 await actor_system.initialize_model_state_dict_transport(
@@ -957,6 +936,49 @@ class Controller(Configurable):
         # loop, so every rank must be running it first).
         with sl.log_trace_span("generator_start_engine_loop"):
             await self.generator_router.start_engine_loop.call_one()
+
+        worker_config = config.rollouter.worker
+        if (
+            worker_config.rdma_min_group_bytes is not None
+            or worker_config.rdma_min_image_bytes is not None
+        ):
+            # Every reader of rollout worker buffers reads one probe from each worker, so a host
+            # whose RDMA reads fail raises here instead of in the first step: each trainer DP
+            # replica leader for packed groups, rank 0 of each generator for prompt image files.
+            # After the engine loops start: a generator answers only once its engine is built,
+            # which can take longer than the probe timeout.
+            with sl.log_trace_span("rdma_probe"):
+                probes = await self._rollouter.make_rdma_probes()
+                checks = []
+                if worker_config.rdma_min_group_bytes is not None:
+                    checks += [
+                        check_rdma_probes_within_timeout(
+                            leader.check_rdma_probes.call_one(probes),
+                            probes,
+                            reader=f"The trainer DP replica leader of DP rank {dp_rank}",
+                            knob="rdma_min_group_bytes",
+                        )
+                        for dp_rank, leader in enumerate(self.trainer.leader_by_dp_rank)
+                    ]
+                if worker_config.rdma_min_image_bytes is not None:
+                    checks.append(
+                        check_rdma_probes_within_timeout(
+                            self.generator_router.check_rdma_probes.call_one(probes),
+                            probes,
+                            reader="Rank 0 of a generator",
+                            knob="rdma_min_image_bytes",
+                        )
+                    )
+                await asyncio.gather(*checks)
+                await self._rollouter.drop_rdma_probes()
+            logger.info(
+                "Rollout groups of >= %s bytes (trainer DP replica leaders read them) and prompt "
+                "image files of >= %s bytes (generator rank 0 reads them) stay in the rollout "
+                "workers, read over torch transport; None: sent in the calls (UCX_TLS=%s)",
+                worker_config.rdma_min_group_bytes,
+                worker_config.rdma_min_image_bytes,
+                os.environ.get("UCX_TLS"),
+            )
 
         # Initial push and pull: generators pull the trainer's trainable weights at
         # start_step; they load the frozen ones (e.g. a LoRA base) from

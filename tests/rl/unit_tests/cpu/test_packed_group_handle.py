@@ -115,15 +115,11 @@ def test_rollout_group_buffers_keep_large_groups_and_reuse_released_buffers() ->
     )
 
     _, small = group_buffers.pack(replace(_group(group_size=1), group_id=5))
-    summary, handle = group_buffers.pack(group)
+    _, handle = group_buffers.pack(group)
 
     assert isinstance(small, PackedRolloutGroup)
     assert isinstance(handle, PackedRolloutGroupHandle) and handle.group_id == 3
-    metrics = {metric.key: metric.value for metric in summary.group.metrics}
-    assert metrics["rollout_worker/pool_registrations"].value == 1
-    assert (
-        metrics["rollout_worker/pool_bytes_in_use"].value == owner.pool.registered_bytes
-    )
+    assert owner.pool.bytes_in_use == owner.pool.registered_bytes
     [read] = read_packed_rollout_group_handles([handle], reader)
     _assert_rollouts_equal(unpack_rollout_group(read).rollouts, group.rollouts)
 

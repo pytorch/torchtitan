@@ -54,7 +54,6 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
-from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.routing.strategies import (
@@ -62,6 +61,7 @@ from torchtitan.rl.routing.strategies import (
     RoutingStrategy,
     StickySessionRoutingStrategy,
 )
+from torchtitan.rl.torch_transport_rdma import RDMAPrompt
 
 _TIMEOUT_S = 5
 
