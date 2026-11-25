@@ -31,7 +31,6 @@ from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
 )
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 
@@ -52,7 +51,6 @@ def transformers_modeling_backend_debugmodel(
         hf_assets_path="./tests/assets/tokenizer",
         debug=DebugConfig(print_config=True, deterministic=deterministic),
         model=model_config,
-        profiler=Profiler.Config(profile_freq=5),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -66,7 +64,6 @@ def transformers_modeling_backend_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -110,7 +107,6 @@ def transformers_modeling_backend_debugmodel_moe(
         hf_assets_path="./tests/assets/tokenizer",
         debug=DebugConfig(print_config=True, deterministic=deterministic),
         model=model_config,
-        profiler=Profiler.Config(profile_freq=5),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -124,7 +120,6 @@ def transformers_modeling_backend_debugmodel_moe(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
-            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -176,7 +171,6 @@ def transformers_modeling_backend_sft_debugmodel(
             # logits tensor. 16384 tokens is ~9GB in fp32 and OOMs the 22GB
             # CI GPUs.
             num_tokens_per_microbatch_per_dp_rank=1 * seq_len,
-            max_context_length=seq_len,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(

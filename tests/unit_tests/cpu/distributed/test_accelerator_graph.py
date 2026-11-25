@@ -229,7 +229,7 @@ def test_manager_teardown_resets_capture_state(initialized) -> None:
             wrapper.teardown.assert_called_once_with()
 
 
-def test_preparation_and_cache_release_run_only_before_first_capture() -> None:
+def test_preparation_runs_only_before_first_capture() -> None:
     events = []
 
     def capture(*args, **kwargs):
@@ -266,7 +266,7 @@ def test_preparation_and_cache_release_run_only_before_first_capture() -> None:
         )
         for _ in range(4):
             wrapper(torch.tensor(1))
-        assert events == ["prepare", "cache", "capture"]
+        assert events == ["prepare", "capture"]
 
 
 def test_capture_gate_does_not_record_gradients() -> None:

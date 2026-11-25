@@ -15,9 +15,11 @@ maintained; it has to earn its cost.
 - Bug fixes: add a regression test only if the bug could silently come back and
   existing tests didn't catch it; otherwise say why none is needed.
 - Don't add tests that only re-read a config they just set, assert constants,
-  grep docs or READMEs, or duplicate an existing test for one more model.
+  grep docs or READMEs, snapshot private layouts, repeat mock calls, or duplicate
+  an existing test for one more model.
 
 ## Prefer Extending Existing Coverage
+- Delete a redundant test only after naming the retained test that covers it.
 - Enable a new feature in an existing integration configuration (e.g. change an
   existing "FSDP 4" entry to "FSDP 2 + CP 2") instead of adding a new entry.
 - Cover the harder configuration: interleaved PP schedules over 1F1B, EP x SP
@@ -41,3 +43,10 @@ maintained; it has to earn its cost.
   a change pass. An expected change must be explained in the PR and regenerated
   for every affected backend and suite (e.g. both real-PG and fake-PG goldens).
 - Verify that the intended test actually ran (not skipped, right config).
+
+## Skip Integration Tests on Specific Backend
+- An integration test that a backend cannot run goes under that backend's key in
+  `tests/integration_tests/hardware_skips/skipped_tests.toml`, not in a
+  per-backend flag. Out-of-tree device repos register their own file through the
+  `torchtitan.integration_tests.hardware_skips` interface.
+  See `tests/integration_tests/hardware_skips/README.md`.

@@ -41,11 +41,11 @@ from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.checkpointer import (
-    BaseCheckpointManager,
     CheckpointManager,
     CheckpointStorage,
     EMA,
     MODEL,
+    ModelWrapper,
     OPTIMIZER,
 )
 from torchtitan.components.checkpointer.torch_checkpointing import (
@@ -55,6 +55,8 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     TorchCheckpointingManager,
 )
 from torchtitan.config import CallableFunction
+from torchtitan.models.base.module import Module
+from torchtitan.models.common.nn_modules import RMSNorm
 
 
 class _BackendManager:
@@ -175,16 +177,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         manager.close()
         self.assertTrue(backend_manager.closed)
 
-    def test_config_adds_no_checkpoint_options(self) -> None:
-        field_names = {
-            field.name for field in dataclasses.fields(TorchCheckpointingManager.Config)
-        }
-        base_field_names = {
-            field.name for field in dataclasses.fields(BaseCheckpointManager.Config)
-        }
-
-        self.assertEqual(field_names, base_field_names)
-
     def test_config_to_dict_is_json_serializable(self) -> None:
         config_dict = TorchCheckpointingManager.Config().to_dict()
 
@@ -262,12 +254,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertIs(storage_config, manager._manager_config.storage_config)
         manager.close()
 
-    def test_legacy_config_has_no_backend_selector(self) -> None:
-        config = CheckpointManager.Config()
-
-        self.assertFalse(hasattr(config, "save_backend"))
-        self.assertFalse(hasattr(config, "load_backend"))
-
     def test_save_obeys_cadence_and_tracks_backend_future(self) -> None:
         config = TorchCheckpointingManager.Config(
             interval=3,
@@ -296,6 +282,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             interval=10,
             keep_latest_k=0,
             initial_load_model_only=False,
+            async_mode="async_with_pinned_mem",
         )
         manager, backend_manager = self._build_manager(config)
 
@@ -343,6 +330,51 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         self.assertIsInstance(manager._manager_config.save, SyncCheckpointSaverConfig)
         self.assertIsNone(manager._manager_config.save.writer_config.barrier_config)
+        manager.close()
+
+    def test_async_mode_selects_the_backend_saver(self) -> None:
+        for async_mode, saver in (
+            ("async_with_pinned_mem", AsyncCheckpointSaverConfig),
+            ("ASYNC_WITH_PINNED_MEM", AsyncCheckpointSaverConfig),
+            ("disabled", SyncCheckpointSaverConfig),
+        ):
+            with self.subTest(async_mode=async_mode):
+                config = TorchCheckpointingManager.Config(
+                    keep_latest_k=0,
+                    initial_load_model_only=False,
+                    async_mode=async_mode,
+                )
+                manager, _ = self._build_manager(config)
+                self.assertIsInstance(manager._manager_config.save, saver)
+                # Training saves wait for every rank before publishing.
+                self.assertIsNotNone(
+                    manager._manager_config.save.writer_config.barrier_config
+                )
+                manager.close()
+        # The field is shared with the DCP manager, including its default.
+        self.assertEqual("disabled", TorchCheckpointingManager.Config().async_mode)
+        with self.assertRaisesRegex(ValueError, "does not support async_mode='async'"):
+            TorchCheckpointingManager.Config(async_mode="ASYNC")
+
+    def test_sync_save_returns_after_writing_and_skips_prewarm(self) -> None:
+        config = TorchCheckpointingManager.Config(
+            interval=3,
+            keep_latest_k=0,
+            initial_load_model_only=False,
+            async_mode="disabled",
+        )
+        manager, backend_manager = self._build_manager(config)
+        # A synchronous backend save writes before returning, and returns None.
+        backend_manager.save_result = None
+
+        self.assertFalse(manager.save(curr_step=1))
+        self.assertFalse(manager.save(curr_step=2))
+        self.assertTrue(manager.save(curr_step=3))
+
+        self.assertEqual([], backend_manager.prewarm_calls)
+        self.assertEqual(1, len(backend_manager.save_calls))
+        self.assertIsNone(manager.save_future)
+        manager.maybe_wait_for_saving()
         manager.close()
 
     def test_load_only_does_not_construct_checkpoint_barrier(self) -> None:
@@ -533,7 +565,8 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
     def test_last_step_export_converts_only_mismatched_float_tensors(self) -> None:
         # Regression for the two defects #4166 fixed on the DCP side: gating on
         # export_dtype != float32 skipped BF16-to-FP32 exports entirely, and the
-        # blanket cast turned integer and boolean buffers into floats.
+        # blanket cast turned integer and boolean buffers into floats. Parameters
+        # in preserve_dtype_params keep their dtype.
         cases = (("float32", torch.float32), ("bfloat16", torch.bfloat16))
         for export_dtype, expected in cases:
             with self.subTest(export_dtype=export_dtype):
@@ -546,13 +579,14 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 manager, _ = self._build_manager(config)
                 sync_manager = _BackendManager()
                 sync_manager.save_result = None
-                model = _Stateful(None)
-                model.state_dict = lambda: {
-                    "weight": torch.ones(2, dtype=torch.bfloat16),
-                    "step_count": torch.ones(2, dtype=torch.int64),
-                    "mask": torch.ones(2, dtype=torch.bool),
-                }
-                manager.states[MODEL] = model
+                model = Module()
+                model.weight = nn.Parameter(torch.ones(2, dtype=torch.bfloat16))
+                model.register_buffer("step_count", torch.ones(2, dtype=torch.int64))
+                model.register_buffer("mask", torch.ones(2, dtype=torch.bool))
+                model.norm = RMSNorm.Config(
+                    normalized_shape=2, preserve_dtype_params=("weight",)
+                ).build()
+                manager.states[MODEL] = ModelWrapper(model)
 
                 with mock.patch.object(
                     BackendCheckpointManager.Config,
@@ -565,6 +599,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 self.assertEqual(expected, saved["weight"].dtype)
                 self.assertEqual(torch.int64, saved["step_count"].dtype)
                 self.assertEqual(torch.bool, saved["mask"].dtype)
+                self.assertEqual(torch.float32, saved["norm.weight"].dtype)
                 manager.close()
 
     def test_last_step_uses_synchronous_manager_and_model_only_payload(self) -> None:
@@ -821,6 +856,24 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
         manager.close()
 
+    def test_hf_final_save_rejects_frozen_params(self) -> None:
+        """State dict adapters drop LoRA adapters, so the export would be the base."""
+        model = nn.Linear(2, 2)
+        model.bias.requires_grad_(False)
+        config = TorchCheckpointingManager.Config(
+            last_save_model_only=True, last_save_in_hf=True
+        )
+        with self.assertRaisesRegex(ValueError, "frozen parameters"):
+            config.build(
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                extra_states={},
+                sd_adapter=_StateDictAdapter(),
+                storage_config=mock.Mock(),
+            )
+
     def test_hf_load_uses_temporary_model_only_manager_and_restores_model(
         self,
     ) -> None:
@@ -838,6 +891,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 keep_latest_k=0,
                 initial_load_model_only=True,
                 initial_load_in_hf=True,
+                async_mode="async_with_pinned_mem",
             )
             backend_manager = _BackendManager()
             hf_manager = _BackendManager()

@@ -9,6 +9,8 @@ import importlib
 import logging
 import math
 import os
+from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, MISSING
 from fractions import Fraction
 from typing import Any
@@ -23,19 +25,19 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.base.model import BaseModel
+from torchtitan.models.base.model import BaseModel, FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.attention import (
     create_attention_mask,
     get_causal_mask_mod,
     get_document_mask_mod,
 )
-from torchtitan.models.common.flops import quadratic_attention_flops_per_token
+from torchtitan.models.common.flops import quadratic_attention_flops
 
 from .parallelize import parallelize_hf_transformers
 from .pipeline import pipeline_hf_transformers
@@ -156,13 +158,6 @@ _TT_SPECIFIC_ATTRIBUTES = [
     "attn_mask_type",
 ]
 
-# NOTE: This backend instantiates model classes from the installed
-# ``transformers`` package. When a model repo ships an older remote config
-# implementation, mixing that remote config with the newer local model code can
-# drop compatibility attrs the local model expects. Prefer the local
-# ``transformers`` config/model pair for denylisted model types.
-_REMOTE_CONFIG_DENYLIST = frozenset({"deepseek_v2", "deepseek_v3"})
-
 
 def _get_moe_attr_name(layer: nn.Module) -> str | None:
     """Return the attribute name holding the MoE block on a decoder layer.
@@ -215,7 +210,7 @@ class HFTransformerModel(BaseModel):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -230,10 +225,10 @@ class HFTransformerModel(BaseModel):
         apply_fsdp(
             self,
             dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=training.enable_cpu_offload,
+            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
             ep_degree=parallelism_context.ep,
@@ -268,6 +263,12 @@ class HFTransformerModel(BaseModel):
         label2id: dict | None = field(init=False, default=None)
         problem_type: str | None = field(init=False, default=None)
 
+        def __post_init__(self, **kwargs) -> None:
+            # Configurable.Config.__post_init__ is ahead of PretrainedConfig
+            # in the MRO and takes no extra arguments. HF passes leftover
+            # kwargs, including attn_implementation, to self.__post_init__.
+            PretrainedConfig.__post_init__(self, **kwargs)
+
         def __init__(
             self,
             model_config,
@@ -278,13 +279,14 @@ class HFTransformerModel(BaseModel):
             PretrainedConfig.__init__(
                 self, attn_implementation=_ATTN_IMPLEMENTATION, **kwargs
             )
-            # Set param_init and sharding_config before Module.Config.build()
-            # accesses them. PretrainedConfig.__getattribute__ doesn't
-            # recognize slots inherited from Module.Config.
+            # Set param_init, sharding_config and preserve_dtype_params before
+            # Module.Config.build() accesses them. PretrainedConfig.__getattribute__
+            # doesn't recognize slots inherited from Module.Config.
             self.param_init = (
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            self.preserve_dtype_params = ()
             # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
             self.local_compile = LocalCompileConfig(
                 regions=["loss", "fused_binary_activation"]
@@ -458,15 +460,11 @@ class HFTransformerModel(BaseModel):
             deterministic: bool,
         ) -> None:
             """Populate this config from the selected Hugging Face model."""
-            config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
-            trust_remote_code = (
-                config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
-            )
             # Load HF config (overwrites our HF attributes)
             hf_model_config = AutoConfig.from_pretrained(
                 hf_model_id,
                 attn_implementation=self.attn_implementation,
-                trust_remote_code=trust_remote_code,
+                trust_remote_code=False,
             )
 
             # For composite (VL) models, use the nested text config so we
@@ -510,6 +508,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
+            self.max_context_length = max_context_length
+            # Aliases HF's max_position_embeddings.
             self.max_seq_len = max_context_length
             self.deterministic = deterministic
 
@@ -568,8 +568,8 @@ class HFTransformerModel(BaseModel):
 
             return self
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
+        def _parameter_counts(
+            self, model: nn.Module, *, include_embeddings: bool
         ) -> tuple[int, int]:
             assert isinstance(model, HFTransformerModel)
             named_parameters = list(model.named_parameters())
@@ -578,17 +578,18 @@ class HFTransformerModel(BaseModel):
                 id(param): Fraction(1) for _, param in named_parameters
             }
 
-            lm_head = getattr(model, "lm_head", None)
-            lm_head_parameter_ids = (
-                {id(param) for param in lm_head.parameters()}
-                if isinstance(lm_head, nn.Module)
-                else set()
-            )
-            for module in model.modules():
-                if isinstance(module, nn.Embedding):
-                    for param in module.parameters(recurse=False):
-                        if id(param) not in lm_head_parameter_ids:
-                            parameter_weights[id(param)] = Fraction(0)
+            if not include_embeddings:
+                lm_head = getattr(model, "lm_head", None)
+                lm_head_parameter_ids = (
+                    {id(param) for param in lm_head.parameters()}
+                    if isinstance(lm_head, nn.Module)
+                    else set()
+                )
+                for module in model.modules():
+                    if isinstance(module, nn.Embedding):
+                        for param in module.parameters(recurse=False):
+                            if id(param) not in lm_head_parameter_ids:
+                                parameter_weights[id(param)] = Fraction(0)
 
             for layer in model.layers.values():
                 moe_params = getattr(layer, "_native_moe_params", None)
@@ -616,7 +617,17 @@ class HFTransformerModel(BaseModel):
                 for _, param in named_parameters
             )
             assert nparams_for_matmul.denominator == 1
-            active_nparams = nparams_for_matmul.numerator
+            return nparams, nparams_for_matmul.numerator
+
+        def get_parameter_counts(self, model: nn.Module) -> tuple[int, int]:
+            return self._parameter_counts(model, include_embeddings=True)
+
+        def build_flops_estimator(
+            self, model: nn.Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            # Attention cost comes from each microbatch's positions.
+            del seq_len
+            _, active_nparams = self._parameter_counts(model, include_embeddings=False)
 
             if all(
                 hasattr(self, name)
@@ -650,7 +661,9 @@ class HFTransformerModel(BaseModel):
                         ["full_attention"] * (len(model.layers) - len(layer_types))
                     )
 
-            attention_op_flops = 0
+            # Number of layers for each (qk_head_dim, v_head_dim,
+            # sliding_window_size) attention shape.
+            attention_shapes: Counter[tuple[int, int, int | None]] = Counter()
             unsupported_layer_types = set()
             for layer_type in layer_types:
                 if layer_type in ("attention", "full_attention"):
@@ -676,13 +689,9 @@ class HFTransformerModel(BaseModel):
                         layer_qk_head_dim = global_head_dim
                         layer_v_head_dim = global_head_dim
 
-                attention_op_flops += quadratic_attention_flops_per_token(
-                    num_heads=self.n_heads,
-                    qk_head_dim=layer_qk_head_dim,
-                    v_head_dim=layer_v_head_dim,
-                    seq_len=seq_len,
-                    sliding_window_size=sliding_window_size,
-                )
+                attention_shapes[
+                    (layer_qk_head_dim, layer_v_head_dim, sliding_window_size)
+                ] += 1
 
             if unsupported_layer_types:
                 logger.warning(
@@ -691,12 +700,34 @@ class HFTransformerModel(BaseModel):
                     "approximating them as full attention."
                 )
 
-            num_flops_per_token = 6 * active_nparams + attention_op_flops
-            logger.info(
-                f"Total parameter count: {nparams:,}, "
-                f"active parameters: {active_nparams:,}"
+            document_masked = (
+                getattr(self, "attn_mask_type", "causal") == "block_causal"
             )
-            return nparams, num_flops_per_token
+
+            def estimate(input_dict: Mapping[str, Any]) -> int:
+                # A causal query at position p attends to p + 1 keys. positions
+                # restart at each document, which only "block_causal" masks
+                # follow. Padding does no useful work, so it is not counted.
+                positions = input_dict["positions"]
+                if not document_masked:
+                    positions = torch.arange(positions.shape[0])
+                num_keys = positions[~input_dict["padding_mask"]] + 1
+                flops = 6 * active_nparams * num_keys.numel()
+                for shape, num_layers in attention_shapes.items():
+                    layer_qk_head_dim, layer_v_head_dim, sliding_window_size = shape
+                    flops += num_layers * quadratic_attention_flops(
+                        num_heads=self.n_heads,
+                        qk_head_dim=layer_qk_head_dim,
+                        v_head_dim=layer_v_head_dim,
+                        num_keys=(
+                            num_keys
+                            if sliding_window_size is None
+                            else num_keys.clamp(max=sliding_window_size)
+                        ),
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config):
         super().__init__()
@@ -1227,11 +1258,10 @@ class HFTransformerModel(BaseModel):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any], dict[str, Any]]:
         """Build the attention mask (when positions are present), CP-shard, return."""
-        del max_num_documents, max_context_length, global_routing_token_counts
+        del max_num_documents, global_routing_token_counts
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types

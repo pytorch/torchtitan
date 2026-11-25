@@ -4,11 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
+from torch.export import register_dataclass
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
@@ -27,11 +28,17 @@ from torchtitan.models.common.rope import RoPE
 from .compressor import compressed_cu_seqlens, Compressor, Indexer, SparseIndexerLoss
 
 
-def _packed_cu_seqlens(
-    attention_metadata: VarlenAttentionMetadata | None,
-) -> torch.Tensor | None:
-    """Document offsets for packed inputs, or None for one causal sequence."""
-    return None if attention_metadata is None else attention_metadata.cu_seq_q
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DeepSeekV4CompressedSparseAttentionMetadata(VarlenAttentionMetadata):
+    """Varlen offsets plus the geometry shared by one sparse-attention variant."""
+
+    cu_seq_compressed: torch.Tensor
+    group_start: torch.Tensor
+    group_first: torch.Tensor
+    compressed_causal_indices: torch.Tensor | None = None
+
+
+register_dataclass(DeepSeekV4CompressedSparseAttentionMetadata)
 
 
 def _assert_spmd_attention_type(tensor, *, tp):
@@ -60,7 +67,6 @@ class DSV4InnerAttention(InnerAttention):
         window_size: int
         compress_ratio: int
         softmax_scale: float
-        index_topk: int
         aux_loss: SparseIndexerLoss.Config | None = None
 
         def build_attention_metadata(
@@ -70,21 +76,56 @@ class DSV4InnerAttention(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> VarlenAttentionMetadata:
-            """Build document offsets shared by DSV4 sparse attention components."""
-            return create_varlen_metadata_for_document(
+        ) -> DeepSeekV4CompressedSparseAttentionMetadata:
+            """Default for the sliding-window variant: no compressed groups."""
+            varlen = create_varlen_metadata_for_document(
                 positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
+            empty = torch.empty(0, dtype=torch.int32, device=positions.device)
+            return DeepSeekV4CompressedSparseAttentionMetadata(
+                cu_seq_q=varlen.cu_seq_q,
+                cu_seq_k=varlen.cu_seq_k,
+                max_q=varlen.max_q,
+                max_k=varlen.max_k,
+                window_size=varlen.window_size,
+                cu_seq_compressed=torch.zeros_like(varlen.cu_seq_q),
+                group_start=empty,
+                group_first=torch.empty(0, dtype=torch.bool, device=positions.device),
+            )
+
+        def _compressed_geometry(
+            self,
+            metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+            positions: torch.Tensor,
+        ) -> dict[str, torch.Tensor]:
+            """Compressed pool offsets and group indices, computed once."""
+            ratio = self.compress_ratio
+            cu = metadata.cu_seq_q
+            cu_seq_compressed = compressed_cu_seqlens(cu, ratio)
+            slots = torch.arange(
+                positions.size(0) // ratio, dtype=torch.int32, device=positions.device
+            )
+            group_doc = torch.searchsorted(
+                cu_seq_compressed[1:], slots, right=True, out_int32=True
+            )
+            group = slots - cu_seq_compressed[group_doc]
+            start = torch.where(
+                slots < cu_seq_compressed[-1], cu[group_doc] + group * ratio, 0
+            )
+            return {
+                "cu_seq_compressed": cu_seq_compressed,
+                "group_start": start,
+                "group_first": group == 0,
+            }
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size
         self.compress_ratio = config.compress_ratio
         self.softmax_scale = config.softmax_scale
-        self.index_topk = config.index_topk
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
     def _gather_attn(
@@ -94,7 +135,7 @@ class DSV4InnerAttention(InnerAttention):
         cmp_k_SD,
         cmp_topk_TK,
         attn_sink,
-        cu_seqlens,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         *,
         topk_scores_TK=None,
         aux_loss_denominator=None,
@@ -102,17 +143,11 @@ class DSV4InnerAttention(InnerAttention):
     ) -> torch.Tensor:
         """``cmp_topk_TK`` holds indices into ``cmp_k_SD``; -1 marks unused slots.
 
-        With packed ``cu_seqlens`` the window stays inside each document and the
+        With packed documents the window stays inside each document and the
         indices are local to the query's document in the packed ``cmp_k_SD``.
         """
-        cu_seqlens_k = None
-        if cu_seqlens is not None:
-            # SWA passes an empty compressed pool: every document's span is empty.
-            cu_seqlens_k = (
-                compressed_cu_seqlens(cu_seqlens, self.compress_ratio)
-                if self.compress_ratio > 1
-                else torch.zeros_like(cu_seqlens)
-            )
+        cu_seqlens = attention_metadata.cu_seq_q
+        cu_seqlens_k = attention_metadata.cu_seq_compressed
         with spmd.no_typecheck():
             # gather_attn takes [B, H, T, D]; the KV latent has one head.
             aux_loss = self.aux_loss if self.training else None
@@ -142,7 +177,7 @@ class DSV4InnerAttention(InnerAttention):
                     cmp_topk_TK,
                     topk_scores_TK,
                     aux.lse.squeeze(0).transpose(0, 1).detach(),
-                    cu_seqlens,
+                    attention_metadata,
                     carrier=out_THD,
                     denominator=aux_loss_denominator,
                     padding_mask_T=padding_mask_T,
@@ -166,25 +201,40 @@ class SlidingWindowAttention(DSV4InnerAttention):
         swa_k,
         attn_sink,
         *,
-        attention_metadata=None,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
     ) -> torch.Tensor:
         seqlen, _, head_dim = q.size()
         no_cmp_k = torch.empty(0, head_dim, dtype=swa_k.dtype, device=q.device)
         no_topk = torch.empty(seqlen, 0, dtype=torch.int32, device=q.device)
         return self._gather_attn(
-            q,
-            swa_k,
-            no_cmp_k,
-            no_topk,
-            attn_sink,
-            _packed_cu_seqlens(attention_metadata),
+            q, swa_k, no_cmp_k, no_topk, attn_sink, attention_metadata
         )
 
 
 class HeavilyCompressedAttention(DSV4InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(DSV4InnerAttention.Config):
-        pass
+        def build_attention_metadata(
+            self, positions: torch.Tensor, **kwargs
+        ) -> DeepSeekV4CompressedSparseAttentionMetadata:
+            metadata = DSV4InnerAttention.Config.build_attention_metadata(
+                self, positions, **kwargs
+            )
+
+            def compressed_causal_indices(max_k: int) -> torch.Tensor:
+                ratio = self.compress_ratio
+                width = min(positions.size(0) // ratio, max_k // ratio)
+                limit = (positions + 1) // ratio
+                candidates = torch.arange(
+                    width, dtype=torch.int32, device=positions.device
+                )
+                return torch.where(candidates < limit[:, None], candidates, -1)
+
+            return replace(
+                metadata,
+                **self._compressed_geometry(metadata, positions),
+                compressed_causal_indices=compressed_causal_indices(metadata.max_k),
+            )
 
     def forward(
         self,
@@ -193,68 +243,49 @@ class HeavilyCompressedAttention(DSV4InnerAttention):
         cmp_k,
         attn_sink,
         *,
-        attention_metadata=None,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
     ) -> torch.Tensor:
-        # Every compressed block that ends at or before the query is attended:
-        # query t sees positions s < (t + 1) // compress_ratio, counted from the
-        # start of its document when packed.
-        cu_seqlens = None
-        seqlen, n_cmp = q.size(0), cmp_k.size(0)
-        pos_t = torch.arange(seqlen, device=q.device)
-        if attention_metadata is not None:
-            cu_seqlens = attention_metadata.cu_seq_q
-            # A query sees only its own document's blocks, so bound the index
-            # width by the longest document instead of the whole batch.
-            n_cmp = min(n_cmp, attention_metadata.max_k // self.compress_ratio)
-            pos_t = pos_t - torch.repeat_interleave(
-                cu_seqlens[:-1], torch.diff(cu_seqlens), output_size=seqlen
-            )
-        cmp_s = torch.arange(n_cmp, dtype=torch.int32, device=q.device)
-        limit_t = (pos_t + 1) // self.compress_ratio
-        cmp_topk = torch.where(cmp_s < limit_t.unsqueeze(1), cmp_s, -1)
-        return self._gather_attn(q, swa_k, cmp_k, cmp_topk, attn_sink, cu_seqlens)
+        return self._gather_attn(
+            q,
+            swa_k,
+            cmp_k,
+            attention_metadata.compressed_causal_indices,
+            attn_sink,
+            attention_metadata,
+        )
 
 
 class CompressedSparseAttention(DSV4InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(DSV4InnerAttention.Config):
-        pass
+        def build_attention_metadata(
+            self, positions: torch.Tensor, **kwargs
+        ) -> DeepSeekV4CompressedSparseAttentionMetadata:
+            metadata = DSV4InnerAttention.Config.build_attention_metadata(
+                self, positions, **kwargs
+            )
+            return replace(metadata, **self._compressed_geometry(metadata, positions))
 
     def forward(
         self,
         q,
         swa_k,
         cmp_k,
-        idx_q,
-        idx_k,
-        idx_w,
+        topk_indices,
+        topk_scores: torch.Tensor,
         attn_sink,
         *,
-        attention_metadata=None,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
         aux_loss_denominator=None,
         padding_mask_T=None,
     ) -> torch.Tensor:
-        cu_seqlens = _packed_cu_seqlens(attention_metadata)
-        with spmd.no_typecheck():
-            cmp_topk, topk_scores = Indexer.select(
-                idx_q,
-                idx_k,
-                idx_w,
-                max_seqlen=q.size(0)
-                if attention_metadata is None
-                else attention_metadata.max_k,
-                ratio=self.compress_ratio,
-                topk=self.index_topk,
-                cu_seqlens=cu_seqlens,
-                return_scores=self.training and self.aux_loss is not None,
-            )
         return self._gather_attn(
             q,
             swa_k,
             cmp_k,
-            cmp_topk,
+            topk_indices,
             attn_sink,
-            cu_seqlens,
+            attention_metadata,
             topk_scores_TK=topk_scores,
             aux_loss_denominator=aux_loss_denominator,
             padding_mask_T=padding_mask_T,
@@ -303,6 +334,43 @@ class DeepSeekV4Attention(Attention):
         compressor_128: Compressor.Config | None = None
         indexer: Indexer.Config | None = None
 
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
+
+            inner_attention = self.inner_attention
+            # A causal query at document position p attends to p + 1 keys,
+            # at most window_size of them uncompressed.
+            num_keys = positions + 1
+            attention_op_flops = quadratic_attention_flops(
+                num_heads=self.n_heads,
+                qk_head_dim=self.head_dim,
+                v_head_dim=self.head_dim,
+                num_keys=num_keys.clamp(max=inner_attention.window_size),
+            )
+
+            if self.compress_ratio > 1:
+                num_compressed_keys = num_keys // self.compress_ratio
+                if self.compress_ratio == 4:
+                    # The indexer scores every compressed key; attention reads
+                    # only the top-k.
+                    attention_op_flops += (
+                        6
+                        * self.index_n_heads
+                        * self.index_head_dim
+                        * int(num_compressed_keys.sum())
+                    )
+                    assert self.indexer is not None
+                    num_compressed_keys = num_compressed_keys.clamp(
+                        max=self.indexer.inner_indexer.topk
+                    )
+                attention_op_flops += quadratic_attention_flops(
+                    num_heads=self.n_heads,
+                    qk_head_dim=self.head_dim,
+                    v_head_dim=self.head_dim,
+                    num_keys=num_compressed_keys,
+                )
+            return attention_op_flops
+
     def __init__(self, config: Config):
         super().__init__()
         cfg = config
@@ -341,8 +409,8 @@ class DeepSeekV4Attention(Attention):
     def forward(
         self,
         x,
-        attention_metadata=None,
-        positions=None,
+        attention_metadata: DeepSeekV4CompressedSparseAttentionMetadata,
+        positions: torch.Tensor,
         aux_loss_denominator=None,
         padding_mask=None,
     ):
@@ -385,32 +453,38 @@ class DeepSeekV4Attention(Attention):
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
-        cu_seqlens = _packed_cu_seqlens(attention_metadata)
-        cmp_k = idx_q = idx_k = idx_w = None
-        if self.compress_ratio > 1 and hasattr(self, "indexer"):
-            idx_q, idx_k, idx_w = self.indexer(
-                x.detach(), qr.detach(), positions=positions, cu_seqlens=cu_seqlens
-            )
-        if self.compress_ratio == 4:
-            cmp_k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
-        elif self.compress_ratio > 1:
-            cmp_k = self.compressor_128(x, positions=positions, cu_seqlens=cu_seqlens)
-
         attn_sink_param = self.attn_sink.weight.squeeze(-1)
         if self.compress_ratio == 4:
+            return_scores = (
+                self.inner_attention.training
+                and self.inner_attention.aux_loss is not None
+            )
+            with torch.set_grad_enabled(torch.is_grad_enabled() and return_scores):
+                topk_indices, topk_scores = self.indexer(
+                    x.detach(),
+                    qr.detach(),
+                    positions=positions,
+                    attention_metadata=attention_metadata,
+                    return_scores=return_scores,
+                )
+            cmp_k = self.compressor(
+                x, positions=positions, attention_metadata=attention_metadata
+            )
             o = self.inner_attention(
                 q,
                 kv,
                 cmp_k,
-                idx_q,
-                idx_k,
-                idx_w,
+                topk_indices,
+                topk_scores,
                 attn_sink_param,
                 attention_metadata=attention_metadata,
                 aux_loss_denominator=aux_loss_denominator,
                 padding_mask_T=padding_mask,
             )
         elif self.compress_ratio > 1:
+            cmp_k = self.compressor_128(
+                x, positions=positions, attention_metadata=attention_metadata
+            )
             o = self.inner_attention(
                 q,
                 kv,

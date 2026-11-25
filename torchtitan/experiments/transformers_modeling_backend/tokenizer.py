@@ -13,11 +13,12 @@ _GENERATION_TAG = re.compile(r"(\{%[-+]?\s*)(end)?generation(\s*[-+]?%\})")
 
 
 class HFBackendTokenizer(HuggingFaceTokenizer):
-    """Tokenizer that passes special tokens to chat templates.
+    """Experiment tokenizer repairs that the base class does not do.
 
-    Some HF models' chat templates reference bos_token, eos_token, etc.
-    The base tokenizer only passes messages. This subclass auto-injects
-    special tokens so all HF chat templates work.
+    ``HuggingFaceTokenizer`` already passes ``bos_token`` and ``eos_token``
+    into chat templates. This subclass rewrites ``{% generation %}`` tags
+    into ``with`` blocks in ``set_chat_template``, and sets ``eos_token``
+    in ``__init__`` when the base left ``eos_id`` unset.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -42,14 +43,3 @@ class HFBackendTokenizer(HuggingFaceTokenizer):
             lambda m: m[1] + ("endwith" if m[2] else "with") + m[3], template
         )
         super().set_chat_template(template)
-
-    def apply_chat_template(self, messages, **kwargs):
-        kwargs.setdefault("bos_token", self.bos_token or "")
-        kwargs.setdefault("eos_token", self.eos_token or "")
-        return super().apply_chat_template(messages, **kwargs)
-
-    def encode(self, text: str, **kwargs) -> list[int]:
-        # Chat templates like Llama 3's render bos_token; don't prepend a second BOS.
-        if self.bos_token and text.startswith(self.bos_token):
-            kwargs["add_bos"] = False
-        return super().encode(text, **kwargs)

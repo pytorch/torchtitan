@@ -24,7 +24,7 @@ from torchtitan.models.common.linear.async_linear import AsyncRowParallelLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
-from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
+from torchtitan.models.deepseek_v3.mtp import DeepSeekV3MTPBlock
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
         )
 
     def test_mtp_valid_mask_is_explicitly_sharded(self):
-        mtp = MTPTransformerBlock.__new__(MTPTransformerBlock)
+        mtp = DeepSeekV3MTPBlock.__new__(DeepSeekV3MTPBlock)
         valid_mask_T = torch.ones(4, dtype=torch.bool)
         tp_group = object()
 
@@ -97,9 +97,8 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
-        assert mtp_config.in_src_shardings is not None
-        self.assertIn("mtp_input_valid_mask", mtp_config.in_src_shardings)
-        self.assertIsNone(mtp_config.in_dst_shardings)
+        assert mtp_config.input_shardings is not None
+        self.assertIn("mtp_input_valid_mask", mtp_config.input_shardings)
 
     def test_select_experts_limits_choices_to_selected_groups(self):
         router = DeepSeekV3Router.Config(
@@ -143,11 +142,9 @@ class TestDeepSeekV3Router(unittest.TestCase):
         attention_config = config.layers[0].attention
         self.assertIs(type(attention_config.wo), RowParallelLinear.Config)
         assert attention_config.sharding_config is not None
-        self.assertIsNotNone(attention_config.sharding_config.in_src_shardings)
-        self.assertIsNone(attention_config.sharding_config.in_dst_shardings)
+        self.assertIsNotNone(attention_config.sharding_config.input_shardings)
         assert attention_config.wo.sharding_config is not None
-        self.assertIsNotNone(attention_config.wo.sharding_config.out_src_shardings)
-        self.assertIsNone(attention_config.wo.sharding_config.out_dst_shardings)
+        self.assertIsNotNone(attention_config.wo.sharding_config.output_shardings)
 
         AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True

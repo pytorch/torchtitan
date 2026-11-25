@@ -8,12 +8,20 @@
 
 from __future__ import annotations
 
-from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
+from monarch.actor import Channel, concurrent_endpoint, context, current_rank
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.config import PrecisionConfig
+from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.model_state_dict_transport import (
+    ModelStateDictTransport,
+    TensorShard,
+    TrainerSource,
+)
+from torchtitan.rl.rollout.types import Completion, Prompt
 
 
 class _GeneratorActorEndpoints:
@@ -21,23 +29,45 @@ class _GeneratorActorEndpoints:
         self,
         config: Generator.Config,
         *,
+        precision: PrecisionConfig,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
+        vision_processor: VisionProcessor.Config | None = None,
+        mooncake_master_address: str | None = None,
     ) -> None:
         super().__init__(
             config,
+            precision=precision,
             model_path=model_path,
             max_num_seqs=max_num_seqs,
             output_dir=output_dir,
             rank=current_rank().rank,
             generator_name=context().actor_instance.actor_id.actor_name,
             open_result_channel=Channel.open,
+            vision_processor=vision_processor,
+            mooncake_master_address=mooncake_master_address,
         )
 
     @concurrent_endpoint
     async def initialize_torchstore_client(self, requester_index: int) -> None:
         await super().initialize_torchstore_client(requester_index)
+
+    @concurrent_endpoint
+    async def model_state_dict_layout(self) -> tuple[int, dict[str, TensorShard]]:
+        return await super().model_state_dict_layout()
+
+    @concurrent_endpoint
+    async def connect_model_state_dict_transport(
+        self,
+        config: ModelStateDictTransport.Config,
+        *,
+        trainer_sources: list[TrainerSource],
+        generator_index: int,
+    ) -> None:
+        await super().connect_model_state_dict_transport(
+            config, trainer_sources=trainer_sources, generator_index=generator_index
+        )
 
     @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
@@ -54,21 +84,19 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def generate(
         self,
-        prompt_token_ids: list[int],
+        prompt: Prompt,
         *,
         request_id: str,
         group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
-        metrics_prefix: str = "generator",
     ) -> Completion:
         return await super().generate(
-            prompt_token_ids,
+            prompt,
             request_id=request_id,
             group_id=group_id,
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
         )
 
     @concurrent_endpoint
@@ -80,8 +108,8 @@ class _GeneratorActorEndpoints:
         await super().release_sessions(session_ids)
 
     @concurrent_endpoint
-    async def load_model_state_dict(self, version: int) -> None:
-        await super().load_model_state_dict(version)
+    async def load_model_state_dict(self, version: int, *, drain: bool) -> None:
+        await super().load_model_state_dict(version, drain=drain)
 
     @concurrent_endpoint
     async def prefetch_model_state_dict(self) -> None:

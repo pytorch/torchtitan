@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the area map from the base branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           sparse-checkout: .github/area_reviewers.yml
           sparse-checkout-cone-mode: false
@@ -27,7 +27,7 @@ jobs:
         run: yq -o=json .github/area_reviewers.yml > "$RUNNER_TEMP/area_reviewers.json"
 
       - name: Request reviewers
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');

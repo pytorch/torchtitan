@@ -16,6 +16,7 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.nn.attention.flex_attention import BlockMask
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
@@ -334,7 +335,9 @@ class TestCpMlaMetadata(unittest.TestCase):
     @staticmethod
     def _get_attention_metadata(config):
         attention = Attention.Config(n_heads=4, inner_attention=config)
-        decoder = SimpleNamespace(config=SimpleNamespace(layers=[attention]))
+        decoder = SimpleNamespace(
+            config=SimpleNamespace(layers=[attention], max_context_length=8)
+        )
         return Decoder._get_attention_metadata(cast(Decoder, decoder), torch.arange(8))
 
     def test_all_gather_uses_cp_backend_key(self):
@@ -838,9 +841,6 @@ class TestCpGroup(unittest.TestCase):
         ):
             self._kernel().forward(q, k, v)
 
-    def test_cp_attention_holds_no_mesh_state(self):
-        self.assertNotIn("cp_group", CPInnerAttention.__dict__)
-
 
 class TestAllGather(unittest.TestCase):
     def test_gathers_k_and_v_over_the_cp_group(self):
@@ -1014,11 +1014,14 @@ class TestUlysses(unittest.TestCase):
                     if isinstance(layer.attention, LinearAttention.Config):
                         self.assertIs(layer.attention.inner_attention._owner, backend)
 
-                for load_balancer in (
-                    HeadTailCPLoadBalancer.Config(),
-                    PTRRFlexAttentionCPLoadBalancer.Config(),
-                ):
-                    parallelism.context_parallel_load_balancer = load_balancer
+                parallelism.context_parallel_load_balancer = (
+                    HeadTailCPLoadBalancer.Config()
+                )
+                validate_context_parallel(model, parallelism)
+                parallelism.context_parallel_load_balancer = (
+                    PTRRFlexAttentionCPLoadBalancer.Config()
+                )
+                with self.assertRaisesRegex(ValueError, "does not support PTRR"):
                     validate_context_parallel(model, parallelism)
 
     def test_rejects_gdn_key_heads_indivisible_by_tp_times_cp(self):
@@ -1026,17 +1029,6 @@ class TestUlysses(unittest.TestCase):
         parallelism.tensor_parallel_degree = 2
         with self.assertRaisesRegex(ValueError, r"n_kv_heads \(2\)"):
             validate_context_parallel(model, parallelism)
-
-    def test_shared_base_is_a_cp_attention(self):
-        self.assertTrue(issubclass(UlyssesInnerAttention, CPInnerAttention))
-        self.assertTrue(
-            issubclass(UlyssesInnerAttention.Config, CPInnerAttention.Config)
-        )
-
-    def test_is_still_a_flex_kernel(self):
-        config = UlyssesFlexInnerAttention.Config()
-        self.assertIsInstance(config, UlyssesInnerAttention.Config)
-        self.assertIsInstance(config, FlexInnerAttention.Config)
 
     def test_is_not_an_attention_backend(self):
         with self.assertRaisesRegex(ValueError, "Unknown backend"):
@@ -1067,6 +1059,40 @@ class TestUlysses(unittest.TestCase):
         self.assertEqual(2, group.size())
         self.assertEqual(spmd.S(1), src)
         self.assertEqual(spmd.S(0), dst)
+
+    def test_kv_head_copies_match_full_gqa(self):
+        # CP rank r gets the r-th contiguous head chunk after the all-to-all.
+        # Running GQA on each chunk must match GQA over all heads.
+        def gqa(q_THK, k_THK, v_THV):
+            out_HTV = F.scaled_dot_product_attention(
+                q_THK.transpose(0, 1),
+                k_THK.transpose(0, 1),
+                v_THV.transpose(0, 1),
+                enable_gqa=True,
+            )
+            return out_HTV.transpose(0, 1)
+
+        kernel = UlyssesFlexInnerAttention(UlyssesFlexInnerAttention.Config())
+        for n_heads, n_kv_heads, tp, cp in ((4, 2, 1, 4), (16, 4, 2, 4), (16, 4, 1, 8)):
+            with self.subTest(n_heads=n_heads, n_kv_heads=n_kv_heads, tp=tp, cp=cp):
+                q = torch.randn(8, n_heads, 16, dtype=torch.float64)
+                k, v = (
+                    torch.randn(8, n_kv_heads, 16, dtype=torch.float64)
+                    for _ in range(2)
+                )
+
+                def gqa_per_cp_rank(_, *qkv, cp=cp, **kwargs):
+                    chunks = zip(*(x.chunk(cp, dim=1) for x in qkv))
+                    return torch.cat([gqa(*c) for c in chunks], dim=1)
+
+                # Identity redistribute keeps every token on this process.
+                with _in_mesh(cp), mock.patch.object(
+                    spmd, "redistribute", lambda x, *a, **kw: x
+                ), mock.patch.object(FlexInnerAttention, "forward", gqa_per_cp_rank):
+                    tp_shards = zip(*(x.chunk(tp, dim=1) for x in (q, k, v)))
+                    out = torch.cat([kernel.forward(*s) for s in tp_shards], dim=1)
+
+                torch.testing.assert_close(out, gqa(q, k, v))
 
 
 class TestMLAContextParallelAttention(unittest.TestCase):
@@ -1276,11 +1302,6 @@ class TestMLAContextParallelAttention(unittest.TestCase):
 
 
 class TestUlyssesVarlen(unittest.TestCase):
-    def test_is_still_a_varlen_kernel(self):
-        config = UlyssesVarlenInnerAttention.Config()
-        self.assertIsInstance(config, UlyssesInnerAttention.Config)
-        self.assertIsInstance(config, VarlenInnerAttention.Config)
-
     def test_dispatches_to_varlen_inner_attention(self):
         q, k, v = (torch.randn(8, 4, 16) for _ in range(3))
         mask = object()

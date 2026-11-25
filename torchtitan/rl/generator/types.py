@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from torchtitan.rl.rollout.types import Prompt
+
 
 @dataclass(kw_only=True, slots=True)
 class SamplingConfig:
@@ -62,11 +64,12 @@ class EngineRequest:
     """One `generate` call's request for the engine, awaiting admission; what a `LoopDecision` broadcasts."""
 
     request_id: str
-    prompt_token_ids: list[int]  # [prompt_tokens]
+    prompt: Prompt
+    """The prompt's tokens and images, with the image files' bytes (not pixels)."""
     sampling: SamplingConfig
     group_id: int
     """Rollout group id. Sets the vLLM priority: lower is admitted first and preempted last.
-    Training ids grow as groups start. Validation ids count down (-1, -2, ...) and restart every run,
+    Training ids grow as groups start. Validation ids count down (-1, -2, ...),
     so all validation gets priority -1: it runs in arrival order (not newest first), before training.
 
         waiting, in arrival order:  g7 turn 1   g9 turn 1   g4 turn 2   val -1      val -2

@@ -23,9 +23,9 @@ from torchtitan.config import Configurable, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    MXFP8LinearConverter,
-    NVFP4GroupedLinearConverter,
-    NVFP4LinearConverter,
+    MXFP8LinearTransform,
+    NVFP4GroupedLinearTransform,
+    NVFP4LinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
@@ -61,10 +61,10 @@ def _dist_moe_runtime_config(*, scratch_capacity_factor: float) -> Configurable.
     )
 
 
-def deepseek_v3_mxfp8_linear_converter_config(
+def deepseek_v3_mxfp8_linear_transform(
     *,
     include_lm_head: bool = False,
-) -> MXFP8LinearConverter.Config:
+) -> MXFP8LinearTransform:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer recipes.
 
     KV up and FFN down projections have single-consumer inputs that no other
@@ -76,7 +76,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
     fqns = ["attention", "shared_experts", "feed_forward.w13", "feed_forward.w2"]
     if include_lm_head:
         fqns.append("lm_head")
-    return MXFP8LinearConverter.Config(
+    return MXFP8LinearTransform(
         fqns=fqns,
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.inner_attention.wkv_b",
@@ -120,7 +120,6 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10000,
             disable_accelerator_graphs=True,
         ),
@@ -160,9 +159,9 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     )
     config.training.num_tokens_per_train_step = 15360 * config.model.max_context_length
     config.training.disable_accelerator_graphs = False
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.precision.dtype = "float32"
+    config.precision.param_dtype = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.activation_remat = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -189,9 +188,6 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         "671B",
         seq_len=seq_len,
         parallelism=config.parallelism,
-        converters=[
-            deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
-        ],
     )
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model)
@@ -205,9 +201,9 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     )
     config.training.num_tokens_per_train_step = 15360 * config.model.max_context_length
     config.training.disable_accelerator_graphs = False
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "bfloat16"
+    config.precision.dtype = "float32"
+    config.precision.param_dtype = "bfloat16"
+    config.precision.reduce_dtype = "bfloat16"
     config.activation_remat = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -217,10 +213,11 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     return apply_transforms(
         config,
         [
+            deepseek_v3_mxfp8_linear_transform(include_lm_head=True),
             DistMoeTransform(
                 expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
-            )
+            ),
         ],
     )
 
@@ -231,29 +228,18 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
     config = deepseek_v3_671b(seq_len=seq_len)
     model_config = cast(DeepSeekV3Model.Config, config.model)
     layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
-    config.model = build_model_config(
-        "671B",
-        seq_len=seq_len,
-        parallelism=config.parallelism,
-        converters=[
-            NVFP4LinearConverter.Config(
+    config = apply_transforms(
+        config,
+        [
+            NVFP4LinearTransform(
                 fqns=[
                     f"{layer}{submodule}"
                     for layer in layer_fqns
                     for submodule in nvfp4_ffn_submodules(model_config.layers)
                 ],
             ),
-            NVFP4GroupedLinearConverter.Config(
-                fqns=layer_fqns,
-            ),
-            MXFP8LinearConverter.Config(
-                fqns=["attention.wq", "attention.wo"],
-            ),
-        ],
-    )
-    config = apply_transforms(
-        config,
-        [
+            NVFP4GroupedLinearTransform(fqns=layer_fqns),
+            MXFP8LinearTransform(fqns=["attention.wq", "attention.wo"]),
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
                 # Each EP rank dispatches one CP x TP shard of a microbatch.
@@ -265,7 +251,7 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
                     )
                 ),
                 kwargs={"non_blocking_capacity_factor": 0.03125, "pad_multiple": 128},
-            )
+            ),
         ],
     )
     config.model.local_compile.regions = ["loss"]

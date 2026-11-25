@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import os
 import shutil
 import tempfile
 import unittest
@@ -39,13 +38,20 @@ class TestEMACpuOffload(unittest.TestCase):
     def setUpClass(cls):
         cls._owns_pg = not dist.is_initialized()
         if cls._owns_pg:
-            os.environ.setdefault("MASTER_ADDR", "localhost")
-            os.environ.setdefault("MASTER_PORT", "29602")
-            os.environ.setdefault("RANK", "0")
-            os.environ.setdefault("WORLD_SIZE", "1")
-            os.environ.setdefault("LOCAL_RANK", "0")
-            torch.cuda.set_device(0)
-            dist.init_process_group(backend="nccl")
+            # Give the one-rank group its own store and device. Do not set
+            # RANK, LOCAL_RANK, or MASTER_PORT in os.environ: they stay set
+            # after this class, later tests that spawn ranks inherit them,
+            # and the default nccl backend picks each rank's GPU from
+            # LOCAL_RANK, so every rank would use GPU 0.
+            device = torch.device("cuda", 0)
+            torch.cuda.set_device(device)
+            dist.init_process_group(
+                backend="nccl",
+                store=dist.HashStore(),
+                rank=0,
+                world_size=1,
+                device_id=device,
+            )
 
     @classmethod
     def tearDownClass(cls):

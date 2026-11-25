@@ -72,7 +72,6 @@ def _gpt_oss_debugmodel(
             # cannot run under CUDA graphs.
             disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,

@@ -539,6 +539,7 @@ def _index_assignments(
     dict[tuple[int, int], list[float]],
     dict[tuple[int, int], list[Assignment]],
     dict[tuple[int, int, float], int],
+    dict[tuple[int, int, float], int],
 ]:
     """Index assignments for point and nearest-slice lookup.
 
@@ -546,20 +547,25 @@ def _index_assignments(
         assignments: Compacted slice assignments.
 
     Returns:
-        Sorted starts, assignments by old stream, and exact start mappings.
+        Sorted starts, assignments by old stream, and start and end mappings.
     """
 
     by_old_stream: dict[tuple[int, int], list[Assignment]] = defaultdict(list)
-    exact_points = {}
+    start_points = {}
     for item in assignments:
         by_old_stream[(item.pid, item.old_tid)].append(item)
-        exact_points[(item.pid, item.old_tid, item.start)] = item.new_tid
+        start_points[(item.pid, item.old_tid, item.start)] = item.new_tid
     for values in by_old_stream.values():
         values.sort(key=lambda item: item.start)
     starts = {
         key: [item.start for item in values] for key, values in by_old_stream.items()
     }
-    return starts, by_old_stream, exact_points
+    end_points = {
+        (item.pid, item.old_tid, item.end): item.new_tid
+        for values in by_old_stream.values()
+        for item in values
+    }
+    return starts, by_old_stream, start_points, end_points
 
 
 def _annotation_signature(event: dict[str, Any]) -> str:
@@ -744,7 +750,8 @@ def _remap_related_events(
     events: list[dict[str, Any]],
     assignment_starts: dict[tuple[int, int], list[float]],
     by_old_stream: dict[tuple[int, int], list[Assignment]],
-    exact_points: dict[tuple[int, int, float], int],
+    start_points: dict[tuple[int, int, float], int],
+    end_points: dict[tuple[int, int, float], int],
     annotation_tids: dict[tuple[int, int], int],
 ) -> tuple[list[dict[str, Any]], int, int]:
     """Remap GPU flows and annotations, and replace old stream metadata.
@@ -753,14 +760,15 @@ def _remap_related_events(
         events: Events whose measured slices have already been remapped.
         assignment_starts: Sorted slice starts by old process and stream.
         by_old_stream: Assignments by old process and stream.
-        exact_points: New lanes keyed by old process, stream, and slice start.
+        start_points: New lanes keyed by old process, stream, and slice start.
+        end_points: New lanes keyed by old process, stream, and slice end.
         annotation_tids: Dedicated annotation track for each compacted lane.
 
     Returns:
         Retained events, mapped flow count, and mapped annotation count.
 
     Raises:
-        ValueError: If any GPU flow endpoint cannot be mapped exactly.
+        ValueError: If a GPU flow endpoint cannot be matched to a slice.
     """
 
     old_streams = set(by_old_stream)
@@ -782,7 +790,21 @@ def _remap_related_events(
             continue
         if event.get("cat") == "ac2g" and original_key in old_streams:
             flow_events += 1
-            mapped = exact_points.get((pid, tid, float(event.get("ts", 0))))
+            timestamp = float(event.get("ts", 0))
+            if event.get("ph") == "s":
+                mapped = None
+                # GPU dependency arrows start at slice ends. Float conversion can
+                # round ts + dur one representable value away from the end stamp.
+                for point in (
+                    timestamp,
+                    math.nextafter(timestamp, -math.inf),
+                    math.nextafter(timestamp, math.inf),
+                ):
+                    mapped = end_points.get((pid, tid, point))
+                    if mapped is not None:
+                        break
+            else:
+                mapped = start_points.get((pid, tid, timestamp))
             if mapped is not None:
                 event["tid"] = mapped
                 flow_events_mapped += 1
@@ -829,7 +851,9 @@ def compact_trace(
     events = _copy_events(original_events)
     slices = _extract_slices(original_events)
     assignments = _assign_lanes(original_events, slices)
-    assignment_starts, by_old_stream, exact_points = _index_assignments(assignments)
+    assignment_starts, by_old_stream, start_points, end_points = _index_assignments(
+        assignments
+    )
     annotation_tids = _annotation_lane_tids(original_events, assignments)
     for item in assignments:
         events[item.event_index]["tid"] = item.new_tid
@@ -838,7 +862,8 @@ def compact_trace(
         events,
         assignment_starts,
         by_old_stream,
-        exact_points,
+        start_points,
+        end_points,
         annotation_tids,
     )
     retained, annotation_events_coalesced = _coalesce_gpu_annotations(retained)

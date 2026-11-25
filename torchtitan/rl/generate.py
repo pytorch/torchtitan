@@ -31,6 +31,7 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+from torch.distributed.elastic.multiprocessing.errors import record
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
@@ -95,6 +96,7 @@ def _shutdown_engine(engine: LLMEngine) -> None:
     cleanup_dist_env_and_memory()
 
 
+@record
 def generate() -> None:
     args, config_args = _parse_args()
     config = ConfigLoader().load(config_args)
@@ -120,11 +122,13 @@ def generate() -> None:
     register_to_vllm(
         model_config,
         parallelism=gen_config.parallelism,
+        precision=config.precision,
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,
         ),
         dist_moe_runtime=gen_config.dist_moe_runtime,
+        model_state_dict_load_mode="cpu_prefetch",
     )
     logger.info("Registered TorchTitan model with vLLM")
 
@@ -145,7 +149,7 @@ def generate() -> None:
         model=model_path,
         trust_remote_code=True,
         config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=gen_config.model_dtype,
+        dtype=config.precision.param_dtype,
         # Parallelism configuration
         tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
         data_parallel_size=gen_config.parallelism.data_parallel_degree,
@@ -166,11 +170,13 @@ def generate() -> None:
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
+    engine_kwargs["watermark"] = engine_config.watermark
     if not has_cuda_capability(9, 0):
         engine_kwargs["block_size"] = 256
     expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
     vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
         max_num_seqs=max_num_seqs,
+        max_model_len=model_config.max_context_length,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
         expert_sequence_parallel_size=expert_sequence_parallel_size,
         enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,

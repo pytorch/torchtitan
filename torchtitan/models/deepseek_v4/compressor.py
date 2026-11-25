@@ -6,7 +6,9 @@
 
 from dataclasses import dataclass
 from functools import cache
+from typing import TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
@@ -22,6 +24,9 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.tools.utils import has_cuda_capability
+
+if TYPE_CHECKING:
+    from .attention import DeepSeekV4CompressedSparseAttentionMetadata
 
 # Shape suffixes: T = tokens, H = heads, D = head width, K = selected slots,
 # G = compressed groups, R = compression ratio, S = compressed pool size.
@@ -47,17 +52,20 @@ def compressed_cu_seqlens(cu_seqlens: torch.Tensor, ratio: int) -> torch.Tensor:
     return F.pad(counts.cumsum(0, dtype=torch.int32), (1, 0))
 
 
-def compressed_gather_indices(topk_indices_TK, cu_seqlens, ratio):
+def compressed_gather_indices(
+    topk_indices_TK: torch.Tensor,
+    attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+    ratio: int,
+) -> torch.Tensor:
     """Translate document-local selections into safe compressed-pool indices."""
     gather_TK = topk_indices_TK.clamp_min(0).long()
-    if cu_seqlens is not None:
-        doc_T = torch.searchsorted(
-            cu_seqlens[1:],
-            torch.arange(topk_indices_TK.size(0), device=topk_indices_TK.device),
-            right=True,
-            out_int32=True,
-        )
-        gather_TK = gather_TK + compressed_cu_seqlens(cu_seqlens, ratio)[doc_T, None]
+    doc_T = torch.searchsorted(
+        attention_metadata.cu_seq_q[1:],
+        torch.arange(topk_indices_TK.size(0), device=topk_indices_TK.device),
+        right=True,
+        out_int32=True,
+    )
+    gather_TK = gather_TK + attention_metadata.cu_seq_compressed[doc_T, None]
     # Empty documents can start at the end of the pool; invalid slots read zero.
     return gather_TK.masked_fill(topk_indices_TK < 0, 0)
 
@@ -80,6 +88,8 @@ class Compressor(Module):
         head_dim: int = 512
         rope_head_dim: int = 64
         compress_ratio: int = 4
+        # ape is added to the float32 compression scores.
+        preserve_dtype_params: tuple[str, ...] = ("ape",)
 
     def __init__(self, config: Config):
         super().__init__()
@@ -120,22 +130,25 @@ class Compressor(Module):
         curr = tensor[:, :, d:]
         return torch.cat([prev, curr], dim=1)
 
-    def forward(self, x, positions, cu_seqlens=None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+    ):
         """Compress hidden states into compressed KV states.
 
         Args:
             x: Hidden states of shape ``[L, D_model]``.
             positions: Position IDs of shape ``[L]``.
-            cu_seqlens: Optional packed document offsets ``[N + 1]``. Groups then
-                restart at each document start, a document's trailing partial
-                group forms no entry, and the overlap candidate never crosses a
-                document boundary.
+            attention_metadata: Compressed-pool geometry from
+                ``build_attention_metadata``. Entries restart at each document
+                start, a document's trailing partial group forms no entry, and
+                the overlap candidate never crosses a document boundary.
 
         Returns:
-            Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``. With
-            ``cu_seqlens``, entries are packed by document at
-            ``compressed_cu_seqlens(cu_seqlens, compress_ratio)`` and later slots
-            are unused.
+            Compressed KV tensor of shape ``[L // compress_ratio, head_dim]``.
+            Entries are packed by document; later slots are unused.
         """
         seqlen = x.size(0)
         rd = self.rope_head_dim
@@ -147,42 +160,17 @@ class Compressor(Module):
         # The softmax pooling below reads the wkv and wgate projection outputs
         # with bare ops.
         remat.recompute_needs_tensor(kv, score)
+        if seqlen < ratio:
+            # Shorter than one group: no document has a compressed entry.
+            return x.new_zeros(0, self.head_dim)
         # Compressed entry j summarizes tokens [j * ratio, (j + 1) * ratio) of its
         # document and takes the position of its first token, as in the
         # DeepSeek-V4 reference.
-        first_G = None
-        if cu_seqlens is None:
-            if seqlen % ratio != 0:
-                raise ValueError(
-                    f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
-                )
-            comp_positions = (
-                positions[::ratio]
-                if positions is not None
-                else torch.arange(0, seqlen, ratio, device=x.device)
-            )
-            kv = kv.unflatten(0, (-1, ratio))
-            score = score.unflatten(0, (-1, ratio))
-        else:
-            if seqlen < ratio:
-                # Shorter than one group: no document has a compressed entry.
-                return x.new_zeros(0, self.head_dim)
-            # Entries are packed by document at compressed_cu_seqlens offsets in
-            # a fixed pool of seqlen // ratio slots, so no host sync is needed.
-            # Slots past the last complete group are unused and read token 0.
-            cmp_cu = compressed_cu_seqlens(cu_seqlens, ratio)
-            slot_G = torch.arange(seqlen // ratio, dtype=torch.int32, device=x.device)
-            doc_G = torch.searchsorted(cmp_cu[1:], slot_G, right=True, out_int32=True)
-            group_G = slot_G - cmp_cu[doc_G]
-            start_G = torch.where(
-                slot_G < cmp_cu[-1], cu_seqlens[doc_G] + group_G * ratio, 0
-            )
-            token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
-            kv, score = kv[token_GR], score[token_GR]
-            comp_positions = (
-                positions[start_G] if positions is not None else group_G * ratio
-            )
-            first_G = group_G == 0
+        start_G = attention_metadata.group_start
+        first_G = attention_metadata.group_first
+        token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
+        kv, score = kv[token_GR], score[token_GR]
+        comp_positions = positions[start_G]
         score = score + self.ape
         if self.overlap:
             kv = self._overlap_transform(kv, 0, first_G)
@@ -196,7 +184,7 @@ class Compressor(Module):
 
 
 class Indexer(Module):
-    """Produce low-dimensional query/key features for CSA top-k selection."""
+    """Project CSA indexer features and return selected positions and scores."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -204,6 +192,7 @@ class Indexer(Module):
         wq_b: Linear.Config
         weights_proj: Linear.Config
         compressor: "Compressor.Config"
+        inner_indexer: "InnerIndexer.Config"
         num_index_heads: int = 64
         index_head_dim: int = 128
         rope_head_dim: int = 64
@@ -220,6 +209,7 @@ class Indexer(Module):
         self.wq_b = cfg.wq_b.build()
         self.weights_proj = cfg.weights_proj.build()
         self.compressor = cfg.compressor.build()
+        self.inner_indexer = cfg.inner_indexer.build()
 
     @staticmethod
     def _rotate_activation(x):
@@ -239,10 +229,11 @@ class Indexer(Module):
         x,
         qr,
         *,
-        positions,
-        cu_seqlens=None,
-    ):
-        """Project raw indexer queries, keys, and per-head weights."""
+        positions: torch.Tensor,
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+        return_scores: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project features and return document-local selections and requested scores."""
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
@@ -253,39 +244,59 @@ class Indexer(Module):
         q_rope = self.rope(q_rope, positions=positions)
         q = torch.cat([q_nope, q_rope], dim=-1)
         q = self._rotate_activation(q)
-        k = self.compressor(x, positions=positions, cu_seqlens=cu_seqlens)
+        k = self.compressor(
+            x, positions=positions, attention_metadata=attention_metadata
+        )
         k = self._rotate_activation(k)
         weights = self.weights_proj(x)
         # The scale reads the weights_proj output with bare ops.
         remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
-        return q, k, weights
+        return self.inner_indexer(
+            q,
+            k,
+            weights,
+            attention_metadata=attention_metadata,
+            return_scores=return_scores,
+        )
 
-    @staticmethod
-    def select(
+
+class InnerIndexer(Module):
+    """Local-SPMD boundary for discrete selection and differentiable scores."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        ratio: int
+        topk: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.ratio = config.ratio
+        self.topk = config.topk
+
+    @spmd.no_typecheck()
+    def forward(
+        self,
         idx_q,
         idx_k,
         idx_w,
         *,
-        max_seqlen: int,
-        ratio: int,
-        topk: int,
-        cu_seqlens: torch.Tensor | None = None,
-        return_scores: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
+        return_scores: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Select top-k compressed positions per folded query token.
 
-        Uses Attention Gym's ``lightning_indexer`` for discrete selection, then
-        recomputes the selected logits inside autograd for the distillation loss.
-        With packed ``cu_seqlens``, returned indices are local to the query's
+        Uses Attention Gym's ``lightning_indexer`` for discrete selection and
+        recomputes the selected logits when the distillation loss needs them.
+        With packed documents, returned indices are local to the query's
         document in the packed compressed-KV pool.
 
         Returns:
             ``(indices, scores)``. ``indices`` is int32
-            ``[T, min(topk, max_seqlen // ratio)]`` with ``-1`` in unusable
-            slots. ``scores`` holds live indexer logits for those selected
-            entries and ``-inf`` in unusable slots, or None when return_scores
-            is False (evaluation and disabled auxiliary loss).
+            ``[T, min(topk, max_k // ratio)]`` with ``-1`` in unusable slots,
+            where ``max_k`` comes from the packed metadata.
+            When requested, ``scores`` holds the selected logits with ``-inf``
+            in unusable slots. Otherwise it has shape ``[T, 0]``.
         """
         # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
         # fall back; CPU, fp32, ROCm, and older GPUs use the reference
@@ -295,10 +306,7 @@ class Indexer(Module):
             and idx_q.dtype in (torch.float16, torch.bfloat16)
             and has_cuda_capability(9, 0)
         )
-        k = min(topk, max_seqlen // ratio)
-        cu_seqlens_k = (
-            None if cu_seqlens is None else compressed_cu_seqlens(cu_seqlens, ratio)
-        )
+        k = min(self.topk, attention_metadata.max_k // self.ratio)
         with torch.no_grad():
             topk_indices = lightning_indexer(
                 idx_q.unsqueeze(0),
@@ -306,17 +314,19 @@ class Indexer(Module):
                 idx_w.unsqueeze(0),
                 k,
                 causal=True,
-                compress_ratio=ratio,
-                cu_seqlens=cu_seqlens,
-                cu_seqlens_k=cu_seqlens_k,
+                compress_ratio=self.ratio,
+                cu_seqlens=attention_metadata.cu_seq_q,
+                cu_seqlens_k=attention_metadata.cu_seq_compressed,
                 impl="fused" if fused else "reference",
             ).squeeze(0)
 
         if not return_scores:
-            return topk_indices, None
-        valid_TK = topk_indices >= 0
-        gather_indices_TK = compressed_gather_indices(topk_indices, cu_seqlens, ratio)
+            return topk_indices, idx_q.new_empty((idx_q.size(0), 0))
 
+        valid_TK = topk_indices >= 0
+        gather_indices_TK = compressed_gather_indices(
+            topk_indices, attention_metadata, self.ratio
+        )
         selected_TKD = idx_k[gather_indices_TK]
         logits_THK = torch.einsum("thd,tkd->thk", idx_q, selected_TKD)
         topk_scores = (logits_THK.relu() * idx_w.unsqueeze(-1)).sum(dim=1)
@@ -367,14 +377,14 @@ class SparseIndexerLoss(AuxLoss):
         cmp_k_SD: torch.Tensor,
         topk_indices_TK: torch.Tensor,
         attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         tp_size = spmd_mesh_size("tp")
         if q_THD.size(1) * tp_size != self.num_heads:
             raise ValueError("Teacher head count does not match the TP-sharded query.")
         gather_TK = compressed_gather_indices(
-            topk_indices_TK, cu_seqlens, self.compress_ratio
+            topk_indices_TK, attention_metadata, self.compress_ratio
         )
         targets = []
         # Bound gathered keys and fp32 logits by chunk_size, not context length.
@@ -424,7 +434,7 @@ class SparseIndexerLoss(AuxLoss):
         topk_indices_TK: torch.Tensor,
         topk_scores_TK: torch.Tensor,
         attn_lse_TH: torch.Tensor,
-        cu_seqlens: torch.Tensor | None,
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata",
         *,
         carrier: torch.Tensor,
         denominator: torch.Tensor,
@@ -439,7 +449,7 @@ class SparseIndexerLoss(AuxLoss):
             cmp_k_SD,
             topk_indices_TK,
             attn_lse_TH,
-            cu_seqlens,
+            attention_metadata,
             padding_mask_T,
         )
         tiny = torch.finfo(torch.float32).tiny

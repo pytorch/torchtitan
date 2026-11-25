@@ -39,6 +39,8 @@ from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
 from torchtitan.models.qwen3 import build_model_config
+
+from torchtitan.observability.metrics import WandBLogger
 from torchtitan.rl.controller.controller import (
     AsyncLoopConfig,
     Controller,
@@ -55,7 +57,7 @@ from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
-from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.losses import DAPOLoss
@@ -78,10 +80,9 @@ def _search_r1_rollouter_config() -> Rollouter.Config:
             data_source="nq",
             shuffle=False,
         ),
-        worker=RolloutWorker.Config(
+        worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardExactMatch.Config(weight=1.0)],
-                truncation_reward=0.0,
             ),
             message_env=SearchR1Env.Config(),
             token_env=TokenEnv.Config(
@@ -123,11 +124,11 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
+            validation=ValidationConfig(steps=500, freq=50),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -140,8 +141,8 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -164,7 +165,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
@@ -196,7 +196,7 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     trainer_model, generator_model = build_rl_model_configs(
         build_model_config,
         "8B",
-        seq_len=config.trainer.training.max_context_length,
+        seq_len=config.trainer.model.max_context_length,
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
@@ -268,11 +268,14 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
-            validation=ValidationConfig(steps=500),
+            # Validation beside training would change the step times this recipe measures: validate at the end.
+            validation=ValidationConfig(
+                steps=500, validate_at_step_0=False, validate_after_training=True
+            ),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -286,8 +289,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             # TODO: Tune the trainer token budget and maximum context length.
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=seq_len,
-                max_context_length=seq_len,
             ),
             parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
@@ -304,7 +307,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="FULL")),
             checkpointer=None,
@@ -384,10 +386,11 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     trainer_model, generator_model = build_rl_model_configs(
         build_muse_glimmer_model_config,
         "30B",
+        seq_len=4096,
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
-        # TODO: bf16 logits. LMHeadFP32OutputConverter can't convert Muse Glimmer's
+        # TODO: bf16 logits. LMHeadFP32OutputTransform can't convert Muse Glimmer's
         # SoftCappedLinear head; it needs a HiMidLoLinear-based variant with the soft cap.
         fp32_lm_head=False,
     )
@@ -397,7 +400,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(steps=500),
+            validation=ValidationConfig(steps=500, freq=50),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(
@@ -405,7 +408,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer"
             )
         ),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
             model=trainer_model,
             optim=Optim.Config(
@@ -418,8 +421,8 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             ),
             training=TrainingConfig(
                 disable_accelerator_graphs=True,
+                preprocess_microbatch_groups_lazily=True,
                 num_tokens_per_microbatch_per_dp_rank=4096,
-                max_context_length=4096,
             ),
             activation_remat=FullActivationRematConfig(),
             parallelism=trainer_parallelism,
@@ -440,7 +443,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         ),
         generator=Generator.Config(
             model=generator_model,
-            model_dtype="bfloat16",
             parallelism=generator_parallelism,
             engine=VLLMEngine.Config(cuda_graph=VLLMCudaGraphConfig(mode="NONE")),
             checkpointer=None,

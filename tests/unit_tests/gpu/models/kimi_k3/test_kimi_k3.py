@@ -6,6 +6,7 @@
 
 import unittest
 from dataclasses import replace
+from functools import partial
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask
@@ -15,13 +16,15 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     LinearAttentionMetadata,
-    MLAAttention,
-    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.kda import KDA, KDAKernel
 from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
-from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
+from torchtitan.models.kimi_k3.flavors import (
+    kimi_k3_config,
+    mla_config,
+    vision_encoder_config,
+)
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
@@ -31,13 +34,14 @@ from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 def _small_model_config(*, attn_backend: str = "flex") -> KimiK3Model.Config:
     """Build a reduced KDA+MLA, dense+MoE, multimodal Kimi K3 config."""
     dim = 64
-    return _kimi_k3_config(
+    return kimi_k3_config(
         parallelism=ParallelismConfig(),
         max_context_length=128,
         dim=dim,
         vocab_size=32,
         num_layers=2,
         full_attention_layers={1},
+        full_attention_config_factory=partial(mla_config, attn_backend=attn_backend),
         attn_res_block_size=1,
         num_heads=2,
         q_lora_rank=32,
@@ -53,7 +57,7 @@ def _small_model_config(*, attn_backend: str = "flex") -> KimiK3Model.Config:
         num_experts=2,
         top_k=1,
         num_shared_experts=1,
-        vision_encoder=_vision_encoder_config(
+        vision_encoder=vision_encoder_config(
             text_dim=dim,
             dim=48,
             qkv_dim=48,
@@ -66,7 +70,6 @@ def _small_model_config(*, attn_backend: str = "flex") -> KimiK3Model.Config:
             init_pos_emb_width=2,
             max_num_frames=1,
         ),
-        attn_backend=attn_backend,
     )
 
 
@@ -134,31 +137,6 @@ class TestKimiK3(unittest.TestCase):
                 attention_config,
                 inner_attention=FlexInnerAttention.Config(),
             )
-
-    def test_varlen_config_uses_mla_backend(self):
-        model_config = _small_model_config(attn_backend="varlen")
-        for layer in model_config.layers:
-            if isinstance(layer.attention, KimiMLAAttention.Config):
-                self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    MLAAttention.Config,
-                )
-                self.assertIsInstance(
-                    layer.attention.inner_attention.inner_attention,
-                    VarlenInnerAttention.Config,
-                )
-
-        flex_model_config = _small_model_config()
-        for layer in flex_model_config.layers:
-            if isinstance(layer.attention, KimiMLAAttention.Config):
-                self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    MLAAttention.Config,
-                )
-                self.assertIsInstance(
-                    layer.attention.inner_attention.inner_attention,
-                    FlexInnerAttention.Config,
-                )
 
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
         """DistMuon buckets reference the native routed W13 and W2 parameters."""

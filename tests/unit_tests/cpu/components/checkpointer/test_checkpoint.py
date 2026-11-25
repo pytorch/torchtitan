@@ -12,12 +12,10 @@ import subprocess
 import sys
 import tempfile
 import time
-import typing
 import unittest
 import uuid
 from concurrent.futures import Future
 from contextlib import contextmanager
-from dataclasses import fields
 from types import SimpleNamespace
 from unittest import mock
 
@@ -193,19 +191,6 @@ class TestCheckpointManager(unittest.TestCase):
 
         self.assertEqual(calls, ["staging", "saving", "close"])
 
-    def test_checkpointer_package_import_path(self):
-        from torchtitan.components.checkpointer import (
-            AsyncMode as PackageAsyncMode,
-            BaseCheckpointManager as PackageBaseCheckpointManager,
-            CheckpointManager as PackageCheckpointManager,
-            ModelWrapper as PackageModelWrapper,
-        )
-
-        self.assertIs(PackageAsyncMode, AsyncMode)
-        self.assertIs(PackageBaseCheckpointManager, BaseCheckpointManager)
-        self.assertIs(PackageCheckpointManager, CheckpointManager)
-        self.assertIs(PackageModelWrapper, ModelWrapper)
-
     def test_optimizer_and_checkpointer_import_order(self):
         for statement in (
             "from torchtitan.components.optim import LRSchedulersContainer; "
@@ -215,20 +200,6 @@ class TestCheckpointManager(unittest.TestCase):
         ):
             with self.subTest(statement=statement):
                 subprocess.run([sys.executable, "-c", statement], check=True)
-
-    def test_trainer_uses_optional_checkpointer_interface(self):
-        from torchtitan.training_engine import TrainingEngine
-
-        annotation = typing.get_type_hints(TrainingEngine.Config, include_extras=True)[
-            "checkpointer"
-        ]
-        self.assertEqual(annotation, CheckpointManager.Config | None)
-        checkpointer_field = next(
-            field
-            for field in fields(TrainingEngine.Config)
-            if field.name == "checkpointer"
-        )
-        self.assertIsNone(checkpointer_field.default)
 
     def test_purge_exempt_is_built_from_config(self):
         self.trainer_config.checkpointer.purge_exempt = CallableFunction.Config(
@@ -309,15 +280,6 @@ class TestCheckpointManager(unittest.TestCase):
 
         with safe_open(os.path.join(checkpoint_id, shard), "pt") as f:
             self.assertEqual(list(f.keys()), ["model.norm.weight"])
-
-    def test_legacy_import_path(self):
-        from torchtitan.components.checkpointer import (
-            CheckpointManager as LegacyCheckpointManager,
-            ModelWrapper as LegacyModelWrapper,
-        )
-
-        self.assertIs(LegacyCheckpointManager, CheckpointManager)
-        self.assertIs(LegacyModelWrapper, ModelWrapper)
 
     def setUp(self):
         self.base_temp_dir = tempfile.mkdtemp()
@@ -927,6 +889,7 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch("torchtitan.components.checkpointer.dcp.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torch.cuda.Stream")
+    @mock.patch("torch.accelerator.current_stream")
     @mock.patch("torchtitan.components.checkpointer.dcp.DefaultStager")
     @mock.patch("torchtitan.components.checkpointer.dcp.dist.new_group")
     @mock.patch.object(
@@ -939,6 +902,7 @@ class TestCheckpointManager(unittest.TestCase):
         mock_async_save,
         mock_new_group,
         mock_default_stager,
+        mock_current_stream,
         mock_cuda_stream,
         mock_rank,
         mock_logger,
@@ -971,6 +935,11 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertIsNone(manager.staging_future)
 
         manager.save(curr_step=1, last_step=False)
+        # Staging must wait for the optimizer step on the current stream.
+        staging_stream = mock_default_stager.return_value._staging_stream
+        staging_stream.wait_stream.assert_called_once_with(
+            mock_current_stream.return_value
+        )
         # After save, staging_future shouldn't be None ...
         self.assertIsNotNone(manager.staging_future)
         # ... and staging should be running
@@ -1316,12 +1285,6 @@ class TestCheckpointManager(unittest.TestCase):
 
 
 class TestConfigPostInit(unittest.TestCase):
-    def test_legacy_config_only_adds_dcp_specific_fields(self):
-        self.assertEqual(
-            {"async_mode"},
-            set(CheckpointManager.Config.__annotations__),
-        )
-
     def test_valid_default_config(self):
         """Verify that default values pass initialization."""
         try:
@@ -1625,10 +1588,6 @@ class TestShouldPurge(unittest.TestCase):
         manager._storage.isdir.return_value = folder_exists
         return manager
 
-    def test_defined_on_the_base_not_the_dcp_manager(self):
-        self.assertNotIn("_should_purge", vars(CheckpointManager))
-        self.assertIn("_should_purge", vars(BaseCheckpointManager))
-
     @mock.patch("torch.distributed.get_rank", return_value=0)
     def test_rank_zero_with_retention_and_an_existing_folder_purges(self, _rank):
         self.assertTrue(self._manager(keep_latest_k=2)._should_purge())
@@ -1713,12 +1672,6 @@ class TestSharedDiscoveryAndRetention(unittest.TestCase):
         while not manager.purge_queue.empty():
             purged.add(manager.purge_queue.get_nowait())
         return purged
-
-    def test_bodies_are_defined_on_the_base(self):
-        for name in ("_find_load_step", "_parse_step", "_purge_stale_checkpoints"):
-            with self.subTest(name=name):
-                self.assertNotIn(name, vars(CheckpointManager))
-                self.assertIn(name, vars(BaseCheckpointManager))
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
     def test_purge_reserves_a_slot_for_the_upcoming_save(self, _rank):

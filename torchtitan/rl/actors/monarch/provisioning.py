@@ -22,6 +22,7 @@ from monarch.actor import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl._env import apply_env_defaults
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import get_visible_devices_env_var
 
 logger = logging.getLogger(__name__)
 
@@ -73,21 +74,23 @@ class PerHostProvisioner:
     On the same host, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
     call to `allocate(n)` reserves the next *n* GPUs and returns the launch
-    env (`CUDA_VISIBLE_DEVICES` plus any `extra_env`) for those GPUs. The
+    env (the visible-devices mask) for those GPUs. The
     returned env vars are applied to the spawned process via ``bootstrap_command``.
+    The mask's variable comes from this (the controller's) device type, so the
+    controller runs on a node with the same accelerator as the workers, as the
+    Monarch launchers do.
     """
 
     def __init__(self, total_gpus: int = 8):
         self.total_gpus = total_gpus
         self.next_gpu = 0
+        self.env_var = get_visible_devices_env_var()
 
     @property
     def available(self) -> int:
         return self.total_gpus - self.next_gpu
 
-    def allocate(
-        self, num_gpus: int, *, extra_env: dict[str, str] | None = None
-    ) -> dict[str, str]:
+    def allocate(self, num_gpus: int) -> dict[str, str]:
         if num_gpus > self.available:
             raise RuntimeError(
                 f"Requested {num_gpus} GPUs but only {self.available} "
@@ -96,10 +99,7 @@ class PerHostProvisioner:
         gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
         self.next_gpu += num_gpus
 
-        env = {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpu_ids)}
-        if extra_env:
-            env.update(extra_env)
-        return env
+        return {self.env_var: ",".join(str(g) for g in gpu_ids)}
 
 
 @dataclass
@@ -107,6 +107,13 @@ class HostMeshes:
     trainer: HostMesh
     generators: list[HostMesh]
     gpus_per_node: int
+
+
+def generator_role_names(num_generators: int) -> list[str]:
+    """Generator mesh and actor names: ``generator``, or ``generator_<i>`` for several."""
+    if num_generators == 1:
+        return ["generator"]
+    return [f"generator_{i}" for i in range(num_generators)]
 
 
 def compute_trainer_world_size(p: ParallelismConfig) -> int:
@@ -132,16 +139,15 @@ def _spawn_proc_mesh(
     provisioner: PerHostProvisioner,
     *,
     bootstrap: Callable[[], None],
-    extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
-    evenly across the mesh's hosts. ``extra_env`` is applied in each proc's bootstrap.
+    evenly across the mesh's hosts.
 
     Assumes ``_check_gpus_per_host`` passed: the split is even and the GPUs fit.
     """
     nodes = len(host_mesh)
     role_gpus_per_node = role_world_size // nodes
-    env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
+    env = provisioner.allocate(role_gpus_per_node)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
         bootstrap=bootstrap,
@@ -204,7 +210,6 @@ def spawn_proc_mesh(
     host_meshes: HostMeshes | None = None,
     *,
     num_generators: int = 1,
-    generator_env: dict[str, str] | None = None,
 ) -> tuple[ProcMesh, list[ProcMesh]]:
     """Spawn the trainer and generator proc meshes.
 
@@ -259,13 +264,12 @@ def spawn_proc_mesh(
                 per_generator_world_size,
                 provisioners[id(gen_host_mesh)],
                 bootstrap=_bootstrap_generator,
-                extra_env=generator_env,
             )
             for gen_host_mesh in generator_host_meshes
         ]
     else:
         # Single-node mode: partition GPUs on this_host() via
-        # CUDA_VISIBLE_DEVICES
+        # the visible-devices mask
         host_mesh = this_host()
         provisioner = PerHostProvisioner(total_gpus=total_gpus)
         trainer_mesh = host_mesh.spawn_procs(
@@ -280,9 +284,7 @@ def spawn_proc_mesh(
                 per_host={"gpus": per_generator_world_size},
                 bootstrap=_bootstrap_generator,
                 bootstrap_command=default_bootstrap_cmd().with_env(
-                    provisioner.allocate(
-                        per_generator_world_size, extra_env=generator_env
-                    )
+                    provisioner.allocate(per_generator_world_size)
                 ),
             )
             for _ in range(num_generators)

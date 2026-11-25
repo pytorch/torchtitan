@@ -6,6 +6,7 @@
 
 """Tests for K/V all-gather varlen context parallelism."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import NamedTuple
 from unittest import mock
@@ -29,7 +30,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.attention.cp_attention import (
     AllGatherKVSlidingWindowVarlenInnerAttention,
     AllGatherKVVarlen,
-    AllGatherKVVarlenAttentionMetadata,
     AllGatherKVVarlenInnerAttention,
 )
 
@@ -37,7 +37,9 @@ from torchtitan.models.common.attention.cp_attention import (
 def _metadata(offsets: list[int]) -> VarlenAttentionMetadata:
     cu_seq = torch.tensor(offsets, dtype=torch.int32)
     max_seq = int(torch.diff(cu_seq).max().item())
-    return VarlenAttentionMetadata(cu_seq, cu_seq, max_seq, max_seq)
+    return VarlenAttentionMetadata(
+        cu_seq_q=cu_seq, cu_seq_k=cu_seq, max_q=max_seq, max_k=max_seq
+    )
 
 
 class TestAllGatherKVVarlenPreparation(TestCase):
@@ -61,7 +63,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
         for kv_start, expected_k in ((0, [0, 3, 6, 6]), (2, [0, 1, 4, 4])):
             with self.subTest(kv_start=kv_start):
                 chunk = AllGatherKVVarlen._chunk_metadata(
-                    metadata.varlen_metadata, q_start=4, end=6, kv_start=kv_start
+                    metadata, q_start=4, end=6, kv_start=kv_start
                 )
                 self.assertEqual(
                     chunk.cu_seq_q, torch.tensor([0, 0, 2, 2], dtype=torch.int32)
@@ -82,7 +84,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
         )
         with set_current_spmd_mesh(mesh), typecheck():
             chunk = AllGatherKVVarlen._chunk_metadata(
-                metadata.varlen_metadata, q_start=4, end=6, kv_start=2
+                metadata, q_start=4, end=6, kv_start=2
             )
             spmd.assert_type(
                 global_metadata.cu_seq_q,
@@ -116,23 +118,29 @@ class TestAllGatherKVVarlenPreparation(TestCase):
     def test_rejects_noncausal_windows(self) -> None:
         for window_size in ((-1, -1), (2, 1), (-2, 0)):
             with self.subTest(window_size=window_size):
-                metadata = _metadata([0, 8])._replace(window_size=window_size)
+                metadata = replace(_metadata([0, 8]), window_size=window_size)
                 with self.assertRaisesRegex(ValueError, "requires a causal window"):
                     AllGatherKVVarlen.prepare_cp_metadata(metadata, permutation=None)
 
 
 class TestVarlenMetadataCudaGraphInputs(TestCase):
     def test_metadata_inputs_are_stable(self) -> None:
-        for inverse_permutation in (None, torch.arange(4, dtype=torch.int32)):
-            with self.subTest(head_tail=inverse_permutation is not None):
-                captured_metadata = AllGatherKVVarlenAttentionMetadata(
-                    varlen_metadata=_metadata([0, 4]),
-                    inverse_permutation=inverse_permutation,
-                )
-                rebuilt_metadata = AllGatherKVVarlenAttentionMetadata(
-                    varlen_metadata=_metadata([0, 4]),
-                    inverse_permutation=inverse_permutation,
-                )
+        for use_cp, head_tail in ((False, False), (True, False), (True, True)):
+            with self.subTest(use_cp=use_cp, head_tail=head_tail):
+                captured_metadata = _metadata([0, 4])
+                rebuilt_metadata = _metadata([0, 4])
+                if use_cp:
+                    permutation = (
+                        torch.arange(4, dtype=torch.int32).unsqueeze(0)
+                        if head_tail
+                        else None
+                    )
+                    captured_metadata = AllGatherKVVarlen.prepare_cp_metadata(
+                        captured_metadata, permutation=permutation
+                    )
+                    rebuilt_metadata = AllGatherKVVarlen.prepare_cp_metadata(
+                        rebuilt_metadata, permutation=permutation
+                    )
                 spec = AcceleratorGraphInputSpec({"metadata": captured_metadata})
                 captured = spec.flatten({"metadata": captured_metadata})
                 rebuilt = spec.flatten({"metadata": rebuilt_metadata})
@@ -140,7 +148,7 @@ class TestVarlenMetadataCudaGraphInputs(TestCase):
                     spec.unflatten(rebuilt), {"metadata": rebuilt_metadata}
                 )
                 tensors = [leaf for leaf in captured if isinstance(leaf, torch.Tensor)]
-                self.assertEqual(len(tensors), 2 if inverse_permutation is None else 3)
+                self.assertEqual(len(tensors), 3 if head_tail else 2)
                 for first, second in zip(captured, rebuilt, strict=True):
                     if not isinstance(first, torch.Tensor):
                         self.assertEqual(first, second)
@@ -185,7 +193,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
                         else None
                     )
                     metadata = AllGatherKVVarlen.prepare_cp_metadata(
-                        _metadata([0, 3, 7, 8])._replace(window_size=case.window),
+                        replace(_metadata([0, 3, 7, 8]), window_size=case.window),
                         permutation=permutation,
                     )
                     q_THK = torch.randn(seq_len // 2, 1, 4)
@@ -214,7 +222,7 @@ class TestKVAllGatherVarlenInnerAttention(TestCase):
                         return_value=(gathered_k_THK, gathered_v_THV),
                     ), mock.patch.object(
                         VarlenInnerAttention,
-                        "forward",
+                        "_forward_varlen",
                         autospec=True,
                         side_effect=outputs,
                     ) as inner_forward, mock.patch.object(

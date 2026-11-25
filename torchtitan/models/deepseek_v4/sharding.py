@@ -17,6 +17,7 @@ from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
+    replicated_activation_placement,
     residual_activation_placement,
     token_id_placement,
 )
@@ -85,9 +86,8 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
         input_shardings.update(
             {
                 "cmp_k": replicated_activation,
-                "idx_q": replicated_activation,
-                "idx_k": replicated_activation,
-                "idx_w": replicated_activation,
+                "topk_indices": replicated_activation,
+                "topk_scores": replicated_activation,
                 "attn_sink": _attn_sink_placement,
                 "padding_mask_T": token_id_placement(),
             }
@@ -103,10 +103,8 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
         input_shardings["attn_sink"] = _attn_sink_placement
 
     return ShardingConfig(
-        in_src_shardings=input_shardings,
-        in_dst_shardings=dict(input_shardings),
-        out_src_shardings=query_states,
-        out_dst_shardings=query_states,
+        input_shardings=input_shardings,
+        output_shardings=query_states,
         local_spmd=True,
     )
 
@@ -114,7 +112,7 @@ def dsa_inner_attention_sharding_config(*, compress_ratio: int) -> ShardingConfi
 def attention_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Attention boundary: ``x`` enters in the residual layout."""
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "x": residual_activation_placement(enable_sp=enable_sp),
         },
     )
@@ -147,14 +145,24 @@ def indexer_sharding_config() -> ShardingConfig:
     """Indexer boundary: gather ``x`` and ``qr`` across TP."""
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "x": replicated_activation,
             "qr": replicated_activation,
         },
-        in_dst_shardings={
-            "x": replicated_activation,
-            "qr": replicated_activation,
-        },
+    )
+
+
+def inner_indexer_sharding_config() -> ShardingConfig:
+    """Keep indexer features and both selection outputs replicated across TP."""
+    replicated = replicated_activation_placement()
+    query = SpmdType(
+        replicated.local_type,
+        partition_spec=spmd.PartitionSpec((DP, CP), None, None),
+    )
+    return ShardingConfig(
+        input_shardings={"idx_q": query, "idx_k": replicated, "idx_w": replicated},
+        output_shardings=(replicated, replicated),
+        local_spmd=True,
     )
 
 
@@ -163,8 +171,8 @@ def hc_pre_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     hc_branch_layout = _hc_branch_placement(enable_sp=enable_sp)
     return ShardingConfig(
         state_shardings=_hc_state_shardings(),
-        in_src_shardings={"x": hc_branch_layout},
-        out_src_shardings=(
+        input_shardings={"x": hc_branch_layout},
+        output_shardings=(
             residual_activation_placement(enable_sp=enable_sp),
             _hc_mix_placement(enable_sp=enable_sp),
             hc_branch_layout,
@@ -176,13 +184,13 @@ def hc_post_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Hyper-connection post-mix back into the branches."""
     hc_branch_layout = _hc_branch_placement(enable_sp=enable_sp)
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "x": residual_activation_placement(enable_sp=enable_sp),
             "residual": hc_branch_layout,
             "post": _hc_mix_placement(enable_sp=enable_sp),
             "comb": hc_branch_layout,
         },
-        out_src_shardings=hc_branch_layout,
+        output_shardings=hc_branch_layout,
     )
 
 
@@ -190,8 +198,8 @@ def hc_head_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Root hyper-connection head: branches in, residual layout out."""
     return ShardingConfig(
         state_shardings=_hc_state_shardings(),
-        in_src_shardings={"x": _hc_branch_placement(enable_sp=enable_sp)},
-        out_src_shardings=residual_activation_placement(enable_sp=enable_sp),
+        input_shardings={"x": _hc_branch_placement(enable_sp=enable_sp)},
+        output_shardings=residual_activation_placement(enable_sp=enable_sp),
     )
 
 
@@ -210,8 +218,8 @@ def mtp_hc_head_sharding_config() -> ShardingConfig:
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
         state_shardings=_hc_state_shardings(),
-        in_src_shardings={"x": replicated_activation},
-        out_src_shardings=replicated_activation,
+        input_shardings={"x": replicated_activation},
+        output_shardings=replicated_activation,
     )
 
 
@@ -219,11 +227,11 @@ def mtp_block_sharding_config() -> ShardingConfig:
     """MTP block boundary over replicated activations and token IDs."""
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     return ShardingConfig(
-        in_src_shardings={
+        input_shardings={
             "mtp_input_embed": replicated_activation,
             "prev_hc_hidden": replicated_activation,
             "mtp_input_ids_T": token_id_placement(),
             "mtp_input_valid_mask": token_id_placement(),
         },
-        out_src_shardings=replicated_activation,
+        output_shardings=replicated_activation,
     )

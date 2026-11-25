@@ -21,6 +21,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.tools.utils import get_visible_devices_env_var
 
 
 class _FakeController:
@@ -116,38 +117,47 @@ def test_async_loop_config_rejects_bad_windowed_fifo_batches() -> None:
         AsyncLoopConfig(window_fraction=0.3)  # type: ignore[call-arg]
 
 
-def _make_stub_rl_trainer():
+def _make_stub_rl_trainer(tmp_path):
     """Create an Controller with a minimal stub config (no Generator validation)."""
     from torchtitan.rl.observability import metrics as m
 
     class _StubRollouter:
+        def __init__(self, *, max_rollouts_in_flight: int):
+            self.max_rollouts_in_flight = max_rollouts_in_flight
+
         async def close(self):
             pass
 
     class _StubConfig:
         async_loop = AsyncLoopConfig()
         metrics = m.MetricsProcessor.Config()
-        dump_folder = "/tmp/test_rl"
+        dump_folder = str(tmp_path)
         rollout_recorder = RolloutSampleRecorder.Config()
         hf_assets_path = "./tests/assets/tokenizer"
         # __init__ builds these too; stub them so construction does no real work.
         tokenizer = SimpleNamespace(
             build=lambda *, tokenizer_path: SimpleNamespace(eos_id=0)
         )
+        vision_processor = None
         renderer = SimpleNamespace(
-            build=lambda *, tokenizer: SimpleNamespace(get_stop_token_ids=lambda: [])
+            build=lambda *, tokenizer, vision_processor: SimpleNamespace(
+                get_stop_token_ids=lambda: []
+            )
         )
-        # __init__ copies each role's model, reads generator.sampling (a dataclass,
-        # for replace) + generator.debug.seed, and applies the (empty) override.
+        # __init__ reads generator.sampling (a dataclass, for replace) and
+        # generator.debug.seed; resolve_overrides is stubbed below.
         trainer = SimpleNamespace(model=None)
         generator = SimpleNamespace(
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
         override = OverrideConfig()
-        rollouter = SimpleNamespace(build=lambda: _StubRollouter())
+        rollouter = SimpleNamespace(build=_StubRollouter)
 
         def to_dict(self):
             return {}
+
+        def resolve_overrides(self) -> None:
+            pass
 
         def maybe_log(self) -> None:
             pass
@@ -188,14 +198,21 @@ def test_main_shuts_down_after_setup_failure(monkeypatch):
     assert _FakeController.instances[0].events == ["setup", "close"]
 
 
-def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
-    trainer = _make_stub_rl_trainer()
+def test_rl_trainer_shutdown_is_noop_before_meshes_spawn(tmp_path):
+    trainer = _make_stub_rl_trainer(tmp_path)
 
     asyncio.run(trainer.close())
 
     assert trainer.trainer is None
     assert trainer.generator_router is None
     assert trainer.actor_system is None
+
+
+def test_controller_builds_rollouter_with_training_rollouts_in_flight(tmp_path):
+    controller = _make_stub_rl_trainer(tmp_path)
+
+    # Default AsyncLoopConfig: (3 + 1) x 8 = 32 groups in flight, x 8 rollouts per group
+    assert controller._rollouter.max_rollouts_in_flight == 256
 
 
 def test_main_reraises_cancellation_after_shutdown(monkeypatch):
@@ -288,10 +305,15 @@ def _set_generator_router(rl_trainer, generators):
     )
 
 
-def test_shutdown_calls_actor_close_before_mesh_stop():
+def test_shutdown_calls_actor_close_before_mesh_stop(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events))
+
+    async def close_rollouter():
+        events.append("rollouter.close")
+
+    rl_trainer._rollouter = SimpleNamespace(close=close_rollouter)
     _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer.actor_system = _actor_system(
         "mesh.stop[router]",
@@ -303,9 +325,11 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
 
     asyncio.run(rl_trainer.close())
 
+    # Generators close before the rollouter, so their failed replies reach live workers.
     assert events == [
         "trainer.close",
         "generator.close",
+        "rollouter.close",
         "mesh.stop[router]",
         "mesh.stop[batcher]",
         "mesh.stop[trainer]",
@@ -313,12 +337,12 @@ def test_shutdown_calls_actor_close_before_mesh_stop():
     ]
     # A second stop has nothing left to stop.
     asyncio.run(rl_trainer.actor_system.stop())
-    assert len(events) == 6
+    assert len(events) == 7
 
 
-def test_shutdown_closes_all_generators():
+def test_shutdown_closes_all_generators(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events))
     _set_generator_router(
         rl_trainer,
@@ -342,9 +366,9 @@ def test_shutdown_closes_all_generators():
     ]
 
 
-def test_shutdown_continues_after_actor_close_failure():
+def test_shutdown_continues_after_actor_close_failure(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events, raises=True))
     _set_generator_router(rl_trainer, [_StubActor("generator.close", events)])
     rl_trainer.actor_system = _actor_system(
@@ -362,9 +386,9 @@ def test_shutdown_continues_after_actor_close_failure():
     ]
 
 
-def test_shutdown_continues_after_generator_close_failure():
+def test_shutdown_continues_after_generator_close_failure(tmp_path):
     events: list[str] = []
-    rl_trainer = _make_stub_rl_trainer()
+    rl_trainer = _make_stub_rl_trainer(tmp_path)
     rl_trainer.trainer = _trainer(_StubActor("trainer.close", events))
     _set_generator_router(
         rl_trainer,
@@ -389,7 +413,7 @@ def test_shutdown_continues_after_generator_close_failure():
 
 
 class _FakeHostMesh:
-    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it."""
+    """Records the visible devices of each proc mesh spawned on it."""
 
     def __init__(self, num_hosts=1):
         self.num_hosts = num_hosts
@@ -399,7 +423,7 @@ class _FakeHostMesh:
         return self.num_hosts
 
     def spawn_procs(self, *, per_host, bootstrap, bootstrap_command):
-        self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
+        self.visible_devices.append(bootstrap_command[get_visible_devices_env_var()])
 
 
 @pytest.fixture
@@ -471,7 +495,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
         events.append(
             f"gpu meshes {trainer_world_size}+"
             f"{kwargs['num_generators']}x{per_generator_world_size} "
-            f"on {kwargs['host_meshes']} with {kwargs['generator_env']}"
+            f"on {kwargs['host_meshes']}"
         )
         return "trainer_mesh", ["generator_mesh_0", "generator_mesh_1"]
 
@@ -487,9 +511,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     monkeypatch.setattr(
         monarch_system, "setup_torch_elastic_env", setup_torch_elastic_env
     )
-    actor_system = MonarchActorSystem.Config().build(
-        host_meshes="host_meshes", generator_env={"KEY": "value"}
-    )
+    actor_system = MonarchActorSystem.Config().build(host_meshes="host_meshes")
 
     asyncio.run(
         actor_system.provision(
@@ -500,7 +522,7 @@ def test_monarch_actor_system_provisions_every_role_before_spawning(monkeypatch)
     )
 
     assert events == [
-        "gpu meshes 2+2x2 on host_meshes with {'KEY': 'value'}",
+        "gpu meshes 2+2x2 on host_meshes",
         "cpu procs 1",
         "cpu procs 1",
         "torch elastic trainer_mesh",

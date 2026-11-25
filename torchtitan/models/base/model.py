@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -24,6 +25,9 @@ if TYPE_CHECKING:
     from torchtitan.distributed.activation_remat import ActivationRematConfig
 
     from .state_dict_adapter import BaseStateDictAdapter
+
+
+FlopsEstimator = Callable[[Mapping[str, Any]], int]
 
 
 class BaseModel(Module, ABC):
@@ -54,7 +58,6 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
-        max_context_length: int | None = None,
         global_routing_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[
@@ -96,6 +99,11 @@ class BaseModel(Module, ABC):
         Subclasses define model-specific hyperparameters.
         """
 
+        max_context_length: int
+        """Longest sequence the model trains or serves. The data pipeline splits
+        documents at this length, attention metadata is built for it, and the
+        RL generator uses it as vLLM's ``max_model_len``."""
+
         local_compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
         """Configuration for named regions, FlexAttention, and block-mask helpers.
 
@@ -103,21 +111,23 @@ class BaseModel(Module, ABC):
         """
 
         @abstractmethod
-        def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
-            pass
+        def get_parameter_counts(self, model: Module) -> tuple[int, int]:
+            """Return unique total and architecturally active parameter counts."""
+            raise NotImplementedError
+
+        @abstractmethod
+        def build_flops_estimator(
+            self, model: Module, *, seq_len: int
+        ) -> FlopsEstimator:
+            """Build a CPU estimator for one raw training microbatch."""
+            raise NotImplementedError
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
-    supports_pipeline_parallel: ClassVar[bool] = True
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
         """Partition the model and build its pipeline schedule."""
-        if not self.supports_pipeline_parallel:
-            raise RuntimeError(
-                f"{type(self).__name__} does not support pipeline parallelism."
-            )
-
         from torchtitan.distributed.pipeline_parallel import (
             pipeline_llm,
             pipeline_with_first_last_stage_modules,
@@ -140,7 +150,7 @@ class BaseModel(Module, ABC):
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
         local_compile: LocalCompileConfig,
         activation_remat: ActivationRematConfig | None,
@@ -152,20 +162,27 @@ class BaseModel(Module, ABC):
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if activation_remat is not None:
-                activation_remat.apply(self)
+                activation_remat.apply(
+                    self, block_container_fqns=self._remat_block_container_fqns()
+                )
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
-                training=training,
+                precision=precision,
                 parallelism=parallelism,
             )
         return self
+
+    def _remat_block_container_fqns(self) -> list[str]:
+        """FQNs of the submodules whose children are the transformer blocks
+        that activation remat checkpoints."""
+        return ["layers"]
 
     @abstractmethod
     def _apply_fsdp(
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         pass

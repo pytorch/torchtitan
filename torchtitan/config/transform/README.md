@@ -63,10 +63,16 @@ never re-derives sharding for the whole model.
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
 
-Legacy `ModelConfigConverter` instances passed to `build_model_config` run before
-all model config transforms. In particular, apply quantization in
-`build_model_config` before applying `LoRATransform`; running a converter over a
-LoRA-transformed tree can replace an adapter config.
+Quantization and `LMHeadFP32OutputTransform` run before `LoRATransform` in the
+same `apply_transforms` call. LoRA replaces each target projection config with
+an adapter and every other config with a frozen subclass. These transforms
+convert only stock projection configs and raise on a frozen one, so apply them
+in the same call as LoRA or in an earlier one.
+
+Quantization and `LMHeadFP32OutputTransform` compose when they target different
+Linears, e.g. `MXFP8LinearTransform(fqns=["layers."])` leaves `lm_head` to the
+fp32 transform. Quantization runs first in the same call. The lm_head transform
+raises on a quantized `lm_head`, and quantization raises on a `HiMidLoLinear`.
 
 NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
 but the current quantized linear implementations still regenerate quantized
@@ -74,10 +80,11 @@ weight operands on every forward or FSDP unshard. This is avoidable work for
 frozen weights. TODO: Cache their quantized operands across forwards.
 
 Synchronous tensor-parallel boundaries compose with quantization and LoRA.
-Their converters replace the projection computation while preserving its
+Their transforms replace the projection computation while preserving its
 column- or row-parallel role. Async tensor parallelism does not yet support
-converted projections; it conflicts with `LoRATransform` and rejects
-quantized projection configs.
+converted projections; it conflicts with `LoRATransform`, `MXFP8LinearTransform`
+and `NVFP4LinearTransform`. Grouped quantization changes only routed experts,
+which async TP never converts.
 
 Use `transform_model_config_` when there is no trainer config. It rewrites the
 model config in place and returns the root. It does not copy or validate the
@@ -117,11 +124,6 @@ supported by these varlen backends.
 
 This package may import other `torchtitan` packages. Those packages must not
 import this package. Recipes import and apply transforms.
-
-Model config builders temporarily violate this direction while they accept
-and apply the legacy `ModelConfigConverter` interface. This dependency will be
-removed when converters are
-replaced by `ModelConfigTransform`.
 
 Keep shared types outside this package. For example, `CPInnerAttention` lives
 with the attention code. Only the transform that installs it belongs here.
@@ -192,7 +194,8 @@ requirements.
 
 See [Configuration validation](../README.md#validation) for where validation
 belongs. `apply_transforms` validates the final trainer config after the last
-transform. The trainer validates it again after command-line overrides.
+transform. `ConfigLoader.load` validates again after launch options, and
+`apply_overrides` validates again after registered overrides.
 
 `__post_init__` also runs when a config is constructed. Set related training
 options before calling `apply_transforms`. It can then validate the final

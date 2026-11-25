@@ -16,36 +16,48 @@ Shape suffixes:
 - G = spatial grid tokens
 - M = merged visual tokens
 - O = adapter output dim
+- C = spatial coordinates (row, column)
 
 """
 
 import math
 from dataclasses import dataclass, field
-from typing import cast
 
 import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.distributed.spmd_types import disable_dense_sp
+
+from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleDict
 
-from torchtitan.models.common import ComplexRoPE, Linear
+from torchtitan.models.common import Linear
+from torchtitan.models.common.attention import (
+    DeterministicVarlenInnerAttention,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.vision_encoder import (
-    create_block_diagonal_mask,
-    RopeApply,
+    get_packed_vision_grids,
     VisionTransformerBlock,
 )
+from torchtitan.ops.grid_sample import deterministic_grid_sample
 
 
-def _identity_rope(
-    query_TNH: torch.Tensor,
-    key_TNH: torch.Tensor,
-    rope_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    _ = rope_cache
-    return query_TNH, key_TNH
+def _segment_attention_metadata(
+    segment_lengths: torch.Tensor, max_segment_length: int
+) -> VarlenAttentionMetadata:
+    """Full attention within each packed segment."""
+    cu_seqlens = F.pad(torch.cumsum(segment_lengths, 0, dtype=torch.int32), (1, 0))
+    return VarlenAttentionMetadata(
+        cu_seq_q=cu_seqlens,
+        cu_seq_k=cu_seqlens,
+        max_q=max_segment_length,
+        max_k=max_segment_length,
+        window_size=(-1, -1),
+    )
 
 
 def _annotate_vision_activation_type(tensor: torch.Tensor) -> torch.Tensor:
@@ -100,36 +112,6 @@ class MuseSparkNaViTAdapter(Module):
         return self.act_fn(self.c_proj(self.act_fn(self.c_fc(value_MO))))
 
 
-class VisionRopeFreq(Module):
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        head_dim: int
-        rope_theta: float
-
-        def __post_init__(self) -> None:
-            if self.head_dim % 4:
-                raise ValueError("NaViT attention head size must be divisible by four")
-
-    def __init__(self, config: Config) -> None:
-        super().__init__()
-        self.head_dim = config.head_dim
-        self.rope_theta = config.rope_theta
-        self.register_buffer("inv_freq", self._compute(), persistent=False)
-
-    def _compute(self, *, device: torch.device | None = None) -> torch.Tensor:
-        half_dim = self.head_dim // 2
-        return 1.0 / (
-            self.rope_theta
-            ** (
-                torch.arange(0, half_dim, 2, dtype=torch.float32, device=device)
-                / half_dim
-            )
-        )
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        self.inv_freq = self._compute(device=buffer_device or self.inv_freq.device)
-
-
 class NaViTEncoder(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -144,14 +126,70 @@ class NaViTEncoder(Module):
         sparse_attention_factor: int
         pos_emb_grid_h: int
         pos_emb_grid_w: int
-        rope_freq: VisionRopeFreq.Config
         conv1_linear: Linear.Config
         ln_pre: LayerNorm.Config
         block: VisionTransformerBlock.Config
         ln_post: LayerNorm.Config
-        use_rope: bool = True
-        grid_sample_mode: str = "bilinear"
         pos_emb_grid_order: str = "raster"
+
+        def __post_init__(self) -> None:
+            if not isinstance(
+                self.block.attn.inner_attention,
+                DeterministicVarlenInnerAttention.Config,
+            ):
+                raise ValueError(
+                    "NaViT attention must use DeterministicVarlenInnerAttention: "
+                    "vision weights are invariant over TP and CP, so their backward "
+                    "must be deterministic or the copies drift."
+                )
+
+        def get_num_output_tokens(self, input_dict) -> int:
+            factor = self.downsample_factor
+            return sum(
+                temporal * (height // factor) * (width // factor)
+                for temporal, height, width in get_packed_vision_grids(input_dict)
+            )
+
+        def build_flops_estimator(self, encoder) -> FlopsEstimator:
+            from torchtitan.models.common.flops import active_parameter_flops_per_token
+
+            input_patch_flops = sum(
+                active_parameter_flops_per_token(module)
+                for module in (
+                    encoder.conv1_linear,
+                    encoder.ln_pre,
+                    encoder.layers,
+                    encoder.ln_post,
+                )
+            )
+            pair_flops = self.block.attn.flops_per_query_key_pair()
+            num_global_layers = sum(
+                index == self.num_layers - 1
+                or (index + 1) % self.sparse_attention_factor == 0
+                for index in range(self.num_layers)
+            )
+            num_window_layers = self.num_layers - num_global_layers
+
+            def estimate(input_dict):
+                flops = 0
+                for temporal, height, width in get_packed_vision_grids(input_dict):
+                    num_patches = height * width
+                    full_h, rem_h = divmod(height, self.pos_emb_grid_h)
+                    full_w, rem_w = divmod(width, self.pos_emb_grid_w)
+                    window_pairs = (full_h * self.pos_emb_grid_h**2 + rem_h**2) * (
+                        full_w * self.pos_emb_grid_w**2 + rem_w**2
+                    )
+                    flops += temporal * (
+                        input_patch_flops * num_patches
+                        + pair_flops
+                        * (
+                            num_global_layers * num_patches**2
+                            + num_window_layers * window_pairs
+                        )
+                    )
+                return flops
+
+            return estimate
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -183,11 +221,8 @@ class NaViTEncoder(Module):
         self.sparse_attention_factor = config.sparse_attention_factor
         self.pos_emb_grid_h = config.pos_emb_grid_h
         self.pos_emb_grid_w = config.pos_emb_grid_w
-        self.use_rope = config.use_rope
-        self.grid_sample_mode = config.grid_sample_mode
         self.pos_emb_grid_order = config.pos_emb_grid_order
 
-        self.rope_freq = config.rope_freq.build()
         self.conv1_linear = config.conv1_linear.build()
         self.positional_embedding_vlm = nn.Parameter(
             torch.empty(
@@ -201,26 +236,20 @@ class NaViTEncoder(Module):
         )
         self.ln_post = config.ln_post.build()
 
-    def _make_2d_rope(
+    def _make_rope_positions(
         self,
         grid_h: int,
         grid_w: int,
         device: torch.device,
     ) -> torch.Tensor:
-        inv_freq_D = self.rope_freq.inv_freq
-        pos_h_H = torch.arange(1, grid_h + 1, dtype=torch.float32, device=device)
-        pos_w_W = torch.arange(1, grid_w + 1, dtype=torch.float32, device=device)
+        pos_h_H = torch.arange(1, grid_h + 1, device=device)
+        pos_w_W = torch.arange(1, grid_w + 1, device=device)
         pos_h_H = _annotate_vision_activation_type(pos_h_H)
         pos_w_W = _annotate_vision_activation_type(pos_w_W)
         idx_h_G = pos_h_H.unsqueeze(1).expand(-1, grid_w).reshape(-1)
         idx_w_G = pos_w_W.unsqueeze(0).expand(grid_h, -1).reshape(-1)
 
-        freq_h_GD = torch.outer(idx_h_G, inv_freq_D)
-        freq_w_GD = torch.outer(idx_w_G, inv_freq_D)
-        angles_GD = torch.cat([freq_w_GD, freq_h_GD], dim=-1)
-        return torch.view_as_complex(
-            torch.stack([torch.cos(angles_GD), torch.sin(angles_GD)], dim=-1)
-        )
+        return torch.stack((idx_h_G, idx_w_G), dim=-1)
 
     def _get_pos_emb(
         self,
@@ -255,12 +284,9 @@ class NaViTEncoder(Module):
                 1, 1, grid_h * grid_w, 2
             )
         pos_xy = _annotate_vision_activation_type(pos_xy)
-        sampled = F.grid_sample(
-            pos_emb_DHW,
-            pos_xy,
-            mode=self.grid_sample_mode,
-            align_corners=False,
-        )
+        # The CUDA grid_sample backward uses atomic adds; every TP/CP rank must
+        # compute the same grad for the invariant positional embedding.
+        sampled = deterministic_grid_sample(pos_emb_DHW, pos_xy)
         return sampled[0, :, 0].transpose(0, 1)
 
     def _pixel_shuffle_downsample(
@@ -324,20 +350,16 @@ class NaViTEncoder(Module):
         pos_emb_GD = self._get_pos_emb(grid_h, grid_w, device)
         x_TD = self.ln_pre(x_TD + pos_emb_GD.to(dtype))
 
-        freqs_cis_GD = (
-            self._make_2d_rope(grid_h, grid_w, device)
-            if self.use_rope
-            else x_TD.new_empty((num_tokens, 0))
-        )
+        positions_GC = self._make_rope_positions(grid_h, grid_w, device)
 
         sp_perm: torch.Tensor | None = None
         sp_slens = torch.empty(0, dtype=torch.int32, device=device)
         if self.sparse_attention_factor > 1:
             sp_perm, sp_slens = self._get_sparse_perm_and_slens(grid_h, grid_w, device)
             x_TD = x_TD[sp_perm]
-            freqs_cis_GD = freqs_cis_GD[sp_perm]
+            positions_GC = positions_GC[sp_perm]
 
-        return x_TD, freqs_cis_GD, num_tokens, grid_h, grid_w, sp_perm, sp_slens
+        return x_TD, positions_GC, num_tokens, grid_h, grid_w, sp_perm, sp_slens
 
     def _finalize_image(
         self,
@@ -352,6 +374,8 @@ class NaViTEncoder(Module):
         x_TD = self.ln_post(x_TD)
         return self._pixel_shuffle_downsample(x_TD, grid_h, grid_w)
 
+    # Vision activations are never sequence-sharded, so they stay TP-invariant.
+    @disable_dense_sp()
     def forward(
         self,
         pixel_values_NP: torch.Tensor,
@@ -365,9 +389,10 @@ class NaViTEncoder(Module):
         sf = self.sparse_attention_factor
 
         all_x: list[torch.Tensor] = []
-        all_freqs: list[torch.Tensor] = []
+        all_positions: list[torch.Tensor] = []
         all_sp_slens: list[torch.Tensor] = []
         all_global_slens: list[int] = []
+        max_window_tokens = 0
         per_frame_meta: list[tuple[int, int, int, torch.Tensor | None]] = []
 
         offset = 0
@@ -380,7 +405,7 @@ class NaViTEncoder(Module):
                 offset += num_spatial_patches
                 (
                     x_TD,
-                    freqs_cis_TD,
+                    positions_TC,
                     num_tokens,
                     grid_h,
                     grid_w,
@@ -388,21 +413,19 @@ class NaViTEncoder(Module):
                     sp_slens,
                 ) = self._embed_image(frame_patches_NP, grid_h, grid_w, device, dtype)
                 all_x.append(x_TD)
-                all_freqs.append(freqs_cis_TD)
+                all_positions.append(positions_TC)
                 if sp_slens.numel() > 0:
                     all_sp_slens.append(sp_slens)
+                    max_window_tokens = max(
+                        max_window_tokens,
+                        min(grid_h, self.pos_emb_grid_h)
+                        * min(grid_w, self.pos_emb_grid_w),
+                    )
                 all_global_slens.append(num_tokens)
                 per_frame_meta.append((grid_h, grid_w, num_tokens, sp_perm))
 
         x_TD = torch.cat(all_x, dim=0)
-        freqs_cis_TD = torch.cat(all_freqs, dim=0)
-        rope_cache = freqs_cis_TD.unsqueeze(1)
-        rope_apply = (
-            cast(RopeApply, ComplexRoPE.apply_rotary_emb)
-            if self.use_rope
-            else _identity_rope
-        )
-        total_tokens = x_TD.shape[0]
+        positions_TC = torch.cat(all_positions, dim=0)
 
         sp_slens_cat = torch.cat(all_sp_slens) if all_sp_slens else None
         global_slens = torch.tensor(
@@ -412,17 +435,11 @@ class NaViTEncoder(Module):
         )
         global_slens = _annotate_vision_activation_type(global_slens)
         with spmd.no_typecheck():
-            full_attention_mask = create_block_diagonal_mask(
-                global_slens,
-                total_tokens,
-                device,
+            full_attention_mask = _segment_attention_metadata(
+                global_slens, max(all_global_slens)
             )
             sparse_attention_mask = (
-                create_block_diagonal_mask(
-                    sp_slens_cat,
-                    total_tokens,
-                    device,
-                )
+                _segment_attention_metadata(sp_slens_cat, max_window_tokens)
                 if sp_slens_cat is not None
                 else None
             )
@@ -437,8 +454,7 @@ class NaViTEncoder(Module):
                 attention_mask = sparse_attention_mask
             x_TD = layer(
                 x_TD,
-                rope_cache=rope_cache,
-                rope_apply=rope_apply,
+                positions=positions_TC,
                 attention_mask=attention_mask,
             )
 
@@ -454,6 +470,5 @@ class NaViTEncoder(Module):
 __all__ = [
     "MuseSparkNaViTAdapter",
     "NaViTEncoder",
-    "VisionRopeFreq",
     "reorder_patch_vector_channel_temporal",
 ]

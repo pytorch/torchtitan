@@ -4,15 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Quantization model-config converters."""
+"""Quantization model transforms."""
 
 import logging
 from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
-from typing import Literal
+from typing import cast, Literal
 
 import torch
 
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -21,14 +22,13 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.nvfp4 import _get_nvfp4_grouped_linear_cls, NVFP4Linear
 from torchtitan.quantization.utils import get_quantized_linear, swap_token_dispatcher
 from torchtitan.tools.utils import has_cuda_capability
 
-from .converter import ModelConfigConverter
+from .base import ModelConfigTransform
 
 
 logger = logging.getLogger(__name__)
@@ -37,8 +37,24 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
-    InvariantRowParallelLinear,
 )
+
+
+def _require_stock_config(
+    config: Linear.Config | GroupedLinear.Config, fqn: str
+) -> None:
+    """Reject a config subclass, e.g. one LoRATransform froze: the quantized config is
+    rebuilt from its fields alone, so the subclass's behavior (frozen weights) would be
+    lost. The relations order quantization before LoRA only within one call."""
+    owner = type(config)._owner
+    assert owner is not None
+    stock_config_cls = cast(type[Module], owner).Config
+    if type(config) is not stock_config_cls:
+        raise ValueError(
+            f"Cannot quantize {fqn!r}: {type(config).__qualname__} is not the stock "
+            f"{stock_config_cls.__qualname__} (e.g. LoRATransform froze it). Apply "
+            "quantization before LoRATransform, or in the same apply_transforms call."
+        )
 
 
 def _validate_quantizable_linear(
@@ -53,18 +69,21 @@ def _validate_quantizable_linear(
             f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
             f"supported Linear classes are {supported}."
         )
+    _require_stock_config(config, fqn)
+    if config.preserve_dtype_params:
+        raise ValueError(
+            f"Cannot quantize {fqn!r}: it lists preserve_dtype_params "
+            f"{config.preserve_dtype_params}. List only the Linears to quantize in "
+            "the transform's fqns; an empty fqns selects every Linear."
+        )
 
 
-class QuantizationConverter(ModelConfigConverter):
-    """Base class for quantization converters.
+class QuantizationTransform(ModelConfigTransform):
+    """Base class for quantization transforms.
 
-    Subclasses define a nested Config and implement ``convert()``
-    to transform the model config tree.
+    The relations in ``relations.py`` name this base, so they hold for every
+    quantization transform, e.g. each runs before ``LoRATransform``.
     """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ModelConfigConverter.Config):
-        pass
 
 
 def _torchao_nightly_install_command() -> str:
@@ -88,58 +107,53 @@ def _torchao_nightly_install_command() -> str:
     )
 
 
-class MXFP8LinearConverter(QuantizationConverter):
+@dataclass(kw_only=True, slots=True)
+class MXFP8LinearTransform(QuantizationTransform):
     """Replace matching Linear.Config with MXFP8Linear.Config."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        fqns: list[str] = field(default_factory=list)
-        """
-        List of fully qualified names of modules to apply MXFP8 quantization to.
-        Only Linear.Config entries whose FQN contains a match are converted.
-        If empty, all Linear modules are converted.
-        """
-        linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(
-            default_factory=list
-        )
-        """FQN substrings selecting linears that save inputs in MXFP8 for backward.
+    fqns: list[str] = field(default_factory=list)
+    """
+    List of fully qualified names of modules to apply MXFP8 quantization to.
+    Only Linear.Config entries whose FQN contains a match are converted.
+    If empty, all Linear modules are converted.
+    """
+    linears_saving_inputs_for_backward_in_mxfp8: list[str] = field(default_factory=list)
+    """FQN substrings selecting linears that save inputs in MXFP8 for backward.
 
-        A linear can save either its BF16 input or a columnwise MXFP8 input for
-        the backward pass.
+    A linear can save either its BF16 input or a columnwise MXFP8 input for
+    the backward pass.
 
-        Without activation checkpointing, if the preceding operation already
-        saves its BF16 output for backward, as flash attention does, that tensor
-        is also available as this linear's input. Saving another MXFP8
-        operands would increase memory usage, so this linear should save
-        BF16. If no other operation retains the BF16 input, saving MXFP8 reduces
-        activation memory and avoids columnwise quantization during backward.
+    Without activation checkpointing, if the preceding operation already
+    saves its BF16 output for backward, as flash attention does, that tensor
+    is also available as this linear's input. Saving another MXFP8
+    operands would increase memory usage, so this linear should save
+    BF16. If no other operation retains the BF16 input, saving MXFP8 reduces
+    activation memory and avoids columnwise quantization during backward.
 
-        With full activation checkpointing, saved tensors from the original
-        forward are discarded and reconstructed during backward. Today, a
-        linear selected here produces its columnwise MXFP8 input in both the
-        original forward and recomputation, even though the original result is
-        discarded. An ideal checkpoint-aware policy could produce it only
-        during recomputation, but distinguishing those executions would add
-        complexity to the linear and its autograd contract. We intentionally
-        apply the same policy to both.
+    With full activation checkpointing, saved tensors from the original
+    forward are discarded and reconstructed during backward. Today, a
+    linear selected here produces its columnwise MXFP8 input in both the
+    original forward and recomputation, even though the original result is
+    discarded. An ideal checkpoint-aware policy could produce it only
+    during recomputation, but distinguishing those executions would add
+    complexity to the linear and its autograd contract. We intentionally
+    apply the same policy to both.
 
-        More granular ``torch.remat`` policies add further save-versus-recompute
-        choices, so the optimal format depends on both model activation
-        ownership and the activation-checkpointing policy. BF16 is therefore
-        the conservative default, and users can opt selected modules into MXFP8
-        with this list.
-        """
+    More granular ``torch.remat`` policies add further save-versus-recompute
+    choices, so the optimal format depends on both model activation
+    ownership and the activation-checkpointing policy. BF16 is therefore
+    the conservative default, and users can opt selected modules into MXFP8
+    with this list.
+    """
 
-        def __post_init__(self) -> None:
-            if any(not fqn for fqn in self.linears_saving_inputs_for_backward_in_mxfp8):
-                raise ValueError(
-                    "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 cannot "
-                    "contain an empty FQN selector."
-                )
+    def __post_init__(self) -> None:
+        if any(not fqn for fqn in self.linears_saving_inputs_for_backward_in_mxfp8):
+            raise ValueError(
+                "MXFP8 linears_saving_inputs_for_backward_in_mxfp8 cannot "
+                "contain an empty FQN selector."
+            )
 
-    def __init__(self, config: Config):
-        self.config = config
-
+    def transform(self, model):
         if MXFP8Linear is None:
             raise ImportError(
                 "MXFP8 linear layers need torchao's 32x32 swizzled cast "
@@ -151,12 +165,10 @@ class MXFP8LinearConverter(QuantizationConverter):
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
 
-    def convert(self, model_config):
-        assert MXFP8Linear is not None
-        fqns = self.config.fqns
+        fqns = self.fqns
         targets = [
             entry
-            for entry in model_config.traverse(Linear.Config)
+            for entry in model.traverse(Linear.Config)
             if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
         ]
 
@@ -169,7 +181,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                     f"or V; got {fqn!r} with head_dim={parent.head_dim}."
                 )
 
-        selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
+        selectors = self.linears_saving_inputs_for_backward_in_mxfp8
         target_fqns = [fqn for fqn, _config, _parent, _attr in targets]
         unmatched_fqn_selectors = {
             selector
@@ -204,7 +216,7 @@ class MXFP8LinearConverter(QuantizationConverter):
                 inplace_wgrad_accum=config.inplace_wgrad_accum,
             )
             if parent is None:
-                model_config = new_config
+                model = new_config
             elif isinstance(parent, list):
                 parent[attr] = new_config
             else:
@@ -217,30 +229,27 @@ class MXFP8LinearConverter(QuantizationConverter):
             f"formats: {num_bf16} bf16, {num_mxfp8} mxfp8"
         )
         logger.debug(f"Linears saving MXFP8 input activations: {sorted(mxfp8_fqns)}")
-        return model_config
+        return model
 
 
-class MXFP8GroupedLinearConverter(QuantizationConverter):
+@dataclass(kw_only=True, slots=True)
+class MXFP8GroupedLinearTransform(QuantizationTransform):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
-        """
-        Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
+    recipe_name: Literal["mxfp8_rceil"] = "mxfp8_rceil"
+    """
+    Quantization recipe name for grouped GEMMs. Options: ["mxfp8_rceil"]
 
-        - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode
-          when computing the e8m0 scale factors.
-        """
-        pad_multiple: int = 32
-        """
-        Pad per-expert token groups to this multiple for MXFP8 grouped GEMM alignment.
-        The CuTeDSL quantization kernel on sm_100 requires multiples of 128.
-        """
+    - mxfp8_rceil: MXFP8 dynamic quantization with RCEIL rounding mode
+      when computing the e8m0 scale factors.
+    """
+    pad_multiple: int = 32
+    """
+    Pad per-expert token groups to this multiple for MXFP8 grouped GEMM alignment.
+    The CuTeDSL quantization kernel on sm_100 requires multiples of 128.
+    """
 
-    def __init__(self, config: Config):
-        self.config = config
-
+    def transform(self, model):
         if find_spec("torchao") is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use MXFP8 MoE training."
@@ -249,47 +258,44 @@ class MXFP8GroupedLinearConverter(QuantizationConverter):
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
 
-    def convert(self, model_config):
         routed_configs: dict[int, RoutedExperts.Config] = {}
-        for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
+        for fqn, config, parent, attr in model.traverse(GroupedLinear.Config):
             if not isinstance(parent, RoutedExperts.Config):
                 raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            _require_stock_config(config, fqn)
             routed_configs[id(parent)] = parent
             base_module_cls = type(config)._owner
             quantized_cls = _get_mxfp8_grouped_linear_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
-                recipe_name=self.config.recipe_name,
+                recipe_name=self.recipe_name,
             )
             setattr(parent, attr, new_config)
 
         for routed_config in routed_configs.values():
-            swap_token_dispatcher(routed_config, self.config.pad_multiple)
+            swap_token_dispatcher(routed_config, self.pad_multiple)
 
         logger.info(
-            f"Converted GroupedLinear modules to use dynamic {self.config.recipe_name} "
+            f"Converted GroupedLinear modules to use dynamic {self.recipe_name} "
             "quantization for grouped_mm"
         )
-        return model_config
+        return model
 
 
-class NVFP4LinearConverter(QuantizationConverter):
+@dataclass(kw_only=True, slots=True)
+class NVFP4LinearTransform(QuantizationTransform):
     """Replace matching Linear.Config with NVFP4Linear.Config."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        fqns: list[str] = field(default_factory=list)
-        """
-        List of fully qualified names of modules to apply NVFP4 quantization to.
-        Only Linear.Config entries whose FQN contains a match are converted.
-        If empty, all Linear modules are converted -- pass explicit fqns to keep
-        the LM head in bf16, which the mixed recipe leaves unquantized for stability.
-        """
+    fqns: list[str] = field(default_factory=list)
+    """
+    List of fully qualified names of modules to apply NVFP4 quantization to.
+    Only Linear.Config entries whose FQN contains a match are converted.
+    If empty, all Linear modules are converted -- pass explicit fqns to keep
+    the LM head in bf16, which the mixed recipe leaves unquantized for stability.
+    """
 
-    def __init__(self, config: Config):
-        self.config = config
-
+    def transform(self, model):
         if NVFP4Linear is None:
             raise ImportError(
                 "torchao is not installed or does not provide the NVFP4 training "
@@ -300,10 +306,8 @@ class NVFP4LinearConverter(QuantizationConverter):
         if not has_cuda_capability(10, 0):
             raise ValueError("NVFP4 is only supported on SM100 or later architectures")
 
-    def convert(self, model_config):
-        assert NVFP4Linear is not None
-        fqns = self.config.fqns
-        for fqn, config, parent, attr in model_config.traverse(Linear.Config):
+        fqns = self.fqns
+        for fqn, config, parent, attr in model.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
                 _validate_quantizable_linear(config, fqn)
                 owner = config._owner
@@ -318,51 +322,49 @@ class NVFP4LinearConverter(QuantizationConverter):
                     sharding_config=config.sharding_config,
                 )
                 if parent is None:
-                    model_config = new_config
+                    model = new_config
                 elif isinstance(parent, list):
                     parent[attr] = new_config
                 else:
                     setattr(parent, attr, new_config)
 
         logger.info("Converted Linear layers to NVFP4Linear")
-        return model_config
+        return model
 
 
-class NVFP4GroupedLinearConverter(QuantizationConverter):
+@dataclass(kw_only=True, slots=True)
+class NVFP4GroupedLinearTransform(QuantizationTransform):
     """Apply NVFP4 quantization to selected MoE grouped projections."""
 
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        fqns: list[str] = field(default_factory=list)
-        """FQN substrings selecting grouped projections. Empty selects all."""
+    fqns: list[str] = field(default_factory=list)
+    """FQN substrings selecting grouped projections. Empty selects all."""
 
-        pad_multiple: int = 128
-        """Per-expert token-group alignment required by NVFP4 grouped GEMMs."""
+    pad_multiple: int = 128
+    """Per-expert token-group alignment required by NVFP4 grouped GEMMs."""
 
-        def __post_init__(self) -> None:
-            if self.pad_multiple <= 0 or self.pad_multiple % 128:
-                raise ValueError(
-                    "NVFP4 grouped linears require pad_multiple to be a positive "
-                    f"multiple of 128; got {self.pad_multiple}."
-                )
+    def __post_init__(self) -> None:
+        if self.pad_multiple <= 0 or self.pad_multiple % 128:
+            raise ValueError(
+                "NVFP4 grouped linears require pad_multiple to be a positive "
+                f"multiple of 128; got {self.pad_multiple}."
+            )
 
-    def __init__(self, config: Config):
-        self.config = config
+    def transform(self, model):
         if _get_nvfp4_grouped_linear_cls is None:
             raise ImportError("torchao NVFP4 training prototype is required")
         if not has_cuda_capability(10, 0):
             raise ValueError("NVFP4 is only supported on SM100 or later architectures")
 
-    def convert(self, model_config):
-        fqns = self.config.fqns
+        fqns = self.fqns
         targets = [
             entry
-            for entry in model_config.traverse(GroupedLinear.Config)
+            for entry in model.traverse(GroupedLinear.Config)
             if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
         ]
         for fqn, config, parent, _attr in targets:
             if not isinstance(parent, RoutedExperts.Config):
                 raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            _require_stock_config(config, fqn)
             if config.in_features % 128 or config.out_features % 128:
                 raise ValueError(
                     "NVFP4 grouped linears require input and output widths "
@@ -386,7 +388,7 @@ class NVFP4GroupedLinearConverter(QuantizationConverter):
             )
 
         for routed_config in routed_configs.values():
-            swap_token_dispatcher(routed_config, self.config.pad_multiple)
+            swap_token_dispatcher(routed_config, self.pad_multiple)
 
         logger.info("Converted GroupedLinear modules to dynamic NVFP4 quantization")
-        return model_config
+        return model

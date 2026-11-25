@@ -69,9 +69,11 @@ gradient edge FSDP2 creates internally, so it lives with SimpleFSDP rather
 than here.
 
 Two dtypes appear above and they are not the same one. S holds the parameter's
-own storage dtype, set by ``training.dtype`` -- float32 by default, so S is
-normally an fp32 master weight, not a BF16 one. ``mp_policy.param_dtype``
-(``training.mixed_precision_param``, bfloat16 by default) is only what
+own storage dtype, set by ``precision.dtype`` -- float32 by default, so S is
+normally an fp32 master weight, not a BF16 one. Frozen parameters are the
+exception: they are stored in ``precision.param_dtype`` when it is narrower
+(see ``PrecisionConfig``). ``mp_policy.param_dtype``
+(``precision.param_dtype``, bfloat16 by default) is only what
 ``fsdp_pre_all_gather`` casts *to*, so it is the dtype of the comm tensor, the
 all-gather output, and hence the logical tensor a format quantizes. Nothing
 here requires either to be BF16; MXFP8 separately rejects a non-BF16 weight in
@@ -153,6 +155,9 @@ __all__: list[str] = []
 # survive them so the parameter keeps its identity across FSDP bookkeeping.
 _FSDP_SHARDED_OPS = {
     torch.ops.aten.empty_like.default,
+    # DCP async staging allocates the staged copy with new_empty and skips the
+    # storage copy (data_ptr() == 0); only a wrapper result keeps ``_tensor``.
+    torch.ops.aten.new_empty.default,
     torch.ops.aten.new_zeros.default,
     torch.ops.aten.slice.Tensor,
     torch.ops.aten.copy_.default,
@@ -393,18 +398,26 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         # before all-gather"), but an extension is handed the unpadded shard
         # every time. TODO(anijain2305): hold a persistent padded buffer on the
         # sharded tensor and copy into it, to drop the per-unshard allocation.
-        comm_tensor = self._tensor.movedim(shard_dim, 0)
-        padded_rows = math.ceil(outer_size[shard_dim] / mesh.size())
-        if comm_tensor.size(0) != padded_rows:
+        #
+        # Return the padded shard in the parameter's own layout, also for a
+        # nonzero shard dim (a stacked [N, F, D] weight is Shard(1)): FSDP2
+        # reads a Tensor input as the padded sharded parameter and concatenates
+        # the ranks' shards along the shard dim itself. The output it hands
+        # ``fsdp_post_all_gather`` is viewed as ``(-1, *input.shape[1:])`` but
+        # holds the parameter's layout:
+        # https://github.com/pytorch/pytorch/blob/d59e86aecf1bce34411bfe66c9e01d9257b8212b/torch/distributed/fsdp/_fully_shard/_fsdp_param.py#L1608-L1632
+        padded_size = list(self._tensor.shape)
+        padded_size[shard_dim] = math.ceil(outer_size[shard_dim] / mesh.size())
+        if self._tensor.size(shard_dim) != padded_size[shard_dim]:
             # Allocate the padded buffer directly in the comm dtype and let the
             # copy do the cast, rather than casting the whole shard first and
             # then copying that into a second buffer.
-            source = comm_tensor.new_zeros(
-                (padded_rows, *comm_tensor.shape[1:]), dtype=dtype
+            source = self._tensor.new_zeros(padded_size, dtype=dtype)
+            source.narrow(shard_dim, 0, self._tensor.size(shard_dim)).copy_(
+                self._tensor
             )
-            source.narrow(0, 0, comm_tensor.size(0)).copy_(comm_tensor)
         else:
-            source = comm_tensor.to(dtype).contiguous()
+            source = self._tensor.to(dtype).contiguous()
         metadata = outer_size if shard_dim == 0 else (tuple(outer_size), shard_dim)
         return (source,), metadata
 
@@ -418,14 +431,21 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
             logical_size, shard_dim = metadata
         else:
             logical_size, shard_dim = metadata, 0
+        # FSDP hands back the output viewed as ``(-1, *input.shape[1:])``, but
+        # for a nonzero shard dim its memory holds the parameter's layout with
+        # every rank's rows concatenated along that dim.
+        if shard_dim != 0:
+            logical_tensor = logical_tensor.view(
+                *logical_size[:shard_dim], -1, *logical_size[shard_dim + 1 :]
+            )
         # ``metadata`` is the logical size returned by fsdp_pre_all_gather. An
         # unevenly sharded parameter gathers padding rows past it, which must
         # not reach the quantizer: they would occupy real scale tiles and, for
         # a grouped expert tensor, appear as extra experts.
-        if logical_tensor.size(0) != logical_size[shard_dim]:
-            logical_tensor = logical_tensor.narrow(0, 0, logical_size[shard_dim])
-        if shard_dim != 0:
-            logical_tensor = logical_tensor.movedim(0, shard_dim).contiguous()
+        if logical_tensor.size(shard_dim) != logical_size[shard_dim]:
+            logical_tensor = logical_tensor.narrow(
+                shard_dim, 0, logical_size[shard_dim]
+            ).contiguous()
 
         # On the first unshard, FSDP has no unsharded-tensor container or managed
         # tensors yet. Build both and return them to FSDP. With RAF=False, FSDP

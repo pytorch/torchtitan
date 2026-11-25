@@ -9,7 +9,7 @@ Those metrics can then be visualized in a TensorBoard, W&B, or MLflow dashboard.
 
 To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
 
-1. Make sure `metrics.enable_tensorboard` option is set to true in model training (either from a recipe function or from CLI).
+1. Add `TensorBoardLogger.Config()` to `metrics.loggers` in your training recipe.
 
 2. Set up SSH tunneling, by running the following from local CLI
 ```
@@ -27,7 +27,17 @@ tensorboard --logdir=./outputs/tb
 
 Weights and Biases will automatically send metrics to a remote server if you login with `wandb login`
 
-So all you need to do is make sure that `metrics.enable_wandb` is enabled
+Add `WandBLogger.Config()` to `metrics.loggers` in your recipe. Set
+`WANDB_PROJECT` to select the W&B project; the default is `torchtitan`.
+
+Plot metrics against `trainer/step`, the training step. Generated charts already
+do; in a saved panel, pick it as the x-axis. W&B's own `Step` (`_step`) counts
+log calls instead. Example: training and validation both log at step 10. That
+makes two rows, both with `trainer/step` 10, and with two different `Step` values.
+
+`WANDB_RESUME_FROM` and `WANDB_FORK_FROM` take `<run>?_step=N`, so N is a `Step`
+value. To start from training step S, use the `Step` of the row whose
+`trainer/step` is S.
 
 For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/models/llama3.py)
 
@@ -36,7 +46,35 @@ For an example you can inspect the Llama 3 [recipe](../../torchtitan_recipes/mod
 Install the optional tracking client with `pip install mlflow-skinny`
 (or the full `mlflow` package).
 
-Enable `metrics.enable_mlflow` in your recipe and set `MLFLOW_TRACKING_URI`
+Add `MLFlowLogger.Config()` to `metrics.loggers` in your recipe and set `MLFLOW_TRACKING_URI`
 and `MLFLOW_EXPERIMENT_NAME` to select the tracking server and experiment.
 
-Any combination of the three loggers can be enabled together.
+## Configure metric exporters
+
+```python
+from torchtitan.observability.metrics import (
+    MetricsProcessor,
+    TensorBoardLogger,
+    WandBLogger,
+)
+
+metrics = MetricsProcessor.Config(
+    loggers=[WandBLogger.Config(), TensorBoardLogger.Config()],
+)
+```
+
+Loggers are built and called in list order. An empty list disables metric
+export while preserving console reporting. The supervised processor writes
+files under `dump_folder/save_tb_folder`; `save_for_all_ranks=True` exports
+from every rank, except MLflow always uses the rank that owns the loss.
+Logger construction errors propagate to the caller.
+
+Custom exporters subclass `BaseLogger`, define a nested
+`Config(BaseLogger.Config)`, and implement `log(metrics, step)` and `close()`.
+Their constructors receive their own config and the runtime arguments
+`log_dir`, `config_dict`, and `tag`. Set `Config.metrics_rank_only = True`
+when an exporter must only run on the metrics rank.
+
+The RL metrics processor accepts the same `loggers` list, builds it on the
+controller, and retains its own aggregation and console filters. RL uses the
+same W&B project default without changing environment variables.

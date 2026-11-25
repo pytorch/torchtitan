@@ -12,61 +12,93 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
-from typing import Self
+from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 import torch
 
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_remat import ActivationRematConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
+
+from torchtitan.models.base.model import FlopsEstimator
+from torchtitan.models.base.module import Module
 
 from .decoder import Decoder
 
 
 class MultimodalModel(Decoder):
-    """Language model with modality-specific encoders."""
+    """Language model with modality-specific encoders.
+
+    A config always sets at least one of ``multimodal_encoder_fqns``; a model
+    family's text-only variant is its ``Decoder`` subclass. Pipeline stages
+    other than the first drop the encoders, so modules may still be None.
+    """
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
 
-    def parallelize(
-        self,
-        *,
-        parallelism_context: ParallelismContext,
-        training: TrainingConfig,
-        parallelism: ParallelismConfig,
-        local_compile: LocalCompileConfig,
-        activation_remat: ActivationRematConfig | None,
-        dump_folder: str,
-    ) -> Self:
-        # Bind local implementations early; torch.compile traces on first use.
-        local_compile.apply()
-        with parallelism_context.activate_spmd():
-            self._parallelize(parallelism_context)
-            encoders = [
-                encoder
-                for encoder_fqn in self.multimodal_encoder_fqns
-                if (encoder := getattr(self, encoder_fqn)) is not None
-            ]
-            if activation_remat is not None:
-                activation_remat.apply(self)
-                for encoder in encoders:
-                    activation_remat.apply(encoder)
+    @dataclass(kw_only=True, slots=True)
+    class Config(Decoder.Config):
+        def __post_init__(self) -> None:
+            super(MultimodalModel.Config, self).__post_init__()
+            owner = cast(type[MultimodalModel], type(self)._owner)
+            if all(
+                getattr(self, encoder_fqn) is None
+                for encoder_fqn in owner.multimodal_encoder_fqns
+            ):
+                raise ValueError(
+                    f"{owner.__qualname__} needs at least one of "
+                    f"{owner.multimodal_encoder_fqns}; use the model family's "
+                    "text-only Decoder for a model without encoders."
+                )
 
-            self._apply_fsdp(
-                parallelism_context=parallelism_context,
-                training=training,
-                parallelism=parallelism,
+        def build_flops_estimator(
+            self,
+            model: Module,
+            *,
+            seq_len: int,
+            excluded_submodules: tuple[Module | None, ...] = (),
+        ) -> FlopsEstimator:
+            model = cast(MultimodalModel, model)
+            encoder_modules = []
+            encoder_estimates = []
+            for encoder_fqn in model.multimodal_encoder_fqns:
+                encoder = getattr(model, encoder_fqn)
+                encoder_modules.append(encoder)
+                if encoder is None:
+                    continue
+                encoder_config = getattr(self, encoder_fqn)
+                estimate = encoder_config.build_flops_estimator(encoder)
+                encoder_estimates.append(estimate)
+            decoder_estimate = super(
+                MultimodalModel.Config, self
+            ).build_flops_estimator(
+                model,
+                seq_len=seq_len,
+                excluded_submodules=(
+                    *encoder_modules,
+                    *excluded_submodules,
+                ),
             )
-        return self
+            return lambda input_dict: decoder_estimate(input_dict) + sum(
+                estimate(input_dict) for estimate in encoder_estimates
+            )
+
+    def _remat_block_container_fqns(self) -> list[str]:
+        encoder_containers = [
+            f"{encoder_fqn}.layers"
+            for encoder_fqn in self.multimodal_encoder_fqns
+            if getattr(self, encoder_fqn) is not None
+        ]
+        return [*encoder_containers, *super()._remat_block_container_fqns()]
 
     def _apply_fsdp(
         self,
         *,
         parallelism_context: ParallelismContext,
-        training: TrainingConfig,
+        precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
         from torchtitan.distributed.fsdp import (
@@ -86,16 +118,17 @@ class MultimodalModel(Decoder):
                 apply_fsdp_to_multimodal_encoder(
                     encoder,
                     dp_mesh,
-                    param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-                    reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                    param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
+                    reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
                     reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
                     pp_enabled=parallelism_context.pp_enabled,
-                    cpu_offload=training.enable_cpu_offload,
+                    cpu_offload=parallelism.fsdp_enable_cpu_offloading,
                     dp_mesh_dims=dp_mesh_dims,
+                    unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
                 )
         super()._apply_fsdp(
             parallelism_context=parallelism_context,
-            training=training,
+            precision=precision,
             parallelism=parallelism,
         )
 
@@ -235,11 +268,17 @@ def scatter_vision_embeds(
 ) -> torch.Tensor:
     """Copy packed vision features into the text sequence at placeholder runs.
 
+    Returns a copy of ``inputs_embeds`` with the vision rows written in.
+    ``inputs_embeds`` is left unchanged: it can alias its producer's input,
+    e.g. the output of a no-op TP ``Invariant -> Replicate`` gather, which
+    autograd does not allow writing in place.
+
     Args:
-        inputs_embeds: ``(T, D)`` text embeddings, modified in place.
+        inputs_embeds: ``(T, D)`` text embeddings.
         vision_embeds: Packed vision features ``(total_tokens, dim)``.
         vision_positions: from ``get_vision_positions``.
     """
+    inputs_embeds = inputs_embeds.clone()
     vision_offset = 0
     for _, vision_start, num_tokens in vision_positions:
         inputs_embeds[vision_start : vision_start + num_tokens] = vision_embeds[
@@ -253,3 +292,27 @@ def scatter_vision_embeds(
             f"the packed vision output contains {vision_embeds.shape[0]}."
         )
     return inputs_embeds
+
+
+def replicate_to_residual(x_TD: torch.Tensor) -> torch.Tensor:
+    """Convert the TP-``Replicate`` multimodal stream to the decoder residual layout.
+
+    The residual layout is ``residual_activation_placement``: TP-``Shard(0)``
+    under sequence parallelism, TP-``Invariant`` otherwise. Multimodal models
+    gather the token embeddings to TP-``Replicate`` with
+    ``maybe_gather_tp_input`` so the vision scatter can write any position;
+    this undoes it afterwards. ``Replicate -> Shard(0)`` under sequence
+    parallelism is a local slice, and ``Replicate -> Invariant`` otherwise is a
+    type change; neither communicates in forward or backward. Returns ``x_TD``
+    unchanged without TP.
+    """
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x_TD
+    return spmd.redistribute(
+        x_TD,
+        tp_group,
+        src=spmd.R,
+        dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        backward_options={"op_dtype": x_TD.dtype},
+    )

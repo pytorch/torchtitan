@@ -8,15 +8,17 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import dataclasses
+import itertools
 import json
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
 import torch
-from torchtitan.rl.controller.controller import Controller
+from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
@@ -26,9 +28,16 @@ from torchtitan.rl.controller.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
-from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan.rl.rollout.types import (
+    Prompt,
+    Rollout,
+    RolloutStatus,
+    RolloutTurn,
+    RolloutTurnID,
+)
 
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.training_sample_builder import (
@@ -52,7 +61,83 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     assert "Running with configs:" in caplog.text
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
-    assert saved_config["trainer"]["training"]["max_context_length"] == 128
+    assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+def _controller_config_with_groups(
+    *, num_groups: int, group_size: int, rollouts_per_worker: int = 128
+) -> Controller.Config:
+    """A CI recipe with `num_groups` training groups of `group_size` in flight."""
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
+    async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        num_prompts_per_train_step=num_groups,
+        num_samples_per_prompt=group_size,
+    )
+    rollouter = dataclasses.replace(
+        config.rollouter, rollouts_per_worker=rollouts_per_worker
+    )
+    # `replace` reruns `__post_init__`, so the group-size check runs.
+    return dataclasses.replace(config, async_loop=async_loop, rollouter=rollouter)
+
+
+# rollouts_per_worker=0 must raise this ValueError too: `Rollouter.setup_async` divides by it.
+@pytest.mark.parametrize("group_size, rollouts_per_worker", [(256, 128), (8, 0)])
+def test_a_group_larger_than_rollouts_per_worker_raises(
+    group_size, rollouts_per_worker
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"num_samples_per_prompt \({group_size}\) is larger than "
+        rf"rollouter.rollouts_per_worker \({rollouts_per_worker}\)",
+    ):
+        _controller_config_with_groups(
+            num_groups=16,
+            group_size=group_size,
+            rollouts_per_worker=rollouts_per_worker,
+        )
+
+
+def test_rollout_loop_keeps_the_metrics_a_worker_sent_with_its_group() -> None:
+    """A rollout worker adds its own metrics to each training group (e.g. its event-loop lag).
+    The controller adds the rollout metrics next to them."""
+    work = SimpleNamespace(sample="prompt", group_id=7)
+    claims = [work, None]
+    finalized: list[RolloutGroup] = []
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        worker_metric = m.Metric("rollout_worker/event_loop_lag_ms", m.Max(5.0))
+        return RolloutGroup(group_id=group_id, rollouts=[], metrics=[worker_metric])
+
+    async def claim_next():
+        return claims.pop(0)
+
+    async def finalize_work(group: RolloutGroup) -> None:
+        finalized.append(group)
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(num_samples_per_prompt=1)
+    )
+    controller._sampling = SamplingConfig()
+    controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    group_buffer = SimpleNamespace(claim_next=claim_next, finalize_work=finalize_work)
+
+    asyncio.run(
+        controller._rollout_loop(
+            group_buffer=group_buffer, generate_fn=None, release_session_fn=None
+        )
+    )
+
+    keys = m.MetricsProcessor._aggregate_metrics(finalized[0].metrics)
+    assert keys["rollout_worker/event_loop_lag_ms/max"] == 5.0
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
@@ -116,7 +201,7 @@ def _untrainable_group(group_id: int) -> TrainingSampleGroup:
 def _build_batcher(
     *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
 ) -> Batcher:
-    config = Batcher.Config()
+    config = Batcher.Config(rdma_min_tensor_bytes=None)
     config.num_mtp_layers = num_mtp_layers
     return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
@@ -236,7 +321,7 @@ def test_batcher_raises_at_consecutive_untrainable_group_limit() -> None:
 def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
     # Five two-token samples need four rank inputs across two microbatches.
     # Redistributing one sample keeps every rank input trainable.
-    batcher = Batcher.Config(max_num_documents=4).build(
+    batcher = Batcher.Config(max_num_documents=4, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -264,7 +349,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
 
 
 def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -291,7 +376,9 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
 
 
 def test_flat_rank_packing_preserves_padding_mask() -> None:
-    batcher = Batcher.Config(per_sample_pad_multiple=4).build(
+    batcher = Batcher.Config(
+        per_sample_pad_multiple=4, rdma_min_tensor_bytes=None
+    ).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -321,7 +408,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
 
 
 def test_batcher_balances_packing_across_dp_ranks() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=8,
         num_prompts_per_train_step=1,
@@ -346,7 +433,7 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
 
 
 def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=40,
         max_context_length=40,
         num_prompts_per_train_step=1,
@@ -368,7 +455,7 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
 
 
 def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -386,7 +473,7 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
 
 
 def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -414,7 +501,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
 
 
 def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
-    batcher = Batcher.Config(max_num_documents=1).build(
+    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=10,
         max_context_length=10,
         num_prompts_per_train_step=1,
@@ -441,7 +528,7 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
 
 
 def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> None:
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=6,
         max_context_length=3,
         num_prompts_per_train_step=1,
@@ -469,7 +556,7 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
 def test_document_limit_applies_to_each_local_microbatch() -> None:
     # A local microbatch is capped at three documents. The batcher must keep all
     # five documents and distribute them 2 + 3 across two microbatches.
-    batcher = Batcher.Config(max_num_documents=3).build(
+    batcher = Batcher.Config(max_num_documents=3, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=8,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -494,7 +581,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
 
 
 def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
-    batcher = Batcher.Config(max_num_documents=1).build(
+    batcher = Batcher.Config(max_num_documents=1, rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=2,
         num_prompts_per_train_step=1,
@@ -515,7 +602,7 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
 
 
 def test_batcher_filters_training_samples_longer_than_context() -> None:
-    batcher = Batcher.Config().build(
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
         num_tokens_per_microbatch_per_dp_rank=4,
         max_context_length=4,
         num_prompts_per_train_step=1,
@@ -551,19 +638,6 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         if metric.key == "batcher/num_samples_dropped_oversized"
     )
     assert dropped_metric.value.value == 1
-
-
-def test_batcher_requires_whole_rows_per_microbatch() -> None:
-    with pytest.raises(ValueError, match="must be divisible"):
-        Batcher.Config().build(
-            num_tokens_per_microbatch_per_dp_rank=5,
-            max_context_length=3,
-            num_prompts_per_train_step=1,
-            dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
-            num_topk_logprobs=0,
-        )
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
@@ -641,7 +715,7 @@ def test_untrainable_group_releases_before_training() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(
             max_active_rollout_groups=1, window_size=None
         )
-        batcher = Batcher.Config().build(
+        batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(
             num_tokens_per_microbatch_per_dp_rank=16384,
             max_context_length=2048,
             num_prompts_per_train_step=1,
@@ -808,8 +882,19 @@ async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
 
-def _run_with_generator_watcher(watcher) -> None:
-    """Run Controller.run with every stage but the engine-loop watcher stubbed to block."""
+async def _train_one_step(*args, **kwargs) -> None:
+    await asyncio.sleep(0)
+
+
+def _run_with_generator_watcher(
+    watcher,
+    *,
+    trainer_loop=_block_forever,
+    validate=None,
+    validation=None,
+    on_close=None,
+) -> Controller:
+    """Run Controller.run with stub loops: `watcher` waits on the engine loops, `trainer_loop` trains, the rest block."""
     controller = object.__new__(Controller)
     controller.config = SimpleNamespace(
         async_loop=SimpleNamespace(
@@ -821,16 +906,21 @@ def _run_with_generator_watcher(watcher) -> None:
             max_offpolicy_steps=None,
             num_prompts_per_train_step=1,
             group_buffer=SimpleNamespace(
-                build=lambda **kwargs: SimpleNamespace(close=AsyncMock())
+                build=lambda **kwargs: SimpleNamespace(
+                    close=AsyncMock(side_effect=on_close)
+                )
             ),
+            validation=validation or ValidationConfig(),
         ),
         trainer=SimpleNamespace(
-            training=SimpleNamespace(
-                num_tokens_per_microbatch_per_dp_rank=8, max_context_length=8
-            )
+            training=SimpleNamespace(num_tokens_per_microbatch_per_dp_rank=8)
         ),
     )
     controller.start_step = 0
+    controller._validation_tasks = []
+    controller._model_state_dict_pull_tasks = []
+    controller._has_pending_validation = False
+    controller.metrics_processor = Mock()
     controller.trainer = None
     controller.trainer_dp_degree = 1
     controller.tokenizer = SimpleNamespace(eos_id=0)
@@ -841,15 +931,16 @@ def _run_with_generator_watcher(watcher) -> None:
     with (
         patch.multiple(
             Controller,
-            _validate_and_log=AsyncMock(return_value={}),
-            _make_generate_fn=lambda self, metrics_prefix: None,
+            validate=validate or AsyncMock(return_value=[]),
+            _make_generate_fn=lambda self: None,
             _data_input_loop=_block_forever,
             _rollout_loop=_block_forever,
             _batcher_loop=_block_forever,
-            _trainer_loop=_block_forever,
+            _trainer_loop=trainer_loop,
         ),
     ):
         asyncio.run(asyncio.wait_for(controller.run(), timeout=10))
+    return controller
 
 
 def test_run_fails_when_an_engine_loop_crashes() -> None:
@@ -868,3 +959,325 @@ def test_run_fails_when_the_engine_loops_exit_mid_run() -> None:
         RuntimeError, match="generator_wait_engine_loop exited unexpectedly"
     ):
         _run_with_generator_watcher(exited)
+
+
+@pytest.mark.parametrize(
+    "step_0_validation, validate_after_training, started_steps, logged_steps",
+    [
+        # Ends before training does: the call after training logs it at step 1.
+        ("ends", False, [0], [1]),
+        # Ends while run()'s finally awaits group_buffer.close(): also logged at step 1.
+        ("ends_during_close", False, [0], [1]),
+        # Still running: run() cancels it (else run() hangs) and logs nothing.
+        ("runs", False, [0], []),
+        # Cancelled, then the validation after training runs and is logged at step 1.
+        ("runs", True, [0, 1], [1]),
+        # Failed: the call after training raises its error.
+        ("fails", False, [0], None),
+    ],
+)
+def test_run_ends_validation(
+    step_0_validation, validate_after_training, started_steps, logged_steps
+) -> None:
+    """1 training step: what run() does with the step-0 validation and the validation after training."""
+    started = []
+    close_started = asyncio.Event()
+
+    async def validate(self, *, step: int) -> list[m.Metric]:
+        started.append(step)
+        if step == 0 and step_0_validation == "ends_during_close":
+            await close_started.wait()
+        if step == 0 and step_0_validation == "runs":
+            await asyncio.Event().wait()
+        if step == 0 and step_0_validation == "fails":
+            raise RuntimeError("validation failed")
+        return [m.Metric(f"started_{step}", m.Mean(1.0))]
+
+    async def close() -> None:
+        close_started.set()
+        await asyncio.sleep(0)  # the validation returns
+
+    def run() -> Controller:
+        return _run_with_generator_watcher(
+            _block_forever,
+            trainer_loop=_train_one_step,
+            validate=validate,
+            validation=ValidationConfig(
+                validate_after_training=validate_after_training
+            ),
+            on_close=close,
+        )
+
+    if step_0_validation == "fails":
+        with pytest.raises(RuntimeError, match="validation failed"):
+            run()
+    else:
+        controller = run()
+        assert [
+            call.kwargs["step"]
+            for call in controller.metrics_processor.log.call_args_list
+        ] == logged_steps
+    assert started == started_steps
+
+
+@pytest.mark.parametrize(
+    "start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged",
+    [
+        # The validation started at 3 came due at 2; the one started at 6 covers steps 4 and 6.
+        (0, True, True, [0, 3, 6], [(3, "started_0"), (6, "started_3")]),
+        (
+            0,
+            True,
+            False,
+            [0, 2, 4, 6],
+            [(3, "started_0"), (5, "started_2"), (7, "started_4")],
+        ),
+        (0, False, True, [2, 5], [(5, "started_2"), (8, "started_5")]),
+        # Resumed at step 2, a multiple of freq: a validation starts there. validate_at_step_0 is for step 0 only.
+        (2, False, True, [2, 5], [(5, "started_2"), (8, "started_5")]),
+        # Resumed at step 3: the first validation starts at 4, also with validate_at_step_0.
+        (3, True, True, [4, 7], [(7, "started_4")]),
+    ],
+)
+def test_validation_schedule(
+    start_step, validate_at_step_0, defer_new_if_not_finished, started_steps, logged
+) -> None:
+    """freq=2, 8 steps, each validation ends 3 steps after it starts and is logged at that step.
+
+    No validation starts at step 8, the last step.
+    """
+    end_events: dict[int, asyncio.Event] = {}
+
+    async def validate(*, step: int) -> list[m.Metric]:
+        end_events[step] = asyncio.Event()
+        await end_events[step].wait()
+        return [m.Metric(f"started_{step}", m.Mean(1.0))]
+
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            num_training_steps=8,
+            validation=ValidationConfig(
+                freq=2,
+                validate_at_step_0=validate_at_step_0,
+                defer_new_if_not_finished=defer_new_if_not_finished,
+            ),
+        )
+    )
+    controller._validation_tasks = []
+    controller._model_state_dict_pull_tasks = []
+    controller._has_pending_validation = False
+    controller.validate = validate
+    controller.metrics_processor = Mock()
+
+    async def run_steps() -> None:
+        for step in range(start_step, 9):
+            if step - 3 in end_events:
+                end_events[step - 3].set()
+                await asyncio.sleep(0)  # the validation returns
+            controller._maybe_start_validation(step=step)
+            await asyncio.sleep(0)  # a new validation starts
+
+    asyncio.run(run_steps())
+
+    assert list(end_events) == started_steps
+    assert [
+        (call.kwargs["step"], call.kwargs["metrics"][0].key)
+        for call in controller.metrics_processor.log.call_args_list
+    ] == logged
+
+
+def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
+    """A failed call releases its reserved load, or the router would keep counting it."""
+
+    async def generate_call(*args, **kwargs) -> None:
+        # The load stays reserved while the generator runs the call.
+        release.assert_not_called()
+        raise RuntimeError("generator failed")
+
+    generate_call = AsyncMock(side_effect=generate_call)
+    reserve = AsyncMock(
+        return_value=SimpleNamespace(generate=SimpleNamespace(call_one=generate_call))
+    )
+    release = Mock()
+    controller = object.__new__(Controller)
+    controller.generator_router = SimpleNamespace(
+        reserve=SimpleNamespace(call_one=reserve),
+        release_reservation=SimpleNamespace(broadcast=release),
+    )
+    generate = controller._make_generate_fn()
+    prompt = Prompt(token_ids=[1, 2])
+
+    with pytest.raises(RuntimeError, match="generator failed"):
+        asyncio.run(
+            generate(prompt, request_id="r0", group_id=0, routing_session_id="s0")
+        )
+
+    # The session reaches both routing layers: the router and the generator's DP routing.
+    reserve.assert_awaited_once_with("r0", routing_session_id="s0")
+    generate_call.assert_awaited_once_with(
+        prompt,
+        request_id="r0",
+        group_id=0,
+        routing_session_id="s0",
+        sampling_config=None,
+    )
+    release.assert_called_once_with("r0")
+
+
+def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
+    """Validation prefixes its turns' metrics with `validation_` (`generator/x` -> `validation_generator/x`,
+    `math_verify/x` -> `validation_math_verify/x`). Two validations never share a group id."""
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        turn = RolloutTurn(
+            rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
+            prompt_prefix_len=0,
+            prompt_delta_token_ids=np.array([1], dtype=np.int32),
+            completion_token_ids=np.array([2], dtype=np.int32),
+            completion_logprobs=np.array([-0.1], dtype=np.float32),
+            min_policy_version=0,
+            max_policy_version=0,
+            metrics=[
+                m.Metric("generator/queue_time_ms", m.Mean(2.0)),
+                m.Metric("math_verify/timeouts", m.Sum(1.0)),
+            ],
+        )
+        rollout = Rollout(
+            group_id=group_id,
+            rollout_id=0,
+            status=RolloutStatus.COMPLETED,
+            reward=0.0,
+            turns=[turn],
+        )
+        return RolloutGroup(group_id=group_id, rollouts=[rollout])
+
+    controller = object.__new__(Controller)
+    controller._validation_group_ids = itertools.count(start=-1, step=-1)
+    controller._make_generate_fn = lambda: None
+    controller._make_release_session_fn = lambda: None
+    controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+    release_groups = AsyncMock()
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=release_groups)
+    )
+
+    async def run_two_validations() -> list[m.Metric]:
+        for step in (0, 2):
+            _, metrics = await controller._collect_validation_rollouts(
+                samples=["prompt 1", "prompt 2"],
+                sampling=SamplingConfig(),
+                num_samples_per_prompt=1,
+                step=step,
+            )
+        return metrics
+
+    keys = m.MetricsProcessor._aggregate_metrics(asyncio.run(run_two_validations()))
+    assert [call.args[0] for call in release_groups.call_args_list] == [
+        [-1, -2],
+        [-3, -4],
+    ]
+    assert keys["validation_generator/queue_time_ms/mean"] == 2.0
+    assert keys["validation_math_verify/timeouts/sum"] == 2.0
+    assert "generator/queue_time_ms/mean" not in keys
+    assert "math_verify/timeouts/sum" not in keys
+
+
+def _scored_group(group_id: int, rewards: list[float | None]) -> RolloutGroup:
+    return RolloutGroup(
+        group_id=group_id,
+        rollouts=[
+            Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.COMPLETED,
+                reward=reward,
+            )
+            for rollout_id, reward in enumerate(rewards)
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "num_samples_per_prompt, rewards, expected_mean, expected_best_of",
+    [
+        (1, [[1.0], [0.0]], 0.5, None),
+        (2, [[1.0, 0.0], [0.0, 0.0]], 0.25, 0.5),
+        # Unscored rollouts (reward None) are skipped; the prompt with none scored is left out.
+        (2, [[None, 1.0], [None, None]], 1.0, 1.0),
+    ],
+)
+def test_validate_rolls_out_each_prompt_n_times(
+    num_samples_per_prompt: int,
+    rewards: list[list[float | None]],
+    expected_mean: float,
+    expected_best_of: float | None,
+) -> None:
+    """2 prompts x n rollouts at T=1: the mean covers all rollouts; best_of_n, logged only for
+    n > 1, the best rollout per prompt."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            validation=ValidationConfig(
+                steps=2, num_samples_per_prompt=num_samples_per_prompt
+            )
+        )
+    )
+    controller._sampling = SamplingConfig(temperature=0.8, seed=7, stop_token_ids=[1])
+    controller._validation_group_ids = itertools.count(start=-1, step=-1)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+    run_group_rollouts = AsyncMock(
+        side_effect=[
+            _scored_group(-(i + 1), group_rewards)
+            for i, group_rewards in enumerate(rewards)
+        ]
+    )
+    controller._rollouter = SimpleNamespace(
+        get_validation_samples=lambda steps: ["a", "b"],
+        run_group_rollouts=run_group_rollouts,
+    )
+
+    metrics = asyncio.run(controller.validate(step=0))
+
+    calls = run_group_rollouts.call_args_list
+    assert [call.kwargs["group_size"] for call in calls] == [num_samples_per_prompt] * 2
+    expected_sampling = SamplingConfig(temperature=1.0, seed=7, stop_token_ids=[1])
+    assert [call.kwargs["sampling"] for call in calls] == [expected_sampling] * 2
+    aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregated["validation_reward/_mean"] == expected_mean
+    best_of_key = f"validation_reward/best_of_{num_samples_per_prompt}/mean"
+    assert aggregated.get(best_of_key) == expected_best_of
+
+
+def test_validation_config_rejects_bad_sampling() -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        ValidationConfig(temperature=-1.0)
+    with pytest.raises(ValueError, match="num_samples_per_prompt"):
+        ValidationConfig(num_samples_per_prompt=0)
+    with pytest.raises(ValueError, match="greedy"):
+        ValidationConfig(temperature=0.0, num_samples_per_prompt=4)
+
+
+def test_run_cancels_the_in_flight_pull_when_the_trainer_loop_fails() -> None:
+    events: list[str] = []
+    buffer_closed = asyncio.Event()
+
+    async def pull() -> None:
+        await buffer_closed.wait()
+        events.append("released groups after close")
+
+    async def failing_trainer_loop(self, *args, **kwargs) -> None:
+        self._model_state_dict_pull_tasks = [asyncio.create_task(pull())]
+        raise RuntimeError("forward/backward failed")
+
+    with pytest.raises(RuntimeError, match="forward/backward failed"):
+        _run_with_generator_watcher(
+            _block_forever,
+            trainer_loop=failing_trainer_loop,
+            on_close=buffer_closed.set,
+        )
+
+    assert events == []

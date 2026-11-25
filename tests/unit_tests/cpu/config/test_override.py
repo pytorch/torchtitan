@@ -80,6 +80,19 @@ class TwoBlocks(Configurable):
         self.config = config
 
 
+class CheckedComponent(Configurable):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        bad: bool = False
+
+        def __post_init__(self) -> None:
+            if self.bad:
+                raise ValueError("bad flag")
+
+    def __init__(self, config: Config):
+        self.config = config
+
+
 class DerivedComponent(ComponentA):
     """A replacement that subclasses the target Config and adds a field.
 
@@ -385,6 +398,13 @@ class TestOverride(_IsolatedRegistryTestCase):
         clear_overrides()
         self.assertEqual(len(_REGISTRY), 0)
 
+    def test_revalidates_after_assignment(self):
+        # A field set after construction is invisible to the first __post_init__.
+        config = CheckedComponent.Config()
+        config.bad = True
+        with self.assertRaisesRegex(ValueError, "bad flag"):
+            apply_overrides(OverrideConfig(), config)
+
     def test_no_overrides_is_noop(self):
         parent_cfg = ParentComponent.Config(child=ComponentA.Config(dim=100))
         replacements = apply_overrides(OverrideConfig(), parent_cfg)
@@ -408,17 +428,49 @@ class TestOverride(_IsolatedRegistryTestCase):
         with self.assertRaises(ImportError):
             apply_overrides(override_cfg, parent_cfg)
 
-    def test_logging_format(self):
-        @override(target=ComponentA.Config, description="format test")
-        def fmt_swap(cfg: ComponentA.Config) -> ComponentB.Config:
-            return _to_b(cfg)
+    def test_groups_success_logs_and_keeps_per_node_results(self):
+        @override(target=ComponentA.Config)
+        def swap(cfg: ComponentA.Config, *, extra: int) -> ComponentB.Config:
+            return ComponentB.Config(dim=cfg.dim, extra=extra)
 
-        parent_cfg = ParentComponent.Config()
-        replacements = apply_overrides(self._imports(), parent_cfg)
-        for line in replacements:
-            self.assertIn("[Override]", line)
-            self.assertIn("fmt_swap", line)
-            self.assertIn("->", line)
+        target = f"{__name__}.swap"
+        parent_cfg = ParentComponent.Config(
+            children=[
+                ComponentA.Config(),
+                ComponentA.Config(),
+                ComponentA.Config(),
+                DerivedComponent.Config(),
+                ComponentA.Config(),
+                ComponentA.Config(),
+            ],
+        )
+        config = OverrideConfig(imports=[(target, {"extra": 256})])
+
+        with self.assertLogs("torchtitan.config.override", "INFO") as logs:
+            replacements = apply_overrides(config, parent_cfg)
+
+        self.assertEqual(
+            [record.getMessage() for record in logs.records],
+            [
+                f"[Override] {target}: ComponentA.Config -> ComponentB.Config with extra=256"
+                " matched=6 fqns=['child', 'children.{0..2,4,5}']",
+                f"[Override] {target}: DerivedComponent.Config -> ComponentB.Config with extra=256"
+                " matched=1 fqns=['children.3']",
+                "Applied 7 override(s)",
+            ],
+        )
+        self.assertEqual(
+            replacements,
+            [
+                f"[Override] {target}: child ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.0 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.1 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.2 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.3 DerivedComponent.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.4 ComponentA.Config -> ComponentB.Config with extra=256",
+                f"[Override] {target}: children.5 ComponentA.Config -> ComponentB.Config with extra=256",
+            ],
+        )
 
 
 class TestOverrideKwargs(_IsolatedRegistryTestCase):

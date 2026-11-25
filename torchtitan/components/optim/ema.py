@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
-from torchtitan.distributed.utils import get_local_tensor
+from torchtitan.distributed.utils import as_dtensor_like, get_local_tensor
 
 from .optimizer import OptimizersContainer
 
@@ -295,8 +295,8 @@ class EMA(OptimizersContainer):
                 "EMA is tracking %s tensors. Once the average and the live "
                 "value are close, the per-firing increment rounds away at that "
                 "precision and the EMA stops tracking altogether. Keep the "
-                "tracked tensors in float32 (FSDP2's mixed_precision_param "
-                "already does).",
+                "tracked tensors in float32 with precision.dtype='float32' "
+                "(FSDP2 still computes in precision.param_dtype).",
                 ", ".join(low_precision),
             )
 
@@ -432,15 +432,7 @@ class EMA(OptimizersContainer):
         """
         if not isinstance(p, DTensor):
             return local
-        local_gpu = local.to(p.device)
-        return DTensor.from_local(
-            local_gpu,
-            device_mesh=p.device_mesh,
-            placements=p.placements,
-            run_check=False,
-            shape=p.shape,
-            stride=p.stride(),
-        )
+        return as_dtensor_like(p, local.to(p.device))
 
     def _scratch_chunks(
         self, params: list[torch.Tensor], ema_params: list[torch.Tensor]

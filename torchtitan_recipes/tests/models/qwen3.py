@@ -31,7 +31,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    NVFP4LinearConverter,
+    NVFP4LinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_remat import (
@@ -46,7 +46,8 @@ from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
 
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3.model import Qwen3Model
-from torchtitan.observability.metrics import MetricsProcessor
+
+from torchtitan.observability.metrics import MetricsProcessor, WandBLogger
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
@@ -99,7 +100,6 @@ def qwen3_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -113,17 +113,7 @@ def qwen3_debugmodel_nvfp4(
 ) -> Trainer.Config:
     config = qwen3_debugmodel(seq_len=seq_len)
     # Convert every decoder-layer Linear while leaving the lm_head in bf16.
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=["layers"],
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=["layers"])])
 
 
 def qwen3_debugmodel_first_85_pct_layers_nvfp4(
@@ -138,17 +128,7 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,
     )
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def qwen3_debugmodel_moe_param_groups(
@@ -224,7 +204,6 @@ def qwen3_debugmodel_flex_flash(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -260,7 +239,6 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         checkpointer=None,
@@ -295,7 +273,6 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=100,
         ),
         checkpointer=None,
@@ -340,7 +317,6 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(
@@ -357,7 +333,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
             ),
             max_num_documents=32,
         ),
-        metrics=MetricsProcessor.Config(enable_wandb=True),
+        metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         checkpointer=CheckpointManager.Config(initial_load_in_hf=True),
         activation_remat=DefaultActivationRematConfig(),
     )
@@ -369,16 +345,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         num_layers,
         _NVFP4_BF16_TAIL_FRACTION,
     )
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
+    config = apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),
@@ -418,7 +385,6 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -460,7 +426,6 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -500,7 +465,6 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=3000,
         ),
         parallelism=parallelism,
@@ -555,7 +519,6 @@ def qwen3_moe_debug(
         training=TrainingConfig(
             disable_accelerator_graphs=disable_accelerator_graphs,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -606,7 +569,6 @@ def qwen3_moe_deepep(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
             disable_accelerator_graphs=True,
         ),
@@ -671,7 +633,6 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(
@@ -689,7 +650,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
             max_num_documents=32,
         ),
         metrics=MetricsProcessor.Config(
-            enable_wandb=True,
+            loggers=[WandBLogger.Config()],
         ),
         checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,

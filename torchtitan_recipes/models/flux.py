@@ -18,7 +18,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.config.transform import apply_transforms, MXFP8LinearTransform
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.data import DATASETS, FluxCollator, FluxSampleProcessor
@@ -62,7 +62,11 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
-        model=build_model_config(flavor, parallelism=parallelism),
+        model=build_model_config(
+            flavor,
+            parallelism=parallelism,
+            seq_len=_flux_seq_len(img_size, max_t5_encoding_len),
+        ),
         parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -77,7 +81,6 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             num_tokens_per_microbatch_per_dp_rank=(
                 24576 if flavor == "flux-dev" else 32768
             ),
-            max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
             steps=30000,
             disable_accelerator_graphs=True,
         ),
@@ -100,11 +103,11 @@ def flux_schnell() -> FluxTrainer.Config:
     return _flux_recipe("flux-schnell", max_t5_encoding_len=256)
 
 
-def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Config:
-    config.model = build_model_config(
-        flavor,
-        converters=[
-            MXFP8LinearConverter.Config(
+def _enable_mxfp8(config: FluxTrainer.Config) -> FluxTrainer.Config:
+    return apply_transforms(
+        config,
+        [
+            MXFP8LinearTransform(
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -116,16 +119,14 @@ def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Con
                 ],
             ),
         ],
-        parallelism=config.parallelism,
     )
-    return config
 
 
 def flux_schnell_mxfp8() -> FluxTrainer.Config:
     """Flux schnell with MXFP8 quantization and torch.compile on SM100+."""
-    return _enable_mxfp8(flux_schnell(), flavor="flux-schnell")
+    return _enable_mxfp8(flux_schnell())
 
 
 def flux_dev_mxfp8() -> FluxTrainer.Config:
     """Flux dev with MXFP8 quantization and torch.compile on SM100+."""
-    return _enable_mxfp8(flux_dev(), flavor="flux-dev")
+    return _enable_mxfp8(flux_dev())

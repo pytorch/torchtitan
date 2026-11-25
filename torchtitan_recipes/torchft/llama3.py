@@ -22,7 +22,7 @@ from torchtitan.experiments.torchft.optimizer import (
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
+from torchtitan.observability.profiler import KinetoTraceProfiler, Profiler
 
 from torchtitan_recipes.data import c4_document_capacity
 
@@ -37,10 +37,7 @@ def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
         ),
         hf_assets_path="./tests/assets/tokenizer",
         profiler=Profiler.Config(
-            enable_profiling=True,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
+            trace=KinetoTraceProfiler.Config(freq=10, active=10, warmup=0)
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
@@ -57,7 +54,6 @@ def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=100,
         ),
         dataloader=GrainDataLoader.Config(

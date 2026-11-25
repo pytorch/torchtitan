@@ -41,8 +41,8 @@ def graph_trainer_llama3_8b_autoresearch() -> GraphTrainer.Config:
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 8192
     config.training.steps = 20
-    config.metrics.enable_tensorboard = False
-    config.profiler.enable_profiling = False
+    config.metrics.loggers = []
+    config.profiler.trace = None
     config.comm.trace_buf_size = 0
     config.debug.seed = 42
     return config

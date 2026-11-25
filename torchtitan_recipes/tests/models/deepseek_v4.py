@@ -35,10 +35,9 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.mtp import MTPCrossEntropyLoss
 from torchtitan.models.deepseek_v4 import build_model_config, DeepSeekV4Model
-from torchtitan.models.deepseek_v4.mtp import MTPCrossEntropyLoss
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 _NSCoefficients = tuple[float, float, float]
@@ -309,12 +308,6 @@ def deepseek_v4_debugmodel(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -342,7 +335,6 @@ def deepseek_v4_debugmodel(
             # cannot run under CUDA graphs.
             disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -367,11 +359,13 @@ def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
 def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     *,
+    parallelism: ParallelismConfig | None = None,
     muon_ns_steps: int = 10,
     muon_ns_coefficients: _NSCoefficientSchedule = _DEFAULT_NS_COEFFICIENTS,
 ) -> Trainer.Config:
     num_mtp_layers = 1
-    parallelism = ParallelismConfig(expert_parallel_degree=1)
+    if parallelism is None:
+        parallelism = ParallelismConfig(expert_parallel_degree=1)
     model_config = build_model_config(
         "debugmodel",
         seq_len=seq_len,
@@ -381,12 +375,6 @@ def deepseek_v4_mtp_debugmodel(
     return _DeepSeekV4TrainerConfig(
         loss=MTPCrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
-        ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
@@ -413,7 +401,7 @@ def deepseek_v4_mtp_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
+            disable_accelerator_graphs=parallelism.expert_parallel_degree > 1,
             steps=10,
         ),
         parallelism=parallelism,
@@ -438,12 +426,6 @@ def deepseek_v4_flash(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -468,7 +450,6 @@ def deepseek_v4_flash(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,
@@ -493,12 +474,6 @@ def deepseek_v4_pro(
                 global_vocab_size=decoder_vocab_size(model_config),
             ),
         ),
-        profiler=Profiler.Config(
-            enable_profiling=False,
-            profile_freq=10,
-            profiler_active=10,
-            profiler_warmup=0,
-        ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
@@ -523,7 +498,6 @@ def deepseek_v4_pro(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         parallelism=parallelism,

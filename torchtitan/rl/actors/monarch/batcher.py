@@ -8,14 +8,13 @@
 
 from __future__ import annotations
 
-from monarch.actor import Actor, endpoint
+from monarch.actor import endpoint
 
+from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.actors.monarch.rdma_microbatch import (
-    create_cuda_context_to_silence_monarch_log,
-    MonarchRDMAMicrobatch,
-)
+from torchtitan.rl.actors.monarch.actor import Actor
+from torchtitan.rl.actors.monarch.rdma_microbatch import MonarchRDMAMicrobatch
 from torchtitan.rl.rollout.types import RolloutGroup
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 
@@ -35,6 +34,7 @@ class _BatcherActorEndpoints:
         num_topk_logprobs: int,
         output_dir: str,
         enable_structured_logging: bool,
+        vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
         init_logger()
         sl.init_structured_logger(
@@ -43,8 +43,6 @@ class _BatcherActorEndpoints:
             rank=0,
             enable=enable_structured_logging,
         )
-        if config.rdma_min_tensor_bytes is not None:
-            create_cuda_context_to_silence_monarch_log()
         super().__init__(
             config,
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
@@ -56,6 +54,7 @@ class _BatcherActorEndpoints:
             temperature=temperature,
             num_topk_logprobs=num_topk_logprobs,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
+            vision_processor=vision_processor,
         )
 
     @endpoint
@@ -87,7 +86,7 @@ class BatcherActor(Actor, _BatcherActorEndpoints, Batcher):
         batcher = this_host().spawn_procs(per_host={"cpus": 1}).spawn(
             "batcher",
             BatcherActor,
-            Batcher.Config(rdma_min_tensor_bytes=1024),
+            Batcher.Config(),
             num_prompts_per_train_step=2,
             **other_init_kwargs,  # see `_BatcherActorEndpoints.__init__`
         )

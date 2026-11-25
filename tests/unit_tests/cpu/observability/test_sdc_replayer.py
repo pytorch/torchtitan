@@ -268,7 +268,7 @@ def test_config_validation():
 def test_empty_tensor_hash_uses_zero_sentinel():
     digest = _hash_tensor(torch.empty(0))
 
-    assert digest.dtype == torch.uint64
+    assert digest.dtype == torch.int64
     assert digest.item() == 0
 
 
@@ -276,10 +276,10 @@ def test_complex_tensor_hash_uses_real_view():
     value = torch.tensor([1 + 2j, 3 + 4j], dtype=torch.complex64)
 
     digest = _hash_tensor(value)
-    expected = torch.hash_tensor(torch.view_as_real(value))
+    expected = torch.hash_tensor(torch.view_as_real(value)).view(torch.int64)
 
     torch.testing.assert_close(digest, expected)
-    assert digest.dtype == torch.uint64
+    assert digest.dtype == torch.int64
 
 
 def test_signature_digest_comparison_is_batched():
@@ -290,16 +290,16 @@ def test_signature_digest_comparison_is_batched():
     reference = _ReplaySignature(
         schema=schema,
         digests=(
-            torch.tensor(1, dtype=torch.uint64),
-            torch.tensor(2, dtype=torch.uint64),
+            torch.tensor(1, dtype=torch.int64),
+            torch.tensor(2, dtype=torch.int64),
         ),
         state=(),
     )
     candidate = _ReplaySignature(
         schema=schema,
         digests=(
-            torch.tensor(1, dtype=torch.uint64),
-            torch.tensor(3, dtype=torch.uint64),
+            torch.tensor(1, dtype=torch.int64),
+            torch.tensor(3, dtype=torch.int64),
         ),
         state=(),
     )

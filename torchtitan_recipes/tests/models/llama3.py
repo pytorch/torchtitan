@@ -31,7 +31,7 @@ from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
     LoRATransform,
-    NVFP4LinearConverter,
+    NVFP4LinearTransform,
 )
 from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
@@ -44,14 +44,15 @@ from torchtitan.models.common.config_utils import (
 
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.llama3.model import Llama3Model
-from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.observability.profiler import Profiler
+
+from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
+from torchtitan.observability.profiler import KinetoTraceProfiler, Profiler
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
 
-from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_config
+from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_transform
 
 
 def llama3_debugmodel(
@@ -91,7 +92,6 @@ def llama3_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(
@@ -156,12 +156,9 @@ def llama3_debugmodel_mxfp8(
     config.model = build_model_config(
         "debugmodel_mxfp8",
         seq_len=seq_len,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
         parallelism=config.parallelism,
     )
-    return config
+    return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
 def llama3_debugmodel_nvfp4(
@@ -171,17 +168,7 @@ def llama3_debugmodel_nvfp4(
     # fqns=["layers"] converts every in-layer Linear (attention + feed_forward)
     # while leaving the lm_head stock: NVFP4 requires each GEMM dim divisible by
     # 128, which the vocab projection does not satisfy.
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=["layers"],
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=["layers"])])
 
 
 def llama3_debugmodel_first_85_pct_layers_nvfp4(
@@ -193,17 +180,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
     n_layers = len(cast(Llama3Model.Config, config.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def llama3_debugmodel_lora(
@@ -244,12 +221,9 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiler=Profiler.Config(
-            enable_profiling=True,
-            profile_freq=100,
-        ),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
+            loggers=[TensorBoardLogger.Config()],
         ),
         model=model_config,
         parallelism=parallelism,
@@ -260,7 +234,6 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -282,30 +255,12 @@ def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.C
     n_layers = len(cast(Llama3Model.Config, config.model).layers)
     _NVFP4_BF16_TAIL_FRACTION = 0.15
     fqns = nvfp4_bf16_tail_fqns(n_layers, _NVFP4_BF16_TAIL_FRACTION)
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            NVFP4LinearConverter.Config(
-                fqns=fqns,
-            ),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [NVFP4LinearTransform(fqns=fqns)])
 
 
 def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     config = llama3_8b(seq_len=seq_len)
-    config.model = build_model_config(
-        "8B",
-        seq_len=seq_len,
-        converters=[
-            llama3_mxfp8_linear_converter_config(),
-        ],
-        parallelism=config.parallelism,
-    )
-    return config
+    return apply_transforms(config, [llama3_mxfp8_linear_transform()])
 
 
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
@@ -321,12 +276,9 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiler=Profiler.Config(
-            enable_profiling=True,
-            profile_freq=100,
-        ),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(
-            enable_tensorboard=True,
+            loggers=[TensorBoardLogger.Config()],
         ),
         model=model_config,
         optim=Optim.Config(
@@ -336,7 +288,6 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=num_tokens_per_microbatch_per_dp_rank,
-            max_context_length=model_config.max_context_length,
             steps=1000,
         ),
         dataloader=GrainDataLoader.Config(
@@ -390,7 +341,6 @@ def sft_debugmodel(
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
             steps=10,
         ),
         dataloader=GrainDataLoader.Config(

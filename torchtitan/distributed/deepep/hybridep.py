@@ -20,12 +20,13 @@ Configuration (via HybridEPTokenDispatcher.Config):
 """
 
 import logging
+import weakref
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.distributed as dist
-from torch._library.opaque_object import CustomClassBase, register_opaque_type
+import torch_remat as remat
 
 logger = logging.getLogger(__name__)
 
@@ -35,35 +36,13 @@ _buffer: Any = None  # Global buffer instance
 _over_budget: torch.Tensor | None = None
 
 
-class DispatchHandle(CustomClassBase):
-    """Opaque wrapper for HybridEP dispatch handle.
-
-    Wraps the deep_ep dispatch handle as an opaque type so it can be returned
-    from custom ops and flow through the torch.compile graph, eliminating
-    the need for a global handle cache.
-    """
-
-    def __init__(self, value=None):
-        self.value = value
-
-    def __eq__(self, other):
-        if not isinstance(other, DispatchHandle):
-            return False
-        return self.value is other.value
-
-    def __hash__(self):
-        if self.value is None:
-            return 0
-        try:
-            return hash(self.value)
-        except TypeError:
-            return id(self.value)
-
-    def __fx_repr__(self):
-        return "DispatchHandle()", {"DispatchHandle": DispatchHandle}
-
-
-register_opaque_type(DispatchHandle, typ="reference")
+# The pinned torch_remat release accepts only tensor outputs; direct opaque
+# outputs require an upstream release. Use CPU tensor IDs as in the DeepEP
+# adapter to retain handles without device-to-host synchronization.
+# TODO: Remove this cache once opaque output support is released:
+# https://github.com/meta-pytorch/remat/issues/10
+_handle_cache: dict[int, Any] = {}
+_handle_counter: int = 0
 
 
 @dataclass
@@ -71,12 +50,12 @@ class DispatchState:
     """State from dispatch needed for combine.
 
     Attributes:
-        handle: Opaque dispatch handle wrapping the deep_ep handle.
+        handle_id: CPU tensor identifying the opaque dispatch handle.
         permuted_scores: Routing scores applied to expert outputs in combine.
         num_tokens: Original input token count (for combine fake shape inference).
     """
 
-    handle: DispatchHandle
+    handle_id: torch.Tensor
     permuted_scores: torch.Tensor | None = None
     num_tokens: int = 0
 
@@ -127,7 +106,7 @@ def _dispatch_impl(
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     DeepEP's dispatch_with_permute needs to know the output buffer size
     (num_permuted_tokens) for the fused permute kernel.
@@ -138,7 +117,7 @@ def _dispatch_impl(
       then reads tokens_per_expert from pinned CPU memory to compute the
       exact num_permuted_tokens on the host.
     """
-    global _buffer
+    global _handle_counter
     # pyrefly: ignore [bad-argument-type]
     group = dist.distributed_c10d._resolve_process_group(group_name)
     assert _buffer is not None, "HybridEP buffer must be initialized before dispatch"
@@ -194,7 +173,12 @@ def _dispatch_impl(
     if tokens_per_expert.device != x.device:
         tokens_per_expert = tokens_per_expert.to(x.device)
 
-    return hidden, scores, tokens_per_expert, DispatchHandle(value=handle)
+    _handle_counter += 1
+    handle_key = _handle_counter
+    handle_id = torch.tensor([handle_key], dtype=torch.int64, device="cpu")
+    _handle_cache[handle_key] = handle
+    weakref.finalize(handle_id, lambda: _handle_cache.pop(handle_key, None))
+    return hidden, scores, tokens_per_expert, handle_id
 
 
 @_dispatch_impl.register_fake
@@ -208,7 +192,7 @@ def _dispatch_fake(
     non_blocking: bool = False,
     moe_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, DispatchHandle]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fake dispatch for torch.compile tracing."""
     num_local_experts = num_experts // ep_size
     if non_blocking:
@@ -225,29 +209,29 @@ def _dispatch_fake(
     hidden = x.new_empty(out_tokens, x.shape[1])
     scores = x.new_empty(out_tokens, dtype=torch.float32)
     tpe = x.new_empty(num_local_experts, dtype=torch.int64)
-    return hidden, scores, tpe, DispatchHandle()
+    return hidden, scores, tpe, torch.empty(1, dtype=torch.int64, device="cpu")
 
 
 @torch.library.custom_op("hybridep::combine", mutates_args=(), device_types="cuda")
 def _combine_impl(
     x: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_tokens: int,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """CUDA combine: reverse dispatch permutation via opaque handle."""
-    global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
-    combined, _ = _buffer.combine_with_unpermute(hidden=x, handle=handle.value)
+    handle = _handle_cache[cast(int, handle_id.item())]
+    combined, _ = _buffer.combine_with_unpermute(hidden=x, handle=handle)
     return combined
 
 
 @_combine_impl.register_fake
 def _combine_fake(
     x: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_tokens: int,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
@@ -263,19 +247,19 @@ def _combine_fake(
 @torch.library.custom_op("hybridep::dispatch_bwd", mutates_args=(), device_types="cuda")
 def _dispatch_bwd_impl(
     grad_combined: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_permuted_tokens: int,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """Backward of combine: scatter gradients via dispatch_with_permute."""
-    global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
+    handle = _handle_cache[cast(int, handle_id.item())]
     grad_x, _, _, _, _ = _buffer.dispatch_with_permute(
         hidden=grad_combined,
         scaling_factor=None,
-        handle=handle.value,
+        handle=handle,
         num_permuted_tokens=num_permuted_tokens,
         pad_multiple=pad_multiple,
     )
@@ -285,7 +269,7 @@ def _dispatch_bwd_impl(
 @_dispatch_bwd_impl.register_fake
 def _dispatch_bwd_fake(
     grad_combined: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_permuted_tokens: int,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
@@ -297,19 +281,19 @@ def _dispatch_bwd_fake(
 def _combine_bwd_impl(
     grad_hidden: torch.Tensor,
     grad_scores: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_tokens: int,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Backward of dispatch: gather gradients via combine_with_unpermute."""
-    global _buffer
     if _buffer is None:
         raise RuntimeError("HybridEP buffer not initialized.")
 
+    handle = _handle_cache[cast(int, handle_id.item())]
     grad_x, grad_probs_dense = _buffer.combine_with_unpermute(
         hidden=grad_hidden,
         probs=grad_scores if grad_scores.numel() > 0 else None,
-        handle=handle.value,
+        handle=handle,
     )
     if grad_probs_dense is None:
         grad_probs_dense = torch.empty(
@@ -322,7 +306,7 @@ def _combine_bwd_impl(
 def _combine_bwd_fake(
     grad_hidden: torch.Tensor,
     grad_scores: torch.Tensor,
-    handle: DispatchHandle,
+    handle_id: torch.Tensor,
     num_tokens: int,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -347,7 +331,7 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
     num_tokens = topk_idx.shape[0]
 
     grad_x, grad_probs_dense = torch.ops.hybridep.combine_bwd(
-        grad_hidden, grad_scores, ctx.dispatch_handle, num_tokens, ctx.num_experts
+        grad_hidden, grad_scores, ctx.handle_id, num_tokens, ctx.num_experts
     )
     grad_x = grad_x.to(ctx.input_dtype)
 
@@ -364,8 +348,10 @@ def _dispatch_backward(ctx, grad_hidden, grad_scores, grad_tpe, grad_handle):
 def _dispatch_setup_context(ctx, inputs, output):
     """Save context for dispatch backward."""
     x, topk_idx, _, num_experts, _, _, _, _, _ = inputs
-    _, _, _, dispatch_handle = output
-    ctx.dispatch_handle = dispatch_handle
+    _, _, _, handle_id = output
+    # The original CPU ID owns the cache entry. Keep it as context metadata;
+    # saved-tensor hooks may copy it and release the original object too early.
+    ctx.handle_id = handle_id
     ctx.input_dtype = x.dtype
     ctx.num_experts = num_experts
     ctx.save_for_backward(topk_idx)
@@ -374,16 +360,16 @@ def _dispatch_setup_context(ctx, inputs, output):
 def _combine_backward(ctx, grad_combined):
     """Backward: scatter gradients via dispatch_bwd op."""
     grad_x = torch.ops.hybridep.dispatch_bwd(
-        grad_combined, ctx.dispatch_handle, ctx.num_permuted_tokens, ctx.pad_multiple
+        grad_combined, ctx.handle_id, ctx.num_permuted_tokens, ctx.pad_multiple
     )
-    # Gradients for: x, handle, num_tokens, pad_multiple
+    # Gradients for: x, handle_id, num_tokens, pad_multiple
     return grad_x, None, None, None
 
 
 def _combine_setup_context(ctx, inputs, output):
     """Save context for combine backward."""
-    x, dispatch_handle, _num_tokens, pad_multiple = inputs
-    ctx.dispatch_handle = dispatch_handle
+    x, handle_id, _num_tokens, pad_multiple = inputs
+    ctx.handle_id = handle_id
     ctx.num_permuted_tokens = x.shape[0]
     ctx.pad_multiple = pad_multiple
 
@@ -467,6 +453,8 @@ def dispatch_tokens(
     num_experts: int,
     group: dist.ProcessGroup,
     *,
+    remat_region_name: str,
+    recompute: bool,
     non_blocking_expert_capacity_factor: float | None = None,
     pad_multiple: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
@@ -482,6 +470,9 @@ def dispatch_tokens(
         num_local_experts: Experts on this EP rank
         num_experts: Total experts across all ranks
         group: EP ProcessGroup
+        remat_region_name: Name for the dispatch communication region.
+        recompute: Whether to replay communication during backward. Must match
+            the value passed to combine_tokens.
         non_blocking_expert_capacity_factor: None = blocking mode (default).
             float in (0, 1] = non-blocking mode; pre-sizes the permute output
             tensor as num_tokens * ep_size *
@@ -501,12 +492,11 @@ def dispatch_tokens(
     ep_size = group.size()
     group_name = group.group_name
 
-    (
-        hidden,
-        permuted_scores,
-        tokens_per_expert,
-        dispatch_handle,
-    ) = torch.ops.hybridep.dispatch(
+    hidden, permuted_scores, tokens_per_expert, handle_id = remat.region(
+        torch.ops.hybridep.dispatch,
+        remat_region_name,
+        recompute=recompute,
+    )(
         hidden_states,
         selected_experts_indices,
         top_scores,
@@ -518,12 +508,15 @@ def dispatch_tokens(
         pad_multiple,
     )
 
+    # The score cast and the expert-count cumsum run outside remat regions.
+    remat.recompute_needs_tensor(permuted_scores, tokens_per_expert)
+
     # Routing scores are applied to expert outputs in combine_tokens.
     if permuted_scores is not None and permuted_scores.dtype != hidden.dtype:
         permuted_scores = permuted_scores.to(hidden.dtype)
 
     state = DispatchState(
-        handle=dispatch_handle,
+        handle_id=handle_id,
         permuted_scores=permuted_scores,
         num_tokens=hidden_states.shape[0],
     )
@@ -533,18 +526,35 @@ def dispatch_tokens(
 def combine_tokens(
     hidden_states: torch.Tensor,
     state: DispatchState,
+    *,
+    remat_region_name: str,
+    recompute: bool,
     pad_multiple: int | None = None,
 ) -> torch.Tensor:
     """Combine expert outputs back to original token order.
 
     Applies deferred scores (if any), then unpermutes via the opaque dispatch handle.
+
+    Args:
+        hidden_states: Unweighted expert outputs.
+        state: Dispatch state for these outputs.
+        remat_region_name: Name for the combine communication region.
+        recompute: Whether to replay communication during backward. Must match
+            the value passed to dispatch_tokens.
+        pad_multiple: Per-expert token alignment used during dispatch.
+
+    Returns:
+        Combined tokens in the original order.
     """
     if state.permuted_scores is not None:
         hidden_states = hidden_states * state.permuted_scores.reshape(-1, 1)
 
-    return torch.ops.hybridep.combine(
-        hidden_states, state.handle, state.num_tokens, pad_multiple
-    )
+    combined = remat.region(
+        torch.ops.hybridep.combine,
+        remat_region_name,
+        recompute=recompute,
+    )(hidden_states, state.handle_id, state.num_tokens, pad_multiple)
+    return combined
 
 
 def _record_over_budget(overflow_flag: torch.Tensor) -> None:
@@ -587,5 +597,4 @@ __all__ = [
     "check_hybridep_over_budget",
     "reset_hybridep_over_budget",
     "DispatchState",
-    "DispatchHandle",
 ]

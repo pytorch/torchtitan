@@ -162,13 +162,42 @@ class TestOptimizerConfig(unittest.TestCase):
         self.assertIsInstance(container.optimizers[0], ExternalSGD)
         self.assertEqual(container.optimizers[0].param_groups[0]["lr"], 0.25)
 
-    def test_bfloat16_moments_require_fused_adam(self):
-        with self.assertRaisesRegex(ValueError, "require fused=True"):
-            AdamW.Config(
-                pattern=r".*",
-                fused=False,
-                moment_dtype="bfloat16",
-            )
+    def test_moment_options_checked_at_config_time(self):
+        """Catches bf16 or CPU-offloaded moments silently using a non-fused
+        kernel, which lacks mixed-precision support and passes over the moments
+        several times, an out-of-range offload fraction, and CPU-offloaded moments
+        on an accelerator other than CUDA."""
+        for moment_kwargs in (
+            {"moment_dtype": "bfloat16"},
+            {"moment_cpu_offload_fraction": 0.5},
+        ):
+            with self.subTest(**moment_kwargs):
+                with self.assertRaisesRegex(ValueError, "require fused=True"):
+                    AdamW.Config(pattern=r".*", fused=False, **moment_kwargs)
+        for fraction in (-0.1, 1.5):
+            with self.subTest(fraction=fraction):
+                with self.assertRaisesRegex(ValueError, "must be in \\[0, 1\\]"):
+                    AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=fraction)
+        cuda = torch.device("cuda")
+        for name, accelerator, hip in (
+            ("rocm", cuda, "6.0"),
+            ("xpu", torch.device("xpu"), None),
+        ):
+            with (
+                self.subTest(name),
+                patch.object(
+                    torch.accelerator, "current_accelerator", return_value=accelerator
+                ),
+                patch.object(torch.version, "hip", hip),
+            ):
+                with self.assertRaisesRegex(ValueError, "require CUDA"):
+                    AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=1.0)
+                AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=0.0)
+        with (
+            patch.object(torch.accelerator, "current_accelerator", return_value=cuda),
+            patch.object(torch.version, "hip", None),
+        ):
+            AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=1.0)
 
     def test_catch_all_optimizer(self):
         """A catch-all optimizer selects every trainable parameter."""
@@ -570,16 +599,6 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
             all(len(optimizer.param_groups) == 1 for optimizer in container.optimizers)
         )
 
-    def test_build_optimizer_default_groups(self):
-        """A catch-all AdamW config produces standard single-group behavior."""
-        model = SimpleModel()
-        config = OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
-        )
-        container = config.build(model_parts=[model])
-        opt = container.optimizers[0]
-        self.assertEqual(len(opt.param_groups), 1)
-
 
 class TestDistMuonRedistributionMeshes(unittest.TestCase):
     def test_builds_one_mesh_per_storage_mesh(self):
@@ -980,8 +999,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         optimizers = config.build(model_parts=[model], enable_accelerator_graph=True)
         group = optimizers.optimizers[0].param_groups[0]
         lr = group["lr"]
-        schedulers = LRSchedulersContainer(
-            optimizers, lr_lambda=lambda step: 1.0 / (step + 1)
+        schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
+            optimizers=optimizers, training_steps=2
         )
 
         optimizers.step()

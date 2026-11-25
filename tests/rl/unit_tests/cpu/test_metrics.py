@@ -8,15 +8,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
-import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
-from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
+from torchtitan.observability.metrics import TensorBoardLogger, WandBLogger
 from torchtitan.rl.controller.metrics import compute_rollout_metrics
 
 from torchtitan.rl.observability import metrics as m
@@ -421,6 +425,71 @@ class TestFold:
         }
 
 
+def test_compute_rollout_metrics_records_a_rate_per_status() -> None:
+    statuses = [
+        RolloutStatus.COMPLETED,
+        RolloutStatus.ERROR,
+        RolloutStatus.ERROR_INFRA,
+        RolloutStatus.ERROR_INFRA,
+    ]
+    rollouts = [
+        Rollout(
+            group_id=0,
+            rollout_id=rollout_id,
+            status=status,
+            reward=1.0 if status.is_trainable() else None,
+        )
+        for rollout_id, status in enumerate(statuses)
+    ]
+    metrics = m.MetricsProcessor._aggregate_metrics(
+        compute_rollout_metrics("rollout", rollouts)
+    )
+    # The mean of the 2 scored rollouts only.
+    assert metrics["rollout_reward/_mean"] == 1.0
+    rates = {
+        key: value
+        for key, value in metrics.items()
+        if key.startswith("rollout/status_rate/")
+    }
+    assert rates["rollout/status_rate/error_infra/mean"] == 0.5
+    assert rates["rollout/status_rate/completed/mean"] == 0.25
+    assert rates["rollout/status_rate/truncated_length/mean"] == 0.0
+    # One per status but ONGOING, so a new status is recorded too.
+    assert len(rates) == len(RolloutStatus) - 1
+
+
+def test_compute_rollout_metrics_counts_each_error_type() -> None:
+    def errors(*error_types: str) -> dict:
+        return {
+            "errors": [
+                {"type": error_type, "message": ""} for error_type in error_types
+            ]
+        }
+
+    rollouts = [
+        Rollout(group_id=0, rollout_id=0, status=RolloutStatus.COMPLETED),
+        Rollout(
+            group_id=0,
+            rollout_id=1,
+            status=RolloutStatus.COMPLETED,
+            logs=errors("ProviderError", "SandboxError"),
+        ),
+        Rollout(
+            group_id=0,
+            rollout_id=2,
+            status=RolloutStatus.ERROR_INFRA,
+            logs=errors("SandboxError"),
+        ),
+    ]
+    metrics = m.MetricsProcessor._aggregate_metrics(
+        compute_rollout_metrics("validation", rollouts)
+    )
+    assert {key: value for key, value in metrics.items() if "/errors/" in key} == {
+        "validation/errors/ProviderError/sum": 1.0,
+        "validation/errors/SandboxError/sum": 2.0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # log_to_console (stateless utility)
 # ---------------------------------------------------------------------------
@@ -538,21 +607,16 @@ def test_fmt_metric_value(value, expected) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Backend identity
-# ---------------------------------------------------------------------------
-
-
-def test_metric_backend_is_base_logger() -> None:
-    assert m.MetricBackend is BaseLogger
-
-
-# ---------------------------------------------------------------------------
 # MetricsProcessor fan-out + build
 # ---------------------------------------------------------------------------
 
 
 class _RecordingBackend(m.MetricBackend):
-    def __init__(self) -> None:
+    @dataclass(kw_only=True, slots=True)
+    class Config(m.MetricBackend.Config):
+        pass
+
+    def __init__(self, config, *, log_dir, config_dict, tag) -> None:
         self.calls: list[tuple[dict, int]] = []
         self.closed = False
 
@@ -579,10 +643,10 @@ class _RaisingBackend(m.MetricBackend):
 
 class TestMetricsProcessorFanOut:
     def test_log_aggregates_and_dispatches(self) -> None:
-        b1 = _RecordingBackend()
-        b2 = _RecordingBackend()
-        logger_inst = m.MetricsProcessor(m.MetricsProcessor.Config())
-        logger_inst._backends = [b1, b2]
+        logger_inst = m.MetricsProcessor.Config(
+            loggers=[_RecordingBackend.Config(), _RecordingBackend.Config()]
+        ).build(log_dir="unused")
+        b1, b2 = logger_inst._backends
         logger_inst.log(
             5,
             [
@@ -594,7 +658,9 @@ class TestMetricsProcessorFanOut:
         assert b2.calls == [({"k/mean": 2.0, "k/max": 3.0}, 5)]
 
     def test_log_isolates_failures(self, caplog: pytest.LogCaptureFixture) -> None:
-        good = _RecordingBackend()
+        good = _RecordingBackend.Config().build(
+            log_dir="unused", config_dict=None, tag=None
+        )
         bad = _RaisingBackend()
         # Both orderings: ensure the good backend always runs.
         for backends in ([bad, good], [good, bad]):
@@ -608,7 +674,9 @@ class TestMetricsProcessorFanOut:
             assert good.calls == [({"k": 1.0}, 0)]
 
     def test_close_isolates_failures(self, caplog: pytest.LogCaptureFixture) -> None:
-        good = _RecordingBackend()
+        good = _RecordingBackend.Config().build(
+            log_dir="unused", config_dict=None, tag=None
+        )
         bad = _RaisingBackend()
         logger_inst = m.MetricsProcessor(m.MetricsProcessor.Config())
         logger_inst._backends = [bad, good]
@@ -629,29 +697,20 @@ class TestMetricsProcessorBuild:
 
     def test_wandb_without_log_dir_raises(self) -> None:
         with pytest.raises(ValueError, match="log_dir is required"):
-            m.MetricsProcessor.Config(enable_wandb=True).build()
+            m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build()
 
     def test_tensorboard_without_log_dir_raises(self) -> None:
         with pytest.raises(ValueError, match="log_dir is required"):
-            m.MetricsProcessor.Config(enable_tensorboard=True).build()
+            m.MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]).build()
 
     def test_tensorboard_appends_backend(self, tmp_path) -> None:
-        logger_inst = m.MetricsProcessor.Config(enable_tensorboard=True).build(
-            log_dir=str(tmp_path)
-        )
+        logger_inst = m.MetricsProcessor.Config(
+            loggers=[TensorBoardLogger.Config()]
+        ).build(log_dir=str(tmp_path))
         backend_types = [type(b).__name__ for b in logger_inst._backends]
         assert "TensorBoardLogger" in backend_types
         assert isinstance(logger_inst._backends[0], TensorBoardLogger)
         logger_inst.close()
-
-    def test_tensorboard_only_does_not_set_wandb_project_env(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        monkeypatch.delenv("WANDB_PROJECT", raising=False)
-        m.MetricsProcessor.Config(enable_tensorboard=True).build(
-            log_dir=str(tmp_path)
-        ).close()
-        assert os.environ.get("WANDB_PROJECT") is None
 
     def test_wandb_and_tensorboard_create_both(self, tmp_path, monkeypatch) -> None:
         fake_wandb = MagicMock()
@@ -659,7 +718,7 @@ class TestMetricsProcessorBuild:
         monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
 
         logger_inst = m.MetricsProcessor.Config(
-            enable_wandb=True, enable_tensorboard=True
+            loggers=[WandBLogger.Config(), TensorBoardLogger.Config()]
         ).build(log_dir=str(tmp_path))
         backend_types = [type(b).__name__ for b in logger_inst._backends]
         assert "WandBLogger" in backend_types
@@ -684,7 +743,7 @@ class TestMetricsProcessorBuild:
         config_dict = {"job": "rl-debug"}
         log_dir = str(tmp_path / "wandb_dir")
 
-        logger_inst = m.MetricsProcessor.Config(enable_wandb=True).build(
+        logger_inst = m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build(
             log_dir=log_dir,
             job_config=config_dict,
         )
@@ -697,82 +756,44 @@ class TestMetricsProcessorBuild:
 
         # `log` forwards to the stub.
         logger_inst.log(3, [m.Metric("k", m.NoReduce(1.0))])
-        fake_wandb.log.assert_called_once_with({"k": 1.0}, step=3, commit=True)
+        fake_wandb.log.assert_called_once_with({"k": 1.0, "trainer/step": 3})
 
         # `close` calls `wandb.finish` when there's a run.
         fake_wandb.run = MagicMock()
         logger_inst.close()
         fake_wandb.finish.assert_called_once()
 
-    def test_console_log_keys_round_trip(self) -> None:
-        """`MetricsProcessor.Config` carries the two per-context allow lists; the
-        controller picks them up at the callsite. The build method
-        ignores them since they aren't part of any backend."""
-        cfg = m.MetricsProcessor.Config(
-            console_log_keys_train=[r"^loss/mean$"],
-            console_log_keys_validation=[r"^validation/reward$"],
-        )
-        # Build should succeed and produce no backends (no W&B configured).
-        logger_inst = cfg.build()
-        assert logger_inst._backends == []
-        # Round-trip: caller can read them straight off the config.
-        assert cfg.console_log_keys_train == [r"^loss/mean$"]
-        assert cfg.console_log_keys_validation == [r"^validation/reward$"]
-
-    def test_wandb_project_default_titan_rl(self, tmp_path, monkeypatch) -> None:
-        """When `WANDB_PROJECT` is unset and `wandb_project` is at the
-        default, the build should write `titan_rl` to the env var."""
-        monkeypatch.delenv("WANDB_PROJECT", raising=False)
-
-        captured = {}
-        fake_wandb = MagicMock()
-        fake_wandb.init = MagicMock(
-            side_effect=lambda **kwargs: captured.update(
-                {**kwargs, "_env_project": os.environ.get("WANDB_PROJECT")}
-            )
-        )
-        monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
-
-        m.MetricsProcessor.Config(enable_wandb=True).build(log_dir=str(tmp_path))
-        assert captured.get("_env_project") == "titan_rl"
-
     def test_wandb_project_env_var_wins(self, tmp_path, monkeypatch) -> None:
-        """User-set `WANDB_PROJECT` takes precedence over the config field
-        because `setdefault` does not overwrite an existing env var."""
+        """WANDB_PROJECT takes precedence over the shared default."""
         monkeypatch.setenv("WANDB_PROJECT", "my-other-project")
 
         captured = {}
         fake_wandb = MagicMock()
         fake_wandb.init = MagicMock(
-            side_effect=lambda **kwargs: captured.update(
-                {**kwargs, "_env_project": os.environ.get("WANDB_PROJECT")}
-            )
+            side_effect=lambda **kwargs: captured.update(kwargs)
         )
         monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
 
-        m.MetricsProcessor.Config(enable_wandb=True).build(log_dir=str(tmp_path))
-        assert captured.get("_env_project") == "my-other-project"
+        m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build(
+            log_dir=str(tmp_path)
+        )
+        assert captured.get("project") == "my-other-project"
 
-    def test_wandb_project_config_overrides_default(
-        self, tmp_path, monkeypatch
-    ) -> None:
-        """When the user sets `wandb_project` explicitly and no env var
-        exists, the config value should win over the default."""
+    def test_wandb_project_defaults_to_torchtitan(self, tmp_path, monkeypatch) -> None:
+        """W&B uses the shared project when WANDB_PROJECT is unset."""
         monkeypatch.delenv("WANDB_PROJECT", raising=False)
 
         captured = {}
         fake_wandb = MagicMock()
         fake_wandb.init = MagicMock(
-            side_effect=lambda **kwargs: captured.update(
-                {**kwargs, "_env_project": os.environ.get("WANDB_PROJECT")}
-            )
+            side_effect=lambda **kwargs: captured.update(kwargs)
         )
         monkeypatch.setitem(__import__("sys").modules, "wandb", fake_wandb)
 
-        m.MetricsProcessor.Config(
-            enable_wandb=True, wandb_project="custom_project"
-        ).build(log_dir=str(tmp_path))
-        assert captured.get("_env_project") == "custom_project"
+        m.MetricsProcessor.Config(loggers=[WandBLogger.Config()]).build(
+            log_dir=str(tmp_path)
+        )
+        assert captured.get("project") == "torchtitan"
 
 
 # ---------------------------------------------------------------------------
@@ -843,7 +864,9 @@ class TestIsValidationSwitch:
         assert "custom/key: 7.0" in msg
 
     def test_backends_get_every_call_regardless_of_console_filter(self) -> None:
-        backend = _RecordingBackend()
+        backend = _RecordingBackend.Config().build(
+            log_dir="unused", config_dict=None, tag=None
+        )
         logger_inst = m.MetricsProcessor(
             m.MetricsProcessor.Config(console_log_keys_train=[]),
         )
@@ -855,3 +878,61 @@ class TestIsValidationSwitch:
             is_validation=True,
         )
         assert [step for _, step in backend.calls] == [0, 1]
+
+
+def test_event_loop_lag_measures_a_blocked_loop() -> None:
+    async def run() -> tuple[list[m.Metric], list[m.Metric]]:
+        lag = m.EventLoopLag("controller", interval_s=0.01)
+        # Let the lag task start its first sleep.
+        await asyncio.sleep(0.02)
+        time.sleep(0.3)
+        # Yield, so the lag task wakes up late and records the block.
+        await asyncio.sleep(0.05)
+        after_block = lag.flush()
+        await asyncio.sleep(0.05)
+        after_no_block = lag.flush()
+        lag.close()
+        return after_block, after_no_block
+
+    after_block, after_no_block = asyncio.run(run())
+    blocked = {type(metric.value): metric.value for metric in after_block}
+    assert [metric.key for metric in after_block] == [
+        "controller/event_loop_lag_ms",
+        "controller/event_loop_lag_ms_per_s",
+    ]
+    assert blocked[m.Max].value >= 250.0
+    # The Mean holds the late ms over the seconds the flush covers, which include the 0.3 s block.
+    assert blocked[m.Mean].value >= 250.0
+    assert blocked[m.Mean].count >= 0.3
+    # The flush started over: no block since, so only small scheduling delays count.
+    not_blocked = {type(metric.value): metric.value for metric in after_no_block}
+    assert not_blocked[m.Max].value < 200.0
+    assert not_blocked[m.Mean].value < 200.0
+
+
+def test_thread_pool_lag_counts_a_stuck_pool(caplog) -> None:
+    """One thread, held until the release: the flush reads the waiting check's wait so far, and a
+    check that waits past `warn_after_s` logs a warning."""
+
+    async def run() -> list[m.Metric]:
+        release = threading.Event()
+        asyncio.get_running_loop().set_default_executor(
+            ThreadPoolExecutor(max_workers=1)
+        )
+        lag = m.ThreadPoolLag("rollout_worker", warn_after_s=0.1)
+        blocking_call = asyncio.ensure_future(asyncio.to_thread(release.wait))
+        await asyncio.sleep(0.3)
+        metrics = lag.flush()
+        release.set()
+        await blocking_call
+        lag.close()
+        return metrics
+
+    with caplog.at_level(logging.WARNING):
+        metrics = asyncio.run(run())
+    values = {metric.key: metric.value.value for metric in metrics}
+    # The first check starts 0.05 s in, so it has waited about 0.25 s at the flush.
+    assert values["rollout_worker/thread_pool_lag_ms"] >= 200.0
+    # `Mean.value` is the total ms late, the wait so far included.
+    assert values["rollout_worker/thread_pool_lag_ms_per_s"] >= 200.0
+    assert "No free thread" in caplog.text
