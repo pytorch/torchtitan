@@ -30,6 +30,7 @@ from torchtitan.tools.utils import device_type
 
 if TYPE_CHECKING:
     from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.distributed.sharding_backend import ShardingBackend
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,12 @@ def unfold_dp_axes(axes: Iterable[MeshAxisName | str]) -> list[str]:
     ]
 
 
+def _default_sharding_backend() -> ShardingBackend:
+    from torchtitan.distributed.sharding_backend import FullyShardBackend
+
+    return FullyShardBackend.Config().build()
+
+
 @dataclass
 class ParallelismContext:
     """Parallelism degrees and the device meshes derived from them."""
@@ -108,9 +115,9 @@ class ParallelismContext:
     ep: int
     world_size: int
     enable_sequence_parallel: bool
-    # Whether parallelism.fsdp_backend is FlexShardConfig(), so FSDP shards the
-    # parameters into plain local shards.
-    flex_shard_enabled: bool = False
+    # Built from parallelism.fsdp_backend: how the data-parallel parameters are
+    # sharded, and what depends on it, e.g. clipping their grads.
+    sharding_backend: ShardingBackend = field(default_factory=_default_sharding_backend)
     _real_pp_group_for_fake_spmd: dist.ProcessGroup | None = None
     # Cache by axis name(s); DeviceMesh equality is by identity, so reuse the
     # same object instead of re-slicing a submesh on every lookup.
@@ -134,8 +141,6 @@ class ParallelismContext:
         dump_folder: str,
     ) -> ParallelismContext:
         """Construct the parallelism context from config and topology."""
-        from torchtitan.config.parallelism import FlexShardConfig
-
         parallelism_context = cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             dp_shard=parallelism_config.data_parallel_shard_degree,
@@ -145,9 +150,7 @@ class ParallelismContext:
             ep=parallelism_config.expert_parallel_degree,
             world_size=topology.world_size,
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
-            flex_shard_enabled=isinstance(
-                parallelism_config.fsdp_backend, FlexShardConfig
-            ),
+            sharding_backend=parallelism_config.fsdp_backend.build(),
             _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
         if parallelism_config.save_parallelism_folder is not None:
