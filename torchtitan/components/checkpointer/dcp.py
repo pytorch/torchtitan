@@ -14,8 +14,9 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
+import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
@@ -36,6 +37,7 @@ from .base import (
     BaseCheckpointManager,
     EMA,
     export_state_dict,
+    FilesystemCheckpointStorage,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -63,27 +65,6 @@ class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
-
-
-class _FilesystemCheckpointStorage:
-    """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
-
-    Local paths go through ``os``/``shutil`` and remote fsspec URIs through
-    fsspec, so DCP keeps reading and writing remote checkpoint folders exactly
-    as it did before.
-    """
-
-    def isdir(self, path: str) -> bool:
-        return filesystem.isdir(path)
-
-    def isfile(self, path: str) -> bool:
-        return filesystem.isfile(path)
-
-    def listdir(self, path: str) -> list[str]:
-        return filesystem.listdir(path)
-
-    def remove(self, path: str) -> None:
-        filesystem.rmtree(path)
 
 
 class CheckpointManager(BaseCheckpointManager):
@@ -135,19 +116,26 @@ class CheckpointManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
-        """DCP save mode: synchronous, threaded async, or pinned-memory async."""
-
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)
-            async_lowered = self.async_mode.lower()
-            if async_lowered not in (
-                "disabled",
-                "async",
-                "async_with_pinned_mem",
+            # DCP's Hugging Face storage reads and writes local paths only, so
+            # reject a remote URI up front instead of failing deep in DCP.
+            # TODO: drop once https://github.com/pytorch/pytorch/issues/205015
+            # is fixed in the nightly CI uses.
+            if self.last_save_in_hf and filesystem.is_remote(self.folder):
+                raise ValueError(
+                    "last_save_in_hf is not supported with a remote "
+                    f"checkpointer.folder: {self.folder}"
+                )
+            if (
+                self.initial_load_in_hf
+                and self.initial_load_path
+                and filesystem.is_remote(self.initial_load_path)
             ):
-                raise ValueError(f"Invalid async_mode: {async_lowered}")
-            self.async_mode = async_lowered
+                raise ValueError(
+                    "initial_load_in_hf is not supported with a remote "
+                    f"initial_load_path: {self.initial_load_path}"
+                )
 
     def __init__(
         self,
@@ -164,7 +152,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
-        self._storage = _FilesystemCheckpointStorage()
+        self._storage = FilesystemCheckpointStorage()
 
         self._validate_extra_state_keys(extra_states)
         self.states = dict(extra_states)
@@ -196,6 +184,7 @@ class CheckpointManager(BaseCheckpointManager):
             raise ValueError(
                 "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
+        self._validate_hf_export(model_parts, last_save_in_hf=self.last_save_in_hf)
 
         # Async & Distributed Infrastructure
         try:
@@ -468,6 +457,12 @@ class CheckpointManager(BaseCheckpointManager):
                         use_non_blocking_copy=True,
                     )
                 )
+            # DefaultStager copies on its own stream, which does not wait for the
+            # current stream. Without this wait, it can copy weights and optimizer
+            # state before the optimizer step finishes writing them.
+            staging_stream = self.stager._staging_stream
+            assert staging_stream is not None
+            staging_stream.wait_stream(torch.accelerator.current_stream())
 
             async_save_started_at = time.monotonic()
             result = self.dcp_save(

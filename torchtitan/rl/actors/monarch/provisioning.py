@@ -8,7 +8,8 @@
 CPU meshes on the controller host, and the Monarch client's shutdown."""
 
 import logging
-from collections.abc import Callable
+import os
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from monarch.actor import (
@@ -22,6 +23,7 @@ from monarch.actor import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.rl._env import apply_env_defaults
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import get_visible_devices_env_var
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +75,20 @@ class PerHostProvisioner:
     On the same host, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
     call to `allocate(n)` reserves the next *n* GPUs and returns the launch
-    env (`CUDA_VISIBLE_DEVICES`) for those GPUs. The
+    env (the visible-devices mask) for those GPUs. The
     returned env vars are applied to the spawned process via ``bootstrap_command``.
+    The mask's variable comes from this (the controller's) device type, so the
+    controller runs on a node with the same accelerator as the workers, as the
+    Monarch launchers do.
+
+    Args:
+        device_ids: The host's device ids to hand out, in order.
     """
 
-    def __init__(self, total_gpus: int = 8):
-        self.total_gpus = total_gpus
+    def __init__(self, device_ids: Sequence[str]):
+        self.env_var = get_visible_devices_env_var()
+        self.device_ids = list(device_ids)
+        self.total_gpus = len(self.device_ids)
         self.next_gpu = 0
 
     @property
@@ -91,10 +101,10 @@ class PerHostProvisioner:
                 f"Requested {num_gpus} GPUs but only {self.available} "
                 f"available (total={self.total_gpus}, allocated={self.next_gpu})"
             )
-        gpu_ids = list(range(self.next_gpu, self.next_gpu + num_gpus))
+        gpu_ids = self.device_ids[self.next_gpu : self.next_gpu + num_gpus]
         self.next_gpu += num_gpus
 
-        return {"CUDA_VISIBLE_DEVICES": ",".join(str(g) for g in gpu_ids)}
+        return {self.env_var: ",".join(gpu_ids)}
 
 
 @dataclass
@@ -245,7 +255,8 @@ def spawn_proc_mesh(
         provisioners: dict[int, PerHostProvisioner] = {}
         for host_mesh in [trainer_host_mesh, *generator_host_meshes]:
             provisioners.setdefault(
-                id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
+                id(host_mesh),
+                PerHostProvisioner([str(index) for index in range(gpus_per_node)]),
             )
         trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh,
@@ -263,10 +274,25 @@ def spawn_proc_mesh(
             for gen_host_mesh in generator_host_meshes
         ]
     else:
-        # Single-node mode: partition GPUs on this_host() via
-        # CUDA_VISIBLE_DEVICES
+        # Single-node mode: partition GPUs on this_host() via the visible-devices mask,
+        # handing out the GPUs this process may use in the order its own mask lists them:
+        # CUDA_VISIBLE_DEVICES=4,5,6,7 runs on GPUs 4-7, and
+        # CUDA_VISIBLE_DEVICES=0,1,4,5,2,3,6,7 gives the trainer GPUs 0,1,4,5.
         host_mesh = this_host()
-        provisioner = PerHostProvisioner(total_gpus=total_gpus)
+        env_var = get_visible_devices_env_var()
+        visible_devices = os.environ.get(env_var)
+        # An empty mask means this process sees no GPUs, so the check below rejects it.
+        device_ids = (
+            [str(index) for index in range(total_gpus)]
+            if visible_devices is None
+            else [device for device in visible_devices.split(",") if device]
+        )
+        if len(device_ids) < total_gpus:
+            raise ValueError(
+                f"The run needs {total_gpus} GPUs, but {env_var} lists "
+                f"{len(device_ids)}: {visible_devices!r}"
+            )
+        provisioner = PerHostProvisioner(device_ids)
         trainer_mesh = host_mesh.spawn_procs(
             per_host={"gpus": trainer_world_size},
             bootstrap=_preimport_torch,

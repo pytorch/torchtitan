@@ -7,20 +7,29 @@
 """Unit tests for direct rollout worker execution."""
 
 import asyncio
+import logging
 import random
+from dataclasses import dataclass
 from types import SimpleNamespace
 
-from renderers import ParsedResponse, Qwen3RendererConfig
+import pytest
+from renderers import (
+    ParsedResponse,
+    PlaceholderRange,
+    Qwen3RendererConfig,
+    RenderedTokens,
+)
 
 from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rollout import RolloutStatus
+from torchtitan.rl.rollout import Prompt, PromptImage, RolloutGroup, RolloutStatus
+from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
-from torchtitan.rl.rollout.rollouter import RolloutWorker
-from torchtitan.rl.rollout.rubric import RubricOutput
+from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
+from torchtitan.rl.rollout.rubric import RewardFn, Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
@@ -45,14 +54,17 @@ class _TokenEnv:
 
     async def init(self) -> TokenEnvOutput:
         return TokenEnvOutput(
-            next_prompt_token_ids=[1, 2],
+            next_prompt=Prompt(token_ids=[1, 2]),
             next_prompt_messages=[{"role": "user", "content": "prompt"}],
             status=RolloutStatus.ONGOING,
         )
 
     async def step(self, completion: Completion) -> TokenEnvOutput:
+        if completion.finish_reason == "abort":
+            # What `TokenEnv.step` returns for a response the generator cut short.
+            return TokenEnvOutput(next_prompt=None, status=RolloutStatus.ERROR_INFRA)
         return TokenEnvOutput(
-            next_prompt_token_ids=None,
+            next_prompt=None,
             status=RolloutStatus.COMPLETED,
             completion_message={"role": "assistant", "content": "answer"},
         )
@@ -85,7 +97,7 @@ class _AdvantageEstimator:
         return [rollout.reward * 10 for rollout in group.rollouts]
 
 
-class _CustomWorker(RolloutWorker):
+class _CustomWorker(MessageEnvRolloutWorker):
     def __init__(self, config) -> None:
         super().__init__(config)
         self.custom_setting = config.custom_setting
@@ -103,8 +115,8 @@ class _GenerateFn:
     def __init__(self) -> None:
         self.calls = []
 
-    async def __call__(self, prompt_token_ids, **kwargs) -> Completion:
-        self.calls.append((prompt_token_ids, kwargs))
+    async def __call__(self, prompt, **kwargs) -> Completion:
+        self.calls.append((prompt, kwargs))
         return Completion(
             min_policy_version=3,
             max_policy_version=3,
@@ -119,7 +131,7 @@ def test_worker_executes_group_without_actor_mesh() -> None:
     async def run() -> None:
         generate_fn = _GenerateFn()
         token_env_config = _TokenEnvConfig()
-        # A RolloutWorker takes its own config, so the worker is usable without a
+        # A MessageEnvRolloutWorker takes its own config, so the worker is usable without a
         # Rollouter or an actor mesh.
         worker_config = SimpleNamespace(
             custom_setting="custom",
@@ -176,6 +188,9 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             {"routing_session_id": "group=7/rollout=1"},
         ]
 
+        # Setup started this process's metrics, and `run_group` added them to the training group.
+        assert "rollout_worker/ram_gib" in [metric.key for metric in group.metrics]
+
     asyncio.run(run())
 
 
@@ -186,8 +201,8 @@ class _RewritingRenderer:
         self.rng = rng
         self.prompts: list[list[int]] = [[1, 2, 3]]
 
-    def render_ids(self, messages, *, tools=None, add_generation_prompt=False):
-        return list(self.prompts[-1])
+    def render(self, messages, *, tools=None, add_generation_prompt=False):
+        return RenderedTokens(token_ids=list(self.prompts[-1]))
 
     def bridge_to_next_turn(
         self, previous_prompt_ids, previous_completion_ids, new_messages, *, tools=None
@@ -207,7 +222,7 @@ class _RewritingRenderer:
 
         # Only a continuation bridges; a rewrite returns None, as when a renderer can't bridge
         if kind == "continue":
-            return SimpleNamespace(token_ids=list(next_prompt))
+            return RenderedTokens(token_ids=list(next_prompt))
         return None
 
     def parse_response(self, token_ids, *, tools=None):
@@ -239,11 +254,82 @@ class _CountingMessageEnv:
         pass
 
 
+class _RewardRolloutId(RewardFn):
+    """Rewards rollout_id + 1."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RewardFn.Config):
+        pass
+
+    async def __call__(self, rollout, env_input) -> float:
+        return float(rollout.rollout_id + 1)
+
+
+@pytest.mark.parametrize(
+    "fails_in, errors",
+    [
+        ("generate call", [("ConnectionError", "generator unreachable")]),
+        # Nothing raised: the env step returns ERROR_INFRA (this test's TokenEnv records no error).
+        ("aborted generation", []),
+    ],
+)
+def test_a_failed_rollout_is_kept_logged_once_and_left_out_of_the_advantage(
+    fails_in: str, errors: list[tuple[str, str]], caplog
+) -> None:
+    class _GenerateFnFailingRolloutZero(_GenerateFn):
+        async def __call__(self, prompt, **kwargs) -> Completion:
+            completion = await super().__call__(prompt, **kwargs)
+            if kwargs["request_id"].startswith("group=7/rollout=0/"):
+                if fails_in == "generate call":
+                    raise ConnectionError("generator unreachable")
+                if fails_in == "aborted generation":
+                    completion.finish_reason = "abort"
+            return completion
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    async def run() -> RolloutGroup:
+        worker = MessageEnvRolloutWorker(
+            SimpleNamespace(
+                # The stock rubric would give rollout 0 reward 1, had it scored it.
+                rubric=Rubric.Config(reward_fns=[_RewardRolloutId.Config()]),
+                message_env=_MessageEnvConfig(),
+                token_env=_TokenEnvConfig(),
+                advantage=AdvantageEstimator.Config(),
+            )
+        )
+        await worker.setup_async(
+            tokenizer_config=HuggingFaceTokenizer.Config(),
+            renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
+            hf_assets_path="tests/assets/tokenizer",
+        )
+        return await worker.run_group(
+            generate_fn=_GenerateFnFailingRolloutZero(),
+            release_session_fn=release_session_fn,
+            sample="sample",
+            group_id=7,
+            group_size=3,
+            sampling=SamplingConfig(),
+        )
+
+    with caplog.at_level(logging.WARNING):
+        failed, *scored = asyncio.run(run()).rollouts
+    assert failed.status is RolloutStatus.ERROR_INFRA
+    assert [
+        (error["type"], error["message"]) for error in failed.logs.get("errors", [])
+    ] == errors
+    assert caplog.text.count("rollout group=7/rollout=0 failed: ERROR_INFRA") == 1
+    assert (failed.reward, failed.advantage) == (None, None)
+    # Rewards 2 and 3, centered on their mean 2.5.
+    assert [rollout.advantage for rollout in scored] == [-0.5, 0.5]
+
+
 def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     # TokenEnv returns each prompt as a delta. Delta prompts must pack into the same samples as full
     # prompts: a turn joins the last sample iff its prompt extends the previous turn's prompt + completion.
     rng = random.Random(0)
-    worker = RolloutWorker(
+    worker = MessageEnvRolloutWorker(
         SimpleNamespace(
             rubric=_Config(None),
             message_env=None,
@@ -253,7 +339,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     )
     builder = TrainingSampleBuilder.Config().build()
 
-    async def generate_fn(prompt_token_ids, **kwargs) -> Completion:
+    async def generate_fn(prompt, **kwargs) -> Completion:
         token_ids = [rng.randrange(100) for _ in range(rng.randint(1, 3))]
         return Completion(
             min_policy_version=1,
@@ -270,7 +356,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
     async def run() -> None:
         for rollout_id in range(20):
             renderer = _RewritingRenderer(rng)
-            env = TokenEnv.Config().build(
+            env = TokenEnv.Config(max_rollout_tokens=32768).build(
                 message_env=_CountingMessageEnv(num_turns=rng.randint(1, 6)),
                 renderer=renderer,
             )
@@ -302,3 +388,48 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
             ] == expected
 
     asyncio.run(run())
+
+
+def test_rollout_sends_and_records_prompt_images() -> None:
+    image = PromptImage(
+        hash_value="img-a", source_path="a.png", grid_thw=(1, 4, 4), data=b"img-a"
+    )
+    placeholder = PlaceholderRange(offset=1, length=4)
+
+    class _ImageTokenEnv(_TokenEnv):
+        async def init(self) -> TokenEnvOutput:
+            return TokenEnvOutput(
+                next_prompt=Prompt(
+                    token_ids=[1, 9, 9, 9, 9, 2],
+                    images=(image,),
+                    image_placeholders=(placeholder,),
+                ),
+                status=RolloutStatus.ONGOING,
+            )
+
+    worker = MessageEnvRolloutWorker(
+        SimpleNamespace(
+            rubric=_Config(None),
+            message_env=None,
+            token_env=None,
+            advantage=_Config(None),
+        )
+    )
+    generate_fn = _GenerateFn()
+
+    async def release_session_fn(**kwargs) -> None:
+        pass
+
+    rollout = asyncio.run(
+        worker._run_single_rollout(
+            generate_fn=generate_fn,
+            release_session_fn=release_session_fn,
+            env=_ImageTokenEnv(),
+            sampling=SamplingConfig(),
+            group_id=0,
+            rollout_id=0,
+        )
+    )
+    assert generate_fn.calls[0][0].images == (image,)
+    assert rollout.turns[0].prompt_delta_images == (image,)
+    assert rollout.turns[0].prompt_delta_image_placeholders == (placeholder,)

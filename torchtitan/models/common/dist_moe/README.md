@@ -7,8 +7,9 @@ dispatch, grouped expert computation, activation storage, scratch storage, and
 combine as one ordered operation.
 
 TorchTitan supports BF16 and asynchronous MXFP8 Dist-MoE training on NVIDIA
-SM100 or newer. The annex also provides NVFP4 inference, which TorchTitan does
-not expose yet. Dist-MoE requires
+SM100 or newer, with SwiGLU or bounded SiTU-GLU expert activations. The annex
+also provides NVFP4 inference, which TorchTitan does not expose yet. Dist-MoE
+requires
 `precision.param_dtype="bfloat16"` because FSDP unshards its persistent
 parameters in BF16.
 
@@ -111,12 +112,13 @@ Set `mxfp8_mega_fused_inference` only on the RL generator, since it does not
 support backward. During validation, the trainer runs under `torch.no_grad()`
 instead.
 
-Verified 671B recipes live in `torchtitan_recipes.models.deepseek_v3`, while
-debug and 16B CI recipes live in `torchtitan_recipes.tests.models.deepseek_v3`.
+Verified 671B recipes live in `torchtitan_recipes.models.deepseek_v3`. Debug and
+16B DeepSeek recipes live in `torchtitan_recipes.tests.models.deepseek_v3`, and
+Kimi K3 debug recipes live in `torchtitan_recipes.tests.models.kimi_k3`.
 GraphTrainer follows the corresponding `graph_trainer` and
 `tests.graph_trainer` ownership. Recipes use `_dist_moe_bf16` and
 `_dist_moe_mxfp8` suffixes and select CUDA-graph-compatible varlen attention.
-MXFP8 recipes also convert dense projections and the language-model head.
+DeepSeek MXFP8 recipes also convert dense projections and the language-model head.
 
 ## Configuration Ownership
 
@@ -130,7 +132,9 @@ structured `GroupedLinear` parameter layout:
 
 This preserves parameter, optimizer, FSDP, and checkpoint ownership. The
 transformed module does not construct the stock activation or token dispatcher,
-because the annex performs those operations internally.
+because the annex performs those operations internally. The transform derives
+either SwiGLU or bounded SiTU-GLU directly from the source activation config and
+rejects other activation contracts.
 
 Per-layer settings belong to the transform:
 

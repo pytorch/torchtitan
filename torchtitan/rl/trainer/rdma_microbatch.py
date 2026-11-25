@@ -4,8 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Opt-in RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes`): the process
-that registers them keeps the large tensors, and each trainer rank reads its own column.
+"""Default RDMA path for trainer microbatches (`Batcher.Config.rdma_min_tensor_bytes=None` turns it off): the
+process that registers them keeps the large tensors, and each trainer rank reads its own column.
 
 The actor system implements `RDMAMicrobatch` (e.g. `actors/monarch/rdma_microbatch.py`); the batcher and
 the trainer use only this interface.
@@ -138,4 +138,5 @@ class RDMAMicrobatchPrefetcher:
         start = time.perf_counter()
         microbatch = asyncio.run(rdma_microbatch.read())
         self.read_s += time.perf_counter() - start
-        return microbatch
+        # Preprocess the images here too, so training hides it like the read.
+        return microbatch.preprocess_images()

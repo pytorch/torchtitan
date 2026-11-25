@@ -17,13 +17,13 @@ from torchtitan.distributed.context_parallel import (
     PTRRFlexAttentionCPLoadBalancer,
 )
 from torchtitan.distributed.pipeline_parallel import (
-    _build_decoder_stage_io,
     _build_pipeline_schedule,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
     _static_stage_metadata,
     _unsupported_static_split,
+    build_decoder_stage_io,
 )
 from torchtitan_recipes.tests.models.llama3 import build_model_config
 
@@ -70,7 +70,6 @@ def test_base_model_pipeline_derives_the_split_only_when_none_is_configured(
     from torchtitan.models.base.model import BaseModel
 
     model = nn.Module()
-    model.supports_pipeline_parallel = True
     model.pipeline_first_stage_module_fqns = ("vision_encoder",)
     model.pipeline_last_stage_module_fqns = ()
     model.vision_encoder = nn.Linear(2, 2)
@@ -304,7 +303,7 @@ def test_static_decoder_stage_metadata_is_complete(
 ):
     model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     parallelism_context = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
-    stage_io = _build_decoder_stage_io(
+    stage_io = build_decoder_stage_io(
         parallelism_context=parallelism_context,
         parallelism=ParallelismConfig(
             enable_sequence_parallel=enable_sequence_parallel,
@@ -338,7 +337,7 @@ def test_static_decoder_stage_metadata_is_complete(
 
 def test_static_decoder_stage_metadata_describes_logits_output():
     model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
-    stage_io = _build_decoder_stage_io(
+    stage_io = build_decoder_stage_io(
         parallelism_context=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
         parallelism=ParallelismConfig(),
         training=pipeline_parallel.TrainingConfig(

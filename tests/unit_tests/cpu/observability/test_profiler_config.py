@@ -6,21 +6,31 @@
 
 import pytest
 
-from torchtitan.observability.profiler import Profiler
+from torchtitan.observability.profiler import (
+    CuspyTraceProfiler,
+    KinetoTraceProfiler,
+    MemorySnapshotProfiler,
+)
 
 
-def test_profiler_config_rejects_profile_period_shorter_than_cycle() -> None:
+def test_trace_profiler_rejects_freq_shorter_than_cycle() -> None:
     with pytest.raises(
         ValueError,
-        match="profiler.profile_freq must be greater than or equal to profiler_warmup \\+ profiler_active",
+        match=r"freq \(3\) must be greater than or equal to warmup \+ active",
     ):
-        Profiler.Config(enable_profiling=True, profile_freq=3)
+        KinetoTraceProfiler.Config(freq=3)
 
 
-def test_profiler_config_allows_default_schedule() -> None:
-    config = Profiler.Config(enable_profiling=True)
-    assert config.profile_freq >= config.profiler_warmup + config.profiler_active
+def test_cuspy_trace_profiler_validates_schedule() -> None:
+    with pytest.raises(ValueError, match="must be greater than or equal to"):
+        CuspyTraceProfiler.Config(freq=3)
 
 
-def test_profiler_config_does_not_validate_unused_schedule() -> None:
-    assert Profiler.Config(enable_profiling=False, profile_freq=0).profile_freq == 0
+def test_trace_profiler_allows_default_schedule() -> None:
+    config = KinetoTraceProfiler.Config()
+    assert config.freq >= config.warmup + config.active
+
+
+def test_memory_snapshot_freq_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="must be greater than zero"):
+        MemorySnapshotProfiler.Config(freq=0)

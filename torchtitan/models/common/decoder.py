@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
 import spmd_types as spmd
@@ -28,13 +29,13 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
-from torchtitan.models.common.embedding import Embedding
+from torchtitan.models.common.embedding import VocabParallelEmbedding
 from torchtitan.models.common.feed_forward import DenseFeedForward, FeedForward
 from torchtitan.models.common.flops import (
     active_parameter_flops_per_token,
     get_parameter_counts,
 )
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -86,18 +87,31 @@ class Decoder(BaseModel):
         dim: int
         vocab_size: int
         lm_head: Linear.Config
-        tok_embeddings: Embedding.Config
+        tok_embeddings: VocabParallelEmbedding.Config
         norm: RMSNorm.Config
-        # TODO(fegin): revisit
-        # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3033849265
-        # and fix the typing here
-        layers: list  # list[TransformerBlock.Config] or subclass configs
+        layers: list[TransformerBlock.Config]
         # Tie ``tok_embeddings`` and ``lm_head`` to share one weight. Models
         # that support it set this True in their config factories; the tying
-        # itself is handled by ``Decoder.__init__`` / ``Decoder.init_states``.
+        # itself is handled by ``Decoder.__init__``, ``Decoder._parallelize``
+        # and ``Decoder.init_states``.
         enable_weight_tying: bool = False
 
         def __post_init__(self) -> None:
+            if self.enable_weight_tying:
+                # From ``_parallelize`` on, tok_embeddings uses lm_head's
+                # distributed weight, so both must declare the same layout.
+                embedding_layout, lm_head_layout = (
+                    None
+                    if module_config.sharding_config is None
+                    else module_config.sharding_config.state_shardings.get("weight")
+                    for module_config in (self.tok_embeddings, self.lm_head)
+                )
+                if embedding_layout != lm_head_layout:
+                    raise ValueError(
+                        "enable_weight_tying requires tok_embeddings and lm_head "
+                        "to declare the same weight sharding, got "
+                        f"{embedding_layout} and {lm_head_layout}."
+                    )
             sliding_window_sizes: dict[type[InnerAttention], int] = {}
             for layer_config in self.layers:
                 for _, attention, _, _ in layer_config.traverse(Attention.Config):
@@ -164,15 +178,44 @@ class Decoder(BaseModel):
             seq_len: int,
             excluded_submodules: tuple[Module | None, ...] = (),
         ) -> FlopsEstimator:
-            parameter_flops = active_parameter_flops_per_token(
+            # Attention cost comes from each microbatch's document positions.
+            del seq_len
+            parameter_flops_per_token = active_parameter_flops_per_token(
                 model, excluded_submodules=excluded_submodules
             )
-            attention_flops = sum(
-                attention.flops_per_token(seq_len)
-                for _, attention, _, _ in self.traverse(Attention.Config)
-            )
-            flops_per_token = parameter_flops + attention_flops
-            return lambda input_dict: flops_per_token * input_dict["input"].numel()
+
+            def equal_ignoring_param_init(a: object, b: object) -> bool:
+                # Layers often differ only in depth-scaled param_init, which
+                # does not change FLOPs.
+                if is_dataclass(a) and type(a) is type(b):
+                    return all(
+                        field.name == "param_init"
+                        or equal_ignoring_param_init(
+                            getattr(a, field.name), getattr(b, field.name)
+                        )
+                        for field in fields(a)
+                    )
+                return a == b
+
+            # Layers repeat a few attention configs; count each distinct one once.
+            attention_counts: list[tuple[Attention.Config, int]] = []
+            for _, attention, _, _ in self.traverse(Attention.Config):
+                for i, (seen, count) in enumerate(attention_counts):
+                    if equal_ignoring_param_init(seen, attention):
+                        attention_counts[i] = (seen, count + 1)
+                        break
+                else:
+                    attention_counts.append((attention, 1))
+
+            def estimate(input_dict: Mapping[str, Any]) -> int:
+                # Padding does no useful work, so it is not counted.
+                positions = input_dict["positions"][~input_dict["padding_mask"]]
+                return parameter_flops_per_token * positions.numel() + sum(
+                    count * attention.flops(positions)
+                    for attention, count in attention_counts
+                )
+
+            return estimate
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
@@ -208,6 +251,7 @@ class Decoder(BaseModel):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
         )
 
     def __init__(self, config: Config):
@@ -264,15 +308,26 @@ class Decoder(BaseModel):
 
         self._tie_rope_caches()
 
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        super()._parallelize(parallelism_context)
+        if self.enable_weight_tying:
+            # Distributing states registers a new Parameter in each module,
+            # which unties the weights. Tie them again before FSDP groups the
+            # tied modules, so it shards and communicates one parameter.
+            self.tok_embeddings.weight = self.lm_head.weight
+        # Share the RoPE caches again too, for code that runs before init_states.
+        self._tie_rope_caches()
+
     def init_states(
         self,
         *,
         buffer_device: torch.device | None = None,
     ) -> None:
         if self.enable_weight_tying:
-            # Re-tie before init: on meta device the ``__init__`` tying may not
-            # have taken effect, and ``tok_embeddings.weight`` is skipped by
-            # ``skip_param_init``, so re-point it at the initialized lm_head
+            # Re-tie before init: a data parallel wrapper that registers new
+            # parameters after ``_parallelize`` (e.g. GraphTrainer's SimpleFSDP)
+            # unties the weights again, and ``tok_embeddings.weight`` is skipped
+            # by ``skip_param_init``, so re-point it at the initialized lm_head
             # weight.
             assert self.tok_embeddings is not None and self.lm_head is not None
             self.tok_embeddings.weight = self.lm_head.weight
@@ -330,7 +385,26 @@ class Decoder(BaseModel):
         # attention_metadata slot and break the maskless SDPA backend).
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
+        return self.forward_embeddings(
+            h,
+            positions,
+            attention_metadata,
+            padding_mask=padding_mask,
+            aux_loss_denominators=aux_loss_denominators,
+        )
 
+    def forward_embeddings(
+        self,
+        h: torch.Tensor,
+        positions: torch.Tensor | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
+    ):
+        """`forward` after the token embedding: the layers, the final norm and the LM head
+        (unless ``_skip_lm_head``). For callers that build the input embeddings
+        themselves, e.g. the RL generator merging image embeddings into a prompt."""
         with spmd.no_typecheck():
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
@@ -349,7 +423,7 @@ class Decoder(BaseModel):
                 aux_loss_denominator=aux_loss_denominator,
             )
 
-        h = self.norm(h) if self.norm is not None else h
+        h = self._pre_lm_head_norm_and_gather(h)
 
         # _skip_lm_head is an attribute rather than a forward kwarg because PP backward
         # calls .requires_grad on all stage inputs, which fails on bool kwargs.
@@ -358,6 +432,22 @@ class Decoder(BaseModel):
             return h
         output = self.lm_head(h) if self.lm_head is not None else h
         return output
+
+    def _pre_lm_head_norm_and_gather(self, h: torch.Tensor) -> torch.Tensor:
+        """Apply the root norm and gather its output to TP-``Replicate``.
+
+        The vocab-sharded ``lm_head`` needs the full hidden states on every TP
+        rank. The gather runs once here, after the norm, rather than inside
+        ``lm_head``, which ``ChunkedLossWrapper`` calls once per chunk.
+        Pipeline stages without the root norm return ``h`` unchanged.
+
+        TODO: issue the gather from its consumer instead: inside ``lm_head``
+        (a column-parallel linear), with ``ChunkedLossWrapper`` gathering once
+        before it chunks.
+        """
+        if self.norm is None:
+            return h
+        return maybe_gather_tp_input(self.norm, self.norm(h))
 
     def preprocess_inputs(
         self,

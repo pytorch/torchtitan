@@ -470,7 +470,6 @@ class ReplicateComputation(Module):
             return self._forward(x)
 
     def _forward(self, x: DTensor) -> torch.Tensor:
-        global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
         # model initialization can be done now through

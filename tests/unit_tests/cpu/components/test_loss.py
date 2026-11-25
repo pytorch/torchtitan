@@ -28,6 +28,7 @@ from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLossWrapper,
     compute_logprobs,
+    cross_entropy_and_logsumexp,
     cross_entropy_loss,
     CrossEntropyLoss,
     GradAccumulator,
@@ -37,12 +38,12 @@ from torchtitan.components.loss import (
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.deepseek_v3.mtp import (
+from torchtitan.models.common.mtp import (
     get_mtp_token_counts,
     MTPCrossEntropyLoss,
-    MTPDecoder,
     roll_mtp_sequence,
 )
+from torchtitan.models.deepseek_v3 import DeepSeekV3Model
 from torchtitan.models.llama3 import build_model_config
 
 
@@ -168,7 +169,7 @@ class TestLoss(unittest.TestCase):
         model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
         routing_token_counts = torch.tensor([6, 4, 2])  # one per depth
         with patch(
-            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+            "torchtitan.models.common.mtp.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
             input_tokens, loss_labels, extra_kwargs, _ = model.preprocess_inputs(
@@ -408,6 +409,21 @@ class TestLoss(unittest.TestCase):
             msg="Global averaged loss should equal weighted average of per-token losses",
         )
 
+    def test_cross_entropy_and_logsumexp_matches_cross_entropy_loss(self):
+        """CE matches ``cross_entropy_loss``; lse is the per-token logsumexp, 0 when ignored."""
+        torch.manual_seed(0)
+        num_tokens, vocab_size = 32, 100
+        pred = torch.randn(num_tokens, vocab_size) * 4
+        labels = torch.randint(0, vocab_size, (num_tokens,))
+        labels[::3] = IGNORE_INDEX
+        expected_lse = torch.where(
+            labels != IGNORE_INDEX, torch.logsumexp(pred.double(), dim=-1), 0
+        )
+
+        ce, lse = cross_entropy_and_logsumexp(pred, labels)
+        torch.testing.assert_close(ce, cross_entropy_loss(pred, labels))
+        torch.testing.assert_close(lse, expected_lse.float())
+
 
 class TestGradAccumulator(unittest.TestCase):
     def test_accumulate_matches_cat(self):
@@ -572,6 +588,58 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         local_grad_dtensor.full_tensor(),
                         logits_dtensor.grad.full_tensor(),
                     )
+
+    @with_comms
+    def test_cross_entropy_and_logsumexp_parity(self):
+        """
+        Vocab-parallel ``cross_entropy_and_logsumexp`` under strict typechecking,
+        with uneven vocab shards and IGNORE_INDEX labels: CE matches
+        ``cross_entropy_loss`` bitwise, lse matches the full-vocab logsumexp,
+        and the gradient of ``CE + sum(lse**2)`` matches an fp64 reference.
+        """
+        T, vocab_size = 64, 1003
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        tp_group = mesh.get_group("tp")
+        generator = torch.Generator().manual_seed(0)
+        logits = torch.randn(T, vocab_size, generator=generator) * 4
+        labels = torch.randint(0, vocab_size, (T,), generator=generator)
+        labels[torch.rand(T, generator=generator) < 0.3] = IGNORE_INDEX
+        logits, labels = logits.to(self.device_type), labels.to(self.device_type)
+
+        # fp64 reference over the full vocab.
+        ref_logits = logits.double().requires_grad_(True)
+        ref_lse = torch.where(
+            labels != IGNORE_INDEX, torch.logsumexp(ref_logits, dim=-1), 0
+        )
+        ref_ce = F.cross_entropy(
+            ref_logits, labels, reduction="sum", ignore_index=IGNORE_INDEX
+        )
+        (ref_ce + ref_lse.square().sum()).backward()
+
+        local_labels = distribute_tensor(labels, mesh, (Replicate(),)).to_local()
+        spmd.assert_type(local_labels, {tp_group: spmd.I})
+        local_logits = (
+            distribute_tensor(logits, mesh, (Shard(1),)).to_local().requires_grad_(True)
+        )
+        spmd.assert_type(local_logits, {tp_group: spmd.S(1)})
+        with set_current_spmd_mesh(mesh):
+            with typecheck(strict_mode="strict"):
+                ce, lse = cross_entropy_and_logsumexp(
+                    local_logits, local_labels, global_vocab_size=vocab_size
+                )
+                expected_ce = cross_entropy_loss(
+                    local_logits.detach(), local_labels, global_vocab_size=vocab_size
+                )
+            with self.assertRaisesRegex(ValueError, "global_vocab_size is required"):
+                cross_entropy_and_logsumexp(local_logits, local_labels)
+        self.assertTrue(torch.equal(ce, expected_ce))
+        torch.testing.assert_close(lse, ref_lse.detach().float())
+
+        (ce + lse.square().sum()).backward()
+        # Uneven sharding: ceil(1003 / 4) = 251 columns per rank, 250 on the last.
+        start = self.rank * 251
+        ref_grad = ref_logits.grad[:, start : start + local_logits.shape[1]]
+        torch.testing.assert_close(local_logits.grad, ref_grad.float())
 
     @with_comms
     def test_loss_parallel_cross_entropy_confident_targets(self):
@@ -760,9 +828,10 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
             ((4,), ("tp",), (Shard(1),), (Replicate(),)),
             ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
         )
+        # (vocab size, dtype, ignore some labels, per-token temperature)
         cases = (
-            (128, torch.float32, False),
-            (131, torch.bfloat16, True),
+            (128, torch.float32, False, False),
+            (131, torch.bfloat16, True, True),
         )
 
         for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
@@ -770,12 +839,13 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                 self.device_type, mesh_shape, mesh_dim_names=axis_names
             )
             tp_group = mesh.get_group("tp")
-            for vocab_size, dtype, ignore in cases:
+            for vocab_size, dtype, ignore, use_temperature in cases:
                 with self.subTest(
                     mesh_shape=mesh_shape,
                     vocab_size=vocab_size,
                     dtype=dtype,
                     ignore=ignore,
+                    temperature=use_temperature,
                 ):
                     # Sample on CPU and move to the test device: not every
                     # accelerator registers a device-side torch.Generator.
@@ -800,6 +870,14 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         global_logits.detach().clone().requires_grad_(True)
                     )
                     reference_logits_fp32 = reference_logits.float()
+                    global_temperature = None
+                    if use_temperature:
+                        global_temperature = torch.linspace(
+                            0.5, 1.5, T, device=self.device_type
+                        )
+                        reference_logits_fp32 = (
+                            reference_logits_fp32 / global_temperature.unsqueeze(-1)
+                        )
                     reference_logprobs = -F.cross_entropy(
                         reference_logits_fp32,
                         global_labels,
@@ -825,6 +903,13 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     local_weights = distribute_tensor(
                         global_weights, mesh, label_placements
                     ).to_local()
+                    local_temperature = (
+                        None
+                        if global_temperature is None
+                        else distribute_tensor(
+                            global_temperature, mesh, label_placements
+                        ).to_local()
+                    )
                     expected_logprobs = distribute_tensor(
                         reference_logprobs.detach(), mesh, label_placements
                     ).to_local()
@@ -843,6 +928,8 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         labels_type[dp_group] = spmd.S(0)
                     spmd.assert_type(local_logits, logits_type)
                     spmd.assert_type(local_labels, labels_type)
+                    if local_temperature is not None:
+                        spmd.assert_type(local_temperature, labels_type)
 
                     with set_current_spmd_mesh(mesh):
                         with typecheck(strict_mode="strict"):
@@ -852,6 +939,7 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                                 vocab_parallel_group=tp_group,
                                 return_entropy=True,
                                 global_vocab_size=vocab_size,
+                                temperature=local_temperature,
                             )
 
                     self.assertIs(spmd.get_axis_local_type(logprobs, tp_group), spmd.I)
@@ -923,7 +1011,7 @@ class _AddMTPBlock(nn.Module):
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 
-class _FakeMTPDecoder(MTPDecoder):
+class _FakeMTPDecoder(DeepSeekV3Model):
     def __init__(self, *, skip_lm_head: bool, num_mtp_layers: int = 1):
         nn.Module.__init__(self)
         self._skip_lm_head = skip_lm_head

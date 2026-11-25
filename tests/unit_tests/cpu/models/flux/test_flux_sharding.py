@@ -28,15 +28,15 @@ from torchtitan.models.flux.sharding import flux_inner_attention_sharding_config
 class TestFluxSharding(unittest.TestCase):
     def test_context_parallel_attention_uses_gathered_keys_and_values(self):
         sharding = flux_inner_attention_sharding_config()
-        assert sharding.in_src_shardings is not None
-        self.assertEqual(set(sharding.in_src_shardings), {"q_THK", "k_THK", "v_THV"})
+        assert sharding.input_shardings is not None
+        self.assertEqual(set(sharding.input_shardings), {"q_THK", "k_THK", "v_THV"})
         self.assertEqual(
-            _per_axis_types(sharding.in_src_shardings["q_THK"])[MeshAxisName.CP],
+            _per_axis_types(sharding.input_shardings["q_THK"])[MeshAxisName.CP],
             spmd.S(0),
         )
         for name in ("k_THK", "v_THV"):
             self.assertEqual(
-                sharding.in_src_shardings[name].local_type[MeshAxisName.CP], spmd.R
+                sharding.input_shardings[name].local_type[MeshAxisName.CP], spmd.R
             )
 
     def test_packed_layout_preserves_sample_boundaries(self):

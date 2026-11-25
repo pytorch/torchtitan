@@ -14,7 +14,7 @@ from typing import Any
 import grain.python as grain
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
-from torchtitan.components.data.multimodal.mm_datasets import VisionProcessor
+from torchtitan.components.data.multimodal.mm_datasets import VisionSampleProcessor
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.trainer import Trainer
 
@@ -44,9 +44,9 @@ class DPRankImagePresenceDatasetConfig:
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.MapDataset | grain.IterDataset:
         processor = self.dataset.processor
-        if not isinstance(processor, VisionProcessor.Config):
+        if not isinstance(processor, VisionSampleProcessor.Config):
             raise TypeError(
-                "DPRankImagePresenceDatasetConfig requires VisionProcessor.Config"
+                "DPRankImagePresenceDatasetConfig requires VisionSampleProcessor.Config"
             )
         sample_processor = partial(
             _set_image_presence,

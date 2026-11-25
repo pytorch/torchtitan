@@ -12,8 +12,9 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint, current_size
+from monarch.actor import concurrent_endpoint, current_size
 
+from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
@@ -32,24 +33,12 @@ class _InterGeneratorRouterActorEndpoints:
         super().__init__(config, generators=generators)
 
     @concurrent_endpoint
-    async def generate(
-        self,
-        prompt_token_ids: list[int],
-        *,
-        request_id: str,
-        group_id: int,
-        routing_session_id: str | None,
-        sampling_config: Any | None,
-        metrics_prefix: str,
-    ) -> Any:
-        return await super().generate(
-            prompt_token_ids,
-            request_id=request_id,
-            group_id=group_id,
-            routing_session_id=routing_session_id,
-            sampling_config=sampling_config,
-            metrics_prefix=metrics_prefix,
-        )
+    async def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
+        return super().reserve(request_id, routing_session_id=routing_session_id)
+
+    @concurrent_endpoint
+    async def release_reservation(self, request_id: str) -> None:
+        super().release_reservation(request_id)
 
     @concurrent_endpoint
     async def start_engine_loop(self) -> None:

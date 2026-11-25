@@ -7,17 +7,50 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass, field
 
 import numpy as np
-from renderers import Message, Renderer, ToolSpec
+from renderers import (
+    Message,
+    MultiModalData,
+    PlaceholderRange,
+    RenderedTokens,
+    Renderer,
+    ToolSpec,
+)
 
+from torchtitan.components.renderer import hash_image_file
 from torchtitan.config import Configurable
 from torchtitan.rl.rollout.message_env import MessageEnv
-from torchtitan.rl.rollout.types import Completion, RolloutStatus, split_prompt
+from torchtitan.rl.rollout.types import (
+    Completion,
+    error_entry,
+    Prompt,
+    PromptImage,
+    RolloutStatus,
+    split_prompt,
+)
 
-logger = logging.getLogger(__name__)
+# Finish reasons of a response the generator cut short: an "abort", or vLLM's "error" (e.g. a
+# failed KV load).
+_CUT_SHORT_FINISH_REASONS = frozenset({"abort", "error"})
+
+
+def _read_image_file(path: str, image_hash: str) -> bytes:
+    """Return the bytes of the image file at ``path``, which must hash to ``image_hash``.
+
+    The image-reference renderer hashes the file (`hash_image_file`) but keeps only the hash
+    and the grid (the renderers library copies only ``pixel_values`` and ``image_grid_thw``
+    out of `_process_image`), so `TokenEnv` reads the file again for the prompt.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    if hash_image_file(data) != image_hash:
+        raise ValueError(
+            f"{path!r} changed after it was rendered: its hash is "
+            f"{hash_image_file(data)}, the prompt has {image_hash}."
+        )
+    return data
 
 
 @dataclass(kw_only=True, slots=True)
@@ -26,16 +59,16 @@ class TokenEnvOutput:
     in or generator metadata (logprobs, policy_version). The rollout loop folds it together
     with those inputs into a durable `RolloutTurn`."""
 
-    next_prompt_token_ids: list[int] | None  # [num_prompt_tokens] or None
-    """Tokens for the next `generate` call. `None` once no further prompt is
+    next_prompt: Prompt | None
+    """Tokens and images for the next `generate` call. `None` once no further prompt is
     rendered (COMPLETED, or a completion-level error)."""
 
     next_prompt_prefix_len: int = 0
     """Length of the longest prefix shared with the previous prompt + completion; 0 on the first prompt.
-    Set it with `split_prompt` on every later prompt, from the tokens in `next_prompt_token_ids`."""
+    Set it with `split_prompt` on every later prompt."""
 
     next_prompt_messages: list[Message] | None = None  # [num_prompt_messages] or None
-    """Message form of `next_prompt_token_ids`; `None` whenever that is `None`."""
+    """Message form of `next_prompt`; `None` whenever that is `None`."""
 
     status: RolloutStatus
     """`ONGOING` while the rollout runs; a terminal `RolloutStatus` otherwise."""
@@ -52,11 +85,38 @@ class TokenEnvOutput:
     """Per-step reward signals from the env; empty when the env was not stepped. This
     can be used by the rubric to compute the final rollout reward."""
 
+    errors: list[dict[str, str]] = field(default_factory=list)
+    """What failed on this call, as `Rollout.logs["errors"]` entries. Empty if nothing did."""
+
     @property
     def next_prompt_delta_token_ids(self) -> np.ndarray:
         """The next prompt after its first `next_prompt_prefix_len` tokens."""
-        delta = (self.next_prompt_token_ids or [])[self.next_prompt_prefix_len :]
+        token_ids = self.next_prompt.token_ids if self.next_prompt is not None else []
+        delta = token_ids[self.next_prompt_prefix_len :]
         return np.asarray(delta, dtype=np.int32)
+
+    @property
+    def next_prompt_delta_images(self) -> tuple[PromptImage, ...]:
+        """The images in `next_prompt_delta_token_ids` (`split_prompt` never splits one)."""
+        if self.next_prompt is None:
+            return ()
+        return self.next_prompt.images[self._delta_image_slice()]
+
+    @property
+    def next_prompt_delta_image_placeholders(self) -> tuple[PlaceholderRange, ...]:
+        """Where each of `next_prompt_delta_images` sits in `next_prompt`."""
+        if self.next_prompt is None:
+            return ()
+        return self.next_prompt.image_placeholders[self._delta_image_slice()]
+
+    def _delta_image_slice(self) -> slice:
+        """The slice of `next_prompt`'s images after its first `next_prompt_prefix_len` tokens."""
+        assert self.next_prompt is not None
+        num_prefix_images = sum(
+            placeholder.offset < self.next_prompt_prefix_len
+            for placeholder in self.next_prompt.image_placeholders
+        )
+        return slice(num_prefix_images, None)
 
 
 class TokenEnv(Configurable):
@@ -85,10 +145,12 @@ class TokenEnv(Configurable):
 
     Example:
 
-        env = TokenEnv.Config().build(message_env=MyMessageEnv(...), renderer=renderer)
+        env = TokenEnv.Config(max_rollout_tokens=32768).build(
+            message_env=MyMessageEnv(...), renderer=renderer
+        )
         env_output = await env.init()
         while not env_output.status.is_terminal():
-            completion = await generator.generate([env_output.next_prompt_token_ids])
+            completion = await generate_fn(env_output.next_prompt, ...)
             env_output = await env.step(completion)
     """
 
@@ -96,9 +158,8 @@ class TokenEnv(Configurable):
     class Config(Configurable.Config):
         """Limits enforced by the wrapper"""
 
-        max_rollout_tokens: int | None = None
-        """Max prompt tokens before the next turn; multi-turn envs use it to stop before the
-        prompt outgrows context (`None` disables)."""
+        max_rollout_tokens: int
+        """A prompt of this many tokens or more ends the rollout."""
 
         # TODO: its unclear if timeout should be on this layer or handled by the messageEnv
         step_timeout_s: float | None = 1800.0
@@ -120,7 +181,10 @@ class TokenEnv(Configurable):
         self._config = config
         self._tools: list[ToolSpec] | None = None
         self._messages: list[Message] = []
-        self._last_prompt_token_ids: list[int] = []
+        self._last_prompt = Prompt(token_ids=[])
+        # The renderer's record of the last prompt's images, which its bridge extends;
+        # None for text prompts.
+        self._last_multi_modal_data: MultiModalData | None = None
         self._num_turns = 0
 
     async def init(self) -> TokenEnvOutput:
@@ -130,25 +194,28 @@ class TokenEnv(Configurable):
         # Copy our running conversation (messages) so we avoid mutating previous states
         self._messages = list(env_init_output.init_prompt_messages)
 
-        # Render messages into tokens
+        # Render messages into tokens. `render`, not `render_ids`: its `multi_modal_data`
+        # places the prompt's images (None for text).
         self._tools = env_init_output.tools if env_init_output.tools else None
-        token_ids = await asyncio.to_thread(
-            self._renderer.render_ids,
+        rendered = await asyncio.to_thread(
+            self._renderer.render,
             messages=self._messages,
             tools=self._tools,
             add_generation_prompt=True,
         )
 
-        # Carry the prompt either way: ONGOING if it fits, else
-        # TRUNCATED_PROMPT_TOO_LONG so the over-budget prompt stays debuggable.
-        prompt_too_long = self._is_prompt_too_long(prompt_len=len(token_ids))
+        # A first prompt that doesn't fit ends the rollout before the policy answers.
+        prompt = await asyncio.to_thread(self._to_prompt, rendered)
+        prompt_too_long = self._is_prompt_too_long(prompt_len=len(prompt.token_ids))
         if not prompt_too_long:
-            self._last_prompt_token_ids = token_ids
+            self._last_prompt = prompt
+            self._last_multi_modal_data = rendered.multi_modal_data
+
         return TokenEnvOutput(
-            next_prompt_token_ids=token_ids,
+            next_prompt=prompt,
             next_prompt_messages=self._messages,
             status=(
-                RolloutStatus.TRUNCATED_PROMPT_TOO_LONG
+                RolloutStatus.FIRST_PROMPT_TOO_LONG
                 if prompt_too_long
                 else RolloutStatus.ONGOING
             ),
@@ -166,23 +233,47 @@ class TokenEnv(Configurable):
         """
         self._num_turns += 1
 
-        # Parse first, so a truncated / aborted response still carries its message
+        # The generator cut the response short: it isn't the policy's output, so don't parse it.
+        if completion.finish_reason in _CUT_SHORT_FINISH_REASONS:
+            return TokenEnvOutput(
+                next_prompt=None,
+                next_prompt_messages=None,
+                status=RolloutStatus.ERROR_INFRA,
+                errors=[
+                    {
+                        "type": f"finish_reason_{completion.finish_reason}",
+                        "message": f"{completion.request_id}: the generator cut the response short",
+                    }
+                ],
+            )
+
+        # The generator returned no tokens: nothing the policy wrote, and nothing to train.
+        if not completion.token_ids:
+            return TokenEnvOutput(
+                next_prompt=None,
+                next_prompt_messages=None,
+                status=RolloutStatus.ERROR_INFRA,
+                errors=[
+                    {
+                        "type": "empty_completion",
+                        "message": f"{completion.request_id}: the generator returned no tokens",
+                    }
+                ],
+            )
+
+        # Parse first, so a truncated response still carries its message
         try:
             parsed = await asyncio.to_thread(
                 self._renderer.parse_response,
                 token_ids=completion.token_ids,
                 tools=self._tools,
             )
-        except Exception:
-            logger.exception(
-                "parse_response failed (finish_reason=%s, %d tokens); -> ERROR_PARSE",
-                completion.finish_reason,
-                len(completion.token_ids),
-            )
+        except Exception as error:
             return TokenEnvOutput(
-                next_prompt_token_ids=None,
+                next_prompt=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.ERROR_PARSE,
+                errors=[error_entry(error)],
             )
 
         completion_message: Message = {
@@ -192,42 +283,44 @@ class TokenEnv(Configurable):
         if parsed.reasoning_content:
             completion_message["reasoning_content"] = parsed.reasoning_content
         if parsed.tool_calls:
+            # TODO: convert `parsed.tool_calls` to the dicts `Message.tool_calls` holds. Today, when
+            # a later turn renders the whole conversation again, Qwen3's and GPT-OSS's renderers raise
+            # on them, and the rollout ends ERROR_INFRA though the policy made the call.
             completion_message["tool_calls"] = parsed.tool_calls
 
-        # Truncated / aborted: the response is final and partial. Keep it for
+        # Truncated: the response is final and partial. Keep it for
         # partial-reward grading and debugging; don't step the env on it.
         # TODO: check if we should step the env on an incomplete message
         if completion.finish_reason == "length":
             return TokenEnvOutput(
-                next_prompt_token_ids=None,
+                next_prompt=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.TRUNCATED_LENGTH,
                 completion_message=completion_message,
             )
-        if completion.finish_reason == "abort":
-            return TokenEnvOutput(
-                next_prompt_token_ids=None,
-                next_prompt_messages=None,
-                status=RolloutStatus.ERROR_ABORT,
-                completion_message=completion_message,
-            )
 
-        # Apply the user's env step under a timeout
+        # Apply the user's env step under a timeout; `asyncio.timeout(None)` never expires.
         timeout = self._config.step_timeout_s
+        deadline = asyncio.timeout(timeout)
         try:
-            if timeout is None:
+            async with deadline:
                 step_output = await self._message_env.step(completion_message)
-            else:
-                step_output = await asyncio.wait_for(
-                    self._message_env.step(completion_message), timeout=timeout
-                )
         except TimeoutError:
-            logger.warning("step timed out after %ss; -> ERROR_TIMEOUT", timeout)
+            if not deadline.expired():
+                # Raised by the env's own code (e.g. its HTTP client), not by this deadline: an
+                # env failure, so raise it like any other env exception.
+                raise
             return TokenEnvOutput(
-                next_prompt_token_ids=None,
+                next_prompt=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.ERROR_TIMEOUT,
                 completion_message=completion_message,
+                errors=[
+                    {
+                        "type": "TimeoutError",
+                        "message": f"MessageEnv.step timed out after {timeout}s",
+                    }
+                ],
             )
 
         # TODO(history-edit): We hard-code the logic to only append new messages.
@@ -241,7 +334,7 @@ class TokenEnv(Configurable):
 
         if step_output.done:
             return TokenEnvOutput(
-                next_prompt_token_ids=None,
+                next_prompt=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.COMPLETED,
                 completion_message=completion_message,
@@ -255,7 +348,7 @@ class TokenEnv(Configurable):
             and self._num_turns >= self._config.max_num_turns
         ):
             return TokenEnvOutput(
-                next_prompt_token_ids=None,
+                next_prompt=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.TRUNCATED_MAX_TURNS,
                 completion_message=completion_message,
@@ -266,27 +359,30 @@ class TokenEnv(Configurable):
         # Prepare the next prompt; full re-render if the renderer can't bridge.
         # `tools` is passed because tool schemas are part of the chat template, so
         # the bridged tokens must match what a full re-render (also tools-aware) produces.
-        bridged = await asyncio.to_thread(
+        bridge_kwargs = {}
+        if self._last_multi_modal_data is not None:
+            # The bridge must know the earlier images to number and place new ones. Only
+            # multimodal renderers' bridges take them, and only they render images.
+            bridge_kwargs["previous_multi_modal_data"] = self._last_multi_modal_data
+        rendered = await asyncio.to_thread(
             self._renderer.bridge_to_next_turn,
-            previous_prompt_ids=self._last_prompt_token_ids,
+            previous_prompt_ids=self._last_prompt.token_ids,
             previous_completion_ids=completion.token_ids,
             new_messages=step_output.env_messages,
             tools=self._tools,
+            **bridge_kwargs,
         )
-        if bridged is None:
-            next_prompt_token_ids = await asyncio.to_thread(
-                self._renderer.render_ids,
+        if rendered is None:
+            rendered = await asyncio.to_thread(
+                self._renderer.render,
                 messages=self._messages,
                 tools=self._tools,
                 add_generation_prompt=True,
             )
-        else:
-            next_prompt_token_ids = bridged.token_ids
-
         # Terminal if the next prompt is over budget
-        if self._is_prompt_too_long(prompt_len=len(next_prompt_token_ids)):
+        if self._is_prompt_too_long(prompt_len=len(rendered.token_ids)):
             return TokenEnvOutput(
-                next_prompt_token_ids=None,
+                next_prompt=None,
                 next_prompt_messages=None,
                 status=RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
                 completion_message=completion_message,
@@ -295,13 +391,19 @@ class TokenEnv(Configurable):
             )
 
         # RolloutTurn stores the next prompt as a delta on this prompt + completion
+        next_prompt = await asyncio.to_thread(self._to_prompt, rendered)
         next_prompt_prefix_len, _ = split_prompt(
-            prompt_token_ids=next_prompt_token_ids,
-            previous_token_ids=self._last_prompt_token_ids + completion.token_ids,
+            next_prompt,
+            previous=Prompt(
+                token_ids=self._last_prompt.token_ids + completion.token_ids,
+                images=self._last_prompt.images,
+                image_placeholders=self._last_prompt.image_placeholders,
+            ),
         )
-        self._last_prompt_token_ids = next_prompt_token_ids
+        self._last_prompt = next_prompt
+        self._last_multi_modal_data = rendered.multi_modal_data
         return TokenEnvOutput(
-            next_prompt_token_ids=next_prompt_token_ids,
+            next_prompt=next_prompt,
             next_prompt_prefix_len=next_prompt_prefix_len,
             next_prompt_messages=self._messages,
             status=RolloutStatus.ONGOING,
@@ -314,5 +416,83 @@ class TokenEnv(Configurable):
         await self._message_env.close()
 
     def _is_prompt_too_long(self, *, prompt_len: int) -> bool:
-        cap = self._config.max_rollout_tokens
-        return cap is not None and prompt_len >= cap
+        return prompt_len >= self._config.max_rollout_tokens
+
+    def _to_prompt(self, rendered: RenderedTokens) -> Prompt:
+        """The generator's input for the rendered conversation: its tokens and images.
+
+        Images need an image-reference renderer (e.g. ``Qwen35ImageRefRenderer``): each
+        image's mm_hash is its file's hash and its ``pixel_values`` is None. Raises
+        otherwise, on non-image modalities, and when image parts render no images (e.g.
+        as a placeholder token with no data behind it). Renderers emit images in message
+        order, so the n-th image part of the conversation names the n-th image's file,
+        read here (`_read_image_file`). Reads files, so callers run it in a worker thread.
+        """
+        image_parts = [
+            part
+            for message in self._messages
+            if isinstance(message.get("content"), list)
+            for part in message["content"]
+            if part.get("type") == "image"
+        ]
+        multi_modal_data = rendered.multi_modal_data
+        if multi_modal_data is None:
+            if image_parts:
+                raise ValueError(
+                    f"The messages have {len(image_parts)} image parts but the "
+                    "renderer placed no images."
+                )
+            return Prompt(token_ids=rendered.token_ids)
+        modalities = {
+            modality
+            for items in (
+                multi_modal_data.mm_hashes,
+                multi_modal_data.mm_placeholders,
+                multi_modal_data.mm_items,
+            )
+            for modality, values in items.items()
+            if values
+        }
+        if modalities - {"image"}:
+            # TODO: video prompts need video grids in PromptImage, the generator and the batcher.
+            raise NotImplementedError(
+                f"RL prompts support images only, got modalities {sorted(modalities)}."
+            )
+        image_hashes = multi_modal_data.mm_hashes.get("image", [])
+        paths = [part["path"] for part in image_parts]
+        if len(paths) != len(image_hashes):
+            raise ValueError(
+                f"The rendered prompt has {len(image_hashes)} images but its messages have "
+                f"{len(paths)} image parts."
+            )
+        images = []
+        image_placeholders = []
+        for image_hash, path, placeholder, item in zip(
+            image_hashes,
+            paths,
+            multi_modal_data.mm_placeholders.get("image", []),
+            multi_modal_data.mm_items.get("image", []),
+            strict=True,
+        ):
+            if item.get("pixel_values") is not None:
+                raise ValueError(
+                    "RL image prompts need an image-reference renderer (e.g. "
+                    "Qwen35ImageRefRenderer), which sets each image's mm_hash to its "
+                    "file's hash and leaves pixel_values None; got pixel_values for "
+                    f"image {image_hash!r}."
+                )
+            t, h, w = item["image_grid_thw"][0]
+            images.append(
+                PromptImage(
+                    hash_value=image_hash,
+                    source_path=path,
+                    grid_thw=(int(t), int(h), int(w)),
+                    data=_read_image_file(path, image_hash),
+                )
+            )
+            image_placeholders.append(placeholder)
+        return Prompt(
+            token_ids=rendered.token_ids,
+            images=tuple(images),
+            image_placeholders=tuple(image_placeholders),
+        )

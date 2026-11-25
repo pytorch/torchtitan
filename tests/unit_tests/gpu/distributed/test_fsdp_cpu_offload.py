@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import CPUOffloadPolicy
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_state import _get_module_fsdp_state
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -18,6 +18,7 @@ from torchtitan.distributed.fsdp import (
     apply_fsdp_to_decoder,
     apply_fsdp_to_multimodal_encoder,
 )
+from torchtitan.distributed.utils import dtensor_rng_tracker_off
 from torchtitan.models.base.module import Module
 from torchtitan.models.muse_spark.flavors import muse_spark_navit_encoder_config
 from torchtitan.models.muse_spark.vision_encoder import NaViTEncoder
@@ -180,6 +181,36 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
         assert not isinstance(_offload_policy(model.tok_embeddings), CPUOffloadPolicy)
 
 
+class TestCPUOffloadRandomInit(DTensorTestBase):
+    @property
+    def world_size(self) -> int:
+        return 2
+
+    # trunc_normal_'s rejection loop reduces over the CPU shards.
+    @with_comms(backend="cpu:gloo,cuda:nccl")
+    def test_random_init_of_cpu_shards_advances_the_generator(self) -> None:
+        with torch.device("meta"):
+            linear = nn.Linear(32, 64, bias=False)
+        mesh = self.build_device_mesh()
+        fully_shard(linear, mesh=mesh, offload_policy=CPUOffloadPolicy())
+        # TrainingEngine materializes the whole model on CPU under cpu offload.
+        linear.to_empty(device="cpu")
+        weight = linear.weight
+        tracker = torch.distributed.tensor._random._rng_tracker
+        std = 32**-0.5
+        with torch.no_grad(), dtensor_rng_tracker_off(mesh):
+            first = weight.normal_().to_local().clone()
+            second = weight.normal_().to_local().clone()
+            # DTensor's RNG tracker would rewind the CPU generator: the second
+            # draw would repeat the first and trunc_normal_ would never return.
+            assert not torch.equal(first, second)
+            nn.init.trunc_normal_(weight, std=std, a=-3 * std, b=3 * std)
+        assert weight.to_local().abs().max() <= 3 * std
+        assert torch.distributed.tensor._random._rng_tracker is tracker
+        if tracker is not None:
+            assert tracker.distribute_region_enabled
+
+
 class TestConditionalVisionFSDP(DTensorTestBase):
     @property
     def world_size(self) -> int:
@@ -214,9 +245,6 @@ class TestConditionalVisionFSDP(DTensorTestBase):
         with torch.no_grad():
             for parameter in encoder.parameters():
                 nn.init.normal_(parameter, std=0.02)
-            encoder.rope_freq.init_states(
-                buffer_device=torch.device(self.device_type) if cpu_offload else None
-            )
 
         has_image = self.rank == 0
         pixel_values, grid_thw = _vision_inputs(
@@ -282,7 +310,6 @@ class TestVisionHSDP(DTensorTestBase):
         with torch.no_grad():
             for parameter in encoder.parameters():
                 nn.init.normal_(parameter, std=0.02)
-            encoder.rope_freq.init_states()
 
         for microbatch_index, image_active in enumerate((True, False)):
             encoder.set_requires_all_reduce(microbatch_index == 1)

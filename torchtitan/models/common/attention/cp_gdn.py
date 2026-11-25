@@ -23,6 +23,8 @@ from torchtitan.models.common.attn_gym import (
 
 from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
+    check_num_head_chunks,
+    chunk_heads,
     ContextParallelLinearAttentionMetadata,
     prepare_cp_linear_attention_metadata,
     prepare_ulysses_linear_attention_metadata,
@@ -150,7 +152,16 @@ class ContextParallelInnerGDN(
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config, InnerGDN.Config):
-        pass
+        num_head_chunks: int = 1
+        """Run the GDN kernel on this many chunks of heads, one after another.
+        Heads are independent, so the result is the same; each call's kernel
+        workspace is ``1 / num_head_chunks`` of one call over all heads."""
+
+        def __post_init__(self) -> None:
+            # Explicit parent: slots dataclasses can't use zero-arg super();
+            # InnerGDN.Config adds no checks.
+            CPInnerAttention.Config.__post_init__(self)
+            check_num_head_chunks(self.num_head_chunks)
 
     def __init__(self, config: Config):
         # Every attn_gym export this module calls; keep the list in sync.
@@ -161,6 +172,7 @@ class ContextParallelInnerGDN(
             l2norm,
         )
         super().__init__(config)
+        self.num_head_chunks = config.num_head_chunks
 
     @staticmethod
     def prepare_cp_metadata(
@@ -275,12 +287,16 @@ class ContextParallelInnerGDN(
             )
         normalized_q_1THK = l2norm(xq_THK.unsqueeze(0), cu_seqlens=routing.cu_seqlens)
         normalized_k_1THK = l2norm(xk_THK.unsqueeze(0), cu_seqlens=routing.cu_seqlens)
-        output_1THV, _ = context_parallel_gdn(
-            normalized_q_1THK,
-            normalized_k_1THK,
-            xv_THV.unsqueeze(0),
-            g_TH.unsqueeze(0),
-            beta_TH.unsqueeze(0),
+        output_1THV = chunk_heads(
+            context_parallel_gdn,
+            (
+                normalized_q_1THK,
+                normalized_k_1THK,
+                xv_THV.unsqueeze(0),
+                g_TH.unsqueeze(0),
+                beta_TH.unsqueeze(0),
+            ),
+            self.num_head_chunks,
             routing=routing,
             group=cp_group,
             scale=xq_THK.shape[-1] ** -0.5,

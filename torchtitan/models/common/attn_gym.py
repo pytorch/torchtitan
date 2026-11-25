@@ -20,6 +20,8 @@ if TYPE_CHECKING:
         paged_chunk_gdn,
         recurrent_gdn,
         recurrent_gdn_decode,
+        ReplayState,
+        StateCheckpoints,
     )
     from attn_gym.linear._delta_rule.gate import _FusedGate, gate_transform
     from attn_gym.linear.context_parallel import (
@@ -28,18 +30,19 @@ if TYPE_CHECKING:
         ContextParallelRouting,
     )
     from attn_gym.linear.gdn.context_parallel import context_parallel_gdn
-    from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
+    from attn_gym.linear.gdn.impl.warpdrive import ChunkGdnWarpdrivePacked
     from attn_gym.linear.gdn.ops import _ChunkGDN
     from attn_gym.linear.kda import (
         bound_gate,
         chunk_kda,
+        copy_replay_tails,
         paged_chunk_kda,
         recurrent_kda_decode,
     )
     from attn_gym.linear.kda.context_parallel import context_parallel_kda
     from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
-    from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
     from attn_gym.linear.kda.impl.fused import _ChunkKDA
+    from attn_gym.linear.kda.impl.warpdrive import ChunkKdaWarpdrive
     from attn_gym.linear.kda.masking import _MaskRows
     from attn_gym.linear.short_conv import (
         causal_conv1d,
@@ -47,6 +50,7 @@ if TYPE_CHECKING:
         paged_causal_conv1d,
     )
     from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
+    from attn_gym.mla import paged_mla_decode
     from attn_gym.sparse import lightning_indexer
     from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
 
@@ -63,11 +67,12 @@ __all__ = [
     "bound_gate",
     "causal_conv1d",
     "causal_conv1d_decode",
-    "ChunkGdnCudnnPacked",
-    "ChunkKdaCudnn",
+    "ChunkGdnWarpdrivePacked",
+    "ChunkKdaWarpdrive",
     "chunk_gdn",
     "chunk_kda",
     "context_parallel_conv_history",
+    "copy_replay_tails",
     "context_parallel_gdn",
     "context_parallel_kda",
     "ContextParallelRouting",
@@ -79,9 +84,12 @@ __all__ = [
     "paged_causal_conv1d",
     "paged_chunk_gdn",
     "paged_chunk_kda",
+    "paged_mla_decode",
     "recurrent_gdn",
     "recurrent_gdn_decode",
     "recurrent_kda_decode",
+    "ReplayState",
+    "StateCheckpoints",
     "is_missing_kernel",
     "require_attn_gym",
 ]
@@ -99,13 +107,14 @@ _EXPORTS = {
     "bound_gate": "attn_gym.linear.kda",
     "causal_conv1d": "attn_gym.linear.short_conv",
     "causal_conv1d_decode": "attn_gym.linear.short_conv",
-    "ChunkGdnCudnnPacked": "attn_gym.linear.gdn.impl.cudnn",
-    "ChunkKdaCudnn": "attn_gym.linear.kda.impl.cudnn",
+    "ChunkGdnWarpdrivePacked": "attn_gym.linear.gdn.impl.warpdrive",
+    "ChunkKdaWarpdrive": "attn_gym.linear.kda.impl.warpdrive",
     "chunk_gdn": "attn_gym.linear",
     "chunk_kda": "attn_gym.linear.kda",
     "context_parallel_conv_history": "attn_gym.linear.context_parallel",
     "context_parallel_gdn": "attn_gym.linear.gdn.context_parallel",
     "context_parallel_kda": "attn_gym.linear.kda.context_parallel",
+    "copy_replay_tails": "attn_gym.linear.kda",
     "ContextParallelRouting": "attn_gym.linear.context_parallel",
     "gate_transform": "attn_gym.linear._delta_rule.gate",
     "gather_attn": "attn_gym.sparse.gather_attn",
@@ -115,9 +124,12 @@ _EXPORTS = {
     "paged_causal_conv1d": "attn_gym.linear.short_conv",
     "paged_chunk_gdn": "attn_gym.linear",
     "paged_chunk_kda": "attn_gym.linear.kda",
+    "paged_mla_decode": "attn_gym.mla",
     "recurrent_gdn": "attn_gym.linear",
     "recurrent_gdn_decode": "attn_gym.linear",
     "recurrent_kda_decode": "attn_gym.linear.kda",
+    "ReplayState": "attn_gym.linear",
+    "StateCheckpoints": "attn_gym.linear",
 }
 
 
@@ -140,10 +152,10 @@ def _raise_for(error: ModuleNotFoundError | None) -> NoReturn:
         raise ModuleNotFoundError(
             str(error), name=error.name, path=error.path
         ) from error
-    # Keep the version in sync with the attn-gym pin in .ci/docker/requirements.txt.
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
-        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.17'.",
+        "Install TorchTitan's pinned dependencies with: "
+        "python -m pip install -r requirements.txt.",
         name="attn_gym",
     )
 

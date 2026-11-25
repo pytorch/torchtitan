@@ -63,7 +63,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 from torchtitan.models.base.state_dict_adapter import dtensor_safe, StateDictAdapter
-
+from torchtitan.models.common.multimodal import MultimodalModel
 from torchtitan.models.common.rope import ComplexRoPE
 
 if TYPE_CHECKING:
@@ -202,9 +202,10 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
         return n_heads, n_kv_heads
 
     def _vision_num_heads(self):
+        if not isinstance(self.model_config, MultimodalModel.Config):
+            return None
         # pyrefly: ignore [missing-attribute]
-        ve = self.model_config.vision_encoder
-        return ve.num_heads if ve is not None else None
+        return self.model_config.vision_encoder.num_heads
 
     def to_hf(
         self, state_dict: dict[str, Any], *, to_quantized_layout: bool = False

@@ -9,7 +9,45 @@ from unittest.mock import patch
 
 import torch
 
-from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import _batched_copy_
+from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
+    _batched_copy_,
+    _BufferRequirements,
+    _BufferSlot,
+)
+
+
+class TestBufferSlot(unittest.TestCase):
+    def test_host_storage_survives_release_and_reallocation(self):
+        slot = _BufferSlot()
+        slot.reserve(
+            {
+                (torch.device("cpu"), torch.bfloat16): _BufferRequirements(
+                    storage_exchange_numel=4,
+                    compute_exchange_numel=8,
+                    compute_scratch_numel=16,
+                    storage_scratch_numel=32,
+                )
+            }
+        )
+        slot.allocate()
+        pointers = tuple(tensor.data_ptr() for tensor in slot._tensors)
+        capacities = tuple(
+            tensor.numel() * tensor.element_size() for tensor in slot._tensors
+        )
+        for step in range(10):
+            for tensor in slot._tensors:
+                tensor.fill_(step)
+            slot.release()
+            sizes = tuple(tensor.untyped_storage().nbytes() for tensor in slot._tensors)
+            slot.allocate()
+            self.assertEqual(sizes, capacities)
+            self.assertEqual(
+                tuple(tensor.data_ptr() for tensor in slot._tensors), pointers
+            )
+            for tensor in slot._tensors:
+                torch.testing.assert_close(
+                    tensor, torch.full_like(tensor, step), rtol=0, atol=0
+                )
 
 
 class TestBatchedCopy(unittest.TestCase):

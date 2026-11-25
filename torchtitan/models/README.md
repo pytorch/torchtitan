@@ -18,6 +18,20 @@ The folder should be organized as follows
       `build_flops_estimator()` estimates work for each raw CPU microbatch.
       `Decoder` subclasses inherit both methods; a new `BaseModel` family
       implements them.
+    - `Decoder.Config.layers` is `list[TransformerBlock.Config]`. If the
+      flavor builders or model code use the model's own block or attention
+      config type, redeclare `layers` (and the block's `attention`) with that
+      type and `# pyrefly: ignore [bad-override]`, rather than narrowing with
+      `isinstance` at each read.
+  - A model with modality encoders has two classes: the text-only model (a
+    `Decoder` subclass, e.g. `Qwen35Model`) and a multimodal subclass of it
+    and `MultimodalModel` (e.g. `Qwen35MultimodalModel`) that adds the
+    encoders, which its `Config` requires. List the text class first in both
+    the model's and the `Config`'s bases: dataclass fields resolve over the
+    reversed MRO, so `MultimodalModel.Config`'s copies of `Decoder.Config`
+    fields would otherwise override the text `Config`'s defaults.
+    (`KimiK25Model` still lists `MultimodalModel` first; see the TODO in
+    `kimi_k2_7/model.py`.)
   - `__init__()` consumes the `Config` to build the model.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - List parameters whose numerics need master precision (e.g. ones the HF checkpoint stores in float32) in `preserve_dtype_params` on their module's `Config`; FSDP mixed precision, checkpoint export and RL weight sync never lower their precision. Default it on the component's `Config` when the component always needs it (e.g. GDN `A_log`), or set it in the flavor builder for one instance of a generic module (e.g. Qwen3.5's GDN `GatedRMSNorm`).
@@ -82,7 +96,7 @@ The folder should be organized as follows
 CPU microbatch dictionary to model-wide logical training FLOPs before sharding.
 Build it from the full model; runtime estimation should use CPU metadata and tensor
 shapes without device-to-host synchronization or retaining model modules.
-Native decoders use `Attention.Config.flops_per_token(seq_len)`. Multimodal models
+Native decoders use `Attention.Config.flops(positions)`. Multimodal models
 share encoder composition through `multimodal_encoder_fqns`. Muse overrides the
 estimator to add output-module work using encoder-owned output-token counts.
 `ForwardBackwardResult.num_flops` reports unreduced work for this DP rank's raw
@@ -92,5 +106,8 @@ Trainers average it over the DP mesh; CP ranks hold the same value.
 `Config.get_parameter_counts(model)` reports unique total and architecturally
 active parameters, including embeddings and encoders and weighting routed experts
 by their active ratio. FLOPs exclude lookup-only embeddings separately.
-Decoder attention uses configured sequence length rather than packed document
-lengths. Causal sparsity, recomputation, and elementwise operations are omitted.
+Each decoder attention config computes its cost from the positions of the
+non-padding queries within their documents: a causal query at position p attends
+to p + 1 keys, at most the window size for sliding-window attention, while linear
+attention costs the same for every query. Padding tokens are excluded.
+Recomputation and elementwise operations are omitted.

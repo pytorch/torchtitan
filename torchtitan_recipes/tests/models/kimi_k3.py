@@ -14,11 +14,11 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
-from torchtitan.components.data.multimodal.mm_datasets import (
-    MM_DATASETS,
+from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
+from torchtitan.components.data.multimodal.vision_processor import (
+    NaViTPatchGridResize,
     VisionProcessor,
 )
-from torchtitan.components.data.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -30,6 +30,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -48,12 +49,14 @@ from torchtitan.models.common.feed_forward import DenseFeedForward
 from torchtitan.models.kimi_k3 import (
     build_model_config,
     KIMI_K3_SPECIAL_TOKENS,
+    KIMI_K3_VISION_PROCESSOR_KWARGS,
     KimiK3Model,
 )
 from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.dist_moe import dist_moe_runtime_config, require_dist_moe
 from torchtitan_recipes.tests.models.kimi_k2_7 import (
     _align_dist_muon_expert_compute_layouts,
     _per_expert_compute_layout,
@@ -63,28 +66,9 @@ from torchtitan_recipes.tests.models.kimi_k2_7 import (
 def _kimi_k3_multimodal_dataloader(
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
-    processor = dataset.processor
-    if not isinstance(processor, VisionProcessor.Config):
-        raise ValueError("Kimi K3 multimodal data requires VisionProcessor.Config")
-
-    processor = VisionProcessor.Config(
-        sample_processor=processor.sample_processor,
-        patch_size=14,
-        temporal_patch_size=1,
-        spatial_merge_size=2,
-        resize_fn=resize_to_navit_patch_grid,
-        max_patches=256,
-        max_patches_per_side=16,
-        image_mean=(0.5, 0.5, 0.5),
-        image_std=(0.5, 0.5, 0.5),
-    )
     return GrainDataLoader.Config(
-        dataset=replace(dataset, processor=processor),
+        dataset=dataset,
         collator=MultiModalCollator.Config(
-            patch_size=processor.patch_size,
-            temporal_patch_size=processor.temporal_patch_size,
-            spatial_merge_size=processor.spatial_merge_size,
-            patch_order="raster",
             build_mrope_positions=False,
         ),
     )
@@ -100,7 +84,7 @@ def kimi_k3_debugmodel(
     if parallelism is None:
         parallelism = ParallelismConfig()
     model_config = build_model_config(
-        "debugmodel",
+        "debugmodel_mm",
         seq_len=seq_len,
         attn_backend=attn_backend,
         parallelism=parallelism,
@@ -115,6 +99,13 @@ def kimi_k3_debugmodel(
         tokenizer=MultiModalTokenizer.Config(**KIMI_K3_SPECIAL_TOKENS),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
+        # Small images keep the debug vision encoder's grids short.
+        vision_processor=replace(
+            VisionProcessor.Config(**KIMI_K3_VISION_PROCESSOR_KWARGS),
+            resize=NaViTPatchGridResize.Config(
+                max_patches=256, max_patches_per_side=16
+            ),
+        ),
         dataloader=_kimi_k3_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
@@ -142,12 +133,38 @@ def kimi_k3_debugmodel(
     )
 
 
+def kimi_k3_debugmodel_dist_moe_mxfp8(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    scratch_capacity_factor: float = 1.0,
+    parallelism: ParallelismConfig | None = None,
+) -> Trainer.Config:
+    """Build the Kimi K3 debug recipe with MXFP8 Dist-MoE experts."""
+    dist_moe = require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+
+    config = kimi_k3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    config.dist_moe_runtime = dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor
+    )
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                expert_precision="mxfp8",
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
+    )
+
+
 def _dist_muon_optimizer(
     model_config: KimiK3Model.Config,
     *,
     muon_lr: float,
     adamw_lr: float,
     parallelism: ParallelismConfig,
+    extra_full_attention_block_sizes: dict[str, tuple[int, ...]] | None = None,
 ) -> OptimizersContainer.Config:
     attention = cast(KimiMLAAttention.Config, model_config.first_full_attention)
     delta_attention = next(
@@ -190,6 +207,10 @@ def _dist_muon_optimizer(
         ),
         "gate": blocks_of(attention.v_head_dim),
         "wo": owned,
+    }
+    attention_shardings |= {
+        projection: blocks_of(*block_sizes) if block_sizes else owned
+        for projection, block_sizes in (extra_full_attention_block_sizes or {}).items()
     }
     per_kda_head = blocks_of(delta_attention.head_dim)
     # forget_a is the shared low-rank down projection and output_proj mixes

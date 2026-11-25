@@ -80,7 +80,40 @@ checkpointer=CheckpointManager.Config(
 ),
 ```
 
-A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). DCP-specific `async_mode` is on `CheckpointManager.Config` in `torchtitan/components/checkpointer/dcp.py`.
+A more exhaustive and up-to-date list of checkpoint config options can be found in `torchtitan/components/checkpointer/base.py` (`BaseCheckpointManager.Config`). That includes `async_mode`: the DCP manager supports all three modes, and `TorchCheckpointingManager` supports `disabled` and `async_with_pinned_mem`.
+
+## Remote storage with `TorchCheckpointingManager`
+
+`TorchCheckpointingManager` can keep checkpoints on a remote store through fsspec.
+Point `folder` at a URI and install its driver, e.g. `gcsfs` for `gs://`:
+
+```python
+checkpointer=TorchCheckpointingManager.Config(
+    folder="gs://my-bucket/run-1/checkpoint",
+    interval=500,
+),
+```
+
+Only `gs://` is verified. A URI that carries a host or port, such as
+`hdfs://host:8020/path`, is not supported: the host would be read as part of the path.
+
+Interval saves, the final save, resume, `keep_latest_k` retention, Hugging Face export
+(`last_save_in_hf`), and Hugging Face load (`initial_load_in_hf`) all go through the
+remote store. `initial_load_path` may be on other storage than `folder`, and a local
+`hf_assets_path` works with a remote `folder`, e.g. HF weights on local disk with
+checkpoints on `gs://`.
+
+Keep `hf_assets_path` on local disk, and include the safetensors index even when the
+weights are remote:
+```bash
+python scripts/download_hf_assets.py --repo_id <repo_id> --assets tokenizer index
+```
+State dict adapters read `model.safetensors.index.json` from `hf_assets_path`, not from
+`initial_load_path`.
+
+On GCS, use a bucket with hierarchical namespace (HNS). On a flat bucket a checkpoint is
+committed by copying each object, so a job preempted mid-commit can leave a `step-N` that
+resume selects and fails to load.
 
 ## Creating a seed checkpoint
 Sometimes one needs to create a seed checkpoint to initialize a model from step 0.

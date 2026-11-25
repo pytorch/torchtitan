@@ -25,6 +25,7 @@ from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
 from torchtitan.config.configs import PrecisionConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
@@ -69,7 +70,9 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
     )
 
 
-def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
+def _lora_dist_moe_config(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts.Config:
     stock = _stock_config()
     base_config = cast(
         DistMoeRoutedExperts.Config,
@@ -77,12 +80,16 @@ def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
     )
     return cast(
         DistMoeRoutedExperts.Config,
-        LoRATransform(rank=8, alpha=16.0).transform(base_config),
+        LoRATransform(
+            rank=8, alpha=16.0, expert_adapter_layout=expert_adapter_layout
+        ).transform(base_config),
     )
 
 
-def _build_lora_dist_moe() -> DistMoeRoutedExperts:
-    module = _lora_dist_moe_config().build()
+def _build_lora_dist_moe(
+    expert_adapter_layout: Literal["per_expert", "shared_outer"] = "per_expert",
+) -> DistMoeRoutedExperts:
+    module = _lora_dist_moe_config(expert_adapter_layout).build()
     module.init_states()
     return cast(DistMoeRoutedExperts, module)
 
@@ -359,14 +366,42 @@ def test_transform_propagates_plain_swiglu_to_annex_config() -> None:
     assert context_config.activation == "swiglu"
 
 
-def test_transform_rejects_unsupported_source_activation() -> None:
-    """Unsupported source semantics fail instead of silently changing."""
-    source = replace(
-        _stock_config(dim=64),
-        activation_fn=SiTUGLU.Config(),
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+def test_transform_preserves_situglu_configuration(
+    expert_precision: Literal["bf16", "mxfp8"],
+) -> None:
+    """Both expert paths translate model bounds to the public SiTU-GLU API."""
+    # Not the annex defaults (4.0, 25.0), so a dropped bound fails.
+    gate_beta, up_beta = 3.5, 20.0
+    stock = _stock_config(dim=64)
+    stock.activation_fn = SiTUGLU.Config(beta=gate_beta, linear_beta=up_beta)
+
+    transformed = DistMoeTransform(expert_precision=expert_precision).transform(stock)
+    assert isinstance(transformed, DistMoeRoutedExperts.Config)
+    assert transformed.activation == "situ_glu"
+    assert transformed.situ_glu_gate_beta == gate_beta
+    assert transformed.situ_glu_up_beta == up_beta
+
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    context_config = _runtime()._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=2,
     )
-    with pytest.raises(TypeError, match="supports SwiGLU.Config or ClampedSwiGLU"):
-        DistMoeTransform().transform(source)
+    assert context_config.activation == "situ_glu"
+    assert context_config.situ_glu_gate_beta == gate_beta
+    assert context_config.situ_glu_up_beta == up_beta
+    assert (context_config.block_scaled is not None) == (expert_precision == "mxfp8")
+
+
+def test_transform_rejects_unbounded_situglu_up_projection() -> None:
+    """The annex SiTU-GLU contract requires both clipping bounds."""
+    stock = _stock_config()
+    stock.activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=None)
+
+    with pytest.raises(ValueError, match="requires linear_beta"):
+        DistMoeTransform().transform(stock)
 
 
 @pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
@@ -449,8 +484,28 @@ def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
     torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
 
 
+def test_shared_outer_lora_dist_moe_weight_operands_broadcast_the_shared_factor() -> None:
+    """W13 shares A and W2 shares B; the materialized operands expand them over the experts."""
+    module = _build_lora_dist_moe("shared_outer")
+    _fill_lora_dist_moe_operands(module)
+    assert module.w13.lora_a.weight.shape == (8, 32)
+    assert module.w13.lora_b.weight.shape == (4, 2, 64, 8)
+    assert module.w2.lora_a.weight.shape == (4, 8, 64)
+    assert module.w2.lora_b.weight.shape == (32, 8)
+
+    actual_w13_EFD, actual_w2_EDF = module._weight_operands()
+    expected_w13_EFD = module.w13.weight.flatten(1, 2) + 2.0 * torch.einsum(
+        "efl,li->efi", module.w13.lora_b.weight.flatten(1, 2), module.w13.lora_a.weight
+    )
+    expected_w2_EDF = module.w2.weight + 2.0 * torch.einsum(
+        "dl,elf->edf", module.w2.lora_b.weight, module.w2.lora_a.weight
+    )
+    torch.testing.assert_close(actual_w13_EFD, expected_w13_EFD)
+    torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
+
+
 def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
-    """Local materialization gives every adapter a finite nonzero gradient."""
+    """Every adapter gets a finite nonzero gradient equal to torch.baddbmm's."""
     module = _build_lora_dist_moe()
     with torch.no_grad():
         module.w13.lora_a.weight.fill_(0.25)
@@ -471,6 +526,28 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
         w2_EDF.numel(),
         dtype=w2_EDF.dtype,
     ).reshape_as(w2_EDF)
+    adapter_names = (
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
+    )
+    adapters = [module.get_parameter(name) for name in adapter_names]
+    w13, w2 = module.w13, module.w2
+    expected_w13_EFD = torch.baddbmm(
+        w13.weight.flatten(1, 2),
+        w13.lora_b.weight.flatten(1, -2),
+        w13.lora_a.weight,
+        alpha=w13._lora_scaling,
+    )
+    expected_w2_EDF = torch.baddbmm(
+        w2.weight, w2.lora_b.weight, w2.lora_a.weight, alpha=w2._lora_scaling
+    )
+    expected_gradients = torch.autograd.grad(
+        (expected_w13_EFD, expected_w2_EDF),
+        adapters,
+        (w13_gradient_EFD, w2_gradient_EDF),
+    )
     torch.autograd.backward(
         (w13_EFD, w2_EDF),
         (w13_gradient_EFD, w2_gradient_EDF),
@@ -478,16 +555,14 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
 
     assert module.w13.weight.grad is None
     assert module.w2.weight.grad is None
-    for name in (
-        "w13.lora_a.weight",
-        "w13.lora_b.weight",
-        "w2.lora_a.weight",
-        "w2.lora_b.weight",
+    for name, adapter, expected in zip(
+        adapter_names, adapters, expected_gradients, strict=True
     ):
-        gradient = module.get_parameter(name).grad
-        assert gradient is not None
+        gradient = adapter.grad
+        assert gradient is not None, name
         assert torch.isfinite(gradient).all()
         assert torch.count_nonzero(gradient) == gradient.numel()
+        torch.testing.assert_close(gradient, expected)
 
 
 def test_dist_moe_lora_rejects_inplace_wgrad() -> None:
@@ -1006,12 +1081,15 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
 
 def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
-    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
-    config.parallelism.expert_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-
-    config.__post_init__()
+    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(
+        seq_len=128,
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=2,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+        ),
+    )
+    assert not config.training.disable_accelerator_graphs
 
 
 @pytest.mark.parametrize(

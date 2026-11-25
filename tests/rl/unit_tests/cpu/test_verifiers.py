@@ -24,19 +24,22 @@ from torchtitan.rl.actors.system import ActorSystem
 from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
+    _validate_token_ids,
     GenerationServer,
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.examples.verifiers.rollouter import (
     _trainable_token_spans,
-    log_failed_rollout,
     VERIFIERS_REWARD_KEY,
     verifiers_rollout_logs,
     VerifiersRollouter,
+    VerifiersRolloutWorker,
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Completion, RolloutStatus
+from torchtitan.rl.rollout.rollouter import log_failed_rollout
+from torchtitan.rl.rollout.types import Completion, Rollout, RolloutStatus
+from verifiers.v1.trace import Error as VerifiersError
 
 
 def test_train_client_config_carries_an_in_tree_renderer() -> None:
@@ -213,36 +216,23 @@ def test_muse_glimmer_renderer_survives_verifiers_worker_config() -> None:
     assert parsed.tool_calls[0].arguments == {"query": "hello"}
 
 
-def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> None:
+def test_verifiers_worker_sends_muse_glimmer_renderer_config(monkeypatch) -> None:
     from renderers import CustomRendererConfig
     from torchtitan.components.renderer import from_renderers
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
-    generation_server = SimpleNamespace(
-        start=AsyncMock(),
-        close=AsyncMock(),
-        base_url="http://127.0.0.1:2",
-    )
-    env_server = SimpleNamespace(
-        start=AsyncMock(return_value="http://127.0.0.1:1"),
-        close=AsyncMock(),
-    )
-    env_client = SimpleNamespace(wait_for_server_startup=AsyncMock(), close=AsyncMock())
+    env_client = SimpleNamespace(wait_for_server_startup=AsyncMock())
     monkeypatch.setattr(
         "torchtitan.rl.examples.verifiers.rollouter.VerifiersEnvClient",
         lambda _: env_client,
     )
 
-    rollouter = object.__new__(VerifiersRollouter)
-    rollouter._verifiers_config = SimpleNamespace(
-        generation_server=SimpleNamespace(build=lambda: generation_server),
-        connection_timeout_sec=5.0,
-        renderer_multiplex=8,
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker._config = SimpleNamespace(connection_timeout_sec=5.0, renderer_multiplex=8)
+    worker._env_server_address = "tcp://127.0.0.1:1"
+    worker._generation_server = SimpleNamespace(
+        start=AsyncMock(), base_url="http://127.0.0.1:2/v1"
     )
-    rollouter._verifiers_env_server = env_server
-    rollouter._generation_server = None
-    rollouter._verifiers_env_client = None
-    rollouter._verifiers_train_client_config = None
     renderers_config = CustomRendererConfig(
         import_path="torchtitan.models.muse_glimmer.renderer.MuseGlimmerRenderer",
         reasoning_strength="low",
@@ -250,19 +240,83 @@ def test_verifiers_rollouter_sends_muse_glimmer_renderer_config(monkeypatch) -> 
     config = from_renderers(renderers_config)
 
     asyncio.run(
-        rollouter.setup_async(
-            actor_system=cast(ActorSystem, None),
+        worker.setup_async(
             tokenizer_config=cast(HuggingFaceTokenizer.Config, None),
             renderer_config=config,
             hf_assets_path="muse-checkpoint",
         )
     )
 
-    sent = rollouter._verifiers_train_client_config
-    assert sent is not None
+    # Raises AttributeError if setup didn't start the metrics.
+    worker.flush_process_metrics(group_id=0)
+
+    sent = worker._verifiers_train_client_config
+    # The worker's agents call its own generation server.
+    assert sent.base_url == "http://127.0.0.1:2/v1"
     assert sent.renderer == renderers_config
     assert sent.renderer_model_name == "muse-checkpoint"
-    asyncio.run(rollouter.close())
+
+
+def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_workers_first() -> None:
+    from renderers import Qwen3RendererConfig
+    from torchtitan.components.renderer import from_renderers
+
+    events = []
+
+    class _WorkerActors:
+        def __init__(self) -> None:
+            self.setup_async = SimpleNamespace(call=AsyncMock())
+
+    class _ActorSystem:
+        async def spawn_rollout_workers(
+            self, config, *, num_workers, num_threads, **kwargs
+        ):
+            events.append(("spawn", num_workers, kwargs["env_server_address"]))
+            return _WorkerActors()
+
+        async def stop_rollout_workers(self) -> None:
+            events.append(("stop_workers",))
+
+    async def start() -> str:
+        events.append(("start_env_server",))
+        return "tcp://127.0.0.1:5555"
+
+    async def close_env_server() -> None:
+        events.append(("close_env_server",))
+
+    worker = VerifiersRolloutWorker.Config(
+        rubric="rubric",
+        generation_server=GenerationServer.Config(max_rollout_tokens=64),
+    )
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._config = SimpleNamespace(
+        worker=worker, rollouts_per_worker=12, rollouts_per_thread=4
+    )
+    # 24 training rollouts in flight / 12 per worker -> 2 workers
+    rollouter._max_rollouts_in_flight = 24
+    rollouter._verifiers_env_server = SimpleNamespace(
+        start=start, close=close_env_server
+    )
+    rollouter._worker_actors = None
+    rollouter._actor_system = None
+    rollouter._inflight_run_group_calls = set()
+
+    async def run() -> None:
+        await rollouter.setup_async(
+            actor_system=cast(ActorSystem, _ActorSystem()),
+            tokenizer_config="tokenizer_config",
+            renderer_config=from_renderers(Qwen3RendererConfig()),
+            hf_assets_path="hf_assets_path",
+        )
+        await rollouter.close()
+
+    asyncio.run(run())
+    assert events == [
+        ("start_env_server",),
+        ("spawn", 2, "tcp://127.0.0.1:5555"),
+        ("stop_workers",),
+        ("close_env_server",),
+    ]
 
 
 def test_trainable_token_spans() -> None:
@@ -291,7 +345,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
             )
         ],
     )
-    turns = VerifiersRollouter.trace_to_rollout_turns(
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
         generation_metadata=VerifiersGenerationMetadata(
             min_policy_version=3,
@@ -340,7 +394,7 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
             )
         ],
     )
-    turns = VerifiersRollouter.trace_to_rollout_turns(
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
         generation_metadata=VerifiersGenerationMetadata(
             min_policy_version=3,
@@ -392,7 +446,7 @@ def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> 
             ),
         ],
     )
-    turns = VerifiersRollouter.trace_to_rollout_turns(
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
         generation_metadata=VerifiersGenerationMetadata(
             min_policy_version=1, max_policy_version=1, metrics=[]
@@ -449,7 +503,7 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
             )
         ],
     )
-    turns = VerifiersRollouter.trace_to_rollout_turns(
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
         trace=trace,
         generation_metadata=VerifiersGenerationMetadata(
             min_policy_version=0, max_policy_version=0, metrics=[]
@@ -524,18 +578,39 @@ def test_verifiers_rollout_logs_keep_the_failure_reason(caplog) -> None:
     assert logs["slowest_model_call_sec"] == 1801.0
 
     with caplog.at_level(logging.WARNING):
-        log_failed_rollout(logs, group_id=3, rollout_id=1)
-        log_failed_rollout({**logs, "errors": []}, group_id=3, rollout_id=2)
-    assert "error=HarnessError: agent timeout" in caplog.text
-    assert "error=None: None" in caplog.text
+        for rollout_id, status, rollout_logs in [
+            (1, RolloutStatus.ERROR, logs),
+            (2, RolloutStatus.FIRST_PROMPT_TOO_LONG, {**logs, "errors": []}),
+            (3, RolloutStatus.COMPLETED, logs),  # didn't fail: no log
+        ]:
+            log_failed_rollout(
+                Rollout(
+                    group_id=3, rollout_id=rollout_id, status=status, logs=rollout_logs
+                )
+            )
+    assert (
+        "rollout group=3/rollout=1 failed: ERROR | HarnessError: agent timeout | "
+        "Traceback |   ... | TimeoutError | verifiers_trace_id=" in caplog.text
+    )
+    assert (
+        "rollout group=3/rollout=2 failed: FIRST_PROMPT_TOO_LONG | verifiers_trace_id="
+        in caplog.text
+    )
+    assert "rollout=3" not in caplog.text
+
+
+# Over aiohttp's default 1 MiB request limit even as compact JSON: 7 bytes per 6-digit id.
+_LONG_PROMPT = [151644] * 160_000
 
 
 def test_generation_server_forwards_token_request() -> None:
+    """Two calls of one session; the second prompt is over 1 MiB of JSON."""
+
     async def run_test() -> None:
         received = []
 
         async def generate_fn(
-            prompt_token_ids,
+            prompt,
             *,
             request_id,
             group_id,
@@ -544,7 +619,7 @@ def test_generation_server_forwards_token_request() -> None:
         ):
             received.append(
                 {
-                    "prompt_token_ids": prompt_token_ids,
+                    "prompt_token_ids": prompt.token_ids,
                     "request_id": request_id,
                     "group_id": group_id,
                     "routing_session_id": routing_session_id,
@@ -565,7 +640,7 @@ def test_generation_server_forwards_token_request() -> None:
                 ],
             )
 
-        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server = GenerationServer.Config(max_rollout_tokens=262144).build()
         server.set_generate_fn(generate_fn)
         await server.start()
         try:
@@ -580,16 +655,16 @@ def test_generation_server_forwards_token_request() -> None:
                             "object": "model",
                             "created": 0,
                             "owned_by": "torchtitan",
-                            "max_model_len": 40960,
+                            "max_model_len": 262144,
                         }
                     ],
                 }
-                for _ in range(2):
+                for token_ids in ([10, 11], _LONG_PROMPT):
                     response = await session.post(
                         f"http://{server.host}:{server.port}/inference/v1/generate",
                         headers={"X-Session-ID": "group=1/rollout=2"},
                         json={
-                            "token_ids": [10, 11],
+                            "token_ids": token_ids,
                             "sampling_params": {
                                 "temperature": 1.0,
                                 "top_p": 1.0,
@@ -611,13 +686,33 @@ def test_generation_server_forwards_token_request() -> None:
             "group=1/rollout=2/request=0",
             "group=1/rollout=2/request=1",
         ]
-        assert all(request["prompt_token_ids"] == [10, 11] for request in received)
+        assert [len(request["prompt_token_ids"]) for request in received] == [
+            2,
+            len(_LONG_PROMPT),
+        ]
         assert all(request["group_id"] == 1 for request in received)
         assert all(
             request["routing_session_id"] == "group=1/rollout=2" for request in received
         )
         assert all(request["sampling_config"].seed == 4 for request in received)
-        assert payload["choices"][0]["token_ids"] == [31, 32]
+        assert payload == {
+            "request_id": "group=1/rollout=2/request=1",
+            "choices": [
+                {
+                    "index": 0,
+                    "token_ids": [31, 32],
+                    "logprobs": {
+                        "content": [
+                            {"token": "token_id:31", "logprob": -0.1},
+                            {"token": "token_id:32", "logprob": -0.2},
+                        ]
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "prompt_logprobs": None,
+            "kv_transfer_params": None,
+        }
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
@@ -634,7 +729,7 @@ def test_generation_server_forwards_token_request() -> None:
 def test_generation_server_rejects_aborted_generation() -> None:
     async def run_test() -> None:
         async def generate_fn(
-            prompt_token_ids,
+            prompt,
             *,
             request_id,
             group_id,
@@ -661,6 +756,9 @@ def test_generation_server_rejects_aborted_generation() -> None:
                     json={
                         "token_ids": [10, 11],
                         "sampling_params": {
+                            "temperature": 1.0,
+                            "top_p": 1.0,
+                            "max_tokens": 2,
                             "torchtitan_group_id": 1,
                             "stop_token_ids": [99],
                         },
@@ -695,7 +793,7 @@ def test_generation_server_requires_group_id() -> None:
                     headers={"X-Session-ID": "group=1/rollout=2"},
                     json={"token_ids": [10, 11], "sampling_params": {}},
                 )
-                assert response.status == 400
+                assert response.status == 422
                 payload = await response.json()
         finally:
             await server.close()
@@ -705,12 +803,100 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
+_GOOD_SAMPLING_PARAMS = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "max_tokens": 2,
+    "stop_token_ids": [99],
+    "torchtitan_group_id": 1,
+}
+
+
+@pytest.mark.parametrize(
+    "headers, request_kwargs",
+    [
+        pytest.param(
+            {},
+            {"json": {"token_ids": [10, 11], "sampling_params": _GOOD_SAMPLING_PARAMS}},
+            id="no_session_header",
+        ),
+        pytest.param(
+            {"X-Session-ID": "group=1/rollout=2"},
+            {"data": b"not json"},
+            id="body_not_json",
+        ),
+        pytest.param(
+            {"X-Session-ID": "group=1/rollout=2"},
+            {"json": {"token_ids": "10 11", "sampling_params": _GOOD_SAMPLING_PARAMS}},
+            id="token_ids_not_a_list",
+        ),
+        pytest.param(
+            {"X-Session-ID": "group=1/rollout=2"},
+            {
+                "json": {
+                    "token_ids": [10, 11],
+                    "sampling_params": {**_GOOD_SAMPLING_PARAMS, "top_k": 20},
+                }
+            },
+            id="sampling_key_that_filters",
+        ),
+    ],
+)
+def test_generation_server_answers_422_to_a_bad_request(
+    headers: dict, request_kwargs: dict
+) -> None:
+    """A bad request is a config or code mistake: 422. Only a prompt too long answers 400, the
+    one status the Verifiers worker maps to a prompt-too-long status."""
+
+    async def run_test() -> int:
+        async def generate_fn(*args, **kwargs):
+            raise AssertionError("generate_fn must not run for a bad request")
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.post(
+                    f"http://{server.host}:{server.port}/inference/v1/generate",
+                    headers=headers,
+                    **request_kwargs,
+                )
+                return response.status
+        finally:
+            await server.close()
+
+    assert asyncio.run(run_test()) == 422
+
+
+def test_generation_server_logs_each_request_at_debug_only(caplog) -> None:
+    async def run_test() -> None:
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.get(
+                    f"http://{server.host}:{server.port}/healthz"
+                )
+                assert response.status == 200
+        finally:
+            await server.close()
+
+    # One DEBUG record: no INFO line, and still logged. Set the level explicitly: imports can
+    # change the root level.
+    with caplog.at_level(logging.DEBUG, logger="aiohttp.access"):
+        asyncio.run(run_test())
+    access_records = [r for r in caplog.records if r.name == "aiohttp.access"]
+    assert [r.levelno for r in access_records] == [logging.DEBUG]
+    assert access_records[0].getMessage().startswith("GET /healthz 200 ")
+
+
 def test_generation_server_rejects_prompt_without_room_for_output() -> None:
     async def run_test() -> None:
         prompt_lengths = []
 
-        async def generate_fn(prompt_token_ids, **kwargs):
-            prompt_lengths.append(len(prompt_token_ids))
+        async def generate_fn(prompt, **kwargs):
+            prompt_lengths.append(len(prompt.token_ids))
             raise RuntimeError("generator reached")
 
         server = GenerationServer.Config(max_rollout_tokens=8).build()
@@ -726,6 +912,9 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
                         json={
                             "token_ids": [1] * num_tokens,
                             "sampling_params": {
+                                "temperature": 1.0,
+                                "top_p": 1.0,
+                                "max_tokens": 2,
                                 "torchtitan_group_id": 1,
                                 "stop_token_ids": [99],
                             },
@@ -744,8 +933,101 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
     asyncio.run(run_test())
 
 
-def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
-    # The first model call fails for context length, so the rollout has no turns.
+@pytest.mark.parametrize(
+    "token_ids, accepted",
+    [
+        ([], True),
+        ([0, 151643], True),
+        ([1, True], False),
+        ([1, 2.0], False),
+        ([[1]], False),
+        ([1, None], False),
+        ((1, 2), False),
+    ],
+)
+def test_validate_token_ids(token_ids, accepted) -> None:
+    if accepted:
+        assert _validate_token_ids(token_ids, field_name="token_ids") == token_ids
+        return
+    with pytest.raises(
+        ValueError, match="token_ids must be a list of integer token IDs"
+    ):
+        _validate_token_ids(token_ids, field_name="token_ids")
+
+
+_OVERFLOW_CALL = SimpleNamespace(
+    time=SimpleNamespace(duration=0.0),
+    error=SimpleNamespace(
+        message="Prompt length (9) exceeds maximum context length (8).", status_code=400
+    ),
+)
+_SANDBOX_ERROR = VerifiersError(type="SandboxError", message="no capacity")
+_HARNESS_ERROR = VerifiersError(type="HarnessError", message="exited with no output")
+
+
+def _one_turn_fields(*, trainable: bool = True) -> dict:
+    """Trace fields for one policy turn: prompt token 10, sampled token 11 (trainable unless
+    `trainable=False`)."""
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    node = SimpleNamespace(
+        token_ids=[10, 11],
+        mask=[False, trainable],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="ls"),
+    )
+    branch = SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
+    return {"nodes": [node], "branches": [branch], "num_turns": 1}
+
+
+@pytest.mark.parametrize(
+    "trace_fields, expected_status, expected_log",
+    [
+        # The first model call overflows the context, and the harness ends the trace cleanly.
+        pytest.param(
+            {"calls": [_OVERFLOW_CALL]},
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
+            "rollout group=1/rollout=2 failed: FIRST_PROMPT_TOO_LONG | verifiers_trace_id=trace task=huge-task",
+            id="first_prompt_too_long",
+        ),
+        # The sandbox never started.
+        pytest.param(
+            {"ok": False, "errors": [_SANDBOX_ERROR], "last_error": _SANDBOX_ERROR},
+            RolloutStatus.ERROR_INFRA,
+            "failed: ERROR_INFRA | SandboxError: no capacity",
+            id="sandbox_error",
+        ),
+        # The harness failed to launch: the policy never answered, so it can't be its failure.
+        pytest.param(
+            {"ok": False, "errors": [_HARNESS_ERROR], "last_error": _HARNESS_ERROR},
+            RolloutStatus.ERROR_INFRA,
+            "failed: ERROR_INFRA | HarnessError: exited with no output",
+            id="harness_error",
+        ),
+        # The same HarnessError after one turn: ERROR, and it trains.
+        pytest.param(
+            {
+                "ok": False,
+                "errors": [_HARNESS_ERROR],
+                "last_error": _HARNESS_ERROR,
+                **_one_turn_fields(),
+            },
+            RolloutStatus.ERROR,
+            "failed: ERROR | HarnessError: exited with no output",
+            id="harness_error_after_a_turn",
+        ),
+        # The policy answered, but none of its tokens is trainable, so the rollout has no turn.
+        pytest.param(
+            _one_turn_fields(trainable=False),
+            RolloutStatus.ERROR_INFRA,
+            "failed: ERROR_INFRA | no_trainable_token: trace: no model call has a trainable token",
+            id="no_trainable_token",
+        ),
+    ],
+)
+def test_a_rollout_with_no_turn_never_trains_and_each_failure_is_logged(
+    trace_fields: dict, expected_status: RolloutStatus, expected_log: str, caplog
+) -> None:
     span = SimpleNamespace(duration=0.0)
     trace = SimpleNamespace(
         id="trace",
@@ -756,38 +1038,39 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
         is_timeout=False,
         stop_condition="agent_completed",
         errors=[],
+        last_error=None,
         timing=SimpleNamespace(
             setup=span,
             agent=SimpleNamespace(duration=0.0, model=span, harness=span),
             scoring=span,
         ),
-        calls=[
-            SimpleNamespace(
-                time=span,
-                error=SimpleNamespace(
-                    message="Prompt length (9) exceeds maximum context length (8)."
-                ),
-            )
-        ],
+        calls=[],
         nodes=[],
         branches=[],
+        num_turns=0,
     )
-    rollouter = object.__new__(VerifiersRollouter)
-    rollouter._generation_server = SimpleNamespace(
-        model_id="model", pop_generation_metadata=lambda trace_id: None
+    for name, value in trace_fields.items():
+        setattr(trace, name, value)
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker._generation_server = SimpleNamespace(
+        model_id="model",
+        pop_generation_metadata=lambda trace_id: VerifiersGenerationMetadata(
+            min_policy_version=0, max_policy_version=0, metrics=[]
+        ),
     )
-    rollouter._verifiers_env_client = SimpleNamespace(
+    worker._verifiers_env_client = SimpleNamespace(
         run=AsyncMock(
             return_value=SimpleNamespace(
-                ok=True, is_timeout=False, errors=[], traces=[trace]
+                ok=trace.ok, is_timeout=False, errors=[], traces=[trace]
             )
         )
     )
-    rollouter._verifiers_train_client_config = object()
+    worker._verifiers_train_client_config = object()
 
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
-            rollouter._run_single_rollout(
+            worker._run_single_rollout(
+                release_session_fn=AsyncMock(),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -795,28 +1078,228 @@ def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
             )
         )
 
-    assert rollout.status is RolloutStatus.ERROR
-    assert "first prompt of task huge-task does not fit" in caplog.text
+    assert rollout.status is expected_status
+    # In these cases, a rollout keeps a turn if and only if it trains.
+    assert (len(rollout.turns) > 0) == expected_status.is_trainable()
+    assert expected_log in caplog.text
+
+
+def test_a_rollout_whose_verifiers_call_raises_is_error_infra_and_logged(
+    caplog,
+) -> None:
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker._generation_server = SimpleNamespace(model_id="model")
+    worker._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(side_effect=ConnectionError("env server unreachable"))
+    )
+    worker._verifiers_train_client_config = object()
+
+    with caplog.at_level(logging.WARNING):
+        rollout = asyncio.run(
+            worker._run_single_rollout(
+                release_session_fn=AsyncMock(),
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=2,
+            )
+        )
+
+    assert rollout.status is RolloutStatus.ERROR_INFRA
+    assert [error["type"] for error in rollout.logs["errors"]] == ["ConnectionError"]
+    assert (
+        "rollout group=1/rollout=2 failed: ERROR_INFRA | ConnectionError: env server unreachable"
+        in caplog.text
+    )
+
+
+def _error(error_type: str, status_code: int | None = None) -> VerifiersError:
+    return VerifiersError(type=error_type, message="", status_code=status_code)
+
+
+# A model call refused with 400: its prompt reached `max_rollout_tokens`.
+_REFUSED_CALL = SimpleNamespace(error=_error("ProviderError", 400))
 
 
 @pytest.mark.parametrize(
-    "ok, is_timeout, episode_is_timeout, expected",
+    "trace_fields, episode_fields, expected",
     [
-        (True, True, False, RolloutStatus.ERROR_TIMEOUT),
-        (False, True, False, RolloutStatus.ERROR_TIMEOUT),
+        pytest.param(
+            {"is_timeout": True, "stop_condition": "setup_timeout", "num_turns": 0},
+            {},
+            RolloutStatus.ERROR_INFRA,
+            id="setup_timeout",
+        ),
+        pytest.param(
+            {"is_timeout": True, "stop_condition": "agent_timeout"},
+            {},
+            RolloutStatus.ERROR_TIMEOUT,
+            id="agent_timeout",
+        ),
+        # A stage deadline records no error and keeps ok=True.
+        pytest.param(
+            {"is_timeout": True, "stop_condition": "scoring_timeout"},
+            {},
+            RolloutStatus.ERROR_TIMEOUT,
+            id="scoring_timeout",
+        ),
         # The episode's own deadline flags the episode and leaves it not ok.
-        (True, False, True, RolloutStatus.ERROR_TIMEOUT),
-        (False, False, False, RolloutStatus.ERROR),
-        (True, False, False, RolloutStatus.COMPLETED),
+        pytest.param(
+            {},
+            {"ok": False, "is_timeout": True},
+            RolloutStatus.ERROR_TIMEOUT,
+            id="episode_timeout",
+        ),
+        pytest.param(
+            {"ok": False, "last_error": _error("HarnessError")},
+            {"ok": False},
+            RolloutStatus.ERROR,
+            id="harness_error",
+        ),
+        pytest.param(
+            {"ok": False, "last_error": _error("TaskError")},
+            {"ok": False},
+            RolloutStatus.ERROR,
+            id="task_error",
+        ),
+        # The first call refused: the policy never answered, whatever failed later.
+        pytest.param(
+            {
+                "calls": [_REFUSED_CALL],
+                "num_turns": 0,
+                "ok": False,
+                "last_error": _error("ProviderError", 400),
+            },
+            {"ok": False},
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
+            id="first_prompt_too_long",
+        ),
+        pytest.param(
+            {
+                "calls": [_REFUSED_CALL],
+                "num_turns": 0,
+                "is_timeout": True,
+                "stop_condition": "agent_timeout",
+            },
+            {},
+            RolloutStatus.FIRST_PROMPT_TOO_LONG,
+            id="first_prompt_too_long_then_deadline",
+        ),
+        # A later call refused, and the trace ended on it: the harness died on it, or stopped cleanly.
+        pytest.param(
+            {
+                "calls": [_REFUSED_CALL],
+                "ok": False,
+                "last_error": _error("ProviderError", 400),
+            },
+            {"ok": False},
+            RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
+            id="later_prompt_too_long",
+        ),
+        pytest.param(
+            {"calls": [_REFUSED_CALL]},
+            {},
+            RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
+            id="later_prompt_too_long_clean_exit",
+        ),
+        # A later call refused, then something else ended the trace: that decides.
+        pytest.param(
+            {
+                "calls": [_REFUSED_CALL],
+                "is_timeout": True,
+                "stop_condition": "agent_timeout",
+            },
+            {},
+            RolloutStatus.ERROR_TIMEOUT,
+            id="refused_then_deadline",
+        ),
+        pytest.param(
+            {"calls": [_REFUSED_CALL]},
+            {"ok": False},
+            RolloutStatus.ERROR_INFRA,
+            id="refused_then_episode_failed",
+        ),
+        pytest.param(
+            {"ok": False, "last_error": _error("ProviderError", 422)},
+            {"ok": False},
+            RolloutStatus.ERROR_INFRA,
+            id="malformed_request",
+        ),
+        pytest.param(
+            {"ok": False, "last_error": _error("ProviderError", 502)},
+            {"ok": False},
+            RolloutStatus.ERROR_INFRA,
+            id="bad_completion",
+        ),
+        pytest.param(
+            {"ok": False, "last_error": _error("SandboxError")},
+            {"ok": False},
+            RolloutStatus.ERROR_INFRA,
+            id="sandbox_error",
+        ),
+        # Another agent's trace, or an env hook, failed; the policy's trace finished.
+        pytest.param({}, {"ok": False}, RolloutStatus.ERROR_INFRA, id="episode_failed"),
+        pytest.param(
+            {"is_truncated": True, "stop_condition": "max_turns"},
+            {},
+            RolloutStatus.TRUNCATED_MAX_TURNS,
+            id="max_turns",
+        ),
+        pytest.param(
+            {
+                "is_truncated": True,
+                "calls": [SimpleNamespace(error=None, finish_reason="length")],
+            },
+            {},
+            RolloutStatus.TRUNCATED_LENGTH,
+            id="length",
+        ),
+        # Verifiers' token budgets for the whole rollout.
+        *(
+            pytest.param(
+                {"is_truncated": True, "stop_condition": budget},
+                {},
+                RolloutStatus.TRUNCATED_LENGTH,
+                id=budget,
+            )
+            for budget in ("max_input_tokens", "max_output_tokens", "max_total_tokens")
+        ),
+        # A truncation this mapping doesn't know doesn't train.
+        pytest.param(
+            {"is_truncated": True, "stop_condition": "compaction_failed"},
+            {},
+            RolloutStatus.ERROR_UNKNOWN,
+            id="unmapped_truncation",
+        ),
+        # A retried attempt's error stays in the history; the final attempt finished.
+        pytest.param(
+            {"last_error": _error("SandboxError")},
+            {},
+            RolloutStatus.COMPLETED,
+            id="ok_after_a_retry",
+        ),
     ],
 )
-def test_rollout_status_maps_timeouts_to_error_timeout(
-    ok: bool, is_timeout: bool, episode_is_timeout: bool, expected: RolloutStatus
+def test_rollout_status_says_who_failed(
+    trace_fields: dict, episode_fields: dict, expected: RolloutStatus
 ) -> None:
-    trace = SimpleNamespace(ok=ok, is_timeout=is_timeout, is_truncated=False)
-    episode = SimpleNamespace(ok=not episode_is_timeout, is_timeout=episode_is_timeout)
+    trace = SimpleNamespace(
+        **{
+            "ok": True,
+            "is_timeout": False,
+            "is_truncated": False,
+            "stop_condition": "agent_completed",
+            "last_error": None,
+            "calls": [],
+            "num_turns": 1,
+            **trace_fields,
+        }
+    )
+    episode = SimpleNamespace(**{"ok": True, "is_timeout": False, **episode_fields})
 
-    status = VerifiersRollouter.rollout_status(verifiers_episode=episode, trace=trace)
+    status = VerifiersRolloutWorker.rollout_status(
+        verifiers_episode=episode, trace=trace
+    )
 
     assert status is expected
 
@@ -848,30 +1331,32 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
             scoring=span,
         ),
         calls=[],
+        num_turns=1,
         nodes=[node],
         branches=[
             SimpleNamespace(nodes=[node], token_ids=[10, 11], logprobs=[0.0, -0.1])
         ],
     )
-    rollouter = object.__new__(VerifiersRollouter)
-    rollouter._generation_server = SimpleNamespace(
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker._generation_server = SimpleNamespace(
         model_id="model",
         pop_generation_metadata=lambda trace_id: VerifiersGenerationMetadata(
             min_policy_version=0, max_policy_version=0, metrics=[]
         ),
     )
-    rollouter._verifiers_env_client = SimpleNamespace(
+    worker._verifiers_env_client = SimpleNamespace(
         run=AsyncMock(
             return_value=SimpleNamespace(
                 ok=True, is_timeout=False, errors=[], traces=[trace]
             )
         )
     )
-    rollouter._verifiers_train_client_config = object()
+    worker._verifiers_train_client_config = object()
 
     with caplog.at_level(logging.WARNING):
         rollout = asyncio.run(
-            rollouter._run_single_rollout(
+            worker._run_single_rollout(
+                release_session_fn=AsyncMock(),
                 sample=VerifiersTaskSample(verifiers_task_data={"name": "slow-task"}),
                 sampling=SamplingConfig(),
                 group_id=1,
@@ -880,8 +1365,147 @@ def test_timed_out_rollout_is_logged_and_keeps_no_reward(caplog) -> None:
         )
 
     assert rollout.status is RolloutStatus.ERROR_TIMEOUT
-    assert "Verifiers rollout failed: trace=trace" in caplog.text
+    assert "rollout group=1/rollout=2 failed: ERROR_TIMEOUT" in caplog.text
     assert VERIFIERS_REWARD_KEY not in rollout.turns[-1].env_rewards
+
+
+# TODO: share one fake trace and rollouter between this test,
+# test_rollout_whose_first_prompt_does_not_fit_is_flagged and
+# test_timed_out_rollout_is_logged_and_keeps_no_reward.
+def test_rollout_releases_every_trace_session_even_if_one_release_fails(caplog) -> None:
+    """Each trace generated under its own id; another agent's trace has one too."""
+    span = SimpleNamespace(duration=0.0)
+    traces = [
+        SimpleNamespace(
+            id=trace_id,
+            task=SimpleNamespace(key="task"),
+            agent=SimpleNamespace(trainable=trainable),
+            ok=True,
+            is_timeout=False,
+            is_truncated=False,
+            stop_condition=None,
+            errors=[],
+            timing=SimpleNamespace(
+                setup=span,
+                agent=SimpleNamespace(duration=0.0, model=span, harness=span),
+                scoring=span,
+            ),
+            calls=[],
+            nodes=[],
+            branches=[],
+        )
+        for trace_id, trainable in [("opponent", False), ("policy", True)]
+    ]
+    worker = object.__new__(VerifiersRolloutWorker)
+    popped_trace_ids = []
+    worker._generation_server = SimpleNamespace(
+        model_id="model", pop_generation_metadata=popped_trace_ids.append
+    )
+    worker._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(
+            return_value=SimpleNamespace(
+                ok=True, is_timeout=False, errors=[], traces=traces
+            )
+        )
+    )
+    worker._verifiers_train_client_config = object()
+    release_session_fn = AsyncMock(side_effect=[RuntimeError("router down"), None])
+
+    with caplog.at_level(logging.ERROR):
+        rollout = asyncio.run(
+            worker._run_single_rollout(
+                release_session_fn=release_session_fn,
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=0,
+            )
+        )
+
+    assert [call.kwargs for call in release_session_fn.call_args_list] == [
+        {"routing_session_id": "opponent"},
+        {"routing_session_id": "policy"},
+    ]
+    assert "releasing routing session opponent failed" in caplog.text
+    assert popped_trace_ids == ["opponent", "policy"]
+    assert rollout.group_id == 1
+
+
+def test_a_rollout_that_raises_fails_its_group_after_its_siblings_stop() -> None:
+    """The controller frees the group once `run_group` returns; no sibling may still be generating."""
+    stopped = []
+
+    async def run_single_rollout(*, rollout_id: int, **kwargs) -> Rollout:
+        if rollout_id == 0:
+            await asyncio.sleep(0)  # let the sibling start first
+            raise RuntimeError("rollout 0 failed")
+        try:
+            await asyncio.sleep(10)
+        finally:
+            stopped.append(rollout_id)
+        raise AssertionError("the sibling should have been cancelled")
+
+    worker = object.__new__(VerifiersRolloutWorker)
+    worker._generation_server = SimpleNamespace(set_generate_fn=lambda fn: None)
+    worker._run_single_rollout = run_single_rollout
+
+    with pytest.raises(ExceptionGroup) as raised:
+        asyncio.run(
+            worker.run_group(
+                generate_fn=AsyncMock(),
+                release_session_fn=AsyncMock(),
+                sample=None,
+                group_id=1,
+                group_size=2,
+                sampling=SamplingConfig(),
+            )
+        )
+    assert [str(error) for error in raised.value.exceptions] == ["rollout 0 failed"]
+    assert stopped == [1]
+
+
+def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
+    sampling_params = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": 5,
+        "stop_token_ids": [1],
+    }
+    for name in ("temperature", "top_p", "max_tokens"):
+        with pytest.raises(ValueError, match=rf"must include \['{name}'\]"):
+            _parse_sampling_config(
+                {key: value for key, value in sampling_params.items() if key != name}
+            )
+
+
+@pytest.mark.parametrize(
+    "update, error",
+    [
+        ({}, None),
+        # What Verifiers 0.4.1 sends on every call: values that filter nothing.
+        ({"top_k": -1, "min_p": 0.0}, None),
+        ({"top_k": 0}, None),
+        ({"top_k": 20}, r"must not filter .* got top_k=20, min_p=0.0"),
+        ({"min_p": 0.05}, r"must not filter .* got top_k=-1, min_p=0.05"),
+    ],
+)
+def test_parse_sampling_config_accepts_only_full_vocabulary_top_k_and_min_p(
+    update, error
+) -> None:
+    sampling_params = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "max_tokens": 2,
+        "stop_token_ids": [99],
+        **update,
+    }
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            _parse_sampling_config(sampling_params)
+        return
+    assert _parse_sampling_config(sampling_params) == SamplingConfig(
+        temperature=1.0, top_p=1.0, max_tokens=2, stop_token_ids=[99]
+    )
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

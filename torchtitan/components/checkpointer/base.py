@@ -223,6 +223,26 @@ class CheckpointStorage(Protocol):
         ...
 
 
+class FilesystemCheckpointStorage:
+    """``CheckpointStorage`` backed by ``torchtitan.tools.filesystem``.
+
+    Local paths go through ``os``/``shutil`` and remote fsspec URIs through
+    fsspec.
+    """
+
+    def isdir(self, path: str) -> bool:
+        return filesystem.isdir(path)
+
+    def isfile(self, path: str) -> bool:
+        return filesystem.isfile(path)
+
+    def listdir(self, path: str) -> list[str]:
+        return filesystem.listdir(path)
+
+    def remove(self, path: str) -> None:
+        filesystem.rmtree(path)
+
+
 class BaseCheckpointManager(Configurable, ABC):
     """Contract every TorchTitan checkpoint manager implements.
 
@@ -262,6 +282,24 @@ class BaseCheckpointManager(Configurable, ABC):
             raise ValueError(
                 "extra_states contains checkpoint-manager-owned keys: "
                 f"{sorted(collisions)}"
+            )
+
+    @staticmethod
+    def _validate_hf_export(
+        model_parts: list[nn.Module], *, last_save_in_hf: bool
+    ) -> None:
+        """Reject an HF export of a model with frozen parameters, e.g. a LoRA model.
+
+        State dict adapters do not map LoRA adapters to HF keys, so the export would
+        hold only the base weights.
+        """
+        # TODO: export LoRA adapters in PEFT format.
+        if last_save_in_hf and any(
+            not p.requires_grad for part in model_parts for p in part.parameters()
+        ):
+            raise ValueError(
+                "checkpointer.last_save_in_hf does not support models with frozen "
+                "parameters (e.g. LoRA) yet: the export would drop the LoRA adapters."
             )
 
     @torch.no_grad()
@@ -654,7 +692,15 @@ class BaseCheckpointManager(Configurable, ABC):
         load_only: bool = False
         """Whether to permit loads while disabling all saves."""
 
+        async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
+        """Save mode: synchronous, threaded async, or pinned-memory async. A
+        checkpoint manager raises on a mode it does not support."""
+
         def __post_init__(self) -> None:
+            async_lowered = self.async_mode.lower()
+            if async_lowered not in ("disabled", "async", "async_with_pinned_mem"):
+                raise ValueError(f"Invalid async_mode: {async_lowered}")
+            self.async_mode = async_lowered
             if not self.folder.strip():
                 raise ValueError("The 'folder' field cannot be empty.")
             if self.interval < 1:
@@ -699,24 +745,6 @@ class BaseCheckpointManager(Configurable, ABC):
                 )
             if self.last_save_in_hf and not self.last_save_model_only:
                 raise ValueError("last_save_in_hf requires last_save_model_only=True.")
-
-            # Remote (fsspec) checkpoint IO supports only the native DCP format.
-            # HF safetensors read/write to a remote URI is not implemented, so
-            # reject the combination up front instead of failing deep in DCP.
-            if self.last_save_in_hf and filesystem.is_remote(self.folder):
-                raise ValueError(
-                    "last_save_in_hf is not supported with a remote "
-                    f"checkpointer.folder: {self.folder}"
-                )
-            if (
-                self.initial_load_in_hf
-                and self.initial_load_path
-                and filesystem.is_remote(self.initial_load_path)
-            ):
-                raise ValueError(
-                    "initial_load_in_hf is not supported with a remote "
-                    f"initial_load_path: {self.initial_load_path}"
-                )
 
             if self.load_only and self.enable_first_step_checkpoint:
                 logger.warning(

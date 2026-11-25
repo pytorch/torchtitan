@@ -13,50 +13,17 @@ agent and the grading through the [Verifiers bridge](../README.md).
 
 ## How it works
 
-Boxes are processes or containers; arrows are numbered in the order one rollout uses
-them.
+Each rollout takes the path in the Verifiers README's
+[integration flow](../README.md#integration-flow). Here:
 
-```text
-+------------------------- GPU actors (Monarch) -------------------------+
-|  router -> vLLM generators  <-- new weights --  trainer (GRPO loss)    |
-+-------^-----------------------------------------------------^----------+
-        | 4. generate                                         | 7. batch
-+-------|-------- controller process (torchtitan.rl.train) ---|----------+
-|  GenerationServer       dataset -> VerifiersRollouter -> batcher       |
-|  (localhost HTTP)                       |      ^                       |
-+-------^---------------------------------|------|-----------------------+
-        | 4. token ids            1. task |      | 6. trace, reward
-+-------|---------------------------------v------|-----------------------+
-|  Verifiers env server (spawned process)                                |
-|  per rollout: interception server (chat messages <-> token ids)        |
-|               and a Docker runtime                                     |
-+-------^---------------------------------|------------------------------+
-        | 3. chat request   2. Terminus-2 |
-        |    each turn      5. test.sh    v
-+-------|---------- Docker container, one per rollout -------------------+
-|  Terminus-2 agent <--> tmux shell                                      |
-|  tests/test.sh -> reward file                                          |
-+------------------------------------------------------------------------+
-```
+- **Agent.** The env server starts a Docker container from the task's `docker_image` and runs
+  Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a tmux shell and
+  reads the screen back. Each agent turn is one model call.
+- **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the container
+  and reads the reward file it writes.
 
-1. **Task.** `VerifiersRollouter` sends the sampled task to the env server once per
-   rollout in the group.
-2. **Agent.** The env server starts a container from the task's `docker_image` and runs
-   Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a
-   tmux shell and reads the screen back.
-3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
-   which records the turn in the rollout's trace.
-4. **Generation.** The request reaches TitanRL's `GenerationServer` as token ids and is
-   served by the vLLM generators.
-5. **Grading.** When the agent stops, Verifiers runs the task's `tests/test.sh` in the
-   container and reads the reward file it writes.
-6. **Trace.** `VerifiersRollouter` turns the trace into rollout turns, with the exact
-   tokens the generators sampled, and computes group advantages.
-7. **Training.** The batcher feeds the trainer, and the generators load the new weights
-   after each step.
-
-Validation takes the same path on Terminal-Bench 2.1, one greedy sample per task, at
-the start and end of training.
+Validation takes the same path on Terminal-Bench 2.1. A validation starts with training and
+runs beside it (`ValidationConfig`).
 
 | What | Where |
 | --- | --- |

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 
@@ -16,11 +17,15 @@ from aiohttp import web
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import GenerateFn
+from torchtitan.rl.rollout.types import GenerateFn, Prompt
 
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
+
+# Stands in for the logprobs content list; the handler splices the real list in.
+_LOGPROBS_CONTENT_PLACEHOLDER = "<logprobs content>"
+
 
 GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
 """Sampling parameter carrying a request's rollout group id.
@@ -50,22 +55,23 @@ class VerifiersGenerationMetadata:
 
 
 class GenerationServer(Configurable):
-    """Expose a TorchTitan ``GenerateFn`` through Verifiers' model API.
+    """Serves TitanRL's `generate_fn` as the vLLM endpoint that Verifiers' train client calls.
 
-    A Verifiers environment calls a named HTTP model endpoint, while TitanRL
-    supplies an in-process ``GenerateFn`` backed by its generator router. This
-    server exposes Verifiers' token-generation endpoint, forwards each request
-    to that function, and retains TorchTitan policy-version and metric metadata
-    that the resulting Verifiers trace does not carry.
+    Each rollout worker runs one, on the controller host:
+
+        Verifiers' train client --POST /inference/v1/generate--> GenerationServer
+                                  (X-Session-ID: the trace id)        |
+                                                                      generate_fn --> generator
+                                <---- token ids + logprobs ----------  <-- Completion --
+
+    Verifiers keeps each completion's tokens and logprobs in its trace. This server keeps what a
+    trace has no field for: each session's policy versions and generator metrics.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         host: str = "127.0.0.1"
         """Interface on which the local HTTP server listens."""
-
-        port: int = 0
-        """Listening port; zero requests an ephemeral port."""
 
         max_rollout_tokens: int
         """Context length; set it to the generator's ``max_model_len``.
@@ -77,8 +83,6 @@ class GenerationServer(Configurable):
         """
 
         def __post_init__(self) -> None:
-            if not 0 <= self.port <= 65535:
-                raise ValueError("port must be between 0 and 65535")
             if self.max_rollout_tokens <= 0:
                 raise ValueError("max_rollout_tokens must be positive")
 
@@ -86,7 +90,6 @@ class GenerationServer(Configurable):
 
     def __init__(self, config: Config) -> None:
         self.host = config.host
-        self.requested_port = config.port
         self.max_rollout_tokens = config.max_rollout_tokens
         self.generate_fn: GenerateFn | None = None
         self.runner: web.AppRunner | None = None
@@ -111,13 +114,17 @@ class GenerationServer(Configurable):
     async def start(self) -> None:
         if self.runner is not None:
             return
-        app = web.Application()
+        # aiohttp refuses a body over 1 MiB by default: a prompt past ~150K token ids. Verifiers'
+        # interception server, which forwards these calls, accepts 1 GiB.
+        app = web.Application(client_max_size=1024**3)
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
-        runner = web.AppRunner(app)
+        runner = web.AppRunner(app, access_log_class=_DebugAccessLogger)
         await runner.setup()
-        site = web.TCPSite(runner, self.host, self.requested_port)
+        # Port 0: the OS picks a free port. Each rollout worker runs its own server,
+        # so a fixed port would collide.
+        site = web.TCPSite(runner, self.host, 0)
         await site.start()
         sockets = getattr(site._server, "sockets", None)
         if not sockets:
@@ -164,14 +171,36 @@ class GenerationServer(Configurable):
         return web.json_response({"object": "list", "data": [model]})
 
     async def _handle_generate_request(self, request: web.Request) -> web.Response:
+        """Run one model call through `generate_fn`. Its error answers:
+
+            503  `generate_fn` is not set yet
+            400  a prompt with no room for an output token
+            422  no X-Session-ID header, or a malformed body
+            500  `generate_fn` raised, or the completion's token ids and logprobs differ in length
+            502  no completion, or a finish reason other than "stop" or "length"
+
+        Example request and reply (one completion of 2 tokens):
+
+            headers  {"X-Session-ID": "9f3c..."}
+            body     {"token_ids": [151644, 872, ...],
+                      "sampling_params": {"temperature": 1.0, "top_p": 1.0, "max_tokens": 512,
+                                          "stop_token_ids": [151645], "torchtitan_group_id": 7,
+                                          "logprobs": 1, ...}}
+            reply    {"request_id": "9f3c.../request=0",
+                      "choices": [{"token_ids": [9707, 151645], "finish_reason": "stop",
+                                   "logprobs": {"content": [{"token": "token_id:9707",
+                                                             "logprob": -0.01}, ...]}}]}
+        """
+        # ======== Check the request ========
         if self.generate_fn is None:
             return web.json_response(
                 {"error": "TorchTitan GenerateFn is not ready"}, status=503
             )
+
         session_id = request.headers.get(_SESSION_ID_HEADER)
         if not session_id:
             return web.json_response(
-                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=400
+                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=422
             )
 
         try:
@@ -179,14 +208,6 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            # vLLM needs room for one output token. Keep vLLM's wording: Verifiers'
-            # harnesses match it as a context overflow.
-            if len(prompt_token_ids) >= self.max_rollout_tokens:
-                raise ValueError(
-                    f"This model's maximum context length is {self.max_rollout_tokens} "
-                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
-                    "leaving no room for an output token"
-                )
             sampling_params = body.get("sampling_params")
             if not isinstance(sampling_params, dict):
                 raise ValueError("sampling_params must be an object")
@@ -200,14 +221,27 @@ class GenerationServer(Configurable):
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
-            return web.json_response({"error": str(error)}, status=400)
+            return web.json_response({"error": str(error)}, status=422)
 
+        # vLLM needs room for one output token. Keep vLLM's wording: Verifiers' harnesses match it
+        # as a context overflow.
+        if len(prompt_token_ids) >= self.max_rollout_tokens:
+            return web.json_response(
+                {
+                    "error": f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
+                    "leaving no room for an output token"
+                },
+                status=400,
+            )
+
+        # ======== Generate ========
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
         request_id = f"{session_id}/request={request_index}"
         try:
             completion = await self.generate_fn(
-                prompt_token_ids,
+                Prompt(token_ids=prompt_token_ids),
                 request_id=request_id,
                 group_id=group_id,
                 routing_session_id=session_id,
@@ -219,6 +253,7 @@ class GenerationServer(Configurable):
             logger.exception("TorchTitan generation failed for %s", request_id)
             return web.json_response({"error": str(error)}, status=500)
 
+        # ======== Check the completion, and keep its versions and metrics ========
         if completion is None:
             return web.json_response(
                 {"error": f"generation returned no completion for {request_id}"},
@@ -258,26 +293,24 @@ class GenerationServer(Configurable):
                 else [*previous.metrics, *completion.metrics]
             ),
         )
-        return web.json_response(
+
+        # ======== Reply ========
+        # Text, not one dict per token: 1.4x faster, and no GC pass every ~700 tokens.
+        # A finite Python float's repr is valid JSON; vLLM's logprobs are Python floats.
+        logprobs_content = ",".join(
+            f'{{"token":"token_id:{token_id}","logprob":{logprob!r}}}'
+            for token_id, logprob in zip(
+                completion.token_ids, completion.token_logprobs
+            )
+        )
+        response_text = json.dumps(
             {
                 "request_id": completion.request_id,
                 "choices": [
                     {
                         "index": 0,
                         "token_ids": completion.token_ids,
-                        "logprobs": {
-                            "content": [
-                                {
-                                    "token": f"token_id:{token_id}",
-                                    "logprob": logprob,
-                                }
-                                for token_id, logprob in zip(
-                                    completion.token_ids,
-                                    completion.token_logprobs,
-                                    strict=True,
-                                )
-                            ]
-                        },
+                        "logprobs": {"content": _LOGPROBS_CONTENT_PLACEHOLDER},
                         "finish_reason": completion.finish_reason,
                     }
                 ],
@@ -285,16 +318,45 @@ class GenerationServer(Configurable):
                 "kv_transfer_params": None,
             }
         )
+        head, _, tail = response_text.rpartition(
+            json.dumps(_LOGPROBS_CONTENT_PLACEHOLDER)
+        )
+        return web.Response(
+            text=f"{head}[{logprobs_content}]{tail}", content_type="application/json"
+        )
+
+
+class _DebugAccessLogger(web.AbstractAccessLogger):
+    """Log each request at DEBUG on the ``aiohttp.access`` logger.
+
+    aiohttp's default logs one INFO line per request, most of the process's log lines. To see them,
+    run with ``TITAN_LOG_LEVEL=DEBUG``: aiohttp checks the level once per connection, so it must be
+    set before the server starts.
+    """
+
+    @property
+    def enabled(self) -> bool:
+        # False skips the per-request timing and formatting.
+        return self.logger.isEnabledFor(logging.DEBUG)
+
+    def log(
+        self, request: web.BaseRequest, response: web.StreamResponse, time: float
+    ) -> None:
+        self.logger.debug(
+            "%s %s %d %.3fs session=%s",
+            request.method,
+            request.path,
+            response.status,
+            time,
+            request.headers.get(_SESSION_ID_HEADER),
+        )
 
 
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
-    """Validate an untyped JSON value as integer token IDs and return a copy."""
-    if not isinstance(value, list) or any(
-        isinstance(token_id, bool) or not isinstance(token_id, int)
-        for token_id in value
-    ):
+    """Validate an untyped JSON value as integer token IDs and return it."""
+    if not isinstance(value, list) or not set(map(type, value)) <= {int}:
         raise ValueError(f"{field_name} must be a list of integer token IDs")
-    return list(value)
+    return value
 
 
 def _parse_sampling_config(value: object):
@@ -306,6 +368,8 @@ def _parse_sampling_config(value: object):
     supported = {
         "temperature",
         "top_p",
+        "top_k",
+        "min_p",
         "max_tokens",
         "seed",
         "stop_token_ids",
@@ -318,17 +382,29 @@ def _parse_sampling_config(value: object):
     unsupported = set(value) - supported - protocol_fields
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
+    # Verifiers sends top_k=-1 and min_p=0.0 on every call. Refuse values that filter: the trainer
+    # computes logprobs over the full vocabulary. TODO(mask-replay): allow them, as for top_p < 1.
+    top_k, min_p = value.get("top_k", -1), value.get("min_p", 0.0)
+    if top_k not in (-1, 0) or min_p != 0.0:
+        raise ValueError(
+            "sampling_params must not filter (top_k -1 or 0, min_p 0.0), "
+            f"got top_k={top_k!r}, min_p={min_p!r}"
+        )
 
     # The generator stops only on these ids; the renderer client always sends them.
     stop_token_ids = _validate_token_ids(
         value.get("stop_token_ids"),
         field_name="stop_token_ids",
     )
-    defaults = SamplingConfig()
+    # The rollouter always sends these. Without them the generator would silently use
+    # SamplingConfig's defaults (temperature 0.8, max_tokens 100).
+    missing = {"temperature", "top_p", "max_tokens"} - set(value)
+    if missing:
+        raise ValueError(f"sampling_params must include {sorted(missing)}")
     return SamplingConfig(
-        temperature=float(value.get("temperature", defaults.temperature)),
-        top_p=float(value.get("top_p", defaults.top_p)),
-        max_tokens=int(value.get("max_tokens", defaults.max_tokens)),
+        temperature=float(value["temperature"]),
+        top_p=float(value["top_p"]),
+        max_tokens=int(value["max_tokens"]),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
     )
