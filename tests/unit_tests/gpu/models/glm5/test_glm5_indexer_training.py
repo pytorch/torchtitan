@@ -15,7 +15,22 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.glm5 import build_model_config
+from torchtitan.models.glm5.dsa import DsaMetadata, DSAIndexerTopK
 from torchtitan.tools.utils import set_default_dtype
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA tensors")
+def test_cp1_low_precision_indexer_rejects_unsupported_device():
+    selector = DSAIndexerTopK.Config(index_topk=8).build()
+    q = torch.empty((16, 4, 16), device="cuda", dtype=torch.bfloat16)
+    k = q[:, 0].contiguous()
+    weights = q[..., 0].contiguous()
+    metadata = DsaMetadata.from_positions(torch.arange(16, device=q.device))
+    with (
+        patch("torchtitan.models.glm5.dsa.has_cuda_capability", return_value=False),
+        pytest.raises(ValueError, match="requires NVIDIA SM90"),
+    ):
+        selector(q, k, weights, metadata=metadata)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is not None,
@@ -92,7 +107,7 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
         return {name: value.detach().cpu().clone()
                 for name, value in model.state_dict().items()}
 
-    def step(model, optimizer, stage, number):
+    def step(model, optimizer, stage):
         optimizer.zero_grad(set_to_none=True)
         for module in model.modules():
             if isinstance(module, AuxLoss):
@@ -119,8 +134,8 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
     with patch.dict(AuxLoss.group_acc, clear=True), patch.dict(AuxLoss._group_counts, clear=True):
         warmup, optimizer = build("warmup", 61)
         initial = snapshot(warmup)
-        for number in (1, 2):
-            step(warmup, optimizer, "warmup", number)
+        for _ in range(2):
+            step(warmup, optimizer, "warmup")
         assert optimizer.state
         saved = snapshot(warmup)
         assert any(not torch.equal(saved[name], initial[name])
@@ -142,8 +157,8 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
         for name, value in snapshot(sparse).items():
             torch.testing.assert_close(value, saved[name], rtol=0, atol=0)
         assert not optimizer.state
-        for number in (1, 2):
-            step(sparse, optimizer, "sparse", number)
+        for _ in range(2):
+            step(sparse, optimizer, "sparse")
         assert optimizer.state
         updated = snapshot(sparse)
         for indexer in (False, True):

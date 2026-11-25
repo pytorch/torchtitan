@@ -253,6 +253,16 @@ class DSAIndexerTopK(Module):
         if cp_group is None and q_QNH.shape[0] != K:
             raise ValueError("DSA indexing requires complete query and key sequences")
 
+        low_precision_cuda = q_QNH.is_cuda and q_QNH.dtype in (
+            torch.float16, torch.bfloat16
+        )
+        if low_precision_cuda and (
+            torch.version.hip is not None
+            or not has_cuda_capability(8 if cp_group is not None else 9, 0)
+        ):
+            minimum = "SM80" if cp_group is not None else "SM90"
+            raise ValueError(f"GLM low-precision DSA indexer requires NVIDIA {minimum}+")
+
         # Keep token order within each document while moving padding to the end.
         # Fixed-capacity offsets use repeated endpoints for empty documents.
         token_order_K = (~metadata.valid_T).to(torch.int32).argsort(stable=True)
@@ -263,11 +273,7 @@ class DSAIndexerTopK(Module):
             (token_indices_K == 0) | (document_starts_K != document_starts_K.roll(1))
         )
         document_offsets_K = torch.where(starts_K, token_indices_K, 0).cummax(0).values
-        fused = (
-            q_QNH.is_cuda
-            and q_QNH.dtype in (torch.float16, torch.bfloat16)
-            and has_cuda_capability(9, 0)
-        )
+        fused = low_precision_cuda
         if cp_group is not None or not fused:
             # Local query rows retain their original order. In the packed key
             # pool, each valid row sees its document prefix through that query.
