@@ -207,7 +207,8 @@ class VLLMEngine(GenerationEngine):
 
             "auto"   the model dtype (bf16); attention runs the trainer's kernel
             "fp8"    e4m3 with scale 1; the query is quantized to e4m3 too, and attention
-                     runs FA4's fp8 forward (SM100 family only)
+                     runs FA4's fp8 forward (varlen attention on the SM100 family only;
+                     vLLM's flex backend refuses fp8)
 
         fp8 vs auto:
 
