@@ -464,10 +464,10 @@ class Glm5Model(DeepSeekV3Model):
         input_shardings = decoder_input_sharding()
         depths = (
             range(1, len(self.mtp_layers) + 1)
-            if self.mtp_layers is not None
+            if self.mtp_layers
             else range(0)
         )
-        if self.mtp_layers is not None and positions is None:
+        if self.mtp_layers and positions is None:
             raise ValueError("GLM-5 MTP input preprocessing requires positions.")
         for depth in depths:
             assert positions is not None
@@ -535,7 +535,7 @@ class Glm5Model(DeepSeekV3Model):
         has_aux_loss = next(self.config.traverse(AuxLoss.Config), None) is not None
         if has_aux_loss or self.mtp_layers:
             input_dict["aux_loss_denominators"] = global_routing_token_counts
-        if self.mtp_layers is not None:
+        if self.mtp_layers:
             inputs = (inputs, *(input_dict.pop(f"mtp_tokens_{d}") for d in depths))
             labels = (labels, *(input_dict.pop(f"mtp_labels_{d}") for d in depths))
             input_dict["mtp_input_valid_masks"] = tuple(
@@ -624,7 +624,7 @@ class Glm5Model(DeepSeekV3Model):
         pre_norm_hidden_TD = hidden_TD
         if not kl_only:
             hidden_TD = self.norm(hidden_TD) if self.norm is not None else hidden_TD
-        if self.mtp_layers is not None:
+        if self.mtp_layers:
             if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
                 raise ValueError(
                     "GLM-5 MTP requires one shifted token tensor per depth."

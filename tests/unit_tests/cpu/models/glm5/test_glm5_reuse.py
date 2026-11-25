@@ -22,16 +22,16 @@ def test_mtp_attention_boundary_accepts_omitted_keyword_indices():
         "glm5_2_debugmodel_mtp", parallelism=ParallelismConfig(), seq_len=16
     )
     attention = config.mtp_layers[0].attention.build()
-    attention._sharding_config = config.mtp_layers[0].attention.sharding_config
+    attention.init_states()
     positions = torch.arange(16)
     args = (
         torch.zeros(16, config.dim),
         DsaMetadata.from_positions(positions),
         positions,
     )
-    actual_args, actual_kwargs = attention._redistribute_inputs(args, {})
-    assert len(actual_args) == 3
-    assert not actual_kwargs
+    output = attention(*args)
+    assert output.shape == args[0].shape
+    assert torch.isfinite(output).all()
 
 
 @pytest.mark.parametrize("save", ["default", [], ["*"], ["*.inner_attention"]])

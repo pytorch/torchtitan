@@ -32,6 +32,7 @@ from torchtitan.models.common.attn_gym import (
     lightning_indexer,
     require_attn_gym,
 )
+from torchtitan.models.deepseek_v4.attention import DeepSeekV4CompressedSparseAttentionMetadata
 from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
 from torchtitan.tools.utils import set_default_dtype
 
@@ -464,12 +465,24 @@ class Glm5DsaIndexer(Module):
 class Glm5IndexerLoss(SparseIndexerLoss):
     """Use DSV4 distillation without compression or document-relative indices.
 
-    GLM passes global pool IDs and cu_seqlens=None to the shared teacher.
+    GLM indices already address a single global key pool.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(SparseIndexerLoss.Config):
         compress_ratio: int = 1
+
+    @staticmethod
+    def teacher_metadata(query, pool):
+        # Describe the index address space, not the original packed documents:
+        # the selector already excluded foreign documents and invalid keys.
+        offsets = torch.arange(2, dtype=torch.int32, device=query.device)
+        keys = offsets * pool.size(0)
+        return DeepSeekV4CompressedSparseAttentionMetadata(
+            cu_seq_q=offsets * query.size(0), cu_seq_k=keys,
+            max_q=query.size(0), max_k=pool.size(0), cu_seq_compressed=keys,
+            group_start=keys[:0], group_first=keys[:0],
+        )
 
     def warmup_objective(self, query_QHD, pool_KD, features, metadata, denominator):
         """KL-only objective using the shared teacher, normalization and metrics.
@@ -488,6 +501,7 @@ class Glm5IndexerLoss(SparseIndexerLoss):
         qi_QNH, ki_KH, weights_QN = features
         raw_sum = query_QHD.new_zeros((), dtype=torch.float32)
         keys_K = torch.arange(pool_KD.shape[0], device=pool_KD.device)
+        teacher_metadata = self.teacher_metadata(query_QHD, pool_KD)
         for start in range(0, query_QHD.shape[0], self.chunk_size):
             stop = min(start + self.chunk_size, query_QHD.shape[0])
             queries_Q = metadata.query_indices_Q[start:stop]
@@ -502,7 +516,7 @@ class Glm5IndexerLoss(SparseIndexerLoss):
                     "qhd,kd->qhk", query_QHD[start:stop].float(), pool_KD.float()
                 ) * self.softmax_scale
                 lse_QH = logits_QHK.masked_fill(~valid_QK[:, None], -torch.inf).logsumexp(-1)
-                p_QK = self._teacher(query_QHD[start:stop], pool_KD, indices_QK, lse_QH, None)
+                p_QK = self._teacher(query_QHD[start:stop], pool_KD, indices_QK, lse_QH, teacher_metadata)
                 targets_QK = p_QK / p_QK.sum(-1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
             with torch.autocast(device_type=pool_KD.device.type, enabled=False):
                 student_QNK = torch.einsum("qnh,kh->qnk", qi_QNH[start:stop].float(), ki_KH.float())
@@ -681,7 +695,7 @@ class Glm5SparseAttention(InnerAttention):
                     indices_QS,
                     scores_QS,
                     aux.lse.squeeze(0).transpose(0, 1).detach(),
-                    None,
+                    self.indexer_loss.teacher_metadata(q_THK, k_KH),
                     carrier=output_THV,
                     denominator=aux_loss_denominator,
                 )

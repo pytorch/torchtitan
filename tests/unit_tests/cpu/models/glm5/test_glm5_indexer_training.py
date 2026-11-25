@@ -377,7 +377,7 @@ def test_teacher_matches_head_averaged_dense_probabilities_without_gradients(que
         coeff=1.0, num_heads=2, softmax_scale=0.25, chunk_size=2
     ).build()
     # Global pool IDs and no document offsets are also the CP teacher contract.
-    actual = loss._teacher(q, k, indices, lse, None, padding_mask_T=padding)
+    actual = loss._teacher(q, k, indices, lse, loss.teacher_metadata(q, k), padding_mask_T=padding)
     expected = expected.gather(1, indices.clamp_min(0)).masked_fill(~valid, 0)
     torch.testing.assert_close(actual, expected)
     assert not actual.requires_grad
