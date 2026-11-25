@@ -59,7 +59,8 @@ def test_forward_matches_causal_attention(
     K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
     writes them; the reference runs on the dequantized values.
     """
-    # Both fp8 verify paths run with any FA4: the one-call path needs `query_len_in_heads`.
+    # The decode + tail path runs with any FA4 (it fakes an FA4 without the knob); the one-call
+    # path needs `query_len_in_heads`.
     if fp8_verify_call == "one_call" and not fa4_takes_query_len_in_heads():
         pytest.skip("this FA4's forward takes no query_len_in_heads")
     if fp8_verify_call == "decode_and_tail":
