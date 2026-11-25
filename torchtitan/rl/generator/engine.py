@@ -56,6 +56,8 @@ class GenerationEngine(Configurable, abc.ABC):
             ``prefetched_model_state_dict``; ``"gpu_fetch"`` does not.
         vision_processor: Preprocesses image prompts' files (`PromptImage.data`). None:
             text only; requests with images are rejected.
+        mooncake_master_address: ``host:port`` of the Mooncake Store master the
+            controller started when ``config.uses_mooncake_store``, else None.
         rank: Global rank of this process.
         generator_name: Name of the generator, for engine metrics.
         output_dir: Output directory, for engine metrics.
@@ -63,7 +65,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        @property
+        def uses_mooncake_store(self) -> bool:
+            """Whether the generators share a Mooncake Store. The controller then
+            starts its master and builds the engines with its address."""
+            return False
 
     @property
     @abc.abstractmethod

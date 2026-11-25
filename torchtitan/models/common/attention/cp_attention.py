@@ -492,7 +492,12 @@ class Ulysses(CPInnerAttention[_GlobalAttentionMetadataT, _GlobalAttentionMetada
 
 
 class UlyssesInnerAttention(Ulysses[_GlobalAttentionMetadataT]):
-    """Move CP sharding from tokens to heads while keeping metadata global."""
+    """Move CP sharding from tokens to heads while keeping metadata global.
+
+    ``n_heads`` must be divisible by TP * CP. ``n_kv_heads`` must be divisible by
+    TP * CP, or divide TP * CP and be divisible by TP. In the second case, each KV
+    head is copied before the all-to-all.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Ulysses.Config):
@@ -510,6 +515,13 @@ class UlyssesInnerAttention(Ulysses[_GlobalAttentionMetadataT]):
             raise RuntimeError(
                 "CP attention requires an active multi-rank CP mesh axis."
             )
+        num_kv_heads = k_THK.shape[_HEAD_DIM]
+        if num_kv_heads < cp_group.size():
+            # Copy each KV head to adjacent slots, so after the all-to-all each
+            # rank holds the single KV head that its GQA query heads use.
+            num_copies = cp_group.size() // num_kv_heads
+            k_THK = k_THK.repeat_interleave(num_copies, dim=_HEAD_DIM)
+            v_THV = v_THV.repeat_interleave(num_copies, dim=_HEAD_DIM)
         # Shard heads instead of tokens: (T/cp, H, *) -> (T, H/cp, *).
         q_THK, k_THK, v_THV = (
             spmd.redistribute(
