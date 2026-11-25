@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from torchtitan.rl.generator.vllm.attention.attention import (
-    _MIN_VERIFY_ROWS_ON_DECODE_KERNEL,
     TorchTitanVarlenInnerAttentionImpl,
 )
 from vllm.config import set_current_vllm_config, VllmConfig
@@ -111,9 +110,8 @@ def test_forward_matches_causal_attention(
         ) as verify_rows_as_decode,
     ):
         impl.forward(layer, query, None, None, kv_cache, metadata, output=output)
-    takes_decode_kernel = (
-        is_uniform_verify and len(query_lens) >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
-    )
+    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`).
+    takes_decode_kernel = is_uniform_verify and len(query_lens) >= 8
     assert verify_rows_as_decode.called == takes_decode_kernel
 
     for row, (num_queries, num_keys) in enumerate(zip(query_lens, seq_lens)):
