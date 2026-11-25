@@ -113,14 +113,18 @@ def _transfer(
         "_global_offset_and_local_shape",
         lambda tensor: boxes[id(tensor)],
     )
-    config = ModelStateDictTransport.Config(backend="nixl", read_timeout_s=5.0)
+    config = ModelStateDictTransport.Config(backend="nixl", min_read_bytes_per_s=1e3)
+    rank_nbytes = 0
 
     def new_transport(backend):
         assert backend == config.backend
         return _FakeTransport()
 
     async def wait_all(works, *, timeout):
-        assert timeout == config.read_timeout_s
+        assert (
+            timeout
+            == m._READ_TIMEOUT_BASE_S + rank_nbytes / config.min_read_bytes_per_s
+        )
 
     monkeypatch.setattr(m, "new_transport", new_transport)
     monkeypatch.setattr(m, "wait_all", wait_all)
@@ -153,6 +157,7 @@ def _transfer(
 
     loaded_sds = []
     for rank, sd in enumerate(generator_sds):
+        rank_nbytes = sum(t.numel() * t.element_size() for t in sd.values())
         generator = ModelStateDictTransport(config)
         generator.connect_generator(
             sd, sources=sources, rank=rank, generator_index=generator_index
