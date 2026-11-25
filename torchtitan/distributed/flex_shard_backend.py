@@ -17,6 +17,10 @@ With expert parallelism, ``fully_shard`` gives an MoE block one group per mesh,
 and the block gets one bucket per group: its routed experts on ``edp_shard``,
 the rest on ``dp_shard``. EP has already split each routed-expert parameter over
 ``ep``, and torchtitan declares that split as the parameter's outer layout.
+Likewise under tensor parallelism, each parameter is its tp rank's shard, and
+declares TP's split as its outer layout, or tp as the group its grad is partial
+over. Under context parallelism, the buckets shard over ``dp_shard`` and ``cp``
+flattened into one axis, as ``fully_shard`` does.
 
 FlexShard parameters and grads are plain local shards, with no DTensor.
 ``apply_to_decoder`` wraps each FlexShard parameter's ``param_init`` function
@@ -55,6 +59,7 @@ from functools import partial
 from importlib.util import find_spec
 from typing import Any, cast, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
@@ -64,6 +69,8 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.distributed.sharding_backend import ShardingBackend
 
 if TYPE_CHECKING:
+    from torch.distributed.fsdp import DataParallelMeshDims
+
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim import Optim
     from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
@@ -83,6 +90,7 @@ __all__ = [
     "declare_optimizer_state_layouts",
     "declare_state_dict_layouts",
     "flex_shard_bucket",
+    "flex_shard_bucket_mesh",
     "flex_shard_grad_norm",
     "flex_shard_partial_backwards",
     "flex_shard_reduce_meshes",
@@ -91,29 +99,66 @@ __all__ = [
 ]
 
 
+def flex_shard_bucket_mesh(
+    dp_mesh: DeviceMesh, dp_mesh_dims: "DataParallelMeshDims | None"
+) -> DeviceMesh:
+    """The mesh of the dense FlexShard buckets, from the dense storage mesh and
+    DP dims that ``resolve_fsdp_mesh`` returns."""
+    if dp_mesh_dims is None:
+        # One rank, where fully_shard takes the mesh as it is.
+        return dp_mesh
+    # validate_model rejects HSDP.
+    assert not dp_mesh_dims.replicate_names, dp_mesh_dims
+    shard_names = dp_mesh_dims.shard_names
+    # As fully_shard does. DeviceMesh caches a flattened mesh by name, so both
+    # backends reduce on one process group.
+    if len(shard_names) == 1:
+        return dp_mesh[shard_names[0]]
+    return dp_mesh[shard_names]._flatten("_".join(shard_names))
+
+
 def flex_shard_reduce_meshes(
     parallelism_context: "ParallelismContext",
 ) -> dict[DeviceMesh, DeviceMesh]:
     """For each mesh of FlexShard buckets whose parameters another parallelism
-    split before FlexShard sharded them, the 1D mesh to reduce their grad norm
-    over (``flex_shard_grad_norm``), as FSDP2's DTensor grad norm does. The
-    grad norms of other buckets reduce over the buckets' own mesh.
+    split before FlexShard sharded them, the mesh to reduce their grad norm over
+    (``flex_shard_grad_norm``): the mesh of FSDP2's DTensor grads for them, with
+    the buckets' ranks as its first dim, or that mesh flattened if their DTensor
+    norm reduces over it in one all-reduce. The grad norms of other buckets
+    reduce over the buckets' own mesh.
 
     FlexShard knows only each bucket's mesh, so the meshes come from
     ``parallelism_context``, resolved as ``FlexShardBackend.apply_to_decoder``
-    resolves the meshes it shards over. Under expert parallelism, EP has split
-    the routed experts over ``ep``, and their buckets are on ``edp_shard``.
+    resolves the meshes it shards over. Tensor parallelism splits the dense
+    parameters over ``tp``, and expert parallelism splits the routed experts
+    over ``ep``, whose buckets are on ``edp_shard``.
     """
-    from torchtitan.distributed.fsdp import resolve_sparse_fsdp_mesh
+    from torchtitan.distributed.fsdp import resolve_fsdp_mesh, resolve_sparse_fsdp_mesh
 
+    meshes = {}
+    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+    tp_mesh = dp_mesh["tp"] if "tp" in (dp_mesh.mesh_dim_names or ()) else None
+    if tp_mesh is not None:
+        # FSDP2 lays the dense grads out as DTensors on (bucket mesh, tp). No
+        # flattened mesh spans tp, so DTensor reduces their norm over the
+        # bucket mesh, then tp.
+        bucket_mesh = flex_shard_bucket_mesh(dp_mesh, dp_mesh_dims)
+        # TODO: Use a public DeviceMesh API once there is one. _concatenate
+        # reuses the meshes' process groups instead of creating new ones.
+        meshes[bucket_mesh] = DeviceMesh._concatenate([bucket_mesh, tp_mesh])
     edp_mesh, _ = resolve_sparse_fsdp_mesh(parallelism_context)
-    if edp_mesh is None:
-        return {}
-    # FSDP2's DTensor grad norm reduces routed-expert grads over edp_shard and
-    # ep in one all-reduce, on torchtitan's loss mesh, which spans the same
-    # ranks and which DTensor finds by layout. _flatten returns that mesh, and
-    # raises if its layout differs.
-    return {edp_mesh["edp_shard"]: edp_mesh._flatten("loss_mesh")}
+    if edp_mesh is not None:
+        # FSDP2's routed-expert grads are DTensors on edp_mesh. Without TP,
+        # torchtitan's loss mesh spans the same ranks, and DTensor finds it by
+        # layout and reduces their norm over it in one all-reduce. _flatten
+        # returns that mesh, and raises if its layout differs. With TP, no
+        # flattened mesh does, so it reduces over edp_shard, then ep. Flattening
+        # one here would make DTensor reduce differently with FSDP2 in the same
+        # process.
+        meshes[edp_mesh["edp_shard"]] = (
+            edp_mesh if tp_mesh is not None else edp_mesh._flatten("loss_mesh")
+        )
+    return meshes
 
 
 def flex_shard_grad_norm(
@@ -125,26 +170,49 @@ def flex_shard_grad_norm(
     foreach: bool | None,
 ) -> torch.Tensor:
     """The norm of the grads of FlexShard parameters ``params``, reduced over
-    the 1D ``mesh``: their buckets' mesh (``flex_shard.get_mesh``), or the mesh
+    ``mesh``: their buckets' 1D mesh (``flex_shard.get_mesh``), or the mesh
     ``flex_shard_reduce_meshes`` gives for it.
 
-    The grads are plain local shards. This reduces them in the order
-    ``get_total_norm`` does for DTensor grads sharded over ``mesh``, so the
-    result is bitwise equal: each grad's local norm, reduced over the mesh, then
-    the norm of those norms.
+    The grads are plain local shards. Like FSDP2's DTensor grads, each is
+    sharded over ``mesh``'s first dim, and over the others if
+    ``_is_outer_sharded``. This computes the norm as ``get_total_norm`` does for
+    DTensor grads with that layout, so the result is bitwise equal. Each grad's
+    local norm is partial over the dims that shard it. Stacking the norms makes
+    them partial over every dim that shards any grad: a norm replicated on such
+    a dim is divided by the dim's size ** (1 / p), so that its copies sum to it.
+    The stacked norms are reduced over each dim in turn, and their norm is taken
+    last. Taking it before the reduction isn't bitwise equal.
     """
     grads = [p.grad for p in params if p.grad is not None]
+    replicated = [not _is_outer_sharded(p) for p in params if p.grad is not None]
     # From flex_shard's examples/deepseek_v3/train.py.
     if foreach is False:
-        norms = torch.stack([torch.linalg.vector_norm(g, norm_type) for g in grads])
+        norm_list = [torch.linalg.vector_norm(g, norm_type) for g in grads]
     else:
-        norms = torch.stack(torch._foreach_norm(grads, norm_type))
-    if math.isinf(norm_type):
-        dist.all_reduce(norms, op=dist.ReduceOp.MAX, group=mesh.get_group())
-    else:
-        norms **= norm_type
-        dist.all_reduce(norms, group=mesh.get_group())
-        norms **= 1.0 / norm_type
+        norm_list = list(torch._foreach_norm(grads, norm_type))
+    # The dims that shard some grad, over which the stacked norms are partial.
+    # TODO: Use flex_shard's grad norm for its layouts once it has one. This
+    # copies DTensor's scaling of replicated norms (_NormPartial), which has to
+    # stay in step with DTensor's for the norm to stay bitwise equal.
+    dims = range(1 if all(replicated) else mesh.ndim)
+    for dim in dims[1:]:
+        # Each norm on its own, so that no mask has to be copied to the device.
+        scale = math.pow(mesh.size(dim), 1.0 / norm_type)
+        norm_list = [
+            norm / scale if is_replicated else norm
+            for norm, is_replicated in zip(norm_list, replicated, strict=True)
+        ]
+    norms = torch.stack(norm_list)
+    for dim in dims:
+        # DTensor skips dims of size 1.
+        if mesh.size(dim) == 1:
+            continue
+        if math.isinf(norm_type):
+            dist.all_reduce(norms, op=dist.ReduceOp.MAX, group=mesh.get_group(dim))
+        else:
+            norms **= norm_type
+            dist.all_reduce(norms, group=mesh.get_group(dim))
+            norms **= 1.0 / norm_type
     total_norm = torch.linalg.vector_norm(norms, norm_type)
     if error_if_nonfinite and not torch.isfinite(total_norm):
         raise RuntimeError(
@@ -154,6 +222,18 @@ def flex_shard_grad_norm(
             "`error_if_nonfinite=False`"
         )
     return total_norm
+
+
+def _is_outer_sharded(param: torch.Tensor) -> bool:
+    """Whether FlexShard parameter ``param`` is a shard of an outer sharding,
+    tensor or expert parallelism, which declared its layout before
+    ``flex_shard()``. Else its grad is the same on the ranks of each dim of the
+    mesh ``flex_shard_grad_norm`` reduces it over but the first, e.g. a norm
+    weight's under TP."""
+    # pyrefly: ignore [missing-import]
+    from flex_shard import get_outer_layout
+
+    return get_outer_layout(param) is not None
 
 
 def holds_flex_shard_params(module: nn.Module) -> bool:
@@ -502,8 +582,6 @@ class FlexShardBackend(ShardingBackend):
                     "data_parallel_replicate_degree",
                     parallelism.data_parallel_replicate_degree,
                 ),
-                ("tensor_parallel_degree", parallelism.tensor_parallel_degree),
-                ("context_parallel_degree", parallelism.context_parallel_degree),
                 ("pipeline_parallel_degree", parallelism.pipeline_parallel_degree),
             )
             if degree != 1
@@ -675,7 +753,7 @@ class FlexShardBackend(ShardingBackend):
             resolve_sparse_fsdp_mesh,
         )
 
-        dp_mesh, _ = resolve_fsdp_mesh(parallelism_context)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         edp_mesh, _ = resolve_sparse_fsdp_mesh(parallelism_context)
         embedding, norm_and_lm_head, blocks = decoder_sharding_units(
             model,
@@ -692,6 +770,7 @@ class FlexShardBackend(ShardingBackend):
             + blocks,
             param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
             reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
+            dp_mesh_dims=dp_mesh_dims,
             edp_mesh=edp_mesh if parallelism_context.ep > 1 else None,
         )
 
@@ -755,6 +834,67 @@ class FlexShardBackend(ShardingBackend):
             cast(Any, model).reshard()
 
 
+def _declare_tensor_parallelism(
+    model: nn.Module,
+    tp_mesh: DeviceMesh,
+    *,
+    routed_expert_params: set[nn.Parameter],
+) -> None:
+    """Declare to FlexShard how tensor parallelism splits each parameter of
+    ``model`` and its grad. Call before ``flex_shard()``.
+
+    ``Module._parallelize`` leaves each parameter as its tp rank's local shard,
+    with the SPMD type that FSDP2 lays it out by:
+
+    - A parameter that TP splits declares where its shard sits in the full
+      parameter, as its outer layout. flex_shard composes it with the bucket's
+      split in the layouts the wrapped ``param_init`` functions use.
+    - A parameter typed ``R`` on tp, e.g. a norm weight under sequence
+      parallelism, has a grad that's partial over tp. FSDP2 types the grad
+      ``P`` and all-reduces it over tp before its reduce-scatter. FlexShard does
+      the same for a parameter that declares tp as its partial-grad group.
+    - A parameter typed ``I`` on tp declares nothing: each tp rank computes
+      its whole grad.
+    - Any other type on tp, or none, raises. Untyped, a parameter would declare
+      itself whole, and the grad norm would count it once per tp rank.
+
+    Routed experts are skipped. MoE models need ``ep >= tp``, so the routed
+    experts are typed on the sparse mesh, and keep their EP layout.
+    """
+    # pyrefly: ignore [missing-import]
+    from flex_shard import set_partial_grad_group
+
+    # TODO: Drop once flex_shard() reads the parameters' SPMD types itself, as
+    # fully_shard(..., dp_mesh_dims=...) does. Until then torchtitan declares TP's
+    # layouts, through a flex_shard adapter that flex_shard doesn't export.
+    # pyrefly: ignore [missing-import]
+    from flex_shard.layout_adapters.spmd_types import spmd_types_to_global_layout
+
+    tp_group = tp_mesh.get_group()
+    tp_axis = spmd.MeshAxis.of(tp_group)
+    layouts = {}
+    for fqn, param in model.named_parameters():
+        if param in routed_expert_params:
+            continue
+        local_type = spmd.get_local_type(param)
+        tp_type = local_type.get(tp_axis)
+        if tp_type is spmd.R:
+            set_partial_grad_group(param, tp_group)
+        elif tp_type is spmd.V or isinstance(tp_type, spmd.Shard):
+            # Split by TP: V with its dim in the PartitionSpec, or S(dim). The
+            # adapter raises for V without a dim.
+            layouts[fqn] = spmd.SpmdType(
+                dict(local_type), spmd.get_partition_spec(param)
+            )
+        elif tp_type is not spmd.I:
+            raise ValueError(
+                "parallelism.fsdp_backend=FlexShardBackend.Config() supports only "
+                "parameters typed R, I, V or S(dim) on tp under tensor "
+                f"parallelism, but {fqn} is {tp_type}."
+            )
+    spmd_types_to_global_layout(model, layouts, tp_mesh)
+
+
 def _apply_flex_shard(
     model: "Decoder",
     *,
@@ -762,6 +902,7 @@ def _apply_flex_shard(
     units: list["ShardingUnit"],
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
+    dp_mesh_dims: "DataParallelMeshDims | None",
     edp_mesh: DeviceMesh | None,
 ) -> None:
     """Shard ``model`` with FlexShard (meta-pytorch/flex_shard), one
@@ -769,19 +910,27 @@ def _apply_flex_shard(
 
     Each bucket names the unit's modules, with its placements and reshard
     setting, and a root bucket takes the parameters left over, as
-    ``fully_shard(model)`` does. Gradients are summed over ``dp_mesh`` without
-    division, as ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets'
-    collectives then match FSDP2's byte for byte. Each sharded parameter's
-    ``param_init`` function is wrapped with flex_shard's ``init_from_full``, so
-    the shards start as one device's initialization. ``model.state_dict()``
-    declares each local shard's place in the full parameter, so DCP saves the
-    same checkpoints as for FSDP2.
+    ``fully_shard(model)`` does. ``dp_mesh`` and ``dp_mesh_dims`` are the dense
+    storage mesh and its data-parallel axes, as ``fully_shard`` gets them. The
+    buckets shard over the mesh ``fully_shard`` shards over: ``dp_shard``, or
+    under context parallelism, ``dp_shard`` and ``cp`` flattened into one axis.
+    Gradients are summed over it without division, as
+    ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets' collectives
+    then match FSDP2's byte for byte. Each sharded parameter's ``param_init``
+    function is wrapped with flex_shard's ``init_from_full``, so the shards start
+    as one device's initialization. ``model.state_dict()`` declares each local
+    shard's place in the full parameter, so DCP saves the same checkpoints as for
+    FSDP2.
+
+    Under tensor parallelism, each parameter is its tp rank's local shard, and
+    declares before ``flex_shard()`` how TP splits it and its grad (see
+    ``_declare_tensor_parallelism``).
 
     With expert parallelism, ``edp_mesh`` is the sparse mesh, with the
     ``edp_shard`` and ``ep`` axes. ``fully_shard`` splits an MoE block into one
     group per mesh, so the block gets two buckets: its routed experts on
-    ``edp_shard``, and its other parameters on ``dp_mesh``. The buckets prefetch
-    as ``apply_fsdp_to_decoder`` sets FSDP2's groups to.
+    ``edp_shard``, and its other parameters on the dense buckets' mesh. The
+    buckets prefetch as ``apply_fsdp_to_decoder`` sets FSDP2's groups to.
     """
     # flex_shard is an optional dependency, needed only for this backend.
     # pyrefly: ignore [missing-import]
@@ -800,13 +949,24 @@ def _apply_flex_shard(
     from torchtitan.models.base.module import Module
     from torchtitan.models.common.param_init import skip_param_init
 
-    # validate_model allows only dp_shard and ep.
-    assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
+    # flex_shard_reduce_meshes gives the mesh to reduce the grad norm over for
+    # the parameters of buckets that another parallelism split first.
+    bucket_mesh = flex_shard_bucket_mesh(dp_mesh, dp_mesh_dims)
+    tp_mesh = dp_mesh["tp"] if "tp" in (dp_mesh.mesh_dim_names or ()) else None
+    if tp_mesh is not None:
+        _declare_tensor_parallelism(
+            model,
+            tp_mesh,
+            routed_expert_params={
+                param
+                for unit in units
+                if unit.routed_experts is not None
+                for param in unit.routed_experts.parameters()
+            },
+        )
     expert_mesh = None
     if edp_mesh is not None:
         assert edp_mesh.mesh_dim_names == ("edp_shard", "ep"), edp_mesh.mesh_dim_names
-        # flex_shard_reduce_meshes gives the mesh to reduce these buckets' grad
-        # norm over.
         expert_mesh = edp_mesh["edp_shard"]
         # EP has split each routed-expert parameter's dim 0, the experts, over
         # ep. Declaring this rank's part makes the layouts that the wrapped
@@ -845,7 +1005,9 @@ def _apply_flex_shard(
         }
 
     def bucket(
-        patterns: list[str], reshard_after_forward: bool, mesh: DeviceMesh = dp_mesh
+        patterns: list[str],
+        reshard_after_forward: bool,
+        mesh: DeviceMesh = bucket_mesh,
     ) -> BucketSpec:
         return BucketSpec(
             patterns,
