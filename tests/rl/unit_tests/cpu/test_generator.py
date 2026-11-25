@@ -811,6 +811,58 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
         )
 
 
+# A model whose first layer uses a 128-token sliding window; the check reads only that field.
+_SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
+    first_full_attention=_MODEL_CONFIG.first_full_attention,
+    layers=[SimpleNamespace(attention=SimpleNamespace(sliding_window_size=128))],
+    max_context_length=1024,
+)
+
+
+@pytest.mark.parametrize(
+    "model, debug, match",
+    [
+        (
+            _MODEL_CONFIG,
+            DebugConfig(batch_invariant=True),
+            "batch_invariant needs kv_cache_dtype='auto'",
+        ),
+        (
+            _SLIDING_WINDOW_MODEL_CONFIG,
+            DebugConfig(),
+            r"untested with sliding-window attention, but \(layer, window\) \[\(0, 128\)\]",
+        ),
+    ],
+    ids=["batch_invariant", "sliding_window"],
+)
+def test_fp8_kv_cache_refusals(tmp_path, model, debug, match):
+    with pytest.raises(ValueError, match=match):
+        VLLMEngine.Config(kv_cache_dtype="fp8").build(
+            model=model,
+            parallelism=_PARALLELISM,
+            model_path="unused",
+            max_num_seqs=8,
+            precision=PrecisionConfig(),
+            gpu_memory_limit=0.9,
+            max_num_batched_tokens=None,
+            checkpointer=None,
+            dist_moe_runtime=None,
+            debug=debug,
+            reset_kv_cache_on_model_state_dict_load=True,
+            model_state_dict_load_mode="cpu_prefetch",
+            vision_processor=None,
+            mooncake_master_address=None,
+            rank=0,
+            generator_name="generator",
+            output_dir=str(tmp_path),
+        )
+
+
+def test_fp8_kv_cache_refuses_drafts_at_config_time():
+    with pytest.raises(ValueError, match="does not support num_speculative_tokens=3"):
+        VLLMEngine.Config(kv_cache_dtype="fp8", num_speculative_tokens=3)
+
+
 def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
@@ -891,6 +943,7 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
         ("watermark", r"use VLLMEngine\.Config\.watermark"),
+        ("kv_cache_dtype", r"use VLLMEngine\.Config\.kv_cache_dtype"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
