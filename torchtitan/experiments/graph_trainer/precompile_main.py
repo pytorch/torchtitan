@@ -114,6 +114,11 @@ def _common_setup(config):
         ep=parallelism.expert_parallel_degree,
         world_size=world_size,
         enable_sequence_parallel=parallelism.enable_sequence_parallel,
+        edp_replicate=(
+            -1
+            if parallelism.expert_data_parallel_replicate_degree is None
+            else parallelism.expert_data_parallel_replicate_degree
+        ),
     )
     parallelism_context.build_mesh()
 

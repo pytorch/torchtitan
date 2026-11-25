@@ -598,11 +598,16 @@ def apply_simple_fsdp(
     )
 
     if parallelism_context.ep_enabled and isinstance(model, Decoder):
-        edp_mesh_names = (
-            ["dp_replicate", "edp_shard"]
-            if parallelism_context.dp_replicate_enabled
-            else ["edp_shard"]
-        )
+        if parallelism_context.edp_replicate_enabled:
+            if parallelism_context.edp_shard > 1:
+                edp_mesh_names = ["edp_replicate", "edp_shard"]
+                edp_mode = "hybrid_shard"
+            else:
+                edp_mesh_names = ["edp_replicate"]
+                edp_mode = "replicate"
+        else:
+            edp_mesh_names = ["edp_shard"]
+            edp_mode = "fully_shard"
         edp_mesh = parallelism_context.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
 
@@ -615,7 +620,7 @@ def apply_simple_fsdp(
             routed_experts = moe.routed_experts
             experts_shard_dim = 0
             if (
-                edp_mesh["edp_shard"].size() * parallelism_context.ep
+                parallelism_context.edp_shard * parallelism_context.ep
                 > routed_experts.w13.group_size
             ):
                 experts_shard_dim = 1
@@ -624,7 +629,7 @@ def apply_simple_fsdp(
                 data_parallel(
                     routed_experts,
                     edp_mesh,
-                    dp_mode,
+                    edp_mode,
                     mp_policy=mp_policy,
                     shard_dim=0,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
@@ -636,7 +641,7 @@ def apply_simple_fsdp(
                 data_parallel(
                     routed_experts.w13,
                     edp_mesh,
-                    dp_mode,
+                    edp_mode,
                     mp_policy=mp_policy,
                     shard_dim=2,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
@@ -644,7 +649,7 @@ def apply_simple_fsdp(
                 data_parallel(
                     routed_experts.w2,
                     edp_mesh,
-                    dp_mode,
+                    edp_mode,
                     mp_policy=mp_policy,
                     shard_dim=1,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),

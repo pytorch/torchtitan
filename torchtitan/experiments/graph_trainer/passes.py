@@ -38,6 +38,7 @@ from collections.abc import Callable
 import torch
 
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     MOE_BLOCK_FQN,
@@ -229,9 +230,28 @@ def compile_time_passes(
         cp_degree = getattr(config.parallelism, "context_parallel_degree", 1)
         tp_degree = getattr(config.parallelism, "tensor_parallel_degree", 1)
         ep_degree = max(1, getattr(config.parallelism, "expert_parallel_degree", 1))
-        edp_shard_degree = max(
-            1, (max(1, dp_shard_degree) * cp_degree * tp_degree) // ep_degree
-        )
+        if ep_degree == 1:
+            edp_shard_degree = 1
+        else:
+            raw_edp_replicate = getattr(
+                config.parallelism, "expert_data_parallel_replicate_degree", None
+            )
+            edp_replicate_degree = (
+                dp_replicate_degree
+                if raw_edp_replicate is None
+                else raw_edp_replicate
+            )
+            edp_shard_degree = max(
+                1,
+                ParallelismContext.compute_edp_shard(
+                    dp_replicate=dp_replicate_degree,
+                    dp_shard=max(1, dp_shard_degree),
+                    cp=cp_degree,
+                    tp=tp_degree,
+                    ep=ep_degree,
+                    edp_replicate=edp_replicate_degree,
+                ),
+            )
     module_bucket_plans = get_default_transformer_block_buckets(
         n_layers,
         num_mtp_layers=num_mtp_layers,
@@ -305,10 +325,10 @@ def compile_time_passes(
                 )
 
             sparse_hsdp_mesh = parallelism_context.get_optional_mesh(
-                ["dp_replicate", "edp_shard"]
+                ["edp_replicate", "edp_shard"]
             )
             if sparse_hsdp_mesh is not None:
-                sparse_replicate_mesh = sparse_hsdp_mesh["dp_replicate"]
+                sparse_replicate_mesh = sparse_hsdp_mesh["edp_replicate"]
                 sparse_shard_mesh = sparse_hsdp_mesh["edp_shard"]
                 hsdp_process_group_pairs.append(
                     (

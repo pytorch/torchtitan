@@ -15,7 +15,8 @@ training. Axis names live in `MeshAxisName`. Degrees come from
 | `cp` | `context_parallel_degree` | Context (sequence) parallel |
 | `tp` | `tensor_parallel_degree` | Tensor parallel |
 | `ep` | `expert_parallel_degree` | Expert parallel on the sparse mesh |
-| `edp_shard` | derived: `dp_shard * cp * tp // ep` | FSDP inside the EP region |
+| `edp_replicate` | `expert_data_parallel_replicate_degree` (default: `dp_replicate`) | HSDP replicate for routed experts |
+| `edp_shard` | derived: `K * dp_shard * cp * tp // ep`, `K = dp_replicate // edp_replicate` | FSDP inside the EP region |
 
 `data_parallel_shard_degree=-1` fills leftover ranks after the other dense
 degrees: `world_size // (dp_replicate * cp * tp * pp)`.
@@ -41,16 +42,17 @@ fastest):
 |------|------|---------|
 | Dense storage | `pp, dp_replicate, dp_shard, cp, tp` | config degrees |
 | Dense fwd/bwd | `pp, dp, cp, tp` | `dp = dp_replicate * dp_shard` |
-| Sparse | `pp, dp_replicate, edp_shard, ep` | `edp_shard = dp_shard * cp * tp // ep` |
+| Sparse | `pp, edp_replicate, edp_shard, ep` | `edp_shard = K * dp_shard * cp * tp // ep` |
 
-`pp` and `dp_replicate` stay outer on every view. The inner dense region
+`pp` stays outer on every view. By default `edp_replicate == dp_replicate`
+(`K = 1`), so the replicate axis is outer too and the inner dense region
 `dp_shard * cp * tp` is the pool EP borrows from:
 
 ```text
 ep must divide (dp_shard * cp * tp)
 ```
 
-Equivalently `dp_shard * cp * tp == edp_shard * ep`. Dense modules (attention,
+Equivalently `dp_shard * cp * tp == edp_shard * ep` when `K = 1`. Dense modules (attention,
 shared experts, embeddings) stay on the dense mesh. Routed experts use the
 sparse mesh: expert weights `Shard(0)` on `ep`, leftover FSDP on `edp_shard`.
 Placements are in [MoE sharding](../models/common/moe/SHARDING.md).
@@ -102,6 +104,33 @@ On a Transformer block those views mean:
 
 Same eight GPUs in every case. Raising EP does not grow `world_size`.
 
+## Fewer expert replicas than dense replicas
+
+In a large MoE, one copy of the dense parameters may fit inside one scale-up
+domain while one copy of the routed experts needs several. Setting
+`expert_data_parallel_replicate_degree` below `data_parallel_replicate_degree`
+lets `K = dp_replicate // edp_replicate` consecutive dense replicas share one
+copy of the routed experts. EP groups stay inside one dense replica, as with
+`K = 1`; only expert FSDP (`edp_shard`) grows by `K` and spans those replicas.
+
+Take `dp_replicate=4`, `dp_shard=4`, `ep=4`, `edp_replicate=2` (`cp = tp = pp
+= 1`, 16 ranks). Then `K = 2` and `edp_shard = 2 * 4 // 4 = 2`:
+
+```text
+ranks         0  1  2  3 | 4  5  6  7 | 8  9 10 11 |12 13 14 15
+dense         replica 0  | replica 1  | replica 2  | replica 3     dp_shard=4 inside each
+EP groups     ep 0..3    | ep 0..3    | ep 0..3    | ep 0..3       one EP group per dense replica
+expert copy   copy 0 (ranks 0-7)      | copy 1 (ranks 8-15)        edp_shard pairs: (0,4) (1,5) ...
+```
+
+Rank 0 reduce-scatters dense gradients over `(0, 1, 2, 3)` and all-reduces
+them over `(0, 4, 8, 12)`. It reduce-scatters routed-expert gradients over
+`(0, 4)` and all-reduces them over `(0, 8)`. Every rank still processes
+different data, and each expert gradient is still summed over the same set of
+ranks as with `K = 1`; only the split between reduce-scatter and all-reduce
+changes. With `ep = 1`, routed experts use the dense FSDP mesh, so
+`edp_replicate` must equal `dp_replicate`.
+
 ## Saving the layout
 
 Set `config.parallelism.save_parallelism_folder = "parallelism"` in the recipe
@@ -116,7 +145,7 @@ fields and no collective is involved. For example, rank 5 with `pp=2`,
   "local_rank": 1,
   "global_rank": 5,
   "world_size": 8,
-  "degrees": {"pp": 2, "dp_replicate": 1, "dp_shard": 2, "cp": 2, "tp": 1, "ep": 2},
+  "degrees": {"pp": 2, "dp_replicate": 1, "dp_shard": 2, "cp": 2, "tp": 1, "ep": 2, "edp_replicate": 1},
   "meshes": {
     "loss": {"axis_names": ["loss_mesh"], "mesh": [4, 5, 6, 7]},
     "dense": {
