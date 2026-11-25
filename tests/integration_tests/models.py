@@ -13,13 +13,14 @@ training process, so it must stay importable from this module.
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.optim import AdamW, OptimizersContainer
-from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
     ActivationRematConfig,
     DefaultActivationRematConfig,
 )
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     MLAAttention,
@@ -91,7 +92,7 @@ def llama3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
 
 def llama3_debugmodel_fsdp2_tp2_cp2_flex_shard() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_cp2()
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     return config
 
 
@@ -175,7 +176,7 @@ def deepseek_v3_debugmodel_fsdp8_ep8() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fsdp8_ep8_flex_shard() -> Trainer.Config:
     config = deepseek_v3_debugmodel_fsdp8_ep8()
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     return config
 
 
@@ -193,7 +194,7 @@ def deepseek_v3_debugmodel_dist_muon_fsdp4_ep2() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_dist_muon_fsdp4_ep2_flex_shard() -> Trainer.Config:
     config = deepseek_v3_debugmodel_dist_muon_fsdp4_ep2()
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     return config
 
 
@@ -221,7 +222,7 @@ def deepseek_v3_debugmodel_fsdp2_tp2_cp2_ep8() -> Trainer.Config:
 
 def deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4_flex_shard() -> Trainer.Config:
     config = deepseek_v3_debugmodel_fsdp2_cp2_pp2_ep4()
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     return config
 
 

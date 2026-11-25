@@ -402,7 +402,7 @@ class VLLMMLAAttention(MLAAttention):
                 f"(num_linears={config.wkv_b.num_linears}, bias={config.wkv_b.bias}). "
                 "MXFP8/NVFP4 quantization and LoRA on wkv_b are not supported "
                 "on this path yet; exclude wkv_b from the quantization "
-                "converter's FQNs."
+                "transform's FQNs."
             )
         self.wkv_b = config.wkv_b.build()
         self.inner_attention = config.inner_attention.build(kv_b_proj=self.wkv_b)

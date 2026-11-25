@@ -19,10 +19,7 @@ from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.model import FlopsEstimator
 from torchtitan.models.base.module import Module, ModuleList
-from torchtitan.models.common.attention import (
-    AttentionMetadataMap,
-    VarlenAttentionMetadata,
-)
+from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
@@ -31,7 +28,10 @@ from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import DeepSeekV4Attention
+    from .attention import (
+        DeepSeekV4Attention,
+        DeepSeekV4CompressedSparseAttentionMetadata,
+    )
     from .mtp import MTPBlock
 
 
@@ -62,7 +62,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self,
         x: torch.Tensor,
         input_ids_T: torch.Tensor | None,
-        attention_metadata: VarlenAttentionMetadata | None,
+        attention_metadata: "DeepSeekV4CompressedSparseAttentionMetadata | None",
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -150,6 +150,9 @@ class DeepSeekV4Model(Decoder):
         register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
         register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)
 
+    def _remat_block_container_fqns(self) -> list[str]:
+        return [*super()._remat_block_container_fqns(), "mtp_layers"]
+
     def _apply_fsdp(
         self,
         *,
@@ -159,7 +162,7 @@ class DeepSeekV4Model(Decoder):
     ) -> None:
         # TODO: Delete this FSDP2-only copy of Decoder._apply_fsdp once DeepSeek
         # V4 is checked against FSDP2 with FlexShard. Until then, it makes
-        # validate_flex_shard_training, which rejects models that override
+        # FlexShardBackend.validate_model, which rejects models that override
         # Decoder._apply_fsdp, reject DeepSeek V4.
         from torchtitan.distributed.fsdp import (
             apply_fsdp_to_decoder,
@@ -171,7 +174,7 @@ class DeepSeekV4Model(Decoder):
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         apply_fsdp_to_decoder(
             self,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
             reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
@@ -297,6 +300,8 @@ class DeepSeekV4Model(Decoder):
         On a later PP stage, ``tokens`` is the previous stage's ``[T, M, D]``
         hidden state and ``input_ids_T`` carries the token IDs.
         """
+        if attention_metadata is None:
+            raise ValueError("DeepSeek V4 requires attention metadata.")
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
             raise ValueError("DeepSeek V4 MTP forward requires token embeddings.")
         if len(self.mtp_layers) > 0 and self._skip_lm_head:
