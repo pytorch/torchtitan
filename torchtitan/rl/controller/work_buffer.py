@@ -182,8 +182,8 @@ class RolloutGroupWorkBuffer(Configurable):
 
         Example:
             # window_size=3: g0 CLAIMED, g1 WAITING, g2 and g3 FINALIZED
-            group = await buffer.take_finalized()
-            assert group.group_id == 2  # g2 is inside [g0, g2].
+            summary = await buffer.take_finalized()
+            assert summary.group.group_id == 2  # g2 is inside [g0, g2].
             # g3 remains blocked. With window_size=None, g3 would be taken next.
         """
         async with self._condition:
