@@ -25,11 +25,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize(
-    "kv_cache_dtype, fp8_verify_call",
-    [("auto", None), ("fp8", "one_call"), ("fp8", "decode_and_tail")],
-    ids=["auto", "fp8-one-call", "fp8-decode-and-tail"],
-)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("max_seq_len", [131072, 262144])
 @pytest.mark.parametrize(
     "query_lens, seq_lens, is_uniform_verify",
@@ -44,13 +40,7 @@ pytestmark = pytest.mark.skipif(
     ids=["verify", "few_rows", "mixed"],
 )
 def test_forward_matches_causal_attention(
-    query_lens,
-    seq_lens,
-    is_uniform_verify,
-    max_seq_len,
-    kv_cache_dtype,
-    fp8_verify_call,
-    monkeypatch,
+    query_lens, seq_lens, is_uniform_verify, max_seq_len, kv_cache_dtype
 ):
     """Each query token attends causally to its row's keys, through the impl's dispatch.
 
@@ -58,16 +48,12 @@ def test_forward_matches_causal_attention(
     K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
     writes them; the reference runs on the dequantized values.
     """
-    # The decode + tail path runs with any FA4 (it fakes an FA4 without the knob); the one-call
-    # path needs `query_len_in_heads`.
-    if fp8_verify_call == "one_call" and not fa4_takes_query_len_in_heads():
-        pytest.skip("this FA4's forward takes no query_len_in_heads")
-    if fp8_verify_call == "decode_and_tail":
-        monkeypatch.setattr(
-            vllm_attention, "fa4_takes_query_len_in_heads", lambda: False
+    is_one_call = kv_cache_dtype == "fp8" and is_uniform_verify
+    if is_one_call and not fa4_takes_query_len_in_heads():
+        pytest.skip(
+            "fp8 verify rows need an FA4 whose forward takes query_len_in_heads"
         )
-    is_one_call = fp8_verify_call == "one_call" and is_uniform_verify
-    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`) for the decode + tail path.
+    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`) for bf16 rows.
     takes_decode_kernel = is_uniform_verify and (is_one_call or len(query_lens) >= 8)
 
     torch.manual_seed(0)

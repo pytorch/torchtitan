@@ -313,11 +313,9 @@ class VLLMEngine(GenerationEngine):
         ):
             import flash_attn.cute
 
-            # Without query_len_in_heads, fp8 verify rows would take the decode + fp32-tail
-            # path of `_verify_rows_as_decode`, which no engine run has measured with drafts.
+            # fp8 verify rows run as one FA4 call with query_len_in_heads (`_verify_rows_as_decode`).
             # TODO: once a released FA4 takes query_len_in_heads (Dao-AILab/flash-attention#3217),
-            # raise the FA4 floor and drop this check. DiffKV layers (V head dim != K's) take
-            # the tail path already.
+            # raise the FA4 floor pin and drop this check.
             raise RuntimeError(
                 f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
                 "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "
