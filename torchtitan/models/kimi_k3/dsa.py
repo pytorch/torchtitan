@@ -292,19 +292,28 @@ class KimiDSAAttention(KimiMLAAttention):
                     f"{aux_loss.softmax_scale} and {aux_loss.num_heads}."
                 )
 
-        def flops_per_token(self, seq_len: int) -> int:
-            from torchtitan.models.common.flops import (
-                quadratic_attention_flops_per_token,
-            )
+        def flops(self, positions: torch.Tensor) -> int:
+            from torchtitan.models.common.flops import quadratic_attention_flops
 
-            attention_flops = quadratic_attention_flops_per_token(
+            # A causal query at document position p has p + 1 keys. The indexer
+            # scores all of them; attention reads only the top-k.
+            num_keys = positions + 1
+            attention_flops = quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
-                seq_len=min(seq_len, self.inner_attention.inner_indexer.topk),
+                num_keys=num_keys.clamp(max=self.inner_attention.inner_indexer.topk),
             )
+
+            # TODO: the indexer scores all keys without grad, then recomputes only the
+            # top-k with grad for the indexer loss. Counting only that cuts Kimi K3.1
+            # Pro's estimate by 0.8% at 32k and 21.7% at 1M (one document).
+            # DeepSeek-V4's indexer needs the same fix.
             indexer_flops = (
-                6 * self.indexer.num_index_heads * self.indexer.index_head_dim * seq_len
+                6
+                * self.indexer.num_index_heads
+                * self.indexer.index_head_dim
+                * int(num_keys.sum())
             )
             return attention_flops + indexer_flops
 
