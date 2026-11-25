@@ -14,7 +14,10 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from torchtitan.rl.generator.vllm import cpu_kv_offload, simple_cpu_offload
+from torchtitan.rl.generator.vllm import (
+    kv_offload_scheduler,
+    simple_cpu_offload_connector,
+)
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.sampling_params import SamplingParams
@@ -44,15 +47,19 @@ def test_cpu_store_waits_for_tp_workers_but_not_other_dp_replicas():
 
     with (
         patch.object(
-            simple_cpu_offload.VllmSimpleCPUOffloadConnector, "__init__", new=init
+            simple_cpu_offload_connector.VllmSimpleCPUOffloadConnector,
+            "__init__",
+            new=init,
         ),
         patch.object(
-            simple_cpu_offload,
+            simple_cpu_offload_connector,
             "get_tp_group",
             return_value=SimpleNamespace(world_size=2),
         ),
     ):
-        connector = simple_cpu_offload.SimpleCPUOffloadConnector(Mock(), Mock(), Mock())
+        connector = simple_cpu_offload_connector.SimpleCPUOffloadConnector(
+            Mock(), Mock(), Mock()
+        )
     aggregator = KVOutputAggregator(2)
     for step in range(3):
         outputs = [
@@ -82,8 +89,8 @@ def test_cpu_receive_cleanup_preserves_lru_order_across_local_ids():
         pool._insert_block_hash(
             block.block_id.to_bytes(8, "little"), block, num_tokens=16
         )
-    scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
-        cpu_kv_offload.KVOffloadScheduler
+    scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
+        kv_offload_scheduler.KVOffloadScheduler
     )
     scheduler.requests = {
         local_id: SimpleNamespace(
@@ -123,7 +130,7 @@ def _coordinate_worker(rank, rendezvous):
         cpu_group=dist.group.WORLD,
     )
     try:
-        with (patch.object(cpu_kv_offload, "get_tp_group", return_value=group),):
+        with (patch.object(kv_offload_scheduler, "get_tp_group", return_value=group),):
             # One shared work flag covers requests, pending KV and queued outputs.
             # A locally idle rank must keep stepping until every rank has drained.
             engine = VLLMEngine.__new__(VLLMEngine)
@@ -174,8 +181,8 @@ def _coordinate_worker(rank, rendezvous):
             store_scheduler._process_store_event = Mock(
                 side_effect=lambda event: pool.free_blocks(blocks)
             )
-            scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
-                cpu_kv_offload.KVOffloadScheduler
+            scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
+                kv_offload_scheduler.KVOffloadScheduler
             )
             scheduler._kv_output_aggregator = KVOutputAggregator(2)
             local_ids = {
@@ -201,7 +208,7 @@ def _coordinate_worker(rank, rendezvous):
                 return {}
 
             with patch.object(
-                cpu_kv_offload.Scheduler, "update_from_output", new=apply_output
+                kv_offload_scheduler.Scheduler, "update_from_output", new=apply_output
             ):
                 for step in range(3):
                     report = rank == 0 and step == 0 or rank == 1 and step == 2
@@ -285,10 +292,10 @@ def test_scheduler_uses_resolved_async_setting(async_scheduling):
         scheduler_config=SimpleNamespace(async_scheduling=async_scheduling)
     )
     with (
-        patch.object(cpu_kv_offload, "KVOffloadScheduler") as sync,
-        patch.object(cpu_kv_offload, "AsyncKVOffloadScheduler") as async_,
+        patch.object(kv_offload_scheduler, "KVOffloadScheduler") as sync,
+        patch.object(kv_offload_scheduler, "AsyncKVOffloadScheduler") as async_,
     ):
-        result = cpu_kv_offload.create_kv_offload_scheduler(config)
+        result = kv_offload_scheduler.create_kv_offload_scheduler(config)
         selected, other = (async_, sync) if async_scheduling else (sync, async_)
         assert result is selected.return_value
         selected.assert_called_once_with(config)
@@ -299,8 +306,8 @@ def test_scheduler_uses_resolved_async_setting(async_scheduling):
 def test_priority_ties_use_shared_request_ids_across_waiting_queues(suffix):
     # Native vLLM orders these IDs differently depending on the random suffix.
     # Every TP scheduler must select the same shared request.
-    scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
-        cpu_kv_offload.KVOffloadScheduler
+    scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
+        kv_offload_scheduler.KVOffloadScheduler
     )
     scheduler.policy = SchedulingPolicy.PRIORITY
     scheduler.shared_to_local_request_ids = {}
@@ -308,8 +315,8 @@ def test_priority_ties_use_shared_request_ids_across_waiting_queues(suffix):
     scheduler.connector = None
     scheduler.log_stats = False
     scheduler.spec_decode_metrics_level = "none"
-    scheduler.waiting = cpu_kv_offload._SharedIDRequestQueue()
-    scheduler.skipped_waiting = cpu_kv_offload._SharedIDRequestQueue()
+    scheduler.waiting = kv_offload_scheduler._SharedIDRequestQueue()
+    scheduler.skipped_waiting = kv_offload_scheduler._SharedIDRequestQueue()
     requests = []
     for shared_request_id in ("request-5", "request"):
         request = Request(
@@ -349,8 +356,8 @@ def test_priority_ties_use_shared_request_ids_across_waiting_queues(suffix):
 def test_terminal_cleanup_preserves_block_identity(late_receive, finished_status):
     # Use real queues and KV allocation/freeing without constructing a GPU worker.
     # Per-process string hash order must not change a later invalid block's owner.
-    scheduler = cpu_kv_offload.KVOffloadScheduler.__new__(
-        cpu_kv_offload.KVOffloadScheduler
+    scheduler = kv_offload_scheduler.KVOffloadScheduler.__new__(
+        kv_offload_scheduler.KVOffloadScheduler
     )
     scheduler.connector = None
     scheduler.ec_connector = None

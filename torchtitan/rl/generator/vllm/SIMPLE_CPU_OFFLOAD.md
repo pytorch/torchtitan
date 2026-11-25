@@ -22,22 +22,24 @@ headroom for DeepEP buffers and CUDA graph pools.
 ## Generator configuration
 
 ```python
-from vllm.config import KVTransferConfig
-
+from torchtitan.rl.generator.vllm.config import SimpleCPUKVOffloadConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 
 engine = VLLMEngine.Config(
-    kv_transfer_config=KVTransferConfig(
-        kv_connector="SimpleCPUOffloadConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
-    ),
+    kv_offload=SimpleCPUKVOffloadConfig(cpu_bytes_per_rank=1 << 30),
 )
 ```
 
 Capacity is **per GPU worker**: TP=2 uses 2 GiB here. Leave room for weight
-buffers and other host processes. Prefix caching is required. Default eager
-offload saves eligible prompt and decode blocks, including single-turn requests.
+buffers and other host processes. Prefix caching is required.
+
+## What is saved, evicted and reloaded
+
+| Step | Policy |
+| --- | --- |
+| GPU -> CPU | Default (eager): every full prompt and decode block, as it is computed, including single-turn requests. `lazy_offload=True`: only cached blocks near the head of the GPU free queue (LRU order), enough to keep about twice a step's token budget evictable. |
+| CPU -> discard | LRU over the CPU block pool. With the session holder, a [session release](#session-release) moves the session's unused blocks to the front, to be evicted next. |
+| CPU -> GPU | On demand, no prefetch: when a request's prefix lookup hits CPU at scheduling, the request waits while its blocks load. |
 
 ## Weight and cache lifecycle
 
@@ -83,8 +85,8 @@ CPU KV.
 ## Multi-GPU coordination
 
 Each TP scheduler queries its local CPU cache. The
-[SimpleCPU adapter](simple_cpu_offload.py) scopes save completion to its TP group;
-the [shared scheduler](cpu_kv_offload.py) coordinates request order and completion:
+[SimpleCPU adapter](simple_cpu_offload_connector.py) scopes save completion to its TP group;
+the [shared scheduler](kv_offload_scheduler.py) coordinates request order and completion:
 
 ```text
 Local lookup -> allocate GPU blocks -> each worker loads its KV shard
@@ -107,6 +109,5 @@ Tests cover CPU restoration, session release, policy isolation, hot swap,
 TP/DP/EP, and hybrid tails, all without CUDA graphs. The RL multi-GPU CI job
 runs TP=2/DP=2/EP=4 and hybrid TP=2 cases. FULL CUDA graphs were benchmarked
 on Qwen3-8B at TP=2 and TP=4 (identical tokens and logprobs between CPU reload
-and GPU prefix reuse) but are not covered by CI. `MultiConnector`, custom
-connectors, and standalone `generate.py` are unsupported. Disk offload remains
-unvalidated.
+and GPU prefix reuse) but are not covered by CI. `MultiConnector` and custom
+connectors are unsupported. Disk offload remains unvalidated.

@@ -27,7 +27,6 @@ def _free_port():
 def _generator_worker(
     device_id,
     port,
-    connector_args,
     hold_sessions,
     block_size,
     commands,
@@ -59,12 +58,15 @@ def _generator_worker(
             from torchtitan.models.qwen3_5 import build_model_config
         from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
         from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-        from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+        from torchtitan.rl.generator.vllm.config import (
+            SimpleCPUKVOffloadConfig,
+            VLLMCudaGraphConfig,
+        )
         from torchtitan.rl.generator.vllm.engine import VLLMEngine
         from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
         from torchtitan.rl.generator.vllm.worker import TorchTitanGPUModelRunner
+        from torchtitan.rl.rollout.types import Prompt
         from torchtitan.tools.utils import has_cuda_capability
-        from vllm.config import KVTransferConfig
         from vllm.distributed import cleanup_dist_env_and_memory, get_tp_group
 
         torch.cuda.set_device(rank)
@@ -82,7 +84,7 @@ def _generator_worker(
         model.local_compile.regions = []
         engine = VLLMEngine.Config(
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-            kv_transfer_config=KVTransferConfig(**connector_args),
+            kv_offload=SimpleCPUKVOffloadConfig(cpu_bytes_per_rank=1 << 30),
             session_kv_holder=(VLLMSessionKVHolder.Config() if hold_sessions else None),
             # Pre-SM90 engines already select 256-token blocks. Exercise that
             # granularity on newer GPUs too, without overriding an owned arg.
@@ -195,7 +197,7 @@ def _generator_worker(
                 assert engine._engine.reset_prefix_cache(reset_connector=False)
             request = EngineRequest(
                 request_id=request_id,
-                prompt_token_ids=prompt,
+                prompt=Prompt(token_ids=prompt),
                 # Leave room for the uncomputed final token and async scheduling
                 # lag beyond a complete block, so reuse proves decode offloading.
                 sampling=SamplingConfig(
@@ -284,11 +286,9 @@ def _generator_worker(
 
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize(
-    "connector, roles, save_decode_cache, hold_sessions, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
+    "save_decode_cache, hold_sessions, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
     [
         pytest.param(
-            "SimpleCPUOffloadConnector",
-            ("kv_both", "kv_both"),
             True,
             False,
             256,
@@ -300,8 +300,6 @@ def _generator_worker(
             id="cpu-hybrid-tail",
         ),
         pytest.param(
-            "SimpleCPUOffloadConnector",
-            ("kv_both", "kv_both"),
             True,
             True,
             256,
@@ -313,8 +311,6 @@ def _generator_worker(
             id="cpu-tp2-session",
         ),
         pytest.param(
-            "SimpleCPUOffloadConnector",
-            ("kv_both", "kv_both"),
             True,
             False,
             256,
@@ -326,8 +322,6 @@ def _generator_worker(
             id="cpu-hybrid-tail-tp2",
         ),
         pytest.param(
-            "SimpleCPUOffloadConnector",
-            ("kv_both", "kv_both"),
             True,
             False,
             None,
@@ -343,8 +337,6 @@ def _generator_worker(
 def test_cpu_kv_and_weight_version_isolation(
     tmp_path,
     monkeypatch,
-    connector,
-    roles,
     save_decode_cache,
     hold_sessions,
     block_size,
@@ -371,12 +363,6 @@ def test_cpu_kv_and_weight_version_isolation(
         queues = []
         block_sizes = []
         for gpu in range(2):
-            extra = {"cpu_bytes_to_use_per_rank": 1 << 30}
-            connector_args = {
-                "kv_connector": connector,
-                "kv_role": roles[gpu],
-                "kv_connector_extra_config": extra,
-            }
             rank_queues = []
             instance_port = _free_port()
             for rank in range(world_size):
@@ -386,7 +372,6 @@ def test_cpu_kv_and_weight_version_isolation(
                     args=(
                         ",".join(device_ids[gpu * world_size : (gpu + 1) * world_size]),
                         instance_port,
-                        connector_args,
                         hold_sessions,
                         block_size,
                         commands,
@@ -522,7 +507,7 @@ def test_cpu_kv_and_weight_version_isolation(
         )
         assert reused[2] >= cached_prompt_tokens
         print(
-            f"{connector} cached tokens: cold={first[2]}, shared={shared[2]}, "
+            f"SimpleCPU cached tokens: cold={first[2]}, shared={shared[2]}, "
             f"next_turn={continued[2]}, new_policy={updated[2]}, old_policy={old[2]}"
         )
         if dp > 1:
@@ -542,9 +527,7 @@ def test_cpu_kv_and_weight_version_isolation(
             before = sum(item[0] for item in released)
             after = sum(item[1] for item in released)
             assert before > 0
-            print(
-                f"Session release: {connector}, cached before={before}, after={after}"
-            )
+            print(f"Session release: SimpleCPU, cached before={before}, after={after}")
         for rank_queues in queues:
             for commands, _ in rank_queues:
                 commands.put(None)

@@ -384,6 +384,11 @@ class EngineLoop:
                 # new requests and avoid a prefill in between every engine decode step, which is inefficient.
                 with sl.log_trace_span("vllm_engine_step_burst"):
                     for _ in range(self._max_engine_steps_between_decisions):
+                        # After a full burst this is the value from before the last step.
+                        # If that step finished all work, rank 0 decides once more without
+                        # waiting and broadcasts an empty STEP, whose first check breaks.
+                        # Cheaper than rechecking after every full burst, a collective on
+                        # the busy path with multi-rank KV offload.
                         has_unfinished_requests = self._engine.has_unfinished_requests()
                         if not has_unfinished_requests:
                             break

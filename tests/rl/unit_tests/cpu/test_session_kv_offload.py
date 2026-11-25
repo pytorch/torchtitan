@@ -9,7 +9,9 @@
 from types import SimpleNamespace
 
 import pytest
-from torchtitan.rl.generator.vllm.simple_cpu_offload import SimpleCPUOffloadConnector
+from torchtitan.rl.generator.vllm.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 

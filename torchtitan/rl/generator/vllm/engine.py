@@ -11,13 +11,13 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 import torch.distributed as dist
 from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.config import AttentionConfig
 from vllm.distributed import get_world_group
 from vllm.exceptions import VLLMClientError
 from vllm.inputs import EngineInput
@@ -45,7 +45,10 @@ from torchtitan.rl.generator.types import (
 from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.config import (
+    SimpleCPUKVOffloadConfig,
+    VLLMCudaGraphConfig,
+)
 from torchtitan.rl.generator.vllm.multimodal_wrapper import (
     image_prompt_to_engine_input,
     keep_prefix_cached_image_data,
@@ -82,7 +85,7 @@ def add_extra_vllm_engine_args(
     config_field_by_engine_arg = {
         "max_num_batched_tokens": "Generator.Config.max_num_batched_tokens",
         "compilation_config": "VLLMEngine.Config.cuda_graph",
-        "kv_transfer_config": "VLLMEngine.Config.kv_transfer_config",
+        "kv_transfer_config": "VLLMEngine.Config.kv_offload",
         "seed": "Generator.Config.debug.seed",
         "watermark": "VLLMEngine.Config.watermark",
     }
@@ -168,9 +171,8 @@ class VLLMEngine(GenerationEngine):
             no request running: admitted at any watermark
         """
 
-        kv_transfer_config: KVTransferConfig | None = None
-        """Native vLLM KV offload configuration. None: no connector. See
-        ``SIMPLE_CPU_OFFLOAD.md``."""
+        kv_offload: SimpleCPUKVOffloadConfig | None = None
+        """Offload GPU prefix KV to CPU DRAM. None: no offload."""
 
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
@@ -188,31 +190,10 @@ class VLLMEngine(GenerationEngine):
         release hints when sessions end. None disables both session behaviors."""
 
         def __post_init__(self):
-            if self.kv_transfer_config is None:
-                return
-            # TODO(acisseJZhong): support prefill/decode disaggregation connectors
-            # if needed, and MultiConnector to combine them with KV offload.
-            if self.kv_transfer_config.kv_connector != "SimpleCPUOffloadConnector":
-                raise ValueError(
-                    "Titan RL supports SimpleCPUOffloadConnector; "
-                    "MultiConnector and other KV connectors are not supported."
-                )
-            if self.kv_transfer_config.kv_role != "kv_both":
-                raise ValueError(
-                    "SimpleCPUOffloadConnector requires kv_role='kv_both': "
-                    "it both saves and loads KV, so vLLM must enable "
-                    "producer finalization and consumer block-lifetime protection."
-                )
-            if self.kv_transfer_config.kv_connector_module_path not in (
-                None,
-                "vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector",
+            if (
+                self.kv_offload is not None
+                and self.extra_engine_args.get("enable_prefix_caching") is False
             ):
-                raise ValueError(
-                    "KV offload requires vLLM's built-in connector in "
-                    "user config. Titan installs its lifecycle adapter automatically; "
-                    "user-provided custom kv_connector_module_path values are not supported."
-                )
-            if self.extra_engine_args.get("enable_prefix_caching") is False:
                 raise ValueError(
                     "SimpleCPUOffloadConnector requires prefix caching: it saves and "
                     "loads KV blocks by their prefix hashes."
@@ -242,14 +223,14 @@ class VLLMEngine(GenerationEngine):
     ):
         # TODO(acisseJZhong): use it once vLLM's Mooncake Store connector lands.
         del mooncake_master_address
-        self._uses_kv_offload = config.kv_transfer_config is not None
+        self._uses_kv_offload = config.kv_offload is not None
         # Multi-rank offload: TP ranks' schedulers must agree (KVOffloadScheduler,
         # a no-op for TP=1), and all ranks keep stepping while any rank has KV work
         # (has_unfinished_requests, DP dummy forwards in step).
         self._coordinate_kv_offload = self._uses_kv_offload and (
             parallelism.tensor_parallel_degree * parallelism.data_parallel_degree > 1
         )
-        if config.kv_transfer_config is not None:
+        if config.kv_offload is not None:
             if reset_kv_cache_on_model_state_dict_load:
                 raise ValueError(
                     "KV offload requires reset_kv_cache_on_model_state_dict_load=False: "
@@ -440,17 +421,14 @@ class VLLMEngine(GenerationEngine):
         # - None: every full block boundary, as before v0.29. Blocks are still freed
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
-        if self.config.kv_transfer_config is not None:
-            engine_kwargs["kv_transfer_config"] = replace(
-                self.config.kv_transfer_config,
-                kv_connector_module_path=(
-                    "torchtitan.rl.generator.vllm.simple_cpu_offload"
-                ),
-            )
+        if self.config.kv_offload is not None:
+            engine_kwargs[
+                "kv_transfer_config"
+            ] = self.config.kv_offload.get_vllm_kv_transfer_config()
             if self._coordinate_kv_offload:
                 engine_kwargs[
                     "scheduler_cls"
-                ] = "torchtitan.rl.generator.vllm.cpu_kv_offload.create_kv_offload_scheduler"
+                ] = "torchtitan.rl.generator.vllm.kv_offload_scheduler.create_kv_offload_scheduler"
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
@@ -628,13 +606,25 @@ class VLLMEngine(GenerationEngine):
         return has_work
 
     def _has_unfinished_local_requests(self) -> bool:
-        # LLMEngine tracks user outputs only; the in-process scheduler also tracks
-        # finish-time saves and the completion steps that release their GPU blocks.
-        # TODO(acisseJZhong): LLMEngine exposes neither pending KV work nor DP dummy
-        # forwards, so this and step() use the private engine_core.engine_core
-        # (scheduler, batch_queue), has_unfinished_requests_dp,
-        # should_execute_dummy_batch and execute_dummy_batch. Upstream a public
-        # query and DP step for external_launcher.
+        """Whether this rank still needs engine steps, also after every request's output
+        has returned:
+
+        - ``output_processor.has_unfinished_requests()``: user-visible requests.
+          Upstream ``LLMEngine.has_unfinished_requests`` checks only this (plus its DP
+          all-reduce).
+        - ``scheduler.has_requests()``: requests whose output finished but whose GPU
+          blocks stay pinned until a step processes their CPU save completion, or
+          requests waiting on a CPU load.
+        - ``batch_queue``: with async scheduling, a dispatched batch whose output is
+          not consumed yet.
+        - ``session_kv_holder.has_pending_work``: session release hints waiting on
+          those saves.
+
+        Upstream's multiprocess ``EngineCoreProc`` keeps stepping on the same
+        conditions (``has_work()``); the in-process ``LLMEngine`` that
+        ``external_launcher`` uses does not, so the engine loop would otherwise sleep
+        with pinned blocks and unsent hints until the next request.
+        """
         core = self._engine.engine_core.engine_core
         return (
             self._engine.output_processor.has_unfinished_requests()

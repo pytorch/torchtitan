@@ -14,7 +14,6 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
-import copy
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -41,7 +40,10 @@ from torchtitan.rl.generator.dispatcher import (
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
+from torchtitan.rl.generator.vllm.config import (
+    SimpleCPUKVOffloadConfig,
+    VLLMCudaGraphConfig,
+)
 from torchtitan.rl.generator.vllm.engine import (
     _build_sampling_params,
     _extract_request_metrics_inputs,
@@ -51,7 +53,9 @@ from torchtitan.rl.generator.vllm.engine import (
     VLLMEngine,
 )
 from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
-from torchtitan.rl.generator.vllm.simple_cpu_offload import SimpleCPUOffloadConnector
+from torchtitan.rl.generator.vllm.simple_cpu_offload_connector import (
+    SimpleCPUOffloadConnector,
+)
 from torchtitan.rl.generator.vllm.worker import (
     TorchTitanCudagraphDispatcher,
     TorchTitanGPUModelRunner,
@@ -66,7 +70,6 @@ from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
     DeviceConfig,
-    KVTransferConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -887,12 +890,6 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
 def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
     monkeypatch, tmp_path, hold_sessions
 ):
-    transfer = KVTransferConfig(
-        kv_connector="SimpleCPUOffloadConnector",
-        kv_role="kv_both",
-        kv_connector_extra_config={"cpu_bytes_to_use_per_rank": 1 << 30},
-    )
-    original = copy.deepcopy(transfer)
     holder_build = Mock()
     monkeypatch.setattr(VLLMSessionKVHolder.Config, "build", holder_build)
     kwargs = _build_engine_kwargs(
@@ -902,7 +899,7 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
             model=_MODEL_CONFIG,
             parallelism=InferenceParallelismConfig(tensor_parallel_degree=2),
             engine=VLLMEngine.Config(
-                kv_transfer_config=transfer,
+                kv_offload=SimpleCPUKVOffloadConfig(cpu_bytes_per_rank=1 << 30),
                 session_kv_holder=(
                     VLLMSessionKVHolder.Config() if hold_sessions else None
                 ),
@@ -912,10 +909,13 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
     resolved = kwargs["kv_transfer_config"]
     assert KVConnectorFactory.get_connector_class(resolved) is SimpleCPUOffloadConnector
     assert kwargs["scheduler_cls"].endswith(
-        "cpu_kv_offload.create_kv_offload_scheduler"
+        "kv_offload_scheduler.create_kv_offload_scheduler"
     )
-    assert resolved.kv_connector_extra_config == original.kv_connector_extra_config
-    assert transfer == original
+    assert resolved.kv_role == "kv_both"
+    assert resolved.kv_connector_extra_config == {
+        "cpu_bytes_to_use_per_rank": 1 << 30,
+        "lazy_offload": False,
+    }
     if hold_sessions:
         scheduler = (
             vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
@@ -927,36 +927,11 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
         holder_build.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "kv_role, module_path, extra_engine_args, match",
-    [
-        (
-            "kv_both",
-            "custom.cpu_offload_connector",
-            {},
-            "custom kv_connector_module_path",
-        ),
-        ("kv_producer", None, {}, "requires kv_role='kv_both'"),
-        ("kv_consumer", None, {}, "requires kv_role='kv_both'"),
-        (
-            "kv_both",
-            None,
-            {"enable_prefix_caching": False},
-            "requires prefix caching",
-        ),
-    ],
-)
-def test_unsupported_kv_transfer_config_rejected_before_engine_creation(
-    kv_role, module_path, extra_engine_args, match
-):
-    with pytest.raises(ValueError, match=match):
+def test_kv_offload_without_prefix_caching_rejected_before_engine_creation():
+    with pytest.raises(ValueError, match="requires prefix caching"):
         VLLMEngine.Config(
-            kv_transfer_config=KVTransferConfig(
-                kv_connector="SimpleCPUOffloadConnector",
-                kv_role=kv_role,
-                kv_connector_module_path=module_path,
-            ),
-            extra_engine_args=extra_engine_args,
+            kv_offload=SimpleCPUKVOffloadConfig(cpu_bytes_per_rank=1 << 30),
+            extra_engine_args={"enable_prefix_caching": False},
         )
 
 
@@ -972,7 +947,7 @@ def test_unsupported_kv_transfer_config_rejected_before_engine_creation(
         ),
         ("seed", r"use Generator\.Config\.debug\.seed"),
         ("watermark", r"use VLLMEngine\.Config\.watermark"),
-        ("kv_transfer_config", r"use VLLMEngine\.Config\.kv_transfer_config"),
+        ("kv_transfer_config", r"use VLLMEngine\.Config\.kv_offload"),
     ],
 )
 def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
