@@ -149,11 +149,39 @@ The multimodal recipe keeps vision on AdamW.
 | FSDP | Per-layer backbone sharding; persistent row ownership for PLE |
 | TP / SP | QSA heads and PLE feature columns; degree must divide the 2 QSA KV heads |
 | EP | Existing routed-expert placements; all-to-all dispatcher by default, Dist-MoE with accelerator graphs in the 125B recipe and the B200 graph test |
+| PP | Stages exchange all four residual streams and declare them as static stage metadata, so PyTorch skips its metadata-inference pass; works with Dist-MoE; zero-bubble and CSV schedules are rejected |
 
 EP shards experts independently of PLE: at FSDP8/EP4 each rank owns one eighth
 of the PLE rows and one fourth of the experts, with FSDP2 within each expert
-shard. CPU offload and deferred FSDP reduction for PLE are unsupported. PP and
-CP are rejected at config time.
+shard. CPU offload and deferred FSDP reduction for PLE are unsupported. CP is
+rejected at config time.
+
+Non-final PP stages send `[T, 4 * D]` and the final stage owns the stream mixer,
+final norm and LM head; a split that separates them raises. The model declares
+these boundaries as static stage metadata on real and fake process groups, so
+PyTorch skips its metadata-inference forward, whose routing on uninitialized
+hidden states can overflow Dist-MoE's scratch. Every stage receives the
+original token IDs and document positions, so PLE can live on any stage. The
+engine preprocesses inputs on a rank's first local model part, which reaches
+the PLE table through a weak reference when the table belongs to a later local
+part (interleaved schedules); only the owning part registers its parameters and
+checkpoint keys. The DistMuon policy works under PP: model parts and PP ranks
+without a pattern's parameters skip that optimizer. Zero-bubble and CSV
+schedules are rejected: under full remat a split weight-gradient pass fails in
+the shared MoE routing region. Multimodal flavors are rejected under PP. The
+text model is verified with Interleaved1F1B, with the all-to-all dispatcher and
+with Dist-MoE.
+
+```
+PP rank 0: [tok_embeddings] [layers.1-3, incl. PLE]
+PP rank 1: [layers.0]       [layers.4-7, mixer, norm, lm_head]
+            local part 0     local part 1
+```
+
+```bash
+NGPU=8 MODULE=tests.integration_tests.b200 \
+  CONFIG=qwen38_flash_next_debugmodel_fsdp2_tp2_ep4_pp2 ./run_train.sh
+```
 
 ## Numerical Parity and Tests
 

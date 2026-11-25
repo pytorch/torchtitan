@@ -14,7 +14,11 @@ from torchtitan.components.data.multimodal.mm_datasets import MM_DATASETS
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optim import LRSchedulersContainer, Optim
+from torchtitan.components.optim import (
+    LRSchedulersContainer,
+    Optim,
+    OptimizersContainer,
+)
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -39,7 +43,9 @@ def qwen38_flash_next_debugmodel(
     *,
     seq_len: int = 64,
     parallelism: ParallelismConfig | None = None,
+    optimizer: OptimizersContainer.Config | None = None,
 ) -> Trainer.Config:
+    """Text debug model; ``optimizer=None`` uses the report's DistMuon policy."""
     parallelism = parallelism or ParallelismConfig()
     model_config = replace(
         build_model_config(
@@ -50,7 +56,9 @@ def qwen38_flash_next_debugmodel(
         ),
         local_compile=LocalCompileConfig(regions=[]),
     )
-    optimizer = make_dist_muon_optimizer(model_config, parallelism=parallelism, lr=8e-4)
+    optimizer = optimizer or make_dist_muon_optimizer(
+        model_config, parallelism=parallelism, lr=8e-4
+    )
     return FlashNextTrainerConfig(
         model=model_config,
         loss=ChunkedLossWrapper.Config(

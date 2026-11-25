@@ -14,6 +14,13 @@ from typing import Any
 import spmd_types as spmd
 import torch.nn as nn
 
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    ScheduleDualPipeV,
+    ScheduleInterleavedZeroBubble,
+    ScheduleZBVZeroBubble,
+)
+
 from torchtitan.config import derive
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base.sharding import ShardingConfig
@@ -562,10 +569,23 @@ def build_model_config(
     The checkpoint reference defines selection but supplies no KL coefficient.
     Training recipes select that objective independently of the architecture.
     """
-    if parallelism.pipeline_parallel_degree > 1:
-        raise ValueError("Flash-Next does not support pipeline parallelism")
     if parallelism.context_parallel_degree > 1:
         raise ValueError("Flash-Next QSA and PLE do not support context parallelism")
+    if parallelism.pipeline_parallel_degree > 1 and (
+        # A schedule CSV can contain weight-gradient actions under any name.
+        parallelism.pipeline_parallel_schedule_csv
+        or issubclass(
+            get_schedule_class(parallelism.pipeline_parallel_schedule),
+            (ScheduleZBVZeroBubble, ScheduleDualPipeV, ScheduleInterleavedZeroBubble),
+        )
+    ):
+        # TODO: under full remat, the split weight-gradient pass reads the
+        # shared MoE "routing_decision" remat region (recompute=False) as an
+        # unrecomputed placeholder. Without remat ZBVZeroBubble matches
+        # Interleaved1F1B, but the released-model recipes need remat.
+        raise ValueError(
+            "Flash-Next does not support zero-bubble or CSV pipeline schedules"
+        )
     if parallelism.fsdp_enable_cpu_offloading:
         raise ValueError(
             "Row-owned PLE requires device-resident parameters; CPU offload is unsupported"
@@ -581,6 +601,14 @@ def build_model_config(
     config = factory(
         seq_len=context, parallelism=parallelism, indexer_loss=indexer_loss
     )
+    if parallelism.pipeline_parallel_degree > 1 and isinstance(
+        config, Qwen38FlashNextMultimodalModel.Config
+    ):
+        # TODO: verify multimodal pipeline stages (vision encoder on the first
+        # stage, image embeddings scattered into its tokens).
+        raise ValueError(
+            "Flash-Next pipeline parallelism supports text-only flavors only"
+        )
     for layer in config.layers:
         attention = layer.attention
         if (

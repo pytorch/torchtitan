@@ -530,6 +530,35 @@ class TestOptimizerConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             config.build(model_parts=[model])
 
+    def test_pattern_matching_one_model_part(self):
+        """A pattern may match nothing in some model parts (PP stages); it raises
+        only when it matches nothing in every part on every PP rank.
+
+        Catches skipping a pattern that matches nowhere, whose parameters a later
+        catch-all would then silently train with the wrong settings.
+        """
+        model = SimpleModel()
+        first_part = nn.ModuleDict({"embed_tokens": model.embed_tokens})
+        last_part = nn.ModuleDict({"layers": model.layers, "output": model.output})
+        embed_only = AdamW.Config(pattern=r"embed_tokens\.", fused=False, lr=1e-3)
+        typo = AdamW.Config(pattern=r"embed_token\.", fused=False, lr=1e-3)
+        store = torch.distributed.HashStore()
+        torch.distributed.init_process_group("gloo", store=store, rank=0, world_size=1)
+        try:
+            for pp_group in (None, torch.distributed.group.WORLD):
+                container = OptimizersContainer.Config(
+                    optimizers=[embed_only, _DEFAULT_ADAMW]
+                ).build(model_parts=[first_part, last_part], pp_group=pp_group)
+                # The first part gets only embed_tokens' optimizer, the last
+                # only the catch-all: empty (part, pattern) pairs are skipped.
+                self.assertEqual(len(container.optimizers), 2)
+                with self.assertRaisesRegex(ValueError, "matched no parameters"):
+                    OptimizersContainer.Config(optimizers=[typo, _DEFAULT_ADAMW]).build(
+                        model_parts=[first_part, last_part], pp_group=pp_group
+                    )
+        finally:
+            torch.distributed.destroy_process_group()
+
     def test_all_params_covered(self):
         """Every requires_grad param appears in exactly one group."""
         model = SimpleModel()

@@ -122,9 +122,11 @@ class Optim(Configurable):
                 "Optim graph capture is disabled because the runtime or model "
                 "parameter device does not support graph capture."
             )
+        pp_mesh = parallelism_context.get_optional_mesh("pp")
         self.optimizers = config.optimizer.build(
             model_parts=model_parts,
             enable_accelerator_graph=enable_accelerator_graph,
+            pp_group=pp_mesh.get_group() if pp_mesh is not None else None,
         )
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,

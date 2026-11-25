@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, TYPE_CHECKING
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from torchtitan.components.optim import Adam, AdamW, Optim, OptimizersContainer
@@ -46,11 +47,13 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         *,
         model_parts: list[nn.Module],
         enable_accelerator_graph: bool = False,
+        pp_group: dist.ProcessGroup | None = None,
     ) -> None:
         super().__init__(
             config,
             model_parts=model_parts,
             enable_accelerator_graph=enable_accelerator_graph,
+            pp_group=pp_group,
         )
 
         # Force to initialize the optimizer state so that `optim.step()`

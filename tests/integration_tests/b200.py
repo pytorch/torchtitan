@@ -15,6 +15,7 @@ from dataclasses import replace
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -198,6 +199,75 @@ def qwen38_flash_next_debugmodel_mm_checkpoint_load() -> Trainer.Config:
     )
 
 
+def _interleaved_pp2_parallelism(**degrees: int) -> ParallelismConfig:
+    """PP2 Interleaved1F1B with PLE (``layers.1``) in a later local part.
+
+    PLE lands in the second local model part of PP rank 0, so the first local
+    part prepares routing for a table it does not own, and the
+    ``tok_embeddings``-only part holds no DistMuon parameters.
+    """
+    return ParallelismConfig(
+        pipeline_parallel_degree=2,
+        num_pp_microbatches=4,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_module_fqns_per_model_part=[
+            ["tok_embeddings"],
+            ["layers.0"],
+            ["layers.1", "layers.2", "layers.3"],
+            [f"layers.{i}" for i in range(4, 8)]
+            + ["norm", "lm_head", "hyper_connection_mixer"],
+        ],
+        **degrees,
+    )
+
+
+def qwen38_flash_next_debugmodel_fsdp2_tp2_ep4_pp2() -> Trainer.Config:
+    """FSDP2 + TP2 + SP + EP4 + PP2 with Interleaved1F1B and full remat.
+
+    AdamW replaces the DistMuon policy, which does not support TP
+    (https://github.com/pytorch/torchtitan/pull/5678).
+    """
+    config = qwen38_flash_next_debugmodel(
+        parallelism=_interleaved_pp2_parallelism(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=4,
+            enable_sequence_parallel=True,
+        ),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
+    )
+    config.activation_remat = FullActivationRematConfig()
+    return config
+
+
+def qwen38_flash_next_debugmodel_fsdp2_ep2_pp2() -> Trainer.Config:
+    """FSDP2 + EP2 + PP2 with Interleaved1F1B, full remat, the DistMuon policy,
+    Dist-MoE and accelerator graphs.
+
+    PP rank 1 holds no PLE parameters and the ``tok_embeddings``-only part no
+    DistMuon parameters, so those optimizers are skipped there. Dist-MoE takes
+    its activation slot per (stage, microbatch) from the schedule, and the
+    stages run with the model's declared boundaries.
+    """
+    from torchtitan.config.transform import apply_transforms
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    config = qwen38_flash_next_debugmodel(
+        parallelism=_interleaved_pp2_parallelism(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        )
+    )
+    config.activation_remat = FullActivationRematConfig()
+    config.training.disable_accelerator_graphs = False
+    config.dist_moe_runtime = DistMoeRuntime.Config(
+        activation_slot_capacity_factor=1.0, scratch_capacity_factor=4.0
+    )
+    return apply_transforms(config, [DistMoeTransform()])
+
+
 def qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2() -> Trainer.Config:
     """Replay Flash-Next as one accelerator graph with row-sharded PLE and Dist-MoE.
 
@@ -207,7 +277,6 @@ def qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2() -> Trainer.Config:
     """
     from torchtitan.config.transform import apply_transforms
     from torchtitan.config.transform.dist_moe import DistMoeTransform
-    from torchtitan.distributed.activation_remat import FullActivationRematConfig
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
     config = qwen38_flash_next_debugmodel(
@@ -316,6 +385,28 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             ),
             test_name="qwen3_8_flash_next_fsdp",
             ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_fsdp2_tp2_ep4_pp2],
+            test_descr=(
+                "Qwen3.8-Flash-Next FSDP+TP+SP+EP+PP (Interleaved1F1B, full "
+                "remat): four-stream stage traffic and PLE on a later local part"
+            ),
+            test_name="qwen3_8_flash_next_fsdp_tp_sp_ep_pp",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen38_flash_next_debugmodel_fsdp2_ep2_pp2],
+            test_descr=(
+                "Qwen3.8-Flash-Next FSDP+EP+PP (Interleaved1F1B, full remat) with "
+                "Dist-MoE, accelerator graphs and the DistMuon policy: declared "
+                "stage boundaries, schedule-derived Dist-MoE slots, and optimizers "
+                "that skip stages without their params"
+            ),
+            test_name="qwen3_8_flash_next_fsdp_ep_pp_dist_muon",
+            ngpu=4,
             use_real_pg=True,
         ),
     ]
