@@ -338,3 +338,14 @@ def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
         parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
     )
+
+
+@pytest.mark.parametrize(
+    "degrees", [{"tensor_parallel_degree": 2}, {"context_parallel_degree": 2}]
+)
+def test_cpu_offload_rejects_tp_and_cp(degrees: dict[str, int]) -> None:
+    with pytest.raises(ValueError, match="identical parameter shards"):
+        TrainingEngine.Config(
+            parallelism=ParallelismConfig(fsdp_enable_cpu_offloading=True, **degrees),
+            debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
+        )
