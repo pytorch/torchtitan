@@ -332,6 +332,7 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="GPT-OSS PP+FSDP+EP+selective AC with VarlenInnerAttention",
             test_name="gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
+            use_real_pg=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_mxfp8_fsdp2],
