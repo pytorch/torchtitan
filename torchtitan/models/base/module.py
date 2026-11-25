@@ -58,6 +58,10 @@ class Module(nn.Module, Configurable):
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
     _remat_recompute_patterns: tuple[str, ...] = ()
+    # Set by ActivationRematConfig.apply on each transformer block it
+    # checkpoints: the block's FQN in the full model (e.g. "layers.3",
+    # "vision_encoder.layers.0"). The activation offloader hooks these blocks.
+    _remat_block_fqn: str = ""
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""

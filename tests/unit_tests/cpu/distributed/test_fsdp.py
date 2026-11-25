@@ -87,7 +87,7 @@ def test_fsdp_unshards_preserve_dtype_params_in_their_dtype(preserve: bool) -> N
 
 
 def test_apply_fsdp_to_decoder_shards_mtp_layers_and_an_moe_held_as_mlp() -> None:
-    # Each block is its own group, MTP layers too, after the decoder's blocks.
+    # Each block is its own sharding unit, MTP layers too, after the decoder's blocks.
     # An MoE held as ``mlp`` still gets its routed experts' placements.
     def moe_block() -> nn.Module:
         moe = MoE.__new__(MoE)
@@ -112,7 +112,7 @@ def test_apply_fsdp_to_decoder_shards_mtp_layers_and_an_moe_held_as_mlp() -> Non
     with mock.patch("torchtitan.distributed.fsdp.fully_shard") as fully_shard:
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
