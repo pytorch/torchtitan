@@ -55,9 +55,9 @@ from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.tests.models.kimi_k2_7 import (
-    _align_dist_muon_expert_compute_layouts,
-    _per_expert_compute_layout,
+from torchtitan_recipes.tests.models.dist_muon import (
+    align_dist_muon_expert_compute_layouts,
+    per_expert_compute_layout,
 )
 
 
@@ -192,7 +192,7 @@ def _dist_muon_optimizer(
         "output_gate": per_kda_head,
         "output_proj": owned,
     }
-    per_expert = _per_expert_compute_layout(parallelism)
+    per_expert = per_expert_compute_layout(parallelism)
     feed_forward_shardings = {
         "w13": ComputeLayout(
             shardings_by_mesh_axis={
@@ -336,7 +336,7 @@ def _dist_muon_optimizer(
 class _KimiK3TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optim.optimizer = _align_dist_muon_expert_compute_layouts(
+        self.optim.optimizer = align_dist_muon_expert_compute_layouts(
             self.optim.optimizer,
             parallelism=self.parallelism,
         )
