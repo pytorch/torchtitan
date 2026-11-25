@@ -298,23 +298,22 @@ class KimiDSAAttention(KimiMLAAttention):
             # A causal query at document position p has p + 1 keys. The indexer
             # scores all of them; attention reads only the top-k.
             num_keys = positions + 1
+            num_selected_keys = num_keys.clamp(
+                max=self.inner_attention.inner_indexer.topk
+            )
             attention_flops = quadratic_attention_flops(
                 num_heads=self.n_heads,
                 qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
-                num_keys=num_keys.clamp(max=self.inner_attention.inner_indexer.topk),
+                num_keys=num_selected_keys,
             )
 
-            # TODO: the indexer scores all keys without grad, then recomputes only the
-            # top-k with grad for the indexer loss. Counting only that cuts Kimi K3.1
-            # Pro's estimate by 0.8% at 32k and 21.7% at 1M (one document).
-            # DeepSeek-V4's indexer needs the same fix.
-            indexer_flops = (
-                6
-                * self.indexer.num_index_heads
-                * self.indexer.index_head_dim
-                * int(num_keys.sum())
-            )
+            # Scoring every key runs without grad: forward only.
+            index_dim = self.indexer.num_index_heads * self.indexer.index_head_dim
+            indexer_flops = 2 * index_dim * int(num_keys.sum())
+            # The indexer loss recomputes the top-k scores with grad.
+            if self.inner_attention.aux_loss is not None:
+                indexer_flops += 6 * index_dim * int(num_selected_keys.sum())
             return attention_flops + indexer_flops
 
     def __init__(self, config: Config) -> None:
