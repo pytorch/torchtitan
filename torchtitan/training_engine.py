@@ -247,10 +247,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     )
             # The sharding backend's model checks run in
             # validate_model_training_config (config/validation.py), which
-            # doesn't receive the loss, checkpointer or optimizers, so its
-            # trainer checks run here.
+            # doesn't receive the checkpointer or optimizers, so its trainer
+            # checks run here.
             self.parallelism.fsdp_backend.build().validate_trainer(
-                loss=self.loss,
                 checkpointer=self.checkpointer,
                 optim=self.optim,
                 trainer=type(self)._owner,
@@ -482,7 +481,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             model_with_lm_head = cast(Any, model)
             lm_head = model_with_lm_head.lm_head
             assert lm_head is not None, error_message
-            self.loss_fn.set_lm_head(lm_head)
+            self.loss_fn.set_lm_head(
+                lm_head,
+                # Creating a seed checkpoint doesn't shard the model.
+                partial_backwards=(
+                    None
+                    if create_seed_checkpoint
+                    else self.parallelism_context.sharding_backend.partial_backwards(
+                        model, "lm_head"
+                    )
+                ),
+            )
             model_with_lm_head._skip_lm_head = True
 
     def _parallelize_kwargs(self) -> dict[str, Any]:
