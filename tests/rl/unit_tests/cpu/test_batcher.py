@@ -28,7 +28,10 @@ from torchtitan.models.qwen3_5 import QWEN3_5_VISION_PROCESSOR_KWARGS
 from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 from torchtitan.rl.trainer.batcher import Batcher
-from torchtitan.rl.trainer.training_sample_builder import TrainingSample
+from torchtitan.rl.trainer.training_sample_builder import (
+    TrainingSample,
+    TrainingSampleSpec,
+)
 
 
 def _make_samples(lengths: list[int]) -> list[TrainingSample]:
@@ -46,6 +49,26 @@ def _make_samples(lengths: list[int]) -> list[TrainingSample]:
     ]
 
 
+def _spec(sample: TrainingSample) -> TrainingSampleSpec:
+    """A spec with `sample`'s length and images: all the planner reads."""
+    return TrainingSampleSpec(
+        rollout_id=sample.rollout_id,
+        last_turn_id=sample.rollout_id.turn_id,
+        num_tokens=len(sample.token_ids),
+        loss_token_counts=(0,),
+        routing_token_counts=(0,),
+        num_response_tokens=0,
+        min_policy_version=sample.min_policy_version,
+        max_policy_version=sample.max_policy_version,
+        images=sample.images,
+        image_placeholders=sample.image_placeholders,
+    )
+
+
+def _make_specs(lengths: list[int]) -> list[TrainingSampleSpec]:
+    return [_spec(sample) for sample in _make_samples(lengths)]
+
+
 def test_padding_workload_matches_existing_full_length_segments() -> None:
     batcher = Batcher.Config(max_num_documents=20).build(
         num_tokens_per_microbatch_per_dp_rank=60,
@@ -58,12 +81,16 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
     long_samples = _make_samples([8] * 6)
     short_samples = _make_samples([1] * 20)
 
-    assert batcher._attention_workload(long_samples) == 6 * 8**2 + 10**2 + 2**2
-    assert batcher._attention_workload(short_samples) == 20 + 4 * 10**2
+    assert batcher._attention_workload(list(map(_spec, long_samples))) == (
+        6 * 8**2 + 10**2 + 2**2
+    )
+    assert batcher._attention_workload(list(map(_spec, short_samples))) == (
+        20 + 4 * 10**2
+    )
     assert batcher._attention_workload([]) == 6 * 10**2
 
     for samples in (long_samples, short_samples, []):
-        microbatch = batcher._pack_training_samples(samples)
+        microbatch = batcher._packer.pack(samples)
         num_padding_segments = int(
             ((microbatch.positions == 0) & microbatch.padding_mask).sum().item()
         )
@@ -79,7 +106,7 @@ def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _make_samples([8] * 3 + [2] * 16)
+    samples = _make_specs([8] * 3 + [2] * 16)
 
     assignments = batcher._assign_training_samples_to_microbatches(samples)
 
@@ -104,7 +131,7 @@ def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None
         pad_id=0,
         temperature=1.0,
     )
-    samples = _make_samples([10, 5, 5, 5, 5])
+    samples = _make_specs([10, 5, 5, 5, 5])
 
     assignments = batcher._assign_training_samples_to_microbatches(samples)
 
@@ -124,7 +151,7 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _make_samples([4, 4, 3, 3, 3, 3, 2, 2])
+    samples = _make_specs([4, 4, 3, 3, 3, 3, 2, 2])
 
     assignments = batcher._assign_training_samples_to_microbatches(samples)
 
@@ -155,7 +182,7 @@ def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _make_samples([3] * 8 + [2] * 9)
+    samples = _make_specs([3] * 8 + [2] * 9)
     assert batcher._pack_with_lpt(samples, target_num_bins=7) is None
 
     assignments = batcher._assign_training_samples_to_microbatches(samples)
@@ -180,7 +207,7 @@ def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    samples = _make_samples([10, 9, 8, 7, 6, 5])
+    samples = _make_specs([10, 9, 8, 7, 6, 5])
 
     assignments = batcher._assign_training_samples_to_microbatches(
         samples, num_pp_microbatches=3
@@ -220,7 +247,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
         )
 
         assignments = batcher._assign_training_samples_to_microbatches(
-            samples, num_pp_microbatches=num_pp_microbatches
+            list(map(_spec, samples)), num_pp_microbatches=num_pp_microbatches
         )
 
         assert len(assignments) % num_pp_microbatches == 0
@@ -232,9 +259,11 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
                 )
                 if max_num_documents is not None:
                     assert len(rank_samples) <= max_num_documents
-                microbatch = batcher._pack_training_samples(rank_samples)
+                microbatch = batcher._packer.pack(
+                    [samples[spec.rollout_id.rollout_id] for spec in rank_samples]
+                )
                 assert int((~microbatch.padding_mask).sum()) == sum(
-                    len(sample.token_ids) - 1 for sample in rank_samples
+                    spec.num_tokens - 1 for spec in rank_samples
                 )
         assert sorted(
             sample.rollout_id.rollout_id
@@ -261,7 +290,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
         pad_id=99,
         temperature=1.0,
     )
-    microbatch = batcher._pack_training_samples(samples)
+    microbatch = batcher._packer.pack(samples)
     valid = ~microbatch.padding_mask
     assert microbatch.input[valid].tolist() == [10, 11, 12, 13, 14, 20, 21, 22]
     assert microbatch.labels[valid].tolist() == [11, 12, 13, 14, 15, 21, 22, 23]
@@ -277,7 +306,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     assert microbatch.loss_token_counts.tolist() == [6]
     assert microbatch.routing_token_counts.tolist() == [8]
     lengths = {1: [5, 3], 4: [8, 4], 8: [8, 8]}[pad_multiple]
-    assert [batcher.num_tokens_to_pack(sample) for sample in samples] == lengths
+    assert [batcher.num_tokens_to_pack(_spec(sample)) for sample in samples] == lengths
     assert microbatch.positions.tolist() == [
         position
         for length in (*lengths, 24 - sum(lengths))
@@ -287,7 +316,7 @@ def test_per_sample_padding_preserves_shifted_fields(pad_multiple) -> None:
     samples[0].advantage = samples[0].advantage[:-1]
     samples[1].advantage = np.pad(samples[1].advantage, (0, 1))
     with pytest.raises(ValueError, match="Segment fields must share one length"):
-        batcher._pack_training_samples(samples)
+        batcher._packer.pack(samples)
 
 
 def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
@@ -299,7 +328,7 @@ def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
         pad_id=0,
         temperature=0.5,
     )
-    microbatch = batcher._pack_training_samples(_make_samples([3]))
+    microbatch = batcher._packer.pack(_make_samples([3]))
 
     temperature = microbatch.as_input_dict()["loss_kwargs"]["temperature"]
     assert temperature.dtype == torch.float32
@@ -315,7 +344,7 @@ def test_microbatch_moves_loss_kwargs_with_the_model_inputs() -> None:
         pad_id=0,
         temperature=1.0,
     )
-    microbatch = batcher._pack_training_samples(_make_samples([3]))
+    microbatch = batcher._packer.pack(_make_samples([3]))
 
     input_dict = microbatch.to_input_dict("meta")
 
@@ -404,7 +433,7 @@ def test_microbatch_encodes_each_distinct_image_once(image_paths) -> None:
         _image_sample(2, [], 5),
     ]
 
-    microbatch = batcher._pack_training_samples(samples)
+    microbatch = batcher._packer.pack(samples)
     kwargs = microbatch.model_kwargs
 
     # The batcher ships the image files once each; moving the inputs to the trainer's
@@ -471,7 +500,7 @@ def _image_batcher(
 def test_text_microbatch_with_a_vision_processor_has_no_image_inputs() -> None:
     batcher = _image_batcher()
 
-    microbatch = batcher._pack_training_samples(_make_samples([5]))
+    microbatch = batcher._packer.pack(_make_samples([5]))
 
     # The model uses the 1D positions and runs its dummy vision forward, as on every
     # rank without images.
@@ -484,9 +513,7 @@ def test_image_microbatch_without_mrope_positions(image_paths) -> None:
     image, placeholder = _prompt_image(image_paths[0], offset=1)
     batcher = _image_batcher(num_tokens=64, build_mrope_positions=False)
 
-    microbatch = batcher._pack_training_samples(
-        [_image_sample(0, [(image, placeholder)], 12)]
-    )
+    microbatch = batcher._packer.pack([_image_sample(0, [(image, placeholder)], 12)])
 
     assert "mrope_positions" not in microbatch.model_kwargs
     assert "image_vision_bank_indices_T" in microbatch.model_kwargs
@@ -500,9 +527,7 @@ def test_image_grid_must_match_the_resized_image(image_paths) -> None:
     image = dataclasses.replace(image, grid_thw=(t, h + 2, w))
     placeholder = PlaceholderRange(offset=1, length=t * (h + 2) * w // 4)
     batcher = _image_batcher(num_tokens=64)
-    microbatch = batcher._pack_training_samples(
-        [_image_sample(0, [(image, placeholder)], 12)]
-    )
+    microbatch = batcher._packer.pack([_image_sample(0, [(image, placeholder)], 12)])
 
     # The trainer resizes the file and finds the batcher's vision processor's grid.
     with pytest.raises(ValueError, match="same vision processor"):
@@ -516,7 +541,7 @@ def test_placeholder_count_must_match_the_grid(image_paths) -> None:
     batcher = _image_batcher(num_tokens=64)
 
     with pytest.raises(ValueError, match="placeholders"):
-        batcher._pack_training_samples([_image_sample(0, [(image, placeholder)], 12)])
+        batcher._packer.pack([_image_sample(0, [(image, placeholder)], 12)])
 
 
 def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
@@ -538,7 +563,7 @@ def test_packing_keeps_samples_of_an_image_together(image_paths) -> None:
             for index in range(3)
         ]
 
-    [row] = batcher._assign_training_samples_to_microbatches(samples)
+    [row] = batcher._assign_training_samples_to_microbatches(list(map(_spec, samples)))
 
     hashes_per_microbatch = sorted(
         sorted({image.hash_value for sample in bin_ for image in sample.images})
@@ -559,8 +584,10 @@ def test_token_budget_need_not_be_a_multiple_of_the_context() -> None:
     )
     samples = _make_samples([10, 10, 4])
 
-    assignments = batcher._assign_training_samples_to_microbatches(samples)
-    microbatch = batcher._pack_training_samples(samples)
+    assignments = batcher._assign_training_samples_to_microbatches(
+        list(map(_spec, samples))
+    )
+    microbatch = batcher._packer.pack(samples)
     metadata = create_varlen_metadata_for_document(
         microbatch.positions,
         padding_mask=microbatch.padding_mask,
