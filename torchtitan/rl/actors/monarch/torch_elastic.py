@@ -8,9 +8,11 @@
 
 import socket
 
-from monarch.actor import Actor, endpoint, ProcMesh
+from monarch.actor import endpoint, ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
 from torch.distributed import TCPStore
+
+from torchtitan.rl.actors.monarch.actor import Actor
 
 
 async def setup_torch_elastic_env(mesh: ProcMesh) -> None:

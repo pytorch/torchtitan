@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config import Configurable
-from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.accelerator_graph import (
     accelerator_graphs_supported,
     NUM_ACCELERATOR_GRAPH_WARMUP_STEPS,
@@ -45,20 +45,19 @@ class GradientClipper(Configurable):
         *,
         parallelism_context: ParallelismContext,
     ) -> torch.Tensor:
-        """Clip gradients with ``dist_utils.clip_grad_norm_``.
+        """Clip gradients with ``parallelism_context.sharding_backend``, which
+        knows how the parameters are sharded.
 
-        Use ``foreach=True``, and the PP mesh and whether FlexShard sharded the
-        parameters from ``parallelism_context``.
+        Use ``foreach=True``.
         Return the pre-clip global L2 norm as a local zero-dimensional tensor
         with an equivalent value on every rank. Preserve non-finite values and
         do not reuse the returned norm as the clip coefficient or scratch.
         """
-        return dist_utils.clip_grad_norm_(
+        return parallelism_context.sharding_backend.clip_grad_norm_(
             parameters,
             max_norm,
             foreach=True,
-            pp_mesh=parallelism_context.get_optional_mesh("pp"),
-            flex_shard_enabled=parallelism_context.flex_shard_enabled,
+            parallelism_context=parallelism_context,
         )
 
 
