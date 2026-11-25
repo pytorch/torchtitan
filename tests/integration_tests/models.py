@@ -766,6 +766,9 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="GLM-5 MTP FSDP+TP+CP+EP",
             test_name="glm5_mtp_fsdp+tp+cp+ep",
             ngpu=8,
+            golden_numerics_path=(
+                "tests/assets/losses/{execution_mode}/{gpu_arch}/glm5_mtp.txt"
+            ),
             skip_rocm_test=True,
             use_real_pg=True,
         ),
