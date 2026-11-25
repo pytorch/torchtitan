@@ -10,10 +10,12 @@ from unittest.mock import patch
 import torch
 import torch.nn.functional as F
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import materialize_mla_kv
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4.compressor import InnerIndexer, SparseIndexerLoss
 from torchtitan.models.kimi_k3.dsa import AbsorbedKVProjection, KimiSparseAttention
+from torchtitan.models.kimi_k3_1 import build_model_config
 
 
 def _reference(
@@ -131,3 +133,22 @@ def test_sparse_attention_and_indexer_loss_match_oracle() -> None:
         torch.testing.assert_close(
             attention.aux_loss.instance_acc, (expected_kl.detach() / 8.0).float()
         )
+
+
+def test_dsa_flops_index_every_key_and_attend_to_topk() -> None:
+    attention = build_model_config(
+        "debugmodel", parallelism=ParallelismConfig()
+    ).first_full_attention
+    topk = attention.inner_attention.inner_indexer.topk
+
+    # Queries at positions 0 and topk have 1 and topk + 1 keys. The indexer scores
+    # all of them; attention reads 1 + topk, one key fewer.
+    qk_head_dim = attention.qk_nope_head_dim + attention.qk_rope_head_dim
+    expected = 6 * attention.n_heads * (qk_head_dim + attention.v_head_dim) * (1 + topk)
+    expected += (
+        6
+        * attention.indexer.num_index_heads
+        * attention.indexer.index_head_dim
+        * (topk + 2)
+    )
+    assert attention.flops(torch.tensor([0, topk])) == expected
