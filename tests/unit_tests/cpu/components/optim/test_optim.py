@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.distributed.sharding_backend import FullyShardBackend
 from torchtitan.tools.utils import device_type
 
 
@@ -49,7 +50,7 @@ class _TestGradientClipper(GradientClipper):
 def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
     parameters = [torch.nn.Parameter(torch.tensor(1.0))]
     parallelism_context = MagicMock()
-    parallelism_context.flex_shard_enabled = False
+    parallelism_context.sharding_backend = FullyShardBackend.Config().build()
     pp_mesh = MagicMock()
     parallelism_context.get_optional_mesh.return_value = pp_mesh
     gradient_clipper_config = Optim.Config().gradient_clipper
@@ -58,7 +59,7 @@ def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
     expected_grad_norm = torch.tensor(2.0)
 
     with patch(
-        "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
+        "torchtitan.distributed.utils.clip_grad_norm_",
         return_value=expected_grad_norm,
     ) as clip_grad_norm:
         grad_norm = gradient_clipper.clip_grad_norm_(
@@ -72,8 +73,6 @@ def test_default_gradient_clipper_uses_distributed_clip_grad_norm() -> None:
         1.0,
         foreach=True,
         pp_mesh=pp_mesh,
-        flex_shard_enabled=False,
-        flex_shard_reduce_meshes=None,
     )
     assert grad_norm is expected_grad_norm
 
@@ -233,9 +232,7 @@ def test_optim_update_uses_configured_grad_clip() -> None:
     optim.optimizers = MagicMock()
     optim.gradient_clipper = gradient_clipper
 
-    with patch(
-        "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_"
-    ) as eager_grad_clip:
+    with patch("torchtitan.distributed.utils.clip_grad_norm_") as eager_grad_clip:
         grad_norm = optim._update(torch.tensor(1.0))
 
     eager_grad_clip.assert_not_called()
