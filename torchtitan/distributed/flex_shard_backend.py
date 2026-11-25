@@ -609,6 +609,11 @@ class FlexShardBackend(ShardingBackend):
                 else model_cls.__name__
             )
             unsupported.append(f"models that override Decoder._apply_fsdp ({name})")
+        if getattr(model_config, "mtp_layers", None):
+            # TODO(<flex_shard issue link>): lm_head runs once per objective, and
+            # FlexShard sums the calls' grads in bf16, where FSDP2 sums them in fp32.
+            # The other grads differ from FSDP2's too, from the first step.
+            unsupported.append("MTP layers")
         # FlexShard's Shard placement all-gathers a bucket in one dtype.
         if any(
             module_config.preserve_dtype_params

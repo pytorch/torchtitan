@@ -22,10 +22,7 @@ from torchtitan.models.base.module import Module, ModuleList
 from torchtitan.models.common.attention import AttentionMetadataMap
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.deepseek_v3.mtp import (
-    apply_fsdp_to_mtp_decoder,
-    roll_mtp_sequence,
-)
+from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
 from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
@@ -163,18 +160,21 @@ class DeepSeekV4Model(Decoder):
         precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
+        # TODO: Delete this FSDP2-only copy of Decoder._apply_fsdp once DeepSeek
+        # V4 is checked against FSDP2 with FlexShard. Until then, it makes
+        # FlexShardBackend.validate_model, which rejects models that override
+        # Decoder._apply_fsdp, reject DeepSeek V4.
         from torchtitan.distributed.fsdp import (
+            apply_fsdp_to_decoder,
             resolve_fsdp_mesh,
             resolve_sparse_fsdp_mesh,
         )
 
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
-        apply_fsdp_to_mtp_decoder(
-            # DeepSeek V4 has the decoder and MTP layer structure required by
-            # this helper, but uses its own MTP implementation.
-            self,  # pyrefly: ignore [bad-argument-type]
-            dp_mesh,
+        apply_fsdp_to_decoder(
+            self,
+            dp_mesh=dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
             reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
             pp_enabled=parallelism_context.pp_enabled,
