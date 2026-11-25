@@ -22,7 +22,6 @@ from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.glm5.dsa import Glm5CPMLAAttention
 from torchtitan.models.glm5.model import Glm5Attention, Glm5Model
 from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
-from torchtitan_recipes.tests.models.glm5_configs import resolve_model_config
 
 
 class TestGlm5Config(unittest.TestCase):
@@ -415,13 +414,13 @@ class TestGlm5Config(unittest.TestCase):
         self.assertEqual(two, 2 * one)
 
     def test_cp_selects_official_kv_all_gather_attention(self) -> None:
-        eager_config = resolve_model_config(
-            "debugmodel",
+        eager_config = build_model_config(
+            "glm5_2_debugmodel",
             parallelism=ParallelismConfig(),
             seq_len=128,
         )
-        cp_config = resolve_model_config(
-            "debugmodel",
+        cp_config = build_model_config(
+            "glm5_2_debugmodel",
             parallelism=ParallelismConfig(context_parallel_degree=2),
             seq_len=128,
         )

@@ -26,12 +26,12 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
-from torchtitan.models.glm5 import MTPLoss
+from torchtitan.models.glm5 import build_model_config, MTPLoss
 from torchtitan.models.glm5.loss import Glm5WarmupLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
-from torchtitan_recipes.tests.models.glm5_configs import resolve_model_config
+
 
 
 def glm5_debugmodel(
@@ -46,7 +46,7 @@ def glm5_debugmodel(
     """Return a deterministic small GLM-5 training recipe."""
     if parallelism is None:
         parallelism = ParallelismConfig()
-    model_config = resolve_model_config(
+    model_config = build_model_config(
         flavor,
         parallelism=parallelism,
         seq_len=seq_len,
@@ -116,18 +116,6 @@ def glm5_debugmodel_sparse() -> Trainer.Config:
     config = glm5_debugmodel(seq_len=128, indexer_stage="sparse")
     _set_spmd_typechecking(config, typechecking=True)
     return config
-
-
-def glm5_2_scaled_debugmodel(
-    seq_len: int = 4096,
-    *,
-    parallelism: ParallelismConfig | None = None,
-) -> Trainer.Config:
-    return glm5_debugmodel(
-        seq_len,
-        parallelism=parallelism,
-        flavor="glm5_2_scaled_debugmodel",
-    )
 
 
 def glm5_2_debugmodel_mtp(

@@ -39,9 +39,14 @@ def test_training_configuration_does_not_mutate_source():
         indexer_stage="warmup", indexer_loss_coeff=1.0,
     )
     assert original.indexer_training_stage == "frozen"
-    assert original.layers[0].attention.indexer.training_stage == "frozen"
     assert configured.indexer_training_stage == "warmup"
-    assert configured.layers[0].attention.indexer.training_stage == "warmup"
+    restored = configure_glm5_training(
+        configured, parallelism=ParallelismConfig(),
+        indexer_stage="frozen", indexer_loss_coeff=1.0,
+    )
+    with torch.device("meta"):
+        assert restored.build().layers["0"].attention.indexer.training_stage == "frozen"
+    assert restored.layers[0].attention.inner_attention.inner_attention.indexer_loss is None
     assert configured.layers[0] is not original.layers[0]
 
 
@@ -490,14 +495,12 @@ def test_warmup_never_runs_selector_but_still_trains_indexer():
     assert all(p.grad is None for name, p in model.named_parameters() if ".indexer." not in name)
 
 
-@pytest.mark.parametrize("mutation", ["model", "indexer", "attention", "loss", "consumer"])
+@pytest.mark.parametrize("mutation", ["model", "attention", "loss", "consumer"])
 def test_config_overrides_cannot_silently_desynchronize_stages(mutation):
     config = build_model_config("glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128, indexer_stage="sparse")
     producer = config.layers[0].attention
     if mutation == "model":
         config.indexer_training_stage = "warmup"
-    elif mutation == "indexer":
-        producer.indexer.training_stage = "frozen"
     elif mutation == "attention":
         producer.inner_attention.inner_attention.training_stage = "frozen"
     elif mutation == "loss":

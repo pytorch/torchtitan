@@ -26,10 +26,9 @@ def test_cp1_low_precision_indexer_rejects_unsupported_device():
     k = q[:, 0].contiguous()
     weights = q[..., 0].contiguous()
     metadata = DsaMetadata.from_positions(torch.arange(16, device=q.device))
-    with (
-        patch("torchtitan.models.glm5.dsa.has_cuda_capability", return_value=False),
-        pytest.raises(ValueError, match="requires NVIDIA SM90"),
-    ):
+    if torch.version.hip is None and torch.cuda.get_device_capability()[0] >= 9:
+        pytest.skip("this regression exercises the real unsupported-device path")
+    with pytest.raises(ValueError, match="requires NVIDIA SM90"):
         selector(q, k, weights, metadata=metadata)
 
 

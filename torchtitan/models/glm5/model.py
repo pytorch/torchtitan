@@ -86,7 +86,10 @@ class Glm5Attention(DeepSeekMLAAttention):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.indexer = config.indexer.build() if config.indexer is not None else None
+        self.indexer = (
+            config.indexer.build(training_stage=self.inner_attention.inner_attention.training_stage)
+            if config.indexer is not None else None
+        )
 
     # DSA specializes the parent's attention metadata contract.
     def forward(  # pyrefly: ignore[bad-override]
@@ -318,8 +321,6 @@ class Glm5Model(DeepSeekV3Model):
                 if leaf.training_stage != stage:
                     raise ValueError("GLM model and attention indexer stages disagree")
                 indexer = attention.indexer
-                if indexer is not None and indexer.training_stage != stage:
-                    raise ValueError("GLM model and indexer stages disagree")
                 needs_loss = indexer is not None and stage != "frozen"
                 if (leaf.indexer_loss is not None) != needs_loss:
                     raise ValueError("GLM indexer stage and auxiliary loss disagree")

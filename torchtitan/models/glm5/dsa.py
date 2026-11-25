@@ -33,7 +33,7 @@ from torchtitan.models.common.attn_gym import (
     require_attn_gym,
 )
 from torchtitan.models.deepseek_v4.compressor import SparseIndexerLoss
-from torchtitan.tools.utils import has_cuda_capability, set_default_dtype
+from torchtitan.tools.utils import set_default_dtype
 
 from .indexer import select_local_topk
 
@@ -256,12 +256,11 @@ class DSAIndexerTopK(Module):
         low_precision_cuda = q_QNH.is_cuda and q_QNH.dtype in (
             torch.float16, torch.bfloat16
         )
-        if low_precision_cuda and (
-            torch.version.hip is not None
-            or not has_cuda_capability(8 if cp_group is not None else 9, 0)
-        ):
-            minimum = "SM80" if cp_group is not None else "SM90"
-            raise ValueError(f"GLM low-precision DSA indexer requires NVIDIA {minimum}+")
+        if low_precision_cuda:
+            # Configs may be built on CPU/meta, before dtype and rank device are known.
+            minimum = 8 if cp_group is not None else 9
+            if torch.version.hip or torch.cuda.get_device_capability(q_QNH.device)[0] < minimum:
+                raise ValueError(f"GLM low-precision DSA indexer requires NVIDIA SM{minimum}0+")
 
         # Keep token order within each document while moving padding to the end.
         # Fixed-capacity offsets use repeated endpoints for empty documents.
@@ -356,11 +355,8 @@ class Glm5DsaIndexer(Module):
         weights_proj: Linear.Config
         rope: ComplexRoPE.Config
         topk: DSAIndexerTopK.Config
-        training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
 
         def __post_init__(self):
-            if self.training_stage not in ("frozen", "warmup", "sparse"):
-                raise ValueError("Unknown GLM indexer training stage")
             if not 1 <= self.n_heads <= 64:
                 raise ValueError("GLM indexer requires 1<=heads<=64")
             if not 16 <= self.head_dim <= 256 or self.head_dim % 8:
@@ -368,7 +364,7 @@ class Glm5DsaIndexer(Module):
             if not 0 <= self.topk.index_topk <= 4096:
                 raise ValueError("GLM indexer requires 0<=topk<=4096")
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, training_stage: Literal["frozen", "warmup", "sparse"]):
         super().__init__()
         self.n_heads = config.n_heads
         self.head_dim = config.head_dim
@@ -382,8 +378,8 @@ class Glm5DsaIndexer(Module):
             self.weights_proj = config.weights_proj.build()
         self.rope = config.rope.build()
         self.topk = config.topk.build()
-        self.training_stage = config.training_stage
-        self.requires_grad_(config.training_stage != "frozen")
+        self.training_stage = training_stage
+        self.requires_grad_(training_stage != "frozen")
 
     def forward(
         self,

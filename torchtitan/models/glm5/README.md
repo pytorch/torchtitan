@@ -32,11 +32,6 @@ version aliases are not required for loading their checkpoints.
 Runnable development recipes live in
 `torchtitan_recipes/tests/models/glm5.py`. The released flavor describes the
 full architecture and is not intended for single-host smoke tests.
-The independent-indexer `debugmodel` and larger `glm5_2_scaled_debugmodel`
-are experiment configurations in `torchtitan_recipes/tests/models/glm5_configs.py`,
-not production flavors. Their historical test names, shapes, initializers and
-context defaults are unchanged. External experiments resolve them there rather
-than substituting the released-schedule debug model.
 
 ### Indexer warmup
 
