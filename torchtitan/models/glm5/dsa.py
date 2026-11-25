@@ -526,6 +526,11 @@ class Glm5SparseAttention(InnerAttention):
     global pool IDs, with -1 padding. Consumers do not re-sort or revalidate them.
     """
 
+    # Bound temporary [query, context] indices and masks on every warmup layer,
+    # including layers with no indexer loss. This is a workspace bound, not a
+    # sparsity or sequence-length limit.
+    _WARMUP_QUERY_CHUNK_SIZE = 128
+
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
         training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
@@ -572,9 +577,11 @@ class Glm5SparseAttention(InnerAttention):
                 device=q_THK.device,
                 dtype=torch.int32,
             )
-            # Producers share the KL chunk budget. Shared-index consumers have
-            # no KL module; cap their dense-support workspace at 128 query rows.
-            chunk_size = self.indexer_loss.chunk_size if self.indexer_loss else 128
+            chunk_size = (
+                self.indexer_loss.chunk_size
+                if self.indexer_loss is not None
+                else self._WARMUP_QUERY_CHUNK_SIZE
+            )
             for start in range(0, q_THK.shape[0], chunk_size):
                 stop = min(start + chunk_size, q_THK.shape[0])
                 queries_Q = attention_metadata.query_indices_Q[start:stop]

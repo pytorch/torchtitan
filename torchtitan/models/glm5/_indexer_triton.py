@@ -14,6 +14,9 @@ import torch
 import triton
 import triton.language as tl
 
+# TODO: Replace this kernel when Attention Gym's lightning indexer accepts
+# rank-local queries with explicit key bounds against a shared key pool.
+# Upstream Triton backend: https://github.com/meta-pytorch/attention-gym/pull/542
 
 @triton.jit
 def _select(
