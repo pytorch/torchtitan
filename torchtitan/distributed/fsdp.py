@@ -139,6 +139,12 @@ class ShardingUnit(NamedTuple):
     routed_experts: nn.Module | None = None
 
 
+def _decoder_blocks(model: "Decoder") -> list[nn.Module]:
+    """Return a decoder's transformer blocks in forward order: ``layers``, then
+    the MTP layers of a multi-token prediction decoder."""
+    return [*model.layers.values(), *(getattr(model, "mtp_layers", None) or ())]
+
+
 def decoder_sharding_units(
     model: "Decoder",
     *,
@@ -153,8 +159,8 @@ def decoder_sharding_units(
 
     The embedding unit also holds the norm and output projection when weights
     are tied, and there is no ``norm_and_lm_head`` unit then. Each transformer
-    block is a unit. The root unit, ``fully_shard(model)``, takes the parameters
-    left over and doesn't reshard after forward.
+    block is a unit, MTP layers included. The root unit, ``fully_shard(model)``,
+    takes the parameters left over and doesn't reshard after forward.
 
     Args:
         model: The decoder.
@@ -193,7 +199,7 @@ def decoder_sharding_units(
             )
 
     blocks = []
-    for transformer_block in model.layers.values():
+    for transformer_block in _decoder_blocks(model):
         # A stacked Linear keeps W1/W3 separate from the matrix-row dimension.
         # Shard matrix rows so every rank retains both projections.
         placements = linear_param_shard_placements(transformer_block)
@@ -242,7 +248,7 @@ def decoder_prefetch_order(model: "Decoder") -> list[nn.Module]:
     With explicit prefetching, each unit prefetches the next one in forward and
     the previous one in backward.
     """
-    order: list[nn.Module] = list(model.layers.values())
+    order = _decoder_blocks(model)
     if not order:
         return []
     if model.tok_embeddings is not None:
@@ -668,6 +674,13 @@ def apply_fsdp_to_decoder(
             all-gathers on the current (compute) stream via
             ``FSDPModule.set_unshard_in_current_stream``.
     """
+    if unshard_in_current_stream and getattr(model, "mtp_layers", None) is not None:
+        # tok_embeddings runs once per MTP depth, which the explicit
+        # prefetching chain below does not model.
+        raise ValueError(
+            "parallelism.fsdp_unshard_in_current_stream is not supported for models "
+            "with MTP layers."
+        )
     embedding, norm_and_lm_head, blocks = decoder_sharding_units(
         model,
         dp_mesh=dp_mesh,
