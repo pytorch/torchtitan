@@ -26,7 +26,7 @@ normal parameter lifecycle.
   recipes run eagerly because per-block model compilation is no longer supported.
 - Local GEMM dimensions divisible by 128. A Linear whose local in/out features
   are not a multiple of 128 (after TP sharding) is rejected by the NVFP4 kernels
-  and must be excluded from the converter. The mixed recipe converts only
+  and must be excluded from the transform. The mixed recipe converts only
   decoder layers, so the token embeddings and LM head always remain in bf16.
 
 ### NVFP4 Training Recommendations
@@ -42,7 +42,7 @@ normal parameter lifecycle.
 5. The current TorchTitan NVFP4 integration does not support independently switching Fprop to BF16 while retaining NVFP4 for Dgrad and Wgrad. The practical fallback is a full-BF16 finish, which is more expensive than the paper's preferred forward-only policy and approximates the Appendix D experiment.
 
 * Save a TorchTitan checkpoint at the desired precision-switch boundary.
-* Restart from that checkpoint with the NVFP4 converter or override disabled.
+* Restart from that checkpoint with the NVFP4 transform or override disabled.
 * Set the training dtype to BF16.
 * Restore the model, optimizer, learning-rate scheduler, dataloader, and trainer-step state, and continue the same learning-rate schedule.
 
@@ -124,7 +124,7 @@ MLCommons DeepSeek-V3 benchmark task, which measures **how many training steps a
 recipe needs to bring validation cross-entropy below 3.60** starting from the
 published BF16 checkpoint. The step count is the figure of merit; the loss value
 is only the stopping condition. All three arms are identical in every field
-except the converters.
+except the quantization transforms.
 
 | Arm | Steps to 3.60 | TFLOP/s per GPU | Tokens/sec per GPU | Peak Reserved Memory |
 | --- | ---: | ---: | ---: | ---: |
@@ -178,10 +178,10 @@ the crossing detail; stars mark the first step at or below the target.*
   no re-reads. Validation on the reference's own holdout file over its first
   1024 packed sequences in original order. All arms start from the published
   MLCommons BF16 checkpoint loaded in HuggingFace format.
-- MXFP8 arm: `MXFP8LinearConverter(fqns=["attention.wq", "attention.wo"])`,
+- MXFP8 arm: `MXFP8LinearTransform(fqns=["attention.wq", "attention.wo"])`,
   which by substring match covers `wq_a`, `wq_b`, and `wo`; `wkv_a`, `wkv_b`,
-  and the dot-product attention stay BF16. NVFP4 arm: `NVFP4LinearConverter` on
-  the FFN fqns plus `NVFP4GroupedLinearConverter` on all 61 layers' routed
+  and the dot-product attention stay BF16. NVFP4 arm: `NVFP4LinearTransform` on
+  the FFN fqns plus `NVFP4GroupedLinearTransform` on all 61 layers' routed
   experts — F0L0, no BF16 tail — with MXFP8 on the same 1D attention path.
 
 MXFP8 for the selected attention linear projections is intentional. The common
