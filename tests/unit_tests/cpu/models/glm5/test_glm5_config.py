@@ -11,8 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
@@ -22,6 +27,77 @@ from torchtitan.models.glm5 import build_model_config, MODEL_FLAVORS
 from torchtitan.models.glm5.dsa import Glm5CPMLAAttention
 from torchtitan.models.glm5.model import Glm5Attention, Glm5Model
 from torchtitan.models.glm5.mtp import Glm5MTPTransformerBlock
+
+
+class TestGlm5CPMetadata(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cpu"
+
+    @with_comms
+    def test_pipeline_and_mtp_prepare_context_parallel_metadata(self) -> None:
+        with patch("torchtitan.distributed.parallelism_context.device_type", "cpu"):
+            context = ParallelismContext(
+                dp_replicate=1, dp_shard=1, cp=2, tp=1, pp=1, ep=1,
+                world_size=self.world_size, enable_sequence_parallel=False,
+            )
+            context.build_mesh()
+        cp_rank = context.get_mesh("cp").get_local_rank()
+        parallelism = ParallelismConfig(
+            pipeline_parallel_degree=2, context_parallel_degree=2
+        )
+        config = build_model_config(
+            "glm5_2_debugmodel", parallelism=parallelism, seq_len=8
+        )
+        for role in ("embedding", "output", "mtp"):
+            if role == "mtp":
+                parallelism = ParallelismConfig(context_parallel_degree=2)
+                config = build_model_config(
+                    "glm5_2_debugmodel_mtp", parallelism=parallelism, seq_len=8
+                )
+            with self.subTest(role=role), torch.device("meta"):
+                model = config.build()
+            if role != "mtp":
+                for name in list(model.layers):
+                    del model.layers[name]
+            if role == "embedding":
+                model.norm = model.lm_head = None
+            elif role == "output":
+                model.tok_embeddings = None
+            positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
+            padding = torch.tensor([False] * 7 + [True])
+            with context.activate_spmd():
+                _, _, kwargs, _ = model.preprocess_inputs(
+                    {
+                        "input": torch.arange(8),
+                        "labels": torch.arange(8),
+                        "positions": positions,
+                        "padding_mask": padding,
+                    },
+                    parallelism_context=context,
+                    parallelism=parallelism,
+                    max_num_documents=2,
+                )
+            metadata = kwargs["attention_masks"]
+            torch.testing.assert_close(metadata.positions_T, positions)
+            torch.testing.assert_close(metadata.valid_T, ~padding)
+            torch.testing.assert_close(
+                metadata.documents_T, torch.tensor([1] * 4 + [2] * 4)
+            )
+            torch.testing.assert_close(
+                metadata.query_indices_Q, torch.arange(4 * cp_rank, 4 * (cp_rank + 1))
+            )
+            if role == "mtp":
+                shifted = kwargs["mtp_attention_masks"][0]
+                torch.testing.assert_close(
+                    shifted.query_indices_Q, metadata.query_indices_Q
+                )
+                self.assertFalse(shifted.valid_T[3].item())
+                self.assertFalse(shifted.valid_T[7].item())
 
 
 class TestGlm5Config(unittest.TestCase):
@@ -86,75 +162,6 @@ class TestGlm5Config(unittest.TestCase):
                 ValueError, message
             ):
                 replace(config, layers=config.layers[:3], index_sources=sources)
-
-    def test_pipeline_and_mtp_prepare_context_parallel_metadata(self) -> None:
-        parallelism = ParallelismConfig(
-            pipeline_parallel_degree=2, context_parallel_degree=2
-        )
-        config = build_model_config(
-            "glm5_2_debugmodel", parallelism=parallelism, seq_len=8
-        )
-        for role in ("embedding", "output", "mtp"):
-            if role == "mtp":
-                parallelism = ParallelismConfig(context_parallel_degree=2)
-                config = build_model_config(
-                    "glm5_2_debugmodel_mtp", parallelism=parallelism, seq_len=8
-                )
-            with self.subTest(role=role), torch.device("meta"):
-                model = config.build()
-            if role != "mtp":
-                for name in list(model.layers):
-                    del model.layers[name]
-            if role == "embedding":
-                model.norm = model.lm_head = None
-            elif role == "output":
-                model.tok_embeddings = None
-            positions = torch.tensor([0, 1, 2, 3, 0, 1, 2, 3])
-            padding = torch.tensor([False] * 7 + [True])
-            group = SimpleNamespace(size=lambda: 2, rank=lambda: 1)
-            # Exercise Decoder._cp_shard and the real GLM metadata preparation;
-            # only distributed transport and SPMD annotations need a process group.
-            with (
-                # This value-level CPU test has no named SPMD mesh. The real
-                # CP2 GPU regression checks the annotations with a mesh.
-                patch("torchtitan.models.glm5.dsa.DsaMetadata.annotate_spmd_types"),
-                patch(
-                    "torchtitan.models.glm5.dsa.spmd_mesh_group", return_value=group
-                ),
-                patch(
-                    "torchtitan.distributed.context_parallel.shard_tensors",
-                    side_effect=lambda inputs, **kwargs: inputs,
-                ),
-                patch(
-                    "torchtitan.models.glm5.model.annotate_input_spmd_types",
-                    side_effect=lambda context, inputs, shardings: inputs,
-                ),
-            ):
-                _, _, kwargs, _ = model.preprocess_inputs(
-                    {
-                        "input": torch.arange(8),
-                        "labels": torch.arange(8),
-                        "positions": positions,
-                        "padding_mask": padding,
-                    },
-                    parallelism_context=SimpleNamespace(cp_enabled=True),
-                    parallelism=parallelism,
-                    max_num_documents=2,
-                )
-            metadata = kwargs["attention_masks"]
-            torch.testing.assert_close(metadata.positions_T, positions)
-            torch.testing.assert_close(metadata.valid_T, ~padding)
-            torch.testing.assert_close(
-                metadata.documents_T, torch.tensor([1] * 4 + [2] * 4)
-            )
-            torch.testing.assert_close(metadata.query_indices_Q, torch.arange(4, 8))
-            if role == "mtp":
-                shifted = kwargs["mtp_attention_masks"][0]
-                torch.testing.assert_close(
-                    shifted.query_indices_Q, metadata.query_indices_Q
-                )
-                self.assertFalse(shifted.valid_T[3].item())
-                self.assertFalse(shifted.valid_T[7].item())
 
     def test_pipeline_forwards_contiguous_shared_indices(self) -> None:
         config = build_model_config(
