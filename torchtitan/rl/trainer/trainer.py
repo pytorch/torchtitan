@@ -9,6 +9,7 @@ import logging
 import os
 import pickle
 import time
+from collections import deque
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -269,8 +270,10 @@ class Trainer(Configurable):
             temperature=temperature,
             vision_processor=vision_processor,
         )
-        # Set on the leader by `receive_replica_column` before each `forward_backward`.
-        self._replica_column: ReplicaColumn | None = None
+        # On the leader, the columns from `receive_replica_column` not yet read, oldest first:
+        # usually one. With read-ahead, the controller sends the next step's column while
+        # `forward_backward` runs, so it can land before that step's reader takes its own.
+        self._replica_columns: deque[ReplicaColumn] = deque()
         # Whether rollout groups can stay in the rollout workers
         # (`BaseRolloutWorker.Config.rdma_min_group_bytes`); the same on every rank, so the
         # read metrics are reduced on every rank or on none.
@@ -281,6 +284,9 @@ class Trainer(Configurable):
             if rollout_groups_by_rdma and self._is_replica_leader
             else None
         )
+        # Set by `start_reading` (during the previous step's optimizer step); the next
+        # `forward_backward` trains on it.
+        self._started_reader: MicrobatchGroupReader | None = None
 
     @property
     def policy_version(self) -> int:
@@ -312,6 +318,10 @@ class Trainer(Configurable):
         the final teardown. Destroying it from this endpoint can race with mesh
         shutdown and hang at process exit.
         """
+        if self._started_reader is not None:
+            # A read-ahead whose step never ran (e.g. the run stopped after `start_reading`).
+            self._started_reader.close()
+            self._started_reader = None
         self.engine.close()
         logger.debug("Trainer close requested; ProcMesh.stop owns PG teardown.")
 
@@ -366,10 +376,38 @@ class Trainer(Configurable):
         await asyncio.to_thread(check_rdma_probes, self._rdma_byte_buffers, probes)
 
     async def receive_replica_column(self, column: ReplicaColumn) -> None:
-        """On a DP replica's leader: keep the replica's column of the next step's plan and the
-        rollouts it names, for the next `forward_backward` to pack."""
-        assert self._is_replica_leader and self._replica_column is None
-        self._replica_column = column
+        """On a DP replica's leader: keep the replica's column of a coming step's plan and the
+        rollouts it names, for that step's reader to pack. Columns are read in the order they
+        arrive, one per step."""
+        assert self._is_replica_leader and len(self._replica_columns) < 2
+        self._replica_columns.append(column)
+
+    async def start_reading(self, *, num_microbatch_groups: int) -> None:
+        """Start this rank's reader for the next `forward_backward` now, so its first microbatch
+        groups (on the leader: the reads, materialize and packing of its column) overlap this
+        step's optimizer step. Called on every rank of every replica, after the leaders'
+        `receive_replica_column`; returns at once."""
+        assert self._started_reader is None
+        reader = self._new_reader(num_microbatch_groups)
+        reader.start()
+        self._started_reader = reader
+
+    def _new_reader(self, num_microbatch_groups: int) -> MicrobatchGroupReader:
+        """A reader for the next step, holding the leader's oldest column from
+        `receive_replica_column`."""
+        # The controller sends each leader its column before it starts the step's readers.
+        assert bool(self._replica_columns) == self._is_replica_leader
+        column = self._replica_columns.popleft() if self._replica_columns else None
+        # The reader frees each rollout group once its samples exist, so it keeps the only
+        # reference to the column.
+        return MicrobatchGroupReader(
+            num_microbatch_groups=num_microbatch_groups,
+            replica_group=self._replica_group,
+            column=column,
+            training_sample_builder=self._training_sample_builder,
+            microbatch_packer=self._microbatch_packer,
+            rdma_byte_buffers=self._rdma_byte_buffers,
+        )
 
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
@@ -409,19 +447,10 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
-        column, self._replica_column = self._replica_column, None
-        # The controller sends each leader its column before every forward_backward.
-        assert (column is not None) == self._is_replica_leader
-        reader = MicrobatchGroupReader(
-            num_microbatch_groups=num_microbatch_groups,
-            replica_group=self._replica_group,
-            column=column,
-            training_sample_builder=self._training_sample_builder,
-            microbatch_packer=self._microbatch_packer,
-            rdma_byte_buffers=self._rdma_byte_buffers,
-        )
-        # The reader frees each rollout group once its samples exist.
-        del column
+        reader, self._started_reader = self._started_reader, None
+        if reader is None:
+            reader = self._new_reader(num_microbatch_groups)
+        assert len(reader) == num_microbatch_groups
         # The packer pads every microbatch to the same token count.
         self._step_num_tokens_per_dp_rank = (
             num_microbatch_groups

@@ -69,6 +69,10 @@ class _TrainerActorEndpoints:
         await super().receive_replica_column(column)
 
     @concurrent_endpoint
+    async def start_reading(self, *, num_microbatch_groups: int) -> None:
+        await super().start_reading(num_microbatch_groups=num_microbatch_groups)
+
+    @concurrent_endpoint
     async def forward_backward(
         self,
         *,

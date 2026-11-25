@@ -476,6 +476,48 @@ def test_reader_yields_in_order_and_packs_two_groups_ahead() -> None:
     assert packed == list(range(6))
 
 
+def test_a_started_reader_makes_the_groups_ahead_before_the_first_pass() -> None:
+    packed: list[int] = []
+    reader = _counting_reader(5, packed)
+
+    reader.start()
+    deadline = time.monotonic() + 10
+    while (
+        len(packed) < _NUM_MICROBATCH_GROUPS_READ_AHEAD and time.monotonic() < deadline
+    ):
+        time.sleep(0.01)
+    time.sleep(0.05)
+
+    # Only the groups the pass would have made ahead of the first wait; the pass continues them.
+    assert packed == list(range(_NUM_MICROBATCH_GROUPS_READ_AHEAD))
+    assert list(reader) == [[0], [1], [2], [3], [4]]
+    assert packed == [0, 1, 2, 3, 4]
+
+
+def test_closing_a_started_reader_cancels_its_queued_reads() -> None:
+    packed: list[int] = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def pack(samples: list[int]) -> SimpleNamespace:
+        [index] = samples
+        started.set()
+        release.wait(timeout=10)
+        packed.append(index)
+        return SimpleNamespace(preprocess_images=lambda: index)
+
+    reader = _counting_reader(5, [], pack=pack)
+    reader.start()
+    # Group 0 is running before the close, so only group 1 is still queued.
+    assert started.wait(timeout=10)
+    reader.close()
+    release.set()
+    time.sleep(0.05)
+
+    # Group 0 was running and finishes; group 1 was queued and never runs.
+    assert packed == [0]
+
+
 def test_reader_thread_sees_the_callers_context() -> None:
     step = contextvars.ContextVar("step")
     step.set(7)

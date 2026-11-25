@@ -98,6 +98,7 @@ def compute_perf_ratio_metrics(
     wait_s = seconds.get("timing/step/wait_for_training_batch")
     send_replica_columns_s = seconds.get("timing/step/send_replica_columns")
     fwd_bwd_s = seconds.get("timing/step/forward_backward")
+    read_ahead_s = seconds.get("timing/step/read_ahead")
     optimizer_s = seconds.get("timing/step/optimizer")
 
     # How long the trainer waited for the push and for the background pull.
@@ -131,6 +132,8 @@ def compute_perf_ratio_metrics(
             "perf/trainer/step_time_ratio/send_replica_columns",
             send_replica_columns_s / step_s,
         )
+    if read_ahead_s is not None:
+        _add_metric("perf/trainer/step_time_ratio/read_ahead", read_ahead_s / step_s)
     if blocking_trainer_push_s is not None:
         _add_metric(
             "perf/trainer/step_time_ratio/blocking_trainer_push_model_state_dict",
@@ -157,6 +160,7 @@ def compute_perf_ratio_metrics(
         wait_s,
         send_replica_columns_s,
         fwd_bwd_s,
+        read_ahead_s,
         optimizer_s,
         blocking_trainer_push_s,
         blocking_generator_pull_s,
@@ -165,6 +169,7 @@ def compute_perf_ratio_metrics(
             wait_s
             + send_replica_columns_s
             + fwd_bwd_s
+            + read_ahead_s
             + optimizer_s
             + blocking_trainer_push_s
             + blocking_generator_pull_s

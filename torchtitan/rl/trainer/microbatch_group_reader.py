@@ -19,6 +19,11 @@ nor the builder. Image files travel packed; every rank turns them into pixel val
 Rollout groups that stay in their rollout workers (`BaseRolloutWorker.Config.rdma_min_group_bytes`)
 reach the leader as handles; before packing the first microbatch group, the leader reads the
 regions its column names from every worker at once (`read_packed_rollout_group_handles`).
+
+When the next step's plan is already queued as this step's forward/backward starts (off-policy
+runs), the controller starts the next step's readers right after it (`MicrobatchGroupReader.start`),
+so the leader's reads, materialize and first packs overlap the optimizer step instead of delaying
+the next forward/backward.
 """
 
 from __future__ import annotations
@@ -53,6 +58,11 @@ if TYPE_CHECKING:
 # Groups made ahead of the one the engine waits on. A rank holds at most 4 microbatch groups
 # on the host: these 2, the one waited on, and the previous one, still in the engine's loop.
 _NUM_MICROBATCH_GROUPS_READ_AHEAD = 2
+
+
+def _new_read_pool() -> ThreadPoolExecutor:
+    """The one thread that makes a pass's microbatch groups."""
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="microbatch_group_read")
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +164,10 @@ class MicrobatchGroupReader:
         # Set once the leader fails to pack, on every rank: later groups raise it without a
         # broadcast, so no rank waits for a group the others never send.
         self._leader_error: str | None = None
+        # The pass's thread and reads, when `start` began them before the pass.
+        self._started: tuple[
+            ThreadPoolExecutor, deque[Future[list[TrainingMicrobatch]]]
+        ] | None = None
         # Total times, hidden or not; final once a pass ends. `pack_s` and `read_s` (with
         # `read_bytes`) are the leader's, on every rank of the replica; `broadcast_s` is this
         # rank's.
@@ -164,6 +178,33 @@ class MicrobatchGroupReader:
 
     def __len__(self) -> int:
         return self._num_microbatch_groups
+
+    def start(self) -> None:
+        """Begin the pass's first groups now, on the background thread: the groups made ahead of
+        the first one the engine waits on, as if the pass had started. Every rank of the replica
+        must call it, since the leader's groups are broadcasts.
+
+        Example:
+            reader.start()        # during the previous step's optimizer step
+            for group in reader:  # the first groups are made or under way
+                train(group)
+        """
+        assert self._started is None and not self._iterated
+        pool = _new_read_pool()
+        reads: deque[Future[list[TrainingMicrobatch]]] = deque()
+        for index in range(
+            min(self._num_microbatch_groups, _NUM_MICROBATCH_GROUPS_READ_AHEAD)
+        ):
+            reads.append(self._submit(pool, index))
+        self._started = (pool, reads)
+
+    def close(self) -> None:
+        """Stop a pass `start` began but no one iterated: cancel its queued reads and leave the
+        running one to finish (as when a pass is closed early)."""
+        if self._started is not None:
+            pool, _ = self._started
+            self._started = None
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def __iter__(self) -> Iterator[list[TrainingMicrobatch]]:
         # One pass: the leader drops each group's samples once it is packed.
@@ -177,17 +218,13 @@ class MicrobatchGroupReader:
             with sl.log_trace_span("wait_for_microbatch"):
                 return read.result()
 
-        pool = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="microbatch_group_read"
-        )
-        reads: deque[Future[list[TrainingMicrobatch]]] = deque()
+        if self._started is None:
+            pool, reads = _new_read_pool(), deque()
+        else:
+            (pool, reads), self._started = self._started, None
         try:
-            for index in range(self._num_microbatch_groups):
-                # Copy the actor's context: in a bare thread an actor framework can start a
-                # second client (Monarch does).
-                reads.append(
-                    pool.submit(contextvars.copy_context().run, self._read, index)
-                )
+            for index in range(len(reads), self._num_microbatch_groups):
+                reads.append(self._submit(pool, index))
                 if len(reads) > _NUM_MICROBATCH_GROUPS_READ_AHEAD:
                     yield wait_for_microbatch_group(reads.popleft())
             while reads:
@@ -197,6 +234,13 @@ class MicrobatchGroupReader:
             # reads, and don't wait for the running one: a rank receiving from a leader that
             # failed would wait out the gloo timeout.
             pool.shutdown(wait=False, cancel_futures=True)
+
+    def _submit(
+        self, pool: ThreadPoolExecutor, index: int
+    ) -> Future[list[TrainingMicrobatch]]:
+        # Copy the caller's context: in a bare thread an actor framework can start a second
+        # client (Monarch does).
+        return pool.submit(contextvars.copy_context().run, self._read, index)
 
     def _read(self, index: int) -> list[TrainingMicrobatch]:
         if self._leader_error is not None:

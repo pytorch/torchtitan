@@ -602,6 +602,7 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
         m.Metric("timing/step/wait_for_training_batch", m.Mean.from_list([0.25])),
         m.Metric("timing/step/send_replica_columns", m.Mean.from_list([0.25])),
         m.Metric("timing/step/forward_backward", m.Mean.from_list([0.5])),
+        m.Metric("timing/step/read_ahead", m.Mean.from_list([0.125])),
         m.Metric("timing/step/optimizer", m.Mean.from_list([0.5])),
         m.Metric(
             "timing/step/blocking_trainer_push_model_state_dict",
@@ -622,8 +623,10 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     assert ratios["perf/trainer/step_time_ratio/fwd_bwd"] == 0.5
     assert ratios["perf/trainer/tokens_per_second_fwd_bwd"] == 100.0
     assert ratios["perf/trainer/step_time_ratio/send_replica_columns"] == 0.125
-    # 2.0 s - (0.25 + 0.25 + 0.5 + 0.5 + 0.0 + 0.25) s: the column send is accounted for.
-    assert ratios["perf/trainer/step_time_ratio/unaccounted"] == 0.125
+    assert ratios["perf/trainer/step_time_ratio/read_ahead"] == 0.0625
+    # 2.0 s - (0.25 + 0.25 + 0.5 + 0.125 + 0.5 + 0.0 + 0.25) s: the column send and the
+    # read-ahead are accounted for.
+    assert ratios["perf/trainer/step_time_ratio/unaccounted"] == 0.0625
 
 
 def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:

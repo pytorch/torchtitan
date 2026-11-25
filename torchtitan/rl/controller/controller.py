@@ -85,9 +85,11 @@ _batcher_loop
     unblocked by: _rollout_loop[N] group_buffer.finalize_work()
   produces: StepPlan (training_batch_queue.put)
     waits for:    a free training_batch_queue slot (maxsize=1)
-    unblocked by: _trainer_loop training_batch_queue.get()
+    unblocked by: _trainer_loop training_batch_queue.get(), or its get_nowait() of the next plan
+                  before forward/backward (read-ahead), so up to one plan more than maxsize is
+                  held: the queue's and the one being read ahead
 _trainer_loop
-  consumes: a StepPlan (training_batch_queue.get)
+  consumes: a StepPlan (training_batch_queue.get, or get_nowait for read-ahead)
     waits for:    a StepPlan in the queue
     unblocked by: _batcher_loop training_batch_queue.put()
 """
@@ -151,6 +153,16 @@ from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadAhead:
+    """The next step's plan, taken from the queue before this step's forward/backward: its
+    columns are with the leaders and its trainer readers have started (`Controller._read_ahead`).
+    """
+
+    plan: StepPlan | None
+    """None when the batcher closed: the next step stops on it."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1384,7 +1396,8 @@ class Controller(Configurable):
             unblocked by: _rollout_loop[N] group_buffer.finalize_work()
         produces: StepPlan (training_batch_queue.put)
             waits for:    a free training_batch_queue slot (maxsize=1)
-            unblocked by: _trainer_loop training_batch_queue.get()
+            unblocked by: _trainer_loop training_batch_queue.get(), or its get_nowait() of the
+                          next plan before forward/backward (read-ahead)
         """
         while True:
             summary = await self._group_buffer.take_finalized()
@@ -1420,6 +1433,11 @@ class Controller(Configurable):
 
         The pull of policy N overlaps forward/backward N+1; the push before it does not:
 
+            Controller: if plan N+1 is already queued, take it
+            Trainer:    forward/backward N
+                          (Controller, meanwhile: send plan N+1's columns)
+            Controller: if it took plan N+1, start its readers
+                          |-> Trainer leaders: read, materialize, pack plan N+1's first groups
             Trainer:    optimizer N -> policy N
             Controller: await pull N-1     (push N must not overwrite pushed weights mid-pull)
             Controller: await push N       (forward/backward N+1 would hold back its reply; see the await)
@@ -1433,12 +1451,15 @@ class Controller(Configurable):
         Impact on off-policiness: no sample is born stale, because the buffer admits new rollout
         groups only after the generators load the new policy.
 
-        consumes: a StepPlan (training_batch_queue.get)
+        consumes: a StepPlan (training_batch_queue.get, or get_nowait for read-ahead)
             waits for:    a StepPlan in the queue
             unblocked by: _batcher_loop training_batch_queue.put()
         """
         # The previous step's pull, returning its wall time; None before the first.
         pull_task: asyncio.Task[float] | None = None
+        # The plan the previous step took from the queue before its forward/backward, with its
+        # columns sent and its trainer readers started (`_read_ahead`).
+        read_ahead: _ReadAhead | None = None
         for step in range(self.start_step + 1, num_training_steps + 1):
             sl.set_step(step)  # propagate the step counter to the actors
             with sl.log_trace_span("sync_log_step"):
@@ -1458,7 +1479,13 @@ class Controller(Configurable):
                     sl.log_trace_span("wait_for_training_batch"),
                     step_timer.record("timing/step/wait_for_training_batch"),
                 ):
-                    plan = await training_batch_queue.get()
+                    if read_ahead is None:
+                        plan = await training_batch_queue.get()
+                    else:
+                        plan = read_ahead.plan
+                # This step's columns went and its readers started during the previous step.
+                read_ahead_started = read_ahead is not None
+                read_ahead = None
 
                 if plan is None:
                     logger.info("Batcher closed and drained; stopping training")
@@ -1478,49 +1505,68 @@ class Controller(Configurable):
                 # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
                 #   global counts over ALL microbatches, needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
-                # TODO: the leaders pack only once forward_backward starts. With
-                #   training.preprocess_microbatch_groups_lazily=False (the default), the engine
-                #   reads every microbatch group before its first forward, so the column send
-                #   and the leaders' materialize, pack and broadcast all wait in this step; with
-                #   it on, the first group still waits for the column's materialize. Sending the
-                #   columns during the previous step would hide them.
+                # Unless the previous step sent this step's columns and started its readers
+                # (`_read_ahead`: off-policy runs whose plan was queued in time), the columns go
+                # now, and the first microbatch group waits for the leaders' reads, materialize
+                # and packing.
                 with (
                     sl.log_trace_span("send_replica_columns"),
                     step_timer.record("timing/step/send_replica_columns"),
                 ):
-                    columns = self._replica_columns(plan)
-                    # The leaders now hold these groups' bytes (or handles).
-                    for group_id in plan.trainable_group_ids:
-                        del self._packed_groups_by_id[group_id]
-                    await self._send_replica_columns(columns)
-                    del columns
-                with (
-                    sl.log_trace_span("forward_backward"),
-                    step_timer.record("timing/step/forward_backward"),
-                ):
-                    fwd_bwd_results = await asyncio.gather(
-                        *(
-                            trainer_at_dp_rank.forward_backward.call(
-                                num_microbatch_groups=len(plan.microbatch_groups),
-                                global_loss_token_counts=plan.global_loss_token_counts,
-                                global_routing_token_counts=(
-                                    plan.global_routing_token_counts
-                                ),
+                    if not read_ahead_started:
+                        await self._send_columns(plan)
+                # If the batcher already queued the next plan (off-policy runs usually have it by
+                # now; on-policy, its groups wait for this step's pull), take it and send its
+                # columns while forward/backward runs.
+                next_columns = (
+                    self._start_sending_next_columns(training_batch_queue)
+                    if step < num_training_steps
+                    else None
+                )
+                try:
+                    with (
+                        sl.log_trace_span("forward_backward"),
+                        step_timer.record("timing/step/forward_backward"),
+                    ):
+                        fwd_bwd_results = await asyncio.gather(
+                            *(
+                                trainer_at_dp_rank.forward_backward.call(
+                                    num_microbatch_groups=len(plan.microbatch_groups),
+                                    global_loss_token_counts=plan.global_loss_token_counts,
+                                    global_routing_token_counts=(
+                                        plan.global_routing_token_counts
+                                    ),
+                                )
+                                for trainer_at_dp_rank in self.trainer.by_dp_rank
                             )
-                            for trainer_at_dp_rank in self.trainer.by_dp_rank
                         )
-                    )
-                    # Under PP, only trainer ranks holding the last stage
-                    # compute the loss; the others return None.
-                    fwd_bwd_metrics = next(
-                        rank_metrics
-                        for rank_metrics in fwd_bwd_results[0].values()
-                        if rank_metrics is not None
-                    )
+                        # Under PP, only trainer ranks holding the last stage
+                        # compute the loss; the others return None.
+                        fwd_bwd_metrics = next(
+                            rank_metrics
+                            for rank_metrics in fwd_bwd_results[0].values()
+                            if rank_metrics is not None
+                        )
 
-                    if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
-                        logger.error("Loss is NaN/Inf; training diverged")
-                        break
+                        if not math.isfinite(fwd_bwd_metrics["loss/mean"]):
+                            logger.error("Loss is NaN/Inf; training diverged")
+                            break
+
+                    # If it took the next plan, start its trainer readers now, so the leaders'
+                    # reads, materialize and first packs overlap this step's optimizer step, pull
+                    # wait and push. The timer is what stays exposed: the rest of the column
+                    # send, and the start_reading calls.
+                    with (
+                        sl.log_trace_span("read_ahead"),
+                        step_timer.record("timing/step/read_ahead"),
+                    ):
+                        if next_columns is not None:
+                            read_ahead = await self._read_ahead(next_columns)
+                finally:
+                    # Every way out before the read-ahead finishes (an error, the NaN break)
+                    # stops the next step's send, so it does not outlive the loop.
+                    if next_columns is not None:
+                        next_columns.cancel()
 
                 with (
                     sl.log_trace_span("optim_step"),
@@ -1582,6 +1628,11 @@ class Controller(Configurable):
                     is_validation=False,
                     metrics=[
                         *plan.metrics,
+                        # 1 when this step's columns went and its readers started during the
+                        # previous step.
+                        m.Metric(
+                            "trainer/read_ahead", m.NoReduce(float(read_ahead_started))
+                        ),
                         *[
                             m.Metric(key, m.NoReduce(value))
                             for key, value in fwd_bwd_metrics.items()
@@ -1620,6 +1671,50 @@ class Controller(Configurable):
         # (`validate_after_training`).
         if pull_task is not None:
             await pull_task
+
+    async def _send_columns(self, plan: StepPlan) -> None:
+        """Send each DP replica's leader its column of `plan`. The leaders now hold the groups'
+        bytes (or handles)."""
+        columns = self._replica_columns(plan)
+        for group_id in plan.trainable_group_ids:
+            del self._packed_groups_by_id[group_id]
+        await self._send_replica_columns(columns)
+
+    def _start_sending_next_columns(
+        self, training_batch_queue: "asyncio.Queue[StepPlan | None]"
+    ) -> asyncio.Task[_ReadAhead] | None:
+        """If the batcher already queued the next plan, take it and start a task that sends its
+        columns; else None, and the next step takes its plan itself. Each leader keeps a column
+        that lands during its `forward_backward` behind that step's own
+        (`Trainer.receive_replica_column`); its handler runs once `forward_backward` returns, but
+        the pickling and the transfer overlap it."""
+        try:
+            plan = training_batch_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+        async def send() -> _ReadAhead:
+            if plan is not None:
+                await self._send_columns(plan)
+            return _ReadAhead(plan=plan)
+
+        return asyncio.create_task(send())
+
+    async def _read_ahead(self, next_columns: asyncio.Task[_ReadAhead]) -> _ReadAhead:
+        """Finish sending the next step's columns and start its readers on every trainer rank
+        (`Trainer.start_reading`). A `None` plan (shutdown) passes through for the next step to
+        stop on."""
+        read_ahead = await next_columns
+        if read_ahead.plan is not None:
+            await asyncio.gather(
+                *(
+                    trainer_at_dp_rank.start_reading.call(
+                        num_microbatch_groups=len(read_ahead.plan.microbatch_groups)
+                    )
+                    for trainer_at_dp_rank in self.trainer.by_dp_rank
+                )
+            )
+        return read_ahead
 
     def _replica_columns(self, plan: StepPlan) -> list[ReplicaColumn]:
         """Each DP replica's column of `plan`, with the rollouts it names: a group's rollouts can
