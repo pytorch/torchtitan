@@ -355,6 +355,12 @@ class Glm5DsaIndexer(Module):
         def __post_init__(self):
             if self.training_stage not in ("frozen", "warmup", "sparse"):
                 raise ValueError("Unknown GLM indexer training stage")
+            if not 1 <= self.n_heads <= 64:
+                raise ValueError("GLM indexer requires 1<=heads<=64")
+            if not 16 <= self.head_dim <= 256 or self.head_dim % 8:
+                raise ValueError("GLM indexer width must be 16..256 divisible by 8")
+            if not 0 <= self.topk.index_topk <= 4096:
+                raise ValueError("GLM indexer requires 0<=topk<=4096")
 
     def __init__(self, config: Config):
         super().__init__()

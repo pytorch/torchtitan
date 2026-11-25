@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from unittest.mock import patch
+from dataclasses import replace
 
 import pytest
 import torch
@@ -13,6 +14,35 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.glm5 import build_model_config
+
+
+@pytest.mark.parametrize("updates", [
+    {"n_heads": 0}, {"n_heads": 65},
+    {"head_dim": 8}, {"head_dim": 257}, {"head_dim": 20},
+])
+def test_indexer_rejects_unsupported_dimensions_at_config_time(updates):
+    config = build_model_config(
+        "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128
+    )
+    with pytest.raises(ValueError, match="GLM indexer"):
+        replace(config.layers[0].attention.indexer, **updates)
+
+
+def test_training_configuration_does_not_mutate_source():
+    from torchtitan.models.glm5.flavors import configure_glm5_training
+
+    original = build_model_config(
+        "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128
+    )
+    configured = configure_glm5_training(
+        original, parallelism=ParallelismConfig(),
+        indexer_stage="warmup", indexer_loss_coeff=1.0,
+    )
+    assert original.indexer_training_stage == "frozen"
+    assert original.layers[0].attention.indexer.training_stage == "frozen"
+    assert configured.indexer_training_stage == "warmup"
+    assert configured.layers[0].attention.indexer.training_stage == "warmup"
+    assert configured.layers[0] is not original.layers[0]
 
 
 @pytest.fixture(autouse=True)
