@@ -9,6 +9,7 @@
 import os
 import re
 from contextlib import nullcontext
+from functools import partial
 from itertools import count, product
 from typing import Any, cast, Literal
 from unittest.mock import patch
@@ -62,6 +63,7 @@ from torchtitan.models.common.attention.cp_attention import (
 )
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.deepseek_v3 import build_model_config as build_deepseek_v3_config
+from torchtitan.models.deepseek_v3.mtp import MTPCrossEntropyLoss
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
 
@@ -165,6 +167,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         # dp_shard and cp flattened.
         tp = parallelism_context.tp
         tp_rank, bucket_rank = self.rank % tp, self.rank // tp
+        mismatched = []
         for fqn, param in model.named_parameters():
             (placement,) = flex_shard.get_placements(param)
             expected = full_params[fqn]
@@ -185,7 +188,17 @@ class TestFlexShardDecoder(DTensorTestBase):
                         expected = expected.chunk(tp, dim)[tp_rank]
                 expected = expected.chunk(self.world_size // tp, placement.dim)
                 expected = expected[bucket_rank]
-            self.assertTrue(torch.equal(param, expected), msg=f"{context} init {fqn}")
+            if not torch.equal(param, expected):
+                mismatched.append(fqn)
+        # A shard can match on some ranks only, e.g. rank 0's when each rank
+        # initializes its own shard. Fail on all ranks, not only on the others,
+        # which would leave the rest waiting in training's collectives.
+        mismatched_by_rank: list[Any] = [None] * self.world_size
+        dist.all_gather_object(mismatched_by_rank, mismatched)
+        self.assertFalse(
+            any(mismatched_by_rank),
+            msg=f"{context} init, mismatches by rank: {mismatched_by_rank}",
+        )
 
     def _train(
         self,
@@ -201,8 +214,12 @@ class TestFlexShardDecoder(DTensorTestBase):
     ):
         if optim is None:
             optim = torch.optim.AdamW(model.parameters(), lr=1e-3, foreach=True)
+        # With MTP layers, one prediction, one loss and one token count per
+        # objective.
+        num_objectives = 1 + len(getattr(model, "mtp_layers", None) or ())
+        loss_cls = CrossEntropyLoss if num_objectives == 1 else MTPCrossEntropyLoss
         # Vocab-parallel under TP, as in the recipes.
-        loss_config = CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size)
+        loss_config = loss_cls.Config(global_vocab_size=model_config.vocab_size)
         if chunked_loss:
             # As the training engine sets it up.
             loss_fn = ChunkedLossWrapper.Config(loss_fn=loss_config).build()
@@ -216,14 +233,17 @@ class TestFlexShardDecoder(DTensorTestBase):
         else:
             loss_fn = loss_config.build()
         # Made outside the graphs: a host-to-device copy can't be captured.
-        global_loss_token_count = torch.tensor(_SEQ_LEN, device=self.device_type)
+        global_loss_token_counts = torch.tensor(
+            _SEQ_LEN if num_objectives == 1 else [_SEQ_LEN] * num_objectives,
+            device=self.device_type,
+        )
 
         def forward_backward(prepared_microbatches) -> torch.Tensor:
             losses = []
             for inputs, labels, model_kwargs in prepared_microbatches:
                 with parallelism_context.activate_spmd():
                     output = model(inputs, **model_kwargs)
-                    loss, _ = loss_fn(output, labels, global_loss_token_count)
+                    loss, _ = loss_fn(output, labels, global_loss_token_counts)
                     with spmd.no_typecheck():
                         loss.backward()
                 losses.append(loss.detach())
@@ -249,7 +269,7 @@ class TestFlexShardDecoder(DTensorTestBase):
             def validate(inputs, labels, model_kwargs) -> torch.Tensor:
                 with parallelism_context.activate_spmd():
                     output = model(inputs, **model_kwargs)
-                    loss, _ = loss_fn(output, labels, global_loss_token_count)
+                    loss, _ = loss_fn(output, labels, global_loss_token_counts)
                     parallelism.fsdp_backend.build().reshard_after_eval([model])
                 return loss
 
@@ -303,7 +323,8 @@ class TestFlexShardDecoder(DTensorTestBase):
                         # The trainer's count for MoE load balancing, without
                         # padding.
                         global_routing_token_counts=torch.tensor(
-                            [seq_len * parallelism_context.dp_shard * microbatches],
+                            [seq_len * parallelism_context.dp_shard * microbatches]
+                            * num_objectives,
                             device=self.device_type,
                         ),
                     )
@@ -351,7 +372,6 @@ class TestFlexShardDecoder(DTensorTestBase):
         *,
         ep: int,
         cases,
-        chunked_loss: bool = False,
         tp: int = 1,
         cp: int = 1,
         sequence_parallel: bool = False,
@@ -369,7 +389,12 @@ class TestFlexShardDecoder(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=sequence_parallel,
         )
-        for (build_config, flavor), reshard_after_forward, microbatches in cases:
+        for (
+            (build_config, flavor),
+            reshard_after_forward,
+            microbatches,
+            chunked_loss,
+        ) in cases:
             context = (
                 f"{flavor} "
                 f"reshard_after_forward={reshard_after_forward} "
@@ -458,9 +483,9 @@ class TestFlexShardDecoder(DTensorTestBase):
         self._check_matches_fsdp2(
             ep=1,
             cases=[
-                ((build_llama3_config, "debugmodel"), "default", 2),
-                ((build_qwen3_config, "debugmodel_moe"), "always", 2),
-                ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2),
+                ((build_llama3_config, "debugmodel"), "default", 2, False),
+                ((build_qwen3_config, "debugmodel_moe"), "always", 2, False),
+                ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2, False),
             ],
         )
 
@@ -480,8 +505,8 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 ("default",),
                 (1, 2),
+                (True,),
             ),
-            chunked_loss=True,
             accelerator_graph="step",
         )
 
@@ -499,8 +524,8 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 ("default",),
                 (2,),
+                (True,),
             ),
-            chunked_loss=True,
             accelerator_graph="microbatch_group",
         )
 
@@ -515,9 +540,11 @@ class TestFlexShardDecoder(DTensorTestBase):
         self._check_matches_fsdp2(
             ep=2,
             cases=product(
-                [(build_qwen3_config, "debugmodel_moe")], ("default", "always"), (1, 2)
+                [(build_qwen3_config, "debugmodel_moe")],
+                ("default", "always"),
+                (1, 2),
+                (True,),
             ),
-            chunked_loss=True,
         )
 
     @with_comms
@@ -526,8 +553,9 @@ class TestFlexShardDecoder(DTensorTestBase):
         # flex_shard_bucket finds it by the shared weight's second name.
         self._check_matches_fsdp2(
             ep=1,
-            cases=[((_build_tied_llama3_config, "debugmodel_tied"), "default", 2)],
-            chunked_loss=True,
+            cases=[
+                ((_build_tied_llama3_config, "debugmodel_tied"), "default", 2, True)
+            ],
         )
 
     @with_comms
@@ -539,10 +567,36 @@ class TestFlexShardDecoder(DTensorTestBase):
         self._check_matches_fsdp2(
             ep=2,
             cases=product(
-                [(build_deepseek_v3_config, "debugmodel")], ("default",), (1, 2)
+                [(build_deepseek_v3_config, "debugmodel")],
+                ("default",),
+                (1, 2),
+                (True,),
             ),
-            chunked_loss=True,
         )
+
+    def _check_deepseek_v3_mtp_matches_fsdp2(self, *, ep: int) -> None:
+        # One MTP layer, as in deepseek_v3_debugmodel_mtp. The embedding and
+        # lm_head run once per objective, so their buckets sum two calls' grads
+        # in each backward. The loss is MTPCrossEntropyLoss on full logits, and
+        # inside ChunkedLossWrapper, as in the recipe, which runs lm_head on its
+        # own on the chunks of both outputs.
+        self._check_matches_fsdp2(
+            ep=ep,
+            cases=product(
+                [(partial(build_deepseek_v3_config, num_mtp_layers=1), "debugmodel")],
+                ("default",),
+                (1, 2),
+                (False, True),
+            ),
+        )
+
+    @with_comms
+    def test_matches_fsdp2_for_deepseek_v3_mtp(self):
+        self._check_deepseek_v3_mtp_matches_fsdp2(ep=1)
+
+    @with_comms
+    def test_matches_fsdp2_for_deepseek_v3_mtp_with_expert_parallelism(self):
+        self._check_deepseek_v3_mtp_matches_fsdp2(ep=2)
 
     @with_comms
     def test_matches_fsdp2_with_tensor_parallelism(self):
@@ -564,8 +618,8 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 ("default",),
                 (1, 2),
+                (True,),
             ),
-            chunked_loss=True,
         )
 
     @with_comms
@@ -606,6 +660,7 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 ("default",),
                 (1, 2),
+                (False,),
             ),
         )
 
@@ -623,6 +678,7 @@ class TestFlexShardDecoder(DTensorTestBase):
                 ),
                 ("default",),
                 (2,),
+                (False,),
             ),
             dist_muon=True,
         )
@@ -633,8 +689,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         # (edp_shard, ep) mesh, as for FSDP2's DTensors.
         self._check_matches_fsdp2(
             ep=2,
-            cases=[((build_qwen3_config, "debugmodel_moe"), "default", 2)],
-            chunked_loss=True,
+            cases=[((build_qwen3_config, "debugmodel_moe"), "default", 2, True)],
             dist_muon=True,
         )
 
