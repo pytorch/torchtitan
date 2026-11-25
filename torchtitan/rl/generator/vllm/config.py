@@ -212,10 +212,12 @@ class SimpleCPUKVOffloadConfig:
     """CPU DRAM for KV per GPU process (TP=2 uses twice this)."""
 
     lazy_offload: bool = True
-    """Save blocks only as they near eviction from the GPU cache. False (vLLM's
-    default): save every full prompt and decode block as it is computed, which
-    copies more and showed no speedup when the CPU tier was smaller than the GPU
-    cache."""
+    """Save a block only when it nears eviction from the GPU cache, so CPU holds blocks
+    the GPU is dropping instead of copies of blocks still on GPU, with fewer copies.
+    False (vLLM's default) saves every full block as it is computed; this only helps
+    when the GPU prefix cache is dropped without eviction (e.g. ``reset_prefix_cache``),
+    which RL with KV offload never does (it rejects
+    ``reset_kv_cache_on_model_state_dict_load=True``)."""
 
     def __post_init__(self) -> None:
         if self.cpu_bytes_per_rank <= 0:
