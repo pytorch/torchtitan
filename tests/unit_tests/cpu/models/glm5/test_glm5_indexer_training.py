@@ -234,10 +234,14 @@ def test_kl_only_warmup_has_no_teacher_activation_backward_or_lm_head():
     # Evaluation remains teacher CE, not KL and not a new inference interface.
     with torch.no_grad():
         logits = model(torch.arange(16), positions=torch.arange(16))
-    labels = torch.arange(16)
-    actual, _ = loss(logits, labels)
-    expected, _ = CrossEntropyLoss.Config().build()(logits, labels)
+        labels = torch.arange(16)
+        actual, _ = loss(logits, labels)
+        expected, _ = CrossEntropyLoss.Config().build()(logits, labels)
+        with pytest.raises(ValueError, match="teacher logits"):
+            loss(output, labels)
     torch.testing.assert_close(actual, expected)
+    with pytest.raises(ValueError, match="scalar KL"):
+        loss(logits, labels)
 
 
 @pytest.mark.parametrize("offset", [0, 4])

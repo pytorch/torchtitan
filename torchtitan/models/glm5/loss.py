@@ -24,9 +24,12 @@ class Glm5WarmupLoss(Loss[torch.Tensor]):
     def __call__(self, pred, labels, global_loss_token_counts=None, **loss_inputs):
         # AuxLoss owns the routed-token normalization and per-layer KL metrics.
         # Labels remain in the dataloader/checkpoint contract but need no LM head.
-        if isinstance(pred, tuple) or pred.ndim != 0:
-            # Evaluation keeps the ordinary teacher-logits contract.
-            return self.evaluation_loss(
-                pred, labels, global_loss_token_counts, **loss_inputs
-            )
-        return pred, {}
+        # Trainer evaluates through Validator.validate under no_grad. Do not
+        # reinterpret malformed training outputs as a different objective.
+        if torch.is_grad_enabled():
+            if not isinstance(pred, torch.Tensor) or pred.ndim != 0:
+                raise ValueError("GLM warmup training requires a scalar KL objective")
+            return pred, {}
+        if isinstance(pred, torch.Tensor) and pred.ndim == 0:
+            raise ValueError("GLM warmup evaluation requires teacher logits, not KL")
+        return self.evaluation_loss(pred, labels, global_loss_token_counts, **loss_inputs)

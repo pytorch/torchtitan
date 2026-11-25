@@ -15,9 +15,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.context_parallel import cp_all_gather_tensors
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
+from torchtitan.models.glm5 import build_model_config
 from torchtitan.models.glm5.dsa import (
     DSAIndexerTopK,
     DsaMetadata,
@@ -25,6 +27,7 @@ from torchtitan.models.glm5.dsa import (
 )
 from torchtitan.models.glm5.indexer import select_local_topk
 from torchtitan.models.glm5.sharding import glm5_indexer_topk_sharding_config
+from torchtitan.tools.utils import set_default_dtype
 
 
 @pytest.mark.multi_gpu
@@ -33,6 +36,40 @@ class TestGlm5CPIndexer(DTensorTestBase):
     @property
     def world_size(self) -> int:
         return 2
+
+    @with_comms
+    def test_warmup_key_gradient_matches_summed_rank_contributions(self):
+        if not torch.cuda.is_bf16_supported():
+            self.skipTest("requires BF16 projections")
+        context = ParallelismContext(
+            dp_replicate=1, dp_shard=1, cp=2, tp=1, pp=1, ep=1,
+            world_size=self.world_size, enable_sequence_parallel=False,
+        )
+        context.build_mesh()
+        device = torch.device("cuda", self.rank)
+        cfg = build_model_config(
+            "glm5_2_debugmodel", seq_len=128, parallelism=ParallelismConfig(),
+            indexer_stage="warmup",
+        ).layers[0].attention.indexer
+        with set_default_dtype(torch.bfloat16):
+            indexer = cfg.build(training_stage="warmup").to(device)
+        indexer.init_states()
+        rows = 8
+        x = torch.randn(rows, cfg.wk.in_features, dtype=torch.bfloat16, device=device)
+        q = torch.randn(rows, cfg.wq_b.in_features, dtype=x.dtype, device=device)
+        pos = torch.arange(rows, device=device) + rows * self.rank
+        # Each consumer contributes a distinct gradient for each global key.
+        g = torch.arange(2 * rows, device=device)[:, None] + 1
+        with context.activate_spmd():
+            _, (_, keys, _) = indexer(x, q, pos, None)
+            self.assertEqual(keys.dtype, torch.bfloat16)
+            keys.backward((g * (1 + self.rank)).to(keys).expand_as(keys))
+        actual = indexer.wk.weight.grad.detach().clone()
+        indexer.zero_grad(set_to_none=True)
+        _, (_, local_keys, _) = indexer(x, q, pos, None)
+        summed = (g.float() + 2 * g.float())[pos]
+        local_keys.backward(summed.to(local_keys).expand_as(local_keys))
+        torch.testing.assert_close(actual, indexer.wk.weight.grad, rtol=0, atol=0)
 
     @with_comms
     def test_local_query_selection_with_real_key_gather(self):

@@ -438,15 +438,8 @@ class Glm5DsaIndexer(Module):
         # Context parallelism keeps queries local but every query ranks the
         # global key sequence. Match the KV-all-gather attention contract by
         # gathering indexer keys over CP before the discrete top-k boundary.
-        cp_group = spmd_mesh_group(MeshAxisName.CP)
-        if cp_group is not None:
-            k_TH = spmd.redistribute(
-                k_TH,
-                cp_group,
-                src=spmd.S(0),
-                dst=spmd.R,
-                backward_options={"op_dtype": k_TH.dtype},
-            )
+        if spmd_mesh_group(MeshAxisName.CP) is not None:
+            (k_TH,) = cp_all_gather_tensors((k_TH,), reduce_dtype=torch.float32)
 
         # The learned per-token head weights turn N head-specific similarities
         # into the scalar [T,T] ranking consumed by top-k.
