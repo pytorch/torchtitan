@@ -9,6 +9,7 @@ from torchtitan.rl.trainer.losses.dppo import DPPOLoss
 from torchtitan.rl.trainer.losses.grpo import GRPOLoss
 from torchtitan.rl.trainer.losses.importance_sampling import CISPOLoss, IcePopLoss
 from torchtitan.rl.trainer.losses.policy_gradient import PolicyGradientLoss
+from torchtitan.rl.trainer.losses.score_centering import ScoreCentering
 
 __all__ = [
     "CISPOLoss",
@@ -17,4 +18,5 @@ __all__ = [
     "GRPOLoss",
     "IcePopLoss",
     "PolicyGradientLoss",
+    "ScoreCentering",
 ]

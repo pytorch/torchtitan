@@ -26,7 +26,7 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
     """
     import vllm.v1.worker.gpu.sample.logprob as vllm_logprob
 
-    from torchtitan.components.loss import compute_logprobs
+    from torchtitan.components.loss import compute_logprobs, compute_topk_logprobs
 
     def generator_compute_token_logprobs(
         logits: torch.Tensor, token_ids: torch.Tensor
@@ -35,32 +35,30 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
 
         Args:
             logits: Full-vocabulary ``[N, V]`` next-token logits for N sampled
-                positions, already gathered by the vLLM model wrapper.
-            token_ids: ``[N, K]`` the K token ids to score per position (vLLM
-                passes the sampled token's logprob plus any top-k logprobs it requested).
+                positions, already gathered by the vLLM model wrapper and divided by
+                the temperature (``processed_logprobs``).
+            token_ids: ``[N, K]`` the K token ids to score per position: the sampled
+                token, then the top-k a request asked for (score centering).
 
         Returns:
             ``[N, K]`` logprob of each of the K token ids at each position.
         """
-        # vLLM gives token_ids [N, K]. SamplingParams(logprobs=0) makes real
-        # requests K=1, but we can't assert that: vLLM's kernel warmup probes
-        # this patched fn with K>1 (e.g. K=6), so we must handle any K. Reuse
-        # the trainer's compute_logprobs once per column.
-        #
-        # NOTE: each element of token_ids is scored independently, after the
-        # whole generated sequence is marterialized. We iterate column-by-column
-        # purely because torchtitan's compute_logprobs takes one token id per
-        # position; it is not a cross-column/cross-position dependency.
+        # The trainer's functions for each column: compute_logprobs for the sampled
+        # token, compute_topk_logprobs for the top-k. vLLM's kernel warmup probes this
+        # function with K > 1 too, so handle any K.
         token_ids = token_ids.to(torch.int64)
-        per_column = [
-            compute_logprobs(
-                logits,
-                token_ids[:, k],
-                vocab_parallel_group=None,
-            )
-            for k in range(token_ids.shape[1])
-        ]
-        return torch.stack(per_column, dim=-1)  # [N, K]
+        sampled = compute_logprobs(logits, token_ids[:, 0], vocab_parallel_group=None)
+        if token_ids.shape[1] == 1:
+            return sampled.unsqueeze(-1)
+        topk = compute_topk_logprobs(
+            logits,
+            token_ids[:, 1:],
+            vocab_parallel_group=None,
+            global_vocab_size=None,
+            # vLLM already divided the logits; dividing by 1 is exact.
+            temperature=torch.ones(logits.shape[0], device=logits.device),
+        )
+        return torch.cat([sampled.unsqueeze(-1), topk], dim=-1)  # [N, K]
 
     vllm_logprob.compute_token_logprobs = generator_compute_token_logprobs
     logger.info(

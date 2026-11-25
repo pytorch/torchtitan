@@ -61,7 +61,7 @@ from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
-from torchtitan.rl.trainer.losses import GRPOLoss
+from torchtitan.rl.trainer.losses import GRPOLoss, ScoreCentering
 from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
@@ -764,7 +764,10 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(trainer_model)
+                    global_vocab_size=decoder_vocab_size(trainer_model),
+                    # Batch-invariant top-k logprobs match the trainer's bitwise, so score
+                    # centering adds exactly 0: the RL loss golden guards that it stays a no-op.
+                    score_centering=ScoreCentering.Config(),
                 ),
             ),
         ),

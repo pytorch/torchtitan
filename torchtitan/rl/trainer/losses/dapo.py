@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 
 from torchtitan.rl.trainer.losses.policy_gradient import (
+    MAX_LOG_RATIO,
     PolicyGradientLoss,
     ScoredTokens,
 )
@@ -45,6 +47,19 @@ class DAPOLoss(PolicyGradientLoss):
         ratio, advantages = tokens.ratio, tokens.advantages
         clipped_ratio = self._clip(ratio)
         return -torch.min(ratio * advantages, clipped_ratio * advantages)
+
+    def log_token_weight(
+        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+    ) -> torch.Tensor:
+        # min(r * A, clip(r) * A) follows r (weight r) unless the clip binds in A's direction;
+        # PolicyGradientLoss's clamp of |log r| to MAX_LOG_RATIO also stops the gradient.
+        unclipped = torch.where(
+            advantages >= 0,
+            log_ratio <= math.log1p(self.ratio_clip_high),
+            log_ratio >= math.log1p(-self.ratio_clip_low),
+        )
+        has_gradient = unclipped & (log_ratio.abs() <= MAX_LOG_RATIO)
+        return torch.where(has_gradient, log_ratio, -torch.inf)
 
     def token_metrics(self, tokens: ScoredTokens) -> dict[str, torch.Tensor]:
         ratio_clipped = torch.abs(tokens.ratio - self._clip(tokens.ratio)) > 1e-6

@@ -16,6 +16,7 @@ import torch
 from torchtitan.components.loss import compute_logprobs, Loss
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.rl.trainer.losses.score_centering import ScoreCentering
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
 # logprob mismatch cannot overflow exp() to inf/NaN.
@@ -58,7 +59,10 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
     """Per-token policy-gradient loss on tokens the generator sampled.
 
     Subclasses define ``token_loss``: each loss token's loss from its ``ScoredTokens``
-    (trainer and generator logprobs, their ratio ``p / q``, the advantage). This class scores
+    (trainer and generator logprobs, their ratio ``p / q``, the advantage), and
+    ``log_token_weight``: the weight ``w`` that loss puts on the token's score, so that the
+    gradient of ``token_loss`` is ``-A * w(p / q) * grad(log p)``. ``score_centering`` uses
+    ``w`` to cancel the drift a trainer/generator mismatch adds to the gradient. This class scores
     the tokens under the distribution the generator sampled from (``softmax(logits / T)``),
     drops tokens whose generator logprob is non-finite (vLLM under CUDA graph) rather than
     training them as if on-policy, and divides the summed loss by
@@ -78,12 +82,33 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
         """Full vocabulary size from the model spec, set when building RL configs.
         Leave unset for batch-invariant mode to retain the full-gather path."""
 
+        score_centering: ScoreCentering.Config | None = None
+        """Score centering (arXiv 2609.20807); None disables it. It needs the generator's
+        top-k logprobs, which the controller then requests on every training rollout."""
+
     def __init__(self, config: Config) -> None:
         self.global_vocab_size = config.global_vocab_size
+        self.score_centering = (
+            None if config.score_centering is None else config.score_centering.build()
+        )
 
     @abstractmethod
     def token_loss(self, tokens: ScoredTokens) -> torch.Tensor:
         """[T] per-token loss."""
+
+    @abstractmethod
+    def log_token_weight(
+        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+    ) -> torch.Tensor:
+        """``log w``: the log of the weight ``token_loss`` puts on a token's score.
+
+        Args:
+            log_ratio: ``log(p / q)`` of any tokens, not clamped.
+            advantages: per-token advantages, broadcastable to ``log_ratio``.
+
+        Returns:
+            ``log w``, -inf where ``token_loss`` has no gradient (``w = 0``).
+        """
 
     def token_metrics(self, tokens: ScoredTokens) -> dict[str, torch.Tensor]:
         """[T] per-token metric values, averaged over the loss tokens; none by default.
@@ -104,6 +129,8 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
         temperature: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
+        generator_topk_token_ids: torch.Tensor | None = None,
+        generator_topk_logprobs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the policy-gradient loss.
 
@@ -116,16 +143,20 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
             advantages: [T] per-token advantages (0.0 for prompt/padding).
             global_loss_token_counts: total response tokens with finite generator logprobs
                 across all microbatches and DP ranks; the loss denominator.
+            generator_topk_token_ids: [T, k] the generator's top-k token ids, with
+                ``score_centering`` only.
+            generator_topk_logprobs: [T, k] the generator's logprobs of those ids.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
+        vocab_parallel_group = spmd_mesh_group("tp")
         # Score tokens under the distribution vLLM sampled from.
         trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             labels,
-            vocab_parallel_group=spmd_mesh_group("tp"),
+            vocab_parallel_group=vocab_parallel_group,
             return_entropy=True,
             global_vocab_size=self.global_vocab_size,
             temperature=temperature,
@@ -150,6 +181,24 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
         )
 
         token_loss = self.token_loss(tokens)
+        score_centering_metrics = {}
+        if self.score_centering is not None:
+            assert (
+                generator_topk_token_ids is not None
+                and generator_topk_logprobs is not None
+            ), "score centering needs the generator's top-k logprobs"
+            correction, score_centering_metrics = self.score_centering(
+                logits,
+                temperature=temperature,
+                advantages=advantages,
+                loss_mask=effective_loss_mask,
+                generator_topk_token_ids=generator_topk_token_ids,
+                generator_topk_logprobs=generator_topk_logprobs,
+                log_token_weight=self.log_token_weight,
+                vocab_parallel_group=vocab_parallel_group,
+                global_vocab_size=self.global_vocab_size,
+            )
+            token_loss = token_loss + advantages * correction
 
         masked_loss = token_loss * effective_loss_mask
         loss = _normalize(masked_loss.sum(), global_loss_token_counts)
@@ -170,7 +219,9 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
                     key: _normalize(
                         (value * effective_loss_mask).sum(), global_loss_token_counts
                     )
-                    for key, value in self.token_metrics(tokens).items()
+                    for key, value in (
+                        self.token_metrics(tokens) | score_centering_metrics
+                    ).items()
                 },
                 # Mean per-token log-ratio (log p_trainer - log q_generator) over
                 # sampled tokens. This is the k1 Monte-Carlo estimate of -KL(q || p).

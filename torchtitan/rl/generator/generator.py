@@ -85,6 +85,7 @@ class Generator(Configurable):
         model_path: Path to the HF model checkpoint.
         max_num_seqs: The engine's upper bound on concurrently scheduled sequences (it may admit
             fewer if KV is tight).
+        max_num_topk_logprobs: The most top-k logprobs a request may ask for; 0 for none.
         output_dir: Structured-logger output directory.
         open_result_channel: Opens the asynchronous channel used to fan in
             completions from nonzero data-parallel replicas to rank 0. It must
@@ -222,6 +223,7 @@ class Generator(Configurable):
         precision: PrecisionConfig,
         model_path: str,
         max_num_seqs: int,
+        max_num_topk_logprobs: int,
         output_dir: str,
         rank: int | None = None,
         generator_name: str = "generator",
@@ -264,6 +266,7 @@ class Generator(Configurable):
                     precision=precision,
                     gpu_memory_limit=config.gpu_memory_limit,
                     max_num_batched_tokens=config.max_num_batched_tokens,
+                    max_num_topk_logprobs=max_num_topk_logprobs,
                     checkpointer=config.checkpointer,
                     dist_moe_runtime=config.dist_moe_runtime,
                     debug=config.debug,

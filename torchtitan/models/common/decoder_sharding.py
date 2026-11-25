@@ -4,7 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from typing import Any
+
 import spmd_types as spmd
+import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -115,6 +118,37 @@ def decoder_input_sharding() -> dict[str, SpmdType]:
             partition_spec=spmd.PartitionSpec((DP, CP)),
         ),
     }
+
+
+def loss_kwarg_sharding(
+    loss_kwargs: dict[str, Any], labels_sharding: SpmdType
+) -> dict[str, SpmdType]:
+    """Shard each loss kwarg like the labels along tokens, and replicate any trailing dims.
+
+    Non-tensor kwargs keep the labels' layout (SPMD annotation and CP skip them), as does every
+    kwarg when the labels have no partition spec.
+
+    Example:
+
+        labels [T]                        -> PartitionSpec((DP, CP))
+        generator_logprobs [T]            -> PartitionSpec((DP, CP))
+        generator_topk_token_ids [T, k]   -> PartitionSpec((DP, CP), None)
+    """
+    if labels_sharding.partition_spec is None:
+        return dict.fromkeys(loss_kwargs, labels_sharding)
+    labels_spec = tuple(labels_sharding.partition_spec)
+    shardings = {}
+    for name, value in loss_kwargs.items():
+        num_trailing_dims = (
+            value.ndim - len(labels_spec) if isinstance(value, torch.Tensor) else 0
+        )
+        shardings[name] = SpmdType(
+            labels_sharding.local_type,
+            partition_spec=spmd.PartitionSpec(
+                *labels_spec, *[None] * num_trailing_dims
+            ),
+        )
+    return shardings
 
 
 def colwise_sharding_config(*, input_layout: SpmdType) -> ShardingConfig:
