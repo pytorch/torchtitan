@@ -11,7 +11,11 @@ from dataclasses import dataclass, fields
 import torch
 import torch.nn.functional as F
 
-from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data import (
+    ConcatThenSplitPackingConfig,
+    GlobalBalancer,
+    GrainDataLoader,
+)
 from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -115,6 +119,11 @@ def _qwen3_5_9b_ulysses_lean_remat_offload(
         dataloader=GrainDataLoader.Config(
             max_num_documents=max_num_documents,
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
+            # A row holding one long document costs far more than a row of
+            # short ones; balancing gives each step rows of similar cost
+            # (1M: 1.18x, 2M: 1.49x on 192 H100s). It reorders rows within
+            # each window of 8 steps.
+            balancer=GlobalBalancer.Config(window_size=8),
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
