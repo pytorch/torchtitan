@@ -252,6 +252,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.parallelism.fsdp_backend.build().validate_trainer(
                 checkpointer=self.checkpointer,
                 optim=self.optim,
+                parallelism=self.parallelism,
                 trainer=type(self)._owner,
             )
 

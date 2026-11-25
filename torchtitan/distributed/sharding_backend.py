@@ -69,6 +69,7 @@ class ShardingBackend(Configurable, ABC):
         *,
         checkpointer: CheckpointManager.Config | None,
         optim: Optim.Config,
+        parallelism: ParallelismConfig,
         trainer: type | None,
     ) -> None:
         """Reject the trainer components this backend doesn't support.
