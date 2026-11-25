@@ -29,32 +29,39 @@ communication. FSDP2 skips the embedding's backward all-gather
 embedding again in backward, with the same values. And an MoE block's expert
 bucket hooks the routed experts, not the block, so FlexShard reshards them as
 soon as the routed experts finish forward or backward, while FSDP2 keeps the
-block's expert group unsharded until the whole block finishes. FlexShard is
-imported only when it is selected.
+block's expert group unsharded until the whole block finishes.
+``flex_shard_partial_backwards`` keeps ``lm_head``'s bucket unsharded across
+``ChunkedLossWrapper``'s chunks, as ``fsdp_partial_backwards`` keeps FSDP2's
+group. FlexShard is imported only when it is selected.
 """
 
 import logging
 import math
+import sys
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from importlib.util import find_spec
-from typing import TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed.sharding_backend import ShardingBackend
 
 if TYPE_CHECKING:
     from torchtitan.components.checkpointer import CheckpointManager
-    from torchtitan.components.loss import Loss
     from torchtitan.components.optim import Optim
     from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.fsdp import ShardingUnit
+    from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
     from torchtitan.distributed.parallelism_context import ParallelismContext
+    from torchtitan.distributed.sharding_backend import PartialBackwards
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.common.decoder import Decoder
 
@@ -62,8 +69,11 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "FlexShardBackend",
+    "flex_shard_bucket",
     "flex_shard_grad_norm",
+    "flex_shard_partial_backwards",
     "flex_shard_reduce_meshes",
+    "holds_flex_shard_params",
 ]
 
 
@@ -132,6 +142,96 @@ def flex_shard_grad_norm(
     return total_norm
 
 
+def holds_flex_shard_params(module: nn.Module) -> bool:
+    """Whether FlexShard sharded ``module``'s parameters. Outside forward and
+    backward only: the gathered parameters of a bucket aren't FlexShard's."""
+    # flex_shard is imported only when it is selected, so without it no
+    # parameter is FlexShard's.
+    flex_shard = sys.modules.get("flex_shard")
+    return flex_shard is not None and any(
+        flex_shard.is_flex_shard_param(param) for param in module.parameters()
+    )
+
+
+def flex_shard_bucket(model: nn.Module, module_fqn: str) -> Any:
+    """The FlexShard bucket that holds the parameters of ``model``'s submodule
+    ``module_fqn``, e.g. ``lm_head``'s, which also holds the final norm's, for
+    ``flex_shard_partial_backwards``. FlexShard must have sharded ``model``,
+    and the buckets name their parameters by their names in ``model``. A
+    shared parameter, e.g. ``lm_head``'s tied weight, goes by its first name,
+    ``tok_embeddings.weight``, with the others among its shared names."""
+    # TODO: Use flex_shard's lookup of a module's bucket once it has one, so
+    # fsdp_partial_backwards can find it from the module as for FSDP2.
+    prefix = f"{module_fqn}."
+    buckets = [
+        bucket
+        for bucket in cast(Any, model).sharded_bucket_storages
+        if any(
+            name.startswith(prefix)
+            for fqn, info in bucket.param_infos.items()
+            for name in (fqn, *info.shared_fqns)
+        )
+    ]
+    if len(buckets) != 1:
+        raise ValueError(
+            f"Expected one FlexShard bucket to hold {module_fqn}'s parameters, "
+            f"but {len(buckets)} do."
+        )
+    return buckets[0]
+
+
+@contextmanager
+def flex_shard_partial_backwards(
+    bucket: Any, *, run_backward: bool, outer_backward_follows: bool
+) -> Iterator["_PartialBackwardHooks"]:
+    """``fsdp_partial_backwards`` for a module whose FSDP2 group is the
+    FlexShard ``bucket`` (``flex_shard_bucket``), with the collectives FSDP2
+    issues for its group.
+
+    A call of the module on its own leaves its bucket's forward open, so
+    FlexShard runs no post-forward for it and finishes the bucket as soon as
+    the call's input grads are ready: with gradient sync, it reduce-scatters
+    and reshards; without, it keeps the grads, and reshards only with
+    ``reshard_after_backward``. That backward finishes no other bucket, so
+    unlike FSDP2, the other buckets need no changes. Gradient sync is on
+    outside, since ``validate_model`` rejects deferred gradient
+    reduction, so the last call's backward reduce-scatters the grads of all
+    calls, as FSDP2's does.
+
+    Without backward, the bucket's forward stays open, as FSDP2 leaves its
+    group's; ``reshard_after_eval`` closes both.
+    """
+    from torchtitan.distributed.fsdp_lifecycle import _PartialBackwardHooks
+
+    if run_backward and not outer_backward_follows:
+        # Calls whose inputs don't require grad have no trigger that finishes
+        # the bucket. FSDP2 completes each call's grouped forward instead.
+        raise ValueError(
+            "parallelism.fsdp_backend=FlexShardBackend.Config() does not support "
+            "ChunkedLossWrapper with a frozen decoder yet."
+        )
+    reshard_after_backward = bucket.reshard_after_backward
+    # TODO: Gradient sync is set to True, not restored, because FlexShard has
+    # no public getter for it, and validate_model rejects
+    # deferred gradient reduction, so it's always on outside. Allowing deferral
+    # needs the caller's setting restored, and FlexShard's state of grads kept
+    # without sync, to leave the last reduce-scatter to the decoder backward
+    # when earlier microbatches kept grads, as FSDP2 does.
+    try:
+        bucket.set_requires_gradient_sync(False)
+        bucket.set_reshard_after_backward(False)
+        # The bucket's forward stays open, so outputs need no hooks.
+        yield _PartialBackwardHooks(
+            lambda: bucket.set_requires_gradient_sync(True), lambda output: output
+        )
+    finally:
+        bucket.set_requires_gradient_sync(True)
+        bucket.set_reshard_after_backward(reshard_after_backward)
+        # The last call's backward has resharded the bucket, unless there was
+        # no backward.
+        bucket.reshard()
+
+
 def _raise_if_unsupported(unsupported: list[str]) -> None:
     if unsupported:
         raise ValueError(
@@ -192,6 +292,8 @@ class FlexShardBackend(ShardingBackend):
             unsupported.append("parallelism.fsdp_unshard_in_current_stream=True")
         if parallelism.fsdp_defer_gradient_reduction:
             # FlexShard has no equivalent of FSDP2's set_is_last_backward.
+            # TODO: When allowing it, change flex_shard_partial_backwards, which
+            # sets lm_head's bucket's gradient sync to True instead of restoring it.
             unsupported.append("parallelism.fsdp_defer_gradient_reduction=True")
         # Decoder._apply_fsdp is the only path that applies fsdp_backend, so a
         # model that overrides it would shard with FSDP2.
@@ -251,7 +353,6 @@ class FlexShardBackend(ShardingBackend):
                 entry = f"{feature} with expert parallelism"
                 if entry not in unsupported:
                     unsupported.append(entry)
-
         if not training.disable_accelerator_graphs and accelerator_graphs_supported():
             unsupported.append(
                 "accelerator graphs (set training.disable_accelerator_graphs=True)"
@@ -272,23 +373,19 @@ class FlexShardBackend(ShardingBackend):
     def validate_trainer(
         self,
         *,
-        loss: "Loss.Config",
         checkpointer: "CheckpointManager.Config | None",
         optim: "Optim.Config",
         trainer: type | None,
     ) -> None:
-        from torchtitan.components.loss import ChunkedLossWrapper
         from torchtitan.components.optim import DistMuon, GradientClipper
         from torchtitan.trainer import Trainer
 
         # TODO: Remove each rejection once FlexShard supports the feature. They
-        # read the loss, checkpointer, optimizers and trainer, which
+        # read the checkpointer, optimizers and trainer, which
         # validate_model_training_config (config/validation.py), where
         # validate_model runs, doesn't receive, so TrainingEngine.Config's
         # __post_init__ calls this method instead.
         unsupported = []
-        if isinstance(loss, ChunkedLossWrapper.Config):
-            unsupported.append("ChunkedLossWrapper")
         if checkpointer is not None:
             unsupported.append("checkpointing")
         if optim.ema is not None:
@@ -304,7 +401,6 @@ class FlexShardBackend(ShardingBackend):
                 "gradient clippers other than GradientClipper "
                 f"({type(optim.gradient_clipper).__qualname__})"
             )
-
         # Other trainers shard, reduce or publish parameters in ways that FlexShard
         # doesn't support yet: GraphTrainer shards with SimpleFSDP, TorchFT's
         # cross-replica all-reduce hooks FSDP2's parameter groups, and the RL
@@ -399,6 +495,20 @@ class FlexShardBackend(ShardingBackend):
             foreach=foreach,
             pp_mesh=parallelism_context.get_optional_mesh("pp"),
         )
+
+    def partial_backwards(
+        self, model: nn.Module, module_fqn: str
+    ) -> "PartialBackwards":
+        return partial(
+            flex_shard_partial_backwards, flex_shard_bucket(model, module_fqn)
+        )
+
+    def reshard_after_eval(self, model_parts: list[nn.Module]) -> None:
+        # Closes the forward of norm and lm_head's bucket, which ChunkedLossWrapper
+        # leaves open, as FSDP2's post_validate_fsdp_for_accelerator_graph does
+        # for their group.
+        for model in model_parts:
+            cast(Any, model).reshard()
 
 
 def _apply_flex_shard(

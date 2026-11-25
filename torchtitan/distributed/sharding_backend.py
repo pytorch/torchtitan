@@ -16,16 +16,19 @@ default, applies FSDP2's ``fully_shard``; ``FlexShardBackend``
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import Any, TYPE_CHECKING, TypeAlias
 
 import torch
+import torch.nn as nn
 
 from torchtitan.config.configurable import Configurable
 
 if TYPE_CHECKING:
     from torchtitan.components.checkpointer import CheckpointManager
-    from torchtitan.components.loss import Loss
     from torchtitan.components.optim import Optim
     from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
@@ -33,7 +36,12 @@ if TYPE_CHECKING:
     from torchtitan.models.base.model import BaseModel
     from torchtitan.models.common.decoder import Decoder
 
-__all__ = ["FullyShardBackend", "ShardingBackend"]
+__all__ = ["FullyShardBackend", "PartialBackwards", "ShardingBackend"]
+
+# Called with ``run_backward`` and ``outer_backward_follows``, as
+# ``fsdp_partial_backwards`` (torchtitan/distributed/fsdp_lifecycle.py) is, and
+# yields the same hooks.
+PartialBackwards: TypeAlias = Callable[..., AbstractContextManager[Any]]
 
 
 class ShardingBackend(Configurable, ABC):
@@ -60,7 +68,6 @@ class ShardingBackend(Configurable, ABC):
     def validate_trainer(
         self,
         *,
-        loss: Loss.Config,
         checkpointer: CheckpointManager.Config | None,
         optim: Optim.Config,
         trainer: type | None,
@@ -92,6 +99,18 @@ class ShardingBackend(Configurable, ABC):
         """Clip the grads of ``parameters`` by their total L2 norm, reduced
         over every rank that holds part of them and over the PP mesh of
         ``parallelism_context``, and return that norm."""
+
+    @abstractmethod
+    def partial_backwards(self, model: nn.Module, module_fqn: str) -> PartialBackwards:
+        """The context that keeps ``model``'s submodule ``module_fqn``
+        unsharded while it runs on its own, in several forwards and backwards,
+        as ``ChunkedLossWrapper`` runs ``lm_head``. Call after sharding."""
+
+    @abstractmethod
+    def reshard_after_eval(self, model_parts: list[nn.Module]) -> None:
+        """Finish the forwards an eval step leaves open, e.g. ``lm_head``'s
+        under ``ChunkedLossWrapper``, and reshard the parameters. Eval has no
+        backward to do it."""
 
 
 class FullyShardBackend(ShardingBackend):
@@ -151,3 +170,13 @@ class FullyShardBackend(ShardingBackend):
             foreach=foreach,
             pp_mesh=parallelism_context.get_optional_mesh("pp"),
         )
+
+    def partial_backwards(self, model: nn.Module, module_fqn: str) -> PartialBackwards:
+        from torchtitan.distributed.fsdp_lifecycle import fsdp_partial_backwards
+
+        return partial(fsdp_partial_backwards, model.get_submodule(module_fqn))
+
+    def reshard_after_eval(self, model_parts: list[nn.Module]) -> None:
+        from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
+
+        post_validate_fsdp_for_accelerator_graph(model_parts)
