@@ -26,6 +26,7 @@ from torchtitan.rl.rdma_object import RDMAImageFiles, RegisterRDMAObject
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
+from torchtitan.rl.rollout.packed_group import PackedRolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
@@ -34,6 +35,7 @@ from torchtitan.rl.rollout.types import (
     ReleaseSessionFn,
     Rollout,
     RolloutGroup,
+    RolloutGroupSummary,
     RolloutStatus,
     RolloutTurn,
     RolloutTurnID,
@@ -68,7 +70,7 @@ class Rollouter(Configurable):
     batch.
 
         index, sample = rollouter.get_training_sample()
-        group = await rollouter.run_group_rollouts(     # one worker runs and scores the group
+        summary, packed = await rollouter.run_group_rollouts(  # one worker runs, scores, packs
             generate_fn=generate_fn, release_session_fn=release_session_fn,
             sample=sample, group_id=index,
             group_size=N, sampling=sampling, is_validation=False)
@@ -91,11 +93,12 @@ class Rollouter(Configurable):
         Rollouter supports customization at several levels:
           - Sample source: provide source configs for training and validation.
           - Group execution, coarse: override `run_group_rollouts` for your own
-            orchestration. It must return `finish_rollout_group(group,
-            is_validation=is_validation, encoder=RolloutSampleEncoder(rollout_recorder_config))`
-            (the config `setup_async` receives): the controller logs the rollout metrics
-            and records the lines that call adds. The worker then becomes optional -- but
-            override `setup_async` too, or the worker pool is still spawned unused.
+            orchestration. It must return `pack_rollout_group(finish_rollout_group(group,
+            is_validation=is_validation, encoder=RolloutSampleEncoder(rollout_recorder_config)))`
+            (the config `setup_async` receives): the controller logs the rollout metrics and
+            records the lines `finish_rollout_group` adds, and the trainer reads the packed
+            bytes. The worker then becomes optional -- but override `setup_async` too, or the
+            worker pool is still spawned unused.
           - Group execution, fine: keep the stock orchestration and point `worker`
             at a `MessageEnvRolloutWorker.Config` subclass, overriding only what you need
             (`make_env_group`, `score_group`, `run_group`). A worker whose env isn't a
@@ -146,7 +149,9 @@ class Rollouter(Configurable):
         self._worker_actors: Any | None = None
         self._actor_system: ActorSystem | None = None
         # `run_group` calls still running on a worker, including those whose caller was cancelled.
-        self._inflight_run_group_calls: set[asyncio.Future[RolloutGroup]] = set()
+        self._inflight_run_group_calls: set[
+            asyncio.Future[tuple[RolloutGroupSummary, PackedRolloutGroup]]
+        ] = set()
 
     def get_training_sample(self) -> tuple[int, object]:
         """Return the next globally identified input from the training loader."""
@@ -258,7 +263,7 @@ class Rollouter(Configurable):
         group_size: int,
         sampling: SamplingConfig,
         is_validation: bool,
-    ) -> RolloutGroup:
+    ) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
         """Send one prompt group to a rollout worker and return its scored group.
 
         Args:
@@ -273,7 +278,8 @@ class Rollouter(Configurable):
                 recorder lines carry `is_validation` (see `finish_rollout_group`).
 
         Returns:
-            One scored `RolloutGroup`, with its rollout metrics and recorder lines.
+            The scored group, with its rollout metrics and recorder lines, packed: its summary and
+            its bytes (`pack_rollout_group`).
         """
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
@@ -296,7 +302,9 @@ class Rollouter(Configurable):
         # Shield `call` from the controller's end-of-training cancel, so `close` can still wait for it.
         return await asyncio.shield(call)
 
-    def _on_run_group_call_done(self, call: asyncio.Future[RolloutGroup]) -> None:
+    def _on_run_group_call_done(
+        self, call: asyncio.Future[tuple[RolloutGroupSummary, PackedRolloutGroup]]
+    ) -> None:
         self._inflight_run_group_calls.discard(call)
         # A cancelled caller never reads the error; read it so asyncio does not log it.
         if not call.cancelled():

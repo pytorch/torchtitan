@@ -17,11 +17,7 @@ from monarch.actor import Actor, endpoint, this_host
 from renderers import PlaceholderRange
 
 from torchtitan.rl.actors.monarch import rdma_object
-from torchtitan.rl.actors.monarch.rdma_object import (
-    _BytesRef,
-    _TensorRef,
-    MonarchRDMAObject,
-)
+from torchtitan.rl.actors.monarch.rdma_object import MonarchRDMAObject
 from torchtitan.rl.rdma_object import RDMAImageFiles, RDMAPrompt
 from torchtitan.rl.rollout.types import Prompt, PromptImage
 
@@ -53,59 +49,6 @@ class _FakeRDMAAction:
     async def submit(self) -> None:
         for dst, src in self._reads:
             dst.copy_(src.data)
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _Settings:
-    """A dataclass field with no large leaf, like a microbatch's `VisionProcessor.Config`."""
-
-    sizes: tuple[int, ...]
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class _Payload:
-    """A dataclass value with tensor and bytes leaves, large and small, in fields and containers."""
-
-    tensor: torch.Tensor
-    files: tuple[bytes, ...]
-    extras: dict
-    settings: _Settings
-    note: str | None = None
-
-
-def test_rdma_object_round_trips_tensor_and_bytes_leaves_and_drops_their_buffers(
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(rdma_object, "RDMABuffer", _FakeRDMABuffer)
-    monkeypatch.setattr(rdma_object, "RDMAAction", _FakeRDMAAction)
-    payload = _Payload(
-        tensor=torch.arange(64, dtype=torch.float32).view(8, 8),  # 256 B
-        files=(bytes(range(200)), b"x"),
-        extras={"small_tensor": torch.tensor([1, 2]), "count": 3},
-        settings=_Settings(sizes=(1, 2)),
-    )
-
-    registered = MonarchRDMAObject.register(payload, min_bytes=100)
-
-    # Leaves of at least 100 bytes stay in the owner; the rest travel with the handle.
-    registered_value = registered.value
-    assert isinstance(registered_value.tensor, _TensorRef)
-    assert isinstance(registered_value.files[0], _BytesRef)
-    assert registered_value.files[1] == b"x"
-    assert isinstance(registered_value.extras["small_tensor"], torch.Tensor)
-    assert registered_value.extras["count"] == 3
-    assert registered_value.settings is payload.settings
-
-    read = asyncio.run(registered.read())
-    assert torch.equal(read.tensor, payload.tensor)
-    assert read.tensor.dtype == payload.tensor.dtype
-    assert read.files == payload.files
-    assert torch.equal(read.extras["small_tensor"], payload.extras["small_tensor"])
-    assert read.extras["count"] == 3 and read.note is None
-
-    asyncio.run(registered.drop())
-    assert registered_value.tensor.buffer.dropped
-    assert registered_value.files[0].buffer.dropped
 
 
 def _image(name: str, num_bytes: int) -> PromptImage:

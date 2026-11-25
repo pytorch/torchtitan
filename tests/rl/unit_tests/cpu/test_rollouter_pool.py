@@ -20,8 +20,10 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
+from torchtitan.rl.rollout.packed_group import pack_rollout_group, PackedRolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
+from torchtitan.rl.rollout.types import RolloutGroupSummary
 
 
 class _ChooseRunGroupEndpoint:
@@ -32,12 +34,14 @@ class _ChooseRunGroupEndpoint:
         self.cancelled = asyncio.Event()
         self.error: Exception | None = None
 
-    def choose(self, **kwargs) -> asyncio.Future[RolloutGroup]:
+    def choose(
+        self, **kwargs
+    ) -> asyncio.Future[tuple[RolloutGroupSummary, PackedRolloutGroup]]:
         self.calls.append(kwargs)
         self.started.set()
         return asyncio.create_task(self._execute(kwargs))
 
-    async def _execute(self, kwargs) -> RolloutGroup:
+    async def _execute(self, kwargs) -> tuple[RolloutGroupSummary, PackedRolloutGroup]:
         try:
             await self.release.wait()
         except asyncio.CancelledError:
@@ -45,7 +49,9 @@ class _ChooseRunGroupEndpoint:
             raise
         if self.error is not None:
             raise self.error
-        return RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
+        return pack_rollout_group(
+            RolloutGroup(group_id=kwargs["group_id"], rollouts=[])
+        )
 
 
 def test_rollout_worker_actor_builds_its_worker_and_inits_its_logger(
@@ -235,7 +241,8 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
         ]
 
         actor_mesh.run_group.release.set()
-        assert (await dispatch).group_id == 1
+        summary, _ = await dispatch
+        assert summary.group.group_id == 1
         await rollouter.close()
         assert actor_mesh.stopped
 

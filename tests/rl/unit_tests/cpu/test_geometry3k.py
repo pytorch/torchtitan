@@ -149,12 +149,17 @@ def test_recipe_gives_image_tokens_the_positions_its_model_takes() -> None:
     config = rl_grpo_qwen3_5_0_8b_geometry3k()
     batcher = config.async_loop.batcher
 
-    assert batcher.build_mrope_positions
+    assert batcher.microbatch_packer.build_mrope_positions
     with pytest.raises(ValueError, match="build_mrope_positions=False.*M-RoPE"):
         dataclasses.replace(
             config,
             async_loop=dataclasses.replace(
                 config.async_loop,
-                batcher=dataclasses.replace(batcher, build_mrope_positions=False),
+                batcher=dataclasses.replace(
+                    batcher,
+                    microbatch_packer=dataclasses.replace(
+                        batcher.microbatch_packer, build_mrope_positions=False
+                    ),
+                ),
             ),
         )
