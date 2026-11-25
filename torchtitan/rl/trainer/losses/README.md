@@ -34,7 +34,7 @@ The controller then asks the generator for its top-k logprobs on every training 
 (validation requests get none) and the loss receives them as `[T, k]` inputs:
 
 ```
-generator (vLLM)            batcher                          PolicyGradientLoss
+generator (vLLM, SGLang)    batcher                          PolicyGradientLoss
   top-k ids, logprobs  -->    one row per loss token   -->     correction = sum_H c_v * log p_v
   [num_generated, k]          scattered to [T, k] on device    token_loss += A * correction
 ```
@@ -46,7 +46,7 @@ enables score centering, and the RL loss golden checks that it stays a no-op the
 
 Requirements and limits:
 
-- `VLLMEngine` only for now; `SGLangEngine` and Verifiers rollouts raise.
+- `VLLMEngine` and `SGLangEngine`; Verifiers rollouts raise for now.
 - Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs).
 - The paper evaluates score centering with REINFORCE, truncated IS and masked IS, not PPO
   clipping; its composition with `DAPOLoss`/`GRPOLoss` follows the same formula.
