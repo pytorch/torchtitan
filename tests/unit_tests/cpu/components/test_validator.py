@@ -17,6 +17,7 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.validator import Validator
+from torchtitan.distributed.sharding_backend import FullyShardBackend
 from torchtitan.models.flux import validator as flux_validator_module
 from torchtitan.models.flux.data import FluxTrainingMicrobatch
 from torchtitan.models.flux.validator import FluxValidator
@@ -65,7 +66,7 @@ def _generic_validator(loader):
         dp_enabled=False,
         pp_enabled=False,
         dp_cp_enabled=False,
-        flex_shard_enabled=False,
+        sharding_backend=FullyShardBackend.Config().build(),
         activate_spmd=lambda **kwargs: nullcontext(),
         get_optional_mesh=lambda axes: None,
     )

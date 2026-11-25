@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from functools import partial
 from typing import Any, cast, NamedTuple, TYPE_CHECKING
 
 import torch
@@ -21,18 +20,19 @@ from torch.distributed.fsdp import (
 from torch.distributed.tensor import Shard
 
 from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
-from torchtitan.config.parallelism import FlexShardConfig, FSDP2Config, FSDPSymmMemScope
-from torchtitan.distributed.flex_shard_fsdp import declare_state_dict_layouts
+from torchtitan.config.parallelism import FSDPSymmMemScope
 from torchtitan.distributed.fsdp_lifecycle import complete_fsdp_grouped_forward
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.param_init import skip_param_init
 
 __all__ = [
+    "ShardingUnit",
     "apply_fsdp_to_decoder",
     "apply_fsdp_to_multimodal_encoder",
+    "decoder_prefetch_order",
+    "decoder_sharding_units",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
     "post_validate_fsdp_for_accelerator_graph",
@@ -47,21 +47,15 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-def post_validate_fsdp_for_accelerator_graph(
-    model_parts: list[nn.Module], *, flex_shard_enabled: bool
-) -> None:
+def post_validate_fsdp_for_accelerator_graph(model_parts: list[nn.Module]) -> None:
     """Finish grouped forwards and release full parameters for pool reuse.
 
     Eager and captured validation use the same cleanup. With ChunkedLossWrapper,
     the model skips lm_head, then the loss calls it after the root forward.
     A group containing norm and lm_head can still have norm pending. Validation
-    has no backward callback to clear this state. With FlexShard
-    (``flex_shard_enabled``), FlexShard's ``reshard()`` on each model part
-    closes the same forward of norm and lm_head's bucket.
+    has no backward callback to clear this state.
     """
     for model in model_parts:
-        if flex_shard_enabled:
-            cast(Any, model).reshard()
         for module in model.modules():
             if not isinstance(module, FSDPModule):
                 continue
@@ -130,8 +124,9 @@ def linear_param_shard_placements(
     return placements
 
 
-class _FSDPGroup(NamedTuple):
-    """Modules that ``apply_fsdp_to_decoder`` passes to one ``fully_shard`` call.
+class ShardingUnit(NamedTuple):
+    """Modules that a ``ShardingBackend`` shards together: one ``fully_shard``
+    call with FSDP2, or one bucket with FlexShard.
 
     ``placements`` holds every parameter whose placement isn't ``Shard(0)``,
     plus all routed-expert parameters. ``routed_experts`` is the block's routed
@@ -144,21 +139,22 @@ class _FSDPGroup(NamedTuple):
     routed_experts: nn.Module | None = None
 
 
-def _decoder_fsdp_groups(
+def decoder_sharding_units(
     model: "Decoder",
-    dp_mesh: DeviceMesh,
     *,
+    dp_mesh: DeviceMesh,
     reshard_after_forward_policy: str,
     pp_enabled: bool,
     ep_degree: int = 1,
     edp_mesh: DeviceMesh | None = None,
-) -> tuple[_FSDPGroup | None, _FSDPGroup | None, list[_FSDPGroup]]:
-    """Return a decoder's FSDP groups as ``(embedding, head, blocks)``.
+) -> tuple[ShardingUnit | None, ShardingUnit | None, list[ShardingUnit]]:
+    """Return a decoder's sharding units as
+    ``(embedding, norm_and_lm_head, blocks)``.
 
-    The embedding group also holds the norm and output projection when weights
-    are tied, and there is no head group then. Each transformer block is a
-    group. The root group, ``fully_shard(model)``, takes the parameters left
-    over and doesn't reshard after forward.
+    The embedding unit also holds the norm and output projection when weights
+    are tied, and there is no ``norm_and_lm_head`` unit then. Each transformer
+    block is a unit. The root unit, ``fully_shard(model)``, takes the parameters
+    left over and doesn't reshard after forward.
 
     Args:
         model: The decoder.
@@ -171,11 +167,11 @@ def _decoder_fsdp_groups(
     reshard_after_forward = get_fsdp_reshard_after_forward_policy(
         reshard_after_forward_policy, pp_enabled
     )
-    embedding = head = None
+    embedding = norm_and_lm_head = None
     if model.enable_weight_tying:
         # When weights are tied, tok_embeddings and output share the same parameter.
         # Group them together in one FSDP unit to avoid duplicate all-gathers.
-        embedding = _FSDPGroup(
+        embedding = ShardingUnit(
             [
                 m
                 for m in (model.tok_embeddings, model.norm, model.lm_head)
@@ -186,11 +182,11 @@ def _decoder_fsdp_groups(
         )
     else:
         if model.tok_embeddings is not None:
-            embedding = _FSDPGroup([model.tok_embeddings], reshard_after_forward, {})
+            embedding = ShardingUnit([model.tok_embeddings], reshard_after_forward, {})
         # As an optimization, do not reshard_after_forward the last layers
         # by default since FSDP would prefetch them immediately.
         if model.norm is not None and model.lm_head is not None:
-            head = _FSDPGroup(
+            norm_and_lm_head = ShardingUnit(
                 [model.norm, model.lm_head],
                 reshard_after_forward_policy == "always",
                 {},
@@ -229,21 +225,21 @@ def _decoder_fsdp_groups(
                     )
                 )
         blocks.append(
-            _FSDPGroup(
+            ShardingUnit(
                 [transformer_block],
                 reshard_after_forward,
                 placements,
                 None if moe is None else moe.routed_experts,
             )
         )
-    return embedding, head, blocks
+    return embedding, norm_and_lm_head, blocks
 
 
-def _decoder_prefetch_order(model: "Decoder") -> list[nn.Module]:
+def decoder_prefetch_order(model: "Decoder") -> list[nn.Module]:
     """Return the embedding, each transformer block and the output projection,
-    in forward order, each standing for its FSDP group.
+    in forward order, each standing for its sharding unit.
 
-    With explicit prefetching, each group prefetches the next one in forward and
+    With explicit prefetching, each unit prefetches the next one in forward and
     the previous one in backward.
     """
     order: list[nn.Module] = list(model.layers.values())
@@ -472,205 +468,13 @@ def apply_fsdp_to_multimodal_encoder(
     fully_shard(encoder, **fsdp_config)
 
 
-def _apply_flex_shard(
+def _apply_fully_shard(
     model: "Decoder",
-    dp_mesh: DeviceMesh,
-    groups: list[_FSDPGroup],
     *,
-    param_dtype: torch.dtype,
-    reduce_dtype: torch.dtype,
-    edp_mesh: DeviceMesh | None,
-) -> None:
-    """Shard ``model`` with FlexShard (meta-pytorch/flex_shard), one
-    ``fsdp2_compatible`` bucket per FSDP group.
-
-    Each bucket names the group's modules, with its placements and reshard
-    setting, and a root bucket takes the parameters left over, as
-    ``fully_shard(model)`` does. Gradients are summed over ``dp_mesh`` without
-    division, as ``disable_fsdp_gradient_division`` makes FSDP2 do. The buckets'
-    collectives then match FSDP2's byte for byte. Each sharded parameter's
-    ``param_init`` function is wrapped with flex_shard's ``init_from_full``, so
-    the shards start as one device's initialization. ``model.state_dict()``
-    declares each local shard's place in the full parameter, so DCP saves the
-    same checkpoints as for FSDP2.
-
-    With expert parallelism, ``edp_mesh`` is the sparse mesh, with the
-    ``edp_shard`` and ``ep`` axes. ``fully_shard`` splits an MoE block into one
-    group per mesh, so the block gets two buckets: its routed experts on
-    ``edp_shard``, and its other parameters on ``dp_mesh``. The buckets prefetch
-    as ``apply_fsdp_to_decoder`` sets FSDP2's groups to.
-    """
-    # flex_shard is an optional dependency, needed only for this backend.
-    # pyrefly: ignore [missing-import]
-    from flex_shard import (
-        BucketSpec,
-        flex_shard,
-        get_flex_shard_global_layouts,
-        GlobalLayout,
-        init_from_full,
-        MixedPrecisionPolicy,
-        set_global_layout,
-    )
-
-    # pyrefly: ignore [missing-import]
-    from flex_shard.custom_placements.shard import Shard as FlexShardShard
-
-    # validate_flex_shard_training allows only dp_shard and ep.
-    assert dp_mesh.mesh_dim_names == ("dp_shard",), dp_mesh.mesh_dim_names
-    expert_mesh = None
-    if edp_mesh is not None:
-        assert edp_mesh.mesh_dim_names == ("edp_shard", "ep"), edp_mesh.mesh_dim_names
-        # flex_shard_reduce_meshes gives the mesh to reduce these buckets' grad
-        # norm over.
-        expert_mesh = edp_mesh["edp_shard"]
-        # EP has split each routed-expert parameter's dim 0, the experts, over
-        # ep. Declaring this rank's part makes the layouts that the wrapped
-        # param_init functions use cover all experts, so each shard is its slice
-        # of one device's init, which briefly holds the parameter with all experts.
-        ep, ep_rank = edp_mesh["ep"].size(), edp_mesh["ep"].get_local_rank()
-        for group in groups:
-            if group.routed_experts is None:
-                continue
-            for param in group.routed_experts.parameters():
-                num_local_experts, *rest = param.shape
-                set_global_layout(
-                    param,
-                    GlobalLayout(
-                        global_shape=(num_local_experts * ep, *rest),
-                        global_offsets=(
-                            (num_local_experts * ep_rank, *[0] * len(rest)),
-                        ),
-                        local_offsets=((0,) * param.ndim,),
-                        local_sizes=(tuple(param.shape),),
-                    ),
-                )
-    mp_policy = MixedPrecisionPolicy(param_dtype=param_dtype, reduce_dtype=reduce_dtype)
-    # Shard dims other than 0, which FSDP2 gets from shard_placement_fn.
-    shard_dims = {
-        param: placement.dim
-        for group in groups
-        for param, placement in group.placements.items()
-    }
-
-    def placement_fn(named_params, mesh):
-        del mesh
-        return {
-            fqn: (FlexShardShard(shard_dims.get(param, 0)),)
-            for fqn, param in named_params
-        }
-
-    def bucket(
-        patterns: list[str], reshard_after_forward: bool, mesh: DeviceMesh = dp_mesh
-    ) -> BucketSpec:
-        return BucketSpec(
-            patterns,
-            placement_fn=placement_fn,
-            mesh=mesh,
-            mp_policy=mp_policy,
-            gradient_divide_factor=1.0,
-            reshard_after_forward=reshard_after_forward,
-            fsdp2_compatible=True,
-        )
-
-    module_fqns = {module: fqn for fqn, module in model.named_modules()}
-    param_fqns = {param: fqn for fqn, param in model.named_parameters()}
-    group_buckets: list[list[BucketSpec]] = []
-    for group in groups:
-        if expert_mesh is None or group.routed_experts is None:
-            patterns = [module_fqns[module] for module in group.modules]
-            group_buckets.append([bucket(patterns, group.reshard_after_forward)])
-            continue
-        # The expert bucket hooks the routed experts. The other bucket names
-        # the rest of the block's parameters, so it hooks their deepest common
-        # module, the block.
-        expert_params = set(group.routed_experts.parameters())
-        dense_fqns = [
-            param_fqns[param]
-            for module in group.modules
-            for param in module.parameters()
-            if param not in expert_params
-        ]
-        group_buckets.append(
-            [
-                bucket(dense_fqns, group.reshard_after_forward),
-                bucket(
-                    [module_fqns[group.routed_experts]],
-                    group.reshard_after_forward,
-                    expert_mesh,
-                ),
-            ]
-        )
-    buckets = [spec for specs in group_buckets for spec in specs]
-    # fully_shard(model) puts the remaining parameters in the root group, which
-    # FSDP2 does not reshard after forward.
-    grouped_params = {
-        param
-        for group in groups
-        for module in group.modules
-        for param in module.parameters()
-    }
-    root_fqns = [
-        fqn for fqn, param in model.named_parameters() if param not in grouped_params
-    ]
-    if root_fqns:
-        buckets.append(bucket(root_fqns, reshard_after_forward=False))
-
-    flex_shard_module = flex_shard(model, buckets=buckets)
-    # FlexShard parameters are plain local shards. Wrap each one's param_init
-    # function so that it fills the full parameter and the shard keeps its part:
-    # one device's initialization, whatever the sharding. to_empty() replaces
-    # the parameters but keeps the modules, so the wrapped functions survive it.
-    # validate_flex_shard_training rejects modules without param_init, whose
-    # reset_parameters() would bypass this.
-    for fqn, layout in get_flex_shard_global_layouts(model).items():
-        module_fqn, _, name = fqn.rpartition(".")
-        module = model.get_submodule(module_fqn)
-        assert isinstance(module, Module) and module._param_init is not None, fqn
-        # A skipped init, e.g. tok_embeddings' with tied weights, which lm_head
-        # initializes, stays a no-op on the shard.
-        if module._param_init.get(name, skip_param_init) is not skip_param_init:
-            # A new dict: modules built from one Config share its param_init.
-            module._param_init = {
-                **module._param_init,
-                name: partial(
-                    init_from_full, layout=layout, init_fn=module._param_init[name]
-                ),
-            }
-    declare_state_dict_layouts(model)
-    if expert_mesh is not None:
-        # Every bucket holds parameters, so there is one storage per bucket.
-        assert len(flex_shard_module.sharded_bucket_storages) == len(buckets)
-        storages = iter(flex_shard_module.sharded_bucket_storages)
-        group_storages = {}
-        for group, specs in zip(groups, group_buckets):
-            storages_of_group = [next(storages) for _ in specs]
-            group_storages.update(dict.fromkeys(group.modules, storages_of_group))
-            # FSDP2 unshards a block's expert group with the block, so the
-            # expert bucket prefetches nothing itself.
-            for storage in storages_of_group[1:]:
-                storage.set_buckets_to_forward_prefetch([])
-                storage.set_buckets_to_backward_prefetch([])
-        # FlexShard's default prefetches the next bucket in forward order. A
-        # block's expert bucket would then gather the next block's dense bucket
-        # before EP's device-to-host sync, but the next block's expert bucket
-        # only from that block's start, after the sync. These lists match
-        # FSDP2's schedule instead, which gathers the whole next block from this
-        # block's start.
-        order = [group_storages[module] for module in _decoder_prefetch_order(model)]
-        for current, following in zip(order, order[1:]):
-            current[0].set_buckets_to_forward_prefetch(following)
-            # In backward, FSDP2 prefetches a module's groups in reverse.
-            following[0].set_buckets_to_backward_prefetch(current[::-1])
-    logger.info("Applied FlexShard to the model")
-
-
-def _apply_fsdp2(
-    model: "Decoder",
     dp_mesh: DeviceMesh,
-    embedding: _FSDPGroup | None,
-    head: _FSDPGroup | None,
-    blocks: list[_FSDPGroup],
-    *,
+    embedding: ShardingUnit | None,
+    norm_and_lm_head: ShardingUnit | None,
+    blocks: list[ShardingUnit],
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
     cpu_offload: bool,
@@ -682,7 +486,7 @@ def _apply_fsdp2(
     unshard_in_current_stream: bool,
 ) -> None:
     """Shard ``model`` with FSDP2's ``fully_shard``: each of the decoder's
-    groups, then the root for any leftover parameters. ``apply_fsdp_to_decoder``
+    units, then the root for any leftover parameters. ``apply_fsdp_to_decoder``
     documents the arguments."""
     mp_policy = mixed_precision_policy(
         model,
@@ -711,11 +515,11 @@ def _apply_fsdp2(
             cast(FSDPModule, model.tok_embeddings), model
         ):
             model.tok_embeddings.set_unshard_in_backward(False)
-    if head is not None:
+    if norm_and_lm_head is not None:
         fully_shard(
-            head.modules,
+            norm_and_lm_head.modules,
             **fsdp_config,
-            reshard_after_forward=head.reshard_after_forward,
+            reshard_after_forward=norm_and_lm_head.reshard_after_forward,
         )
 
     for block in blocks:
@@ -794,7 +598,7 @@ def _apply_fsdp2(
     if ep_degree == 1 and not unshard_in_current_stream:
         return
 
-    fsdp_modules = [cast(FSDPModule, m) for m in _decoder_prefetch_order(model)]
+    fsdp_modules = [cast(FSDPModule, m) for m in decoder_prefetch_order(model)]
     for module, next_module in zip(fsdp_modules, fsdp_modules[1:]):
         module.set_modules_to_forward_prefetch([next_module])
         next_module.set_modules_to_backward_prefetch([module])
@@ -806,6 +610,7 @@ def _apply_fsdp2(
 
 def apply_fsdp_to_decoder(
     model: "Decoder",
+    *,
     dp_mesh: DeviceMesh,
     param_dtype: torch.dtype,
     reduce_dtype: torch.dtype,
@@ -817,13 +622,10 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
-    *,
     unshard_in_current_stream: bool = False,
-    fsdp_backend: FSDP2Config | FlexShardConfig | None = None,
 ):
     """
-    Apply data parallelism (via FSDP2, or FlexShard) to a decoder-style
-    transformer model.
+    Apply data parallelism (via FSDP2) to a decoder-style transformer model.
 
     Shared by all dense and MoE decoders (llama3, qwen3, deepseek_v3,
     gpt_oss, qwen3_vl, ...). The MoE handling is a strict superset of the dense
@@ -865,41 +667,28 @@ def apply_fsdp_to_decoder(
         unshard_in_current_stream: Whether to issue pre-forward/pre-backward
             all-gathers on the current (compute) stream via
             ``FSDPModule.set_unshard_in_current_stream``.
-        fsdp_backend: ``FlexShardConfig()`` shards each FSDP2 group with
-            FlexShard instead; ``validate_flex_shard_training`` rejects the
-            arguments it doesn't support. FSDP2 otherwise.
     """
-    embedding, head, blocks = _decoder_fsdp_groups(
+    embedding, norm_and_lm_head, blocks = decoder_sharding_units(
         model,
-        dp_mesh,
+        dp_mesh=dp_mesh,
         reshard_after_forward_policy=reshard_after_forward_policy,
         pp_enabled=pp_enabled,
         ep_degree=ep_degree,
         edp_mesh=edp_mesh,
     )
-    if isinstance(fsdp_backend, FlexShardConfig):
-        _apply_flex_shard(
-            model,
-            dp_mesh,
-            [group for group in (embedding, head) if group is not None] + blocks,
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            edp_mesh=edp_mesh if ep_degree > 1 else None,
-        )
-    else:
-        _apply_fsdp2(
-            model,
-            dp_mesh,
-            embedding,
-            head,
-            blocks,
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            cpu_offload=cpu_offload,
-            ep_degree=ep_degree,
-            edp_mesh=edp_mesh,
-            dp_mesh_dims=dp_mesh_dims,
-            edp_mesh_dims=edp_mesh_dims,
-            symm_mem_scope=symm_mem_scope,
-            unshard_in_current_stream=unshard_in_current_stream,
-        )
+    _apply_fully_shard(
+        model,
+        dp_mesh=dp_mesh,
+        embedding=embedding,
+        norm_and_lm_head=norm_and_lm_head,
+        blocks=blocks,
+        param_dtype=param_dtype,
+        reduce_dtype=reduce_dtype,
+        cpu_offload=cpu_offload,
+        ep_degree=ep_degree,
+        edp_mesh=edp_mesh,
+        dp_mesh_dims=dp_mesh_dims,
+        edp_mesh_dims=edp_mesh_dims,
+        symm_mem_scope=symm_mem_scope,
+        unshard_in_current_stream=unshard_in_current_stream,
+    )
