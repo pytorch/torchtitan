@@ -27,6 +27,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     DistMuon as FlexShardDistMuon,
 )
+from torchtitan.distributed.flex_shard_backend import declare_optimizer_state_layouts
 from torchtitan.distributed.utils import build_alternative_fsdp_mesh
 
 from .offloading import init_cpu_offloaded_moments
@@ -450,6 +451,9 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                         return state_dict
 
                     optimizer.register_state_dict_post_hook(_save_host_lr)
+                # FlexShard's states are plain local shards, which need to
+                # declare their layouts to DCP, as the model's parameters do.
+                declare_optimizer_state_layouts(optimizer, model)
                 self.optimizers.append(optimizer)
                 self._log_optimizer(
                     optimizer,
