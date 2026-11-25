@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+from torch.export import register_dataclass
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attn_gym import (
@@ -54,15 +55,19 @@ class LinearAttentionMetadata:
             self.varlen.annotate_spmd_types()
 
 
-def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
-    """Attention Gym chunk-kernel options: cuDNN where it runs, fused elsewhere.
+# Expose tensor fields to pytree so CUDA graph replay copies fresh offsets.
+register_dataclass(LinearAttentionMetadata)
 
-    The cuDNN chunk kernels take packed (batch 1) fp16/bf16 inputs on SM100/SM103, where
-    they are 2.3-3.9x faster than the fused ones (Qwen3.5-27B GDN fwd+bwd on GB300).
-    Fused stays in deterministic mode (cuDNN's backward is not checked for
+
+def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
+    """Attention Gym chunk-kernel options: warpdrive where it runs, fused elsewhere.
+
+    The warpdrive chunk kernels take packed (batch 1) fp16/bf16 inputs on SM100/SM103,
+    where they are 2.3-3.9x faster than the fused ones (Qwen3.5-27B GDN fwd+bwd on GB300).
+    Fused stays in deterministic mode (warpdrive's backward is not checked for
     determinism) and in batch-invariant mode (paged KDA replay requires fused).
     """
-    use_cudnn = (
+    use_warpdrive = (
         q.is_cuda
         and not torch.are_deterministic_algorithms_enabled()
         and not is_in_batch_invariant_mode()
@@ -70,4 +75,4 @@ def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
         and q.dtype in (torch.float16, torch.bfloat16)
         and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
     )
-    return KernelOptions(backend="cudnn" if use_cudnn else "fused")
+    return KernelOptions(backend="warpdrive" if use_warpdrive else "fused")

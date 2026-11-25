@@ -27,7 +27,7 @@ from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
     causal_conv1d,
     chunk_gdn,
-    ChunkGdnCudnnPacked,
+    ChunkGdnWarpdrivePacked,
     ContextParallelRouting,
     is_missing_kernel,
     l2norm,
@@ -47,7 +47,7 @@ from .linear_attention import (
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
-for _kernel_function in (_ChunkGDN, ChunkGdnCudnnPacked):
+for _kernel_function in (_ChunkGDN, ChunkGdnWarpdrivePacked):
     if not is_missing_kernel(_kernel_function):
         spmd.register_local_autograd_function(_kernel_function)
 

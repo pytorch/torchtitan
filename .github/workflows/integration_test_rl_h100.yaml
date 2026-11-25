@@ -6,8 +6,9 @@ on:
     tags:
       - ciflow/rl/*
   schedule:
-    # Runs every 12 hours
-    - cron: '0 */12 * * *'
+    - cron: '0 0 * * *'
+    - cron: '0 12 * * *'
+  workflow_dispatch:
 
 concurrency:
   group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
@@ -90,5 +91,7 @@ jobs:
         torchrun --nproc-per-node=2 -m pytest \
           tests/rl/unit_tests/gpu/test_generator_dp_cudagraph.py::test_vllm_dp_linear_attention_full_graphs -v
 
-        python -m tests.integration_tests.run_tests "$OUTPUT_DIR/integration" \
-          --ngpu 8 --test_suite rl_h100
+        if [[ "${{ github.event_name }}" == workflow_dispatch || "${{ github.event.schedule }}" == '0 0 * * *' ]]; then
+          python -m tests.integration_tests.run_tests "$OUTPUT_DIR/integration" \
+            --ngpu 8 --test_suite rl_h100
+        fi
