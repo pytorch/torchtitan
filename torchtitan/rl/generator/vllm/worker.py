@@ -115,8 +115,9 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         if transfer is None or transfer.kv_connector != "MooncakeStoreConnector":
             return GPUModelRunner.kv_connector_no_forward(scheduler_output, vllm_config)
 
-        # TODO(acisseJZhong): upstream to vLLM: its kv_connector_no_forward
-        # passes wait_for_save=False, so Mooncake never submits finish-time saves
+        # TODO(acisseJZhong): vLLM's kv_connector_no_forward passes
+        # wait_for_save=False (https://github.com/vllm-project/vllm/issues/69805),
+        # so Mooncake never submits finish-time saves
         # (e.g. hybrid tails pinned after the last forward) scheduled on a step
         # without a forward. Submit them before get_finished, as on forward
         # steps: get_finished retires the ledger of finished requests that have

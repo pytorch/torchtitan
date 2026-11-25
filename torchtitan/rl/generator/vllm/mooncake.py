@@ -17,9 +17,10 @@ the Mooncake-specific pieces:
   rank (TP * DP).
 - Each DP replica's TP leader starts the lookup server at its DP-local address.
 
-TODO(acisseJZhong): upstream to vLLM: with external_launcher, start a lookup
-server per DP replica, scope the save quorum to the TP group, and share the TP
-leader's lookup result, so this adapter can be removed.
+TODO(acisseJZhong): with external_launcher, vLLM starts no lookup server per DP
+replica, scopes the save quorum to the world, and has no shared TP lookup result,
+so this adapter uses private connector members:
+https://github.com/vllm-project/vllm/issues/69786
 """
 
 from typing import Any
