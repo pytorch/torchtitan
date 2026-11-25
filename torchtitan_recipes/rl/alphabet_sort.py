@@ -61,7 +61,7 @@ from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.rollout.token_env import TokenEnv
-from torchtitan.rl.trainer.losses import GRPOLoss, ScoreCentering
+from torchtitan.rl.trainer.losses import CISPOLoss, GRPOLoss, IcePopLoss, ScoreCentering
 from torchtitan.rl.trainer.trainer import Trainer
 
 from torchtitan_recipes.rl.model_configs import build_rl_model_configs
@@ -194,6 +194,32 @@ def rl_grpo_qwen3_0_6b_varlen_sglang(*, seq_len: int = 2048) -> Controller.Confi
 
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     config.generator.engine = SGLangEngine.Config()
+    return config
+
+
+def rl_cispo_score_centering_qwen3_0_6b_varlen(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with truncated-IS REINFORCE (``CISPOLoss``) and score
+    centering: arXiv 2609.20807's TIS + SC (6 GPUs: 4 gen + 2 train)."""
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = CISPOLoss.Config(
+        global_vocab_size=config.trainer.loss.loss_fn.global_vocab_size,
+        score_centering=ScoreCentering.Config(),
+    )
+    return config
+
+
+def rl_icepop_score_centering_qwen3_0_6b_varlen(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_varlen`` with masked-IS REINFORCE (``IcePopLoss``) and score
+    centering: arXiv 2609.20807's masked IS + SC (6 GPUs: 4 gen + 2 train)."""
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = IcePopLoss.Config(
+        global_vocab_size=config.trainer.loss.loss_fn.global_vocab_size,
+        score_centering=ScoreCentering.Config(),
+    )
     return config
 
 

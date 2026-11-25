@@ -13,6 +13,8 @@ ratio is `r = p / q`, trainer over generator. A subclass defines
 | --- | --- |
 | `DAPOLoss` | PPO clip with separate lower and upper bounds ("clip-higher") |
 | `GRPOLoss` | `DAPOLoss` with one symmetric bound |
+| `CISPOLoss` | REINFORCE weighted by `min(r, 1 + ratio_clip_high)` (truncated IS) |
+| `IcePopLoss` | REINFORCE weighted by `r` inside `[ratio_mask_low, ratio_mask_high]`, 0 outside (masked IS) |
 
 ## Score centering
 
@@ -48,8 +50,10 @@ Requirements and limits:
 
 - `VLLMEngine` and `SGLangEngine`, with the message-env and Verifiers rollouters.
 - Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs).
-- The paper evaluates score centering with REINFORCE, truncated IS and masked IS, not PPO
-  clipping; its composition with `DAPOLoss`/`GRPOLoss` follows the same formula.
+- The paper evaluates score centering with REINFORCE, truncated IS (`CISPOLoss`) and masked
+  IS (`IcePopLoss`), not PPO clipping; its composition with `DAPOLoss`/`GRPOLoss` follows the
+  same formula. With stale rollouts, the paper finds score centering best combined with
+  truncated or masked IS.
 
 Metrics: `score_centering/generator_topk_mass/mean` and `score_centering/trainer_topk_mass/mean`
 (the probability mass the top-k covers; the tail model approximates the rest) and

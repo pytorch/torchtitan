@@ -10,12 +10,20 @@ import pytest
 import torch
 
 from torchtitan.components.loss import compute_topk_logprobs
-from torchtitan.rl.trainer.losses import DAPOLoss, GRPOLoss, ScoreCentering
+from torchtitan.rl.trainer.losses import (
+    CISPOLoss,
+    DAPOLoss,
+    GRPOLoss,
+    IcePopLoss,
+    ScoreCentering,
+)
 from torchtitan.rl.trainer.losses.policy_gradient import MAX_LOG_RATIO
 
 _LOSS_CONFIGS = {
     "dapo": DAPOLoss.Config(ratio_clip_low=0.2, ratio_clip_high=0.28),
     "grpo": GRPOLoss.Config(clip_eps=0.1),
+    "cispo": CISPOLoss.Config(ratio_clip_high=0.2),
+    "icepop": IcePopLoss.Config(ratio_mask_low=0.8, ratio_mask_high=1.25),
 }
 
 
