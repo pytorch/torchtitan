@@ -31,6 +31,7 @@ __all__ = [
     "ShardingUnit",
     "apply_fsdp_to_decoder",
     "apply_fsdp_to_multimodal_encoder",
+    "decoder_prefetch_order",
     "decoder_sharding_units",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
@@ -232,6 +233,23 @@ def decoder_sharding_units(
             )
         )
     return embedding, norm_and_lm_head, blocks
+
+
+def decoder_prefetch_order(model: "Decoder") -> list[nn.Module]:
+    """Return the embedding, each transformer block and the output projection,
+    in forward order, each standing for its sharding unit.
+
+    With explicit prefetching, each unit prefetches the next one in forward and
+    the previous one in backward.
+    """
+    order: list[nn.Module] = list(model.layers.values())
+    if not order:
+        return []
+    if model.tok_embeddings is not None:
+        order.insert(0, model.tok_embeddings)
+    if model.norm is not None and model.lm_head is not None:
+        order.append(model.lm_head)
+    return order
 
 
 def resolve_fsdp_mesh(
@@ -580,42 +598,10 @@ def _apply_fully_shard(
     if ep_degree == 1 and not unshard_in_current_stream:
         return
 
-    # set up explicit prefetching for forward
-    transformer_blocks = list(model.layers.values())
-    next_transformer_blocks = transformer_blocks[1:] + [None]
-
-    if model.tok_embeddings is not None and len(model.layers) > 0:
-        model.tok_embeddings.set_modules_to_forward_prefetch([transformer_blocks[0]])
-
-    for transformer_block, next_transformer_block in zip(
-        transformer_blocks, next_transformer_blocks
-    ):
-        if next_transformer_block is not None:
-            # pyrefly: ignore [not-callable]
-            transformer_block.set_modules_to_forward_prefetch([next_transformer_block])
-        elif model.norm is not None and model.lm_head is not None:
-            # pyrefly: ignore [not-callable]
-            transformer_block.set_modules_to_forward_prefetch(
-                [model.norm, model.lm_head]
-            )
-
-    # set up explicit prefetching for backward
-    # pyrefly: ignore [no-matching-overload]
-    reversed_transformer_blocks = list(reversed(model.layers.values()))
-    prev_transformer_blocks = reversed_transformer_blocks[1:] + [None]
-
-    if model.norm is not None and model.lm_head is not None and len(model.layers) > 0:
-        model.lm_head.set_modules_to_backward_prefetch([reversed_transformer_blocks[0]])
-
-    for transformer_block, prev_transformer_block in zip(
-        reversed_transformer_blocks, prev_transformer_blocks
-    ):
-        if prev_transformer_block is not None:
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.set_modules_to_backward_prefetch([prev_transformer_block])
-        elif model.tok_embeddings is not None:
-            # pyrefly: ignore [missing-attribute]
-            transformer_block.set_modules_to_backward_prefetch([model.tok_embeddings])
+    fsdp_modules = [cast(FSDPModule, m) for m in decoder_prefetch_order(model)]
+    for module, next_module in zip(fsdp_modules, fsdp_modules[1:]):
+        module.set_modules_to_forward_prefetch([next_module])
+        next_module.set_modules_to_backward_prefetch([module])
 
     if unshard_in_current_stream:
         assert isinstance(model, FSDPModule)
