@@ -353,6 +353,19 @@ class GDNKernel(Module):
         return output_BTHV.squeeze(0)
 
 
+@local_compile("gdn_gate", batch_invariant=True)
+def _compute_gdn_gates(
+    a_TH: torch.Tensor,
+    b_TH: torch.Tensor,
+    A_log_H: torch.Tensor,
+    dt_bias_H: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse Gated DeltaNet decay ``g_TH`` and update gate ``beta_TH``."""
+    g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
+    beta_TH = torch.sigmoid(b_TH)
+    return g_TH, beta_TH
+
+
 class InnerGDN(InnerAttention):
     """Dense GDN computation behind the vLLM replacement boundary.
 
@@ -481,8 +494,7 @@ class InnerGDN(InnerAttention):
             cu_seqlens=convolution_offsets,
             routing=routing,
         ).reshape(num_tokens, -1, value_head_dim)
-        g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
-        beta_TH = torch.sigmoid(b_TH)
+        g_TH, beta_TH = _compute_gdn_gates(a_TH, b_TH, A_log_H, dt_bias_H)
         return self.gdn_core(
             xq_THK,
             xk_THK,
