@@ -97,7 +97,14 @@ class ConfigLoader:
         parser.add_argument(
             "--resume-step",
             type=_parse_resume_step,
-            help="Checkpoint step to load; -1 selects the latest checkpoint.",
+            help=(
+                "Checkpoint step to load for this launch; -1 selects the latest. "
+                "With saves enabled, an older step is rejected if the folder has "
+                "newer resumable checkpoints. For rollback, use a fresh "
+                "checkpointer.folder with initial_load_path=/absolute/old-folder/step-K "
+                "(or a remote URI) and initial_load_model_only=False instead, "
+                "leaving load_step=-1."
+            ),
         )
         parser.add_argument(
             "--print-config",
