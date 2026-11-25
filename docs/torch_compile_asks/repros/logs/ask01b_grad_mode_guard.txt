@@ -1,0 +1,5 @@
+== python ask01b_grad_mode_guard.py
+after training at 3 token counts: graphs = 2
+after a no_grad validation pass: graphs = 3
+last guard failure: 0/0: GLOBAL_STATE changed: grad_mode
+5 ranks x 2 grad modes: FailOnRecompileLimitHit at signature 9 (recompile_limit=8)

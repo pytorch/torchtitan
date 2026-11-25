@@ -1,0 +1,24 @@
+== python ask10_dispatch_codegen.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+--- static
+T=   1: graph  12.3 us, 5 kernels, kernel sum   6.8 us: 1.5  1.2  1.4  1.3  1.3
+T=   8: graph  17.7 us, 5 kernels, kernel sum   8.0 us: 2.0  1.5  1.7  1.3  1.5
+T=  34: graph  18.5 us, 5 kernels, kernel sum   8.5 us: 2.1  1.3  1.7  1.3  2.1
+       2.08 us  triton_per_fused__to_copy_arange_cumsum_eq_unsqueeze_view_0
+       1.28 us  triton_per_fused_cumsum_select_1
+       1.70 us  triton_poi_fused_add_arange_gather_index_index_put_select_squeeze_sub_unsqueeze_view_2
+       1.28 us  triton_poi_fused_floor_divide_index_view_3
+       2.14 us  triton_poi_fused_index_4
+T=  64: graph  17.8 us, 5 kernels, kernel sum   9.4 us: 2.4  1.6  1.8  1.4  2.2
+T= 256: graph  23.3 us, 5 kernels, kernel sum  13.9 us: 6.0  1.2  1.7  1.4  3.6
+--- dynamic
+T=   1: graph  14.8 us, 5 kernels, kernel sum   6.6 us: 1.3  1.2  1.4  1.2  1.4
+T=   8: graph  19.6 us, 5 kernels, kernel sum  11.3 us: 4.8  1.6  1.7  1.4  1.8
+T=  34: graph  19.5 us, 5 kernels, kernel sum  11.1 us: 4.9  1.3  1.7  1.3  1.8
+       4.93 us  triton_red_fused__to_copy_arange_cumsum_eq_unsqueeze_view_0
+       1.31 us  triton_per_fused_cumsum_select_1
+       1.70 us  triton_poi_fused_add_arange_gather_index_index_put_select_squeeze_sub_unsqueeze_view_2
+       1.31 us  triton_poi_fused_floor_divide_index_view_3
+       1.82 us  triton_poi_fused_index_4
+T=  64: graph  20.3 us, 5 kernels, kernel sum  11.9 us: 5.4  1.5  1.7  1.3  2.0
+T= 256: graph  23.2 us, 5 kernels, kernel sum  16.1 us: 8.0  1.3  1.8  1.5  3.6

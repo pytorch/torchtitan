@@ -1,0 +1,6 @@
+== python ask03_gather_and_swiglu.py
+torch 2.16.0.dev20261009+cu132 (146a5a2f73), NVIDIA GB300
+T=    8: gather   1.3 us + w13   60.4 us + SwiGLU   1.2 us
+T=   34: gather   1.8 us + w13  144.2 us + SwiGLU   1.2 us
+T=  256: gather   6.0 us + w13  204.2 us + SwiGLU   2.5 us
+T= 4096: gather  34.7 us + w13  226.8 us + SwiGLU  14.7 us
