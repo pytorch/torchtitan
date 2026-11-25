@@ -179,7 +179,7 @@ def test_forward_matches_causal_attention(
         )
         if is_fp8:
             # FA4's fp8 kernels round the softmax probabilities to e4m3 before P @ V: rel L2
-            # ~0.02 on this flat attention; verify rows without their descales give 0.45-0.6.
+            # ~0.02 on this flat attention.
             rel_l2 = (output[rows].float() - expected).norm() / expected.norm()
             assert rel_l2 < 0.05, (row, rel_l2)
         else:

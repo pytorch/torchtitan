@@ -381,9 +381,8 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             max_seqlen_q == self.verify_query_len
             and num_actual_tokens == max_seqlen_q * seqused_k.shape[0]
         )
-        # fp8 rows run as one SwapAB call (the engine refuses an FA4 without query_len_in_heads,
-        # and DiffKV layers refuse fp8): 0.47-0.92x the varlen call's time at 1-7 rows (head dim
-        # 256, GB300), so no row cutoff.
+        # fp8 rows run as one SwapAB call (the engine refuses an FA4 without query_len_in_heads):
+        # 0.47-0.92x the varlen call's time at 1-7 rows (head dim 256, GB300), so no row cutoff.
         if (
             is_uniform_verify
             and (
