@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from torchtitan.rl.generator.vllm.attention.attention import (
+    _MIN_VERIFY_ROWS_ON_DECODE_KERNEL,
     TorchTitanVarlenInnerAttentionImpl,
 )
 from vllm.config import set_current_vllm_config, VllmConfig
@@ -26,19 +27,19 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("max_seq_len", [131072, 262144])
 @pytest.mark.parametrize(
-    "query_lens, seq_lens, is_verify_step",
+    "query_lens, seq_lens, is_uniform_verify",
     [
         # 8 rows of 1 + 3 tokens; the 30k row gets KV splits; a padded row (seq_len 0).
         ([4] * 8, [4, 130, 1000, 257, 30_000, 0, 513, 2_048], True),
         # Fewer than 8 verify rows: FA4's varlen call.
-        ([4, 4, 4], [130, 30_000, 257], False),
+        ([4, 4, 4], [130, 30_000, 257], True),
         # A 1-token row: FA4's varlen call.
         ([4, 4, 1], [130, 30_000, 257], False),
     ],
     ids=["verify", "few_rows", "mixed"],
 )
 def test_forward_matches_causal_attention(
-    query_lens, seq_lens, is_verify_step, max_seq_len, kv_cache_dtype
+    query_lens, seq_lens, is_uniform_verify, max_seq_len, kv_cache_dtype
 ):
     """Each query token attends causally to its row's keys, through the impl's dispatch.
 
@@ -46,6 +47,10 @@ def test_forward_matches_causal_attention(
     K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
     writes them; the reference runs on the dequantized values.
     """
+    takes_decode_kernel = (
+        is_uniform_verify and len(query_lens) >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
+    )
+
     torch.manual_seed(0)
     device = torch.device("cuda")
     num_heads, num_kv_heads, head_dim, page_size = 24, 4, 256, 128
@@ -133,7 +138,7 @@ def test_forward_matches_causal_attention(
         ) as verify_rows_as_decode,
     ):
         impl.forward(layer, query, None, None, stored_cache, metadata, output=output)
-    assert verify_rows_as_decode.called == is_verify_step
+    assert verify_rows_as_decode.called == takes_decode_kernel
 
     for row, (num_queries, num_keys) in enumerate(zip(query_lens, seq_lens)):
         if num_keys == 0:
