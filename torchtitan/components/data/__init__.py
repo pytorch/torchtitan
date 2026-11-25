@@ -6,6 +6,7 @@
 
 from torchtitan.components.data.balancing import (
     document_attention_cost,
+    GlobalBalancer,
     LocalBalancer,
     MicrobatchBalancer,
     packed_attention_cost,
@@ -49,6 +50,7 @@ __all__ = [
     "DatasetMixConfig",
     "document_attention_cost",
     "FirstFitPackingConfig",
+    "GlobalBalancer",
     "GrainDataLoader",
     "HuggingFaceRandomAccessSource",
     "HuggingFaceStreamingSource",

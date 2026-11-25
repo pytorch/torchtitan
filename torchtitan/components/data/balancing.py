@@ -32,6 +32,12 @@ heaviest microbatch. For sorted sequences this pairing minimizes the sum of
 per-step maxima, with no communication. It cannot fix a window in which one
 rank holds several heavy microbatches.
 
+``GlobalBalancer`` fixes that by planning each window across all
+data-parallel ranks: the ranks all-gather their costs over gloo, every rank
+computes the same plan, and moved microbatches are sent
+point to point. It runs on the loader's prefetch thread, so it overlaps
+training.
+
 The set of microbatches per window is unchanged; each moves at most
 ``window_size - 1`` steps (like the packer's own bin shuffling). Local
 balancing does not depend on the mesh, so it applies unchanged to
@@ -45,19 +51,38 @@ order can split a single document: a row that is one full-length document
 stays as heavy as it is.
 """
 
+# TODO: group-local balancing, which plans within blocks of data-parallel ranks
+# instead of all of them, to bound the gather and the plan on very large jobs.
+# TODO: plan from a global view of the data sources instead of moving
+# microbatches. If every rank knew every rank's document lengths, each could
+# compute the same plan and read only its own rows: no all-gather, no exchange,
+# and no copy sent to every CP peer. Blocked today: lengths are only known after
+# tokenizing and packing, and streaming sources are split per rank
+# (sources.py, split_dataset_by_node); needs a precomputed length index.
+
+import io
+import logging
+import pickle
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import grain.python as grain
 import torch
+import torch.distributed as dist
 
+from torchtitan.components.data.collators import HAS_PIN_MEMORY
 from torchtitan.components.data.types import (
     TokenizedTrainingMicrobatch,
     TrainingMicrobatch,
 )
 from torchtitan.config import Configurable
+
+logger = logging.getLogger(__name__)
 
 
 def _attention_cost(segment_lengths: Sequence[int]) -> int:
@@ -158,6 +183,9 @@ class MicrobatchBalancer(Configurable, ABC):
         """Return the microbatches this rank trains in the next ``len(rows)``
         steps, in step order. Every rank calls it at the same step."""
 
+    def close(self) -> None:
+        """Stop in-flight communication; the loader calls this before closing."""
+
 
 class LocalBalancer(MicrobatchBalancer):
     """Yield this rank's own window heaviest first, without communication."""
@@ -170,6 +198,260 @@ class LocalBalancer(MicrobatchBalancer):
         # Stable: equal costs keep their packed order.
         costs = [self._cost_fn(row) for row in rows]
         return [rows[i] for i in sorted(range(len(rows)), key=lambda i: -costs[i])]
+
+
+class GlobalBalancer(MicrobatchBalancer):
+    """Plan each window across all data-parallel ranks and move microbatches.
+
+    ``LocalBalancer`` can only reorder a rank's own window, so a rank that
+    holds several heavy microbatches stays the slowest for several steps.
+    ``GlobalBalancer`` also moves microbatches between ranks. Two ranks, a
+    window of 4, step time = slowest rank::
+
+        packed order         LocalBalancer        GlobalBalancer
+        step  r0  r1  time   step  r0  r1  time   step  r0  r1  time
+          0    9   3    9      0    9   4    9      0    9   8*   9
+          1    1   2    2      1    8   3    8      1    3*  4    4
+          2    8   1    8      2    2   2    2      2    2   2    2
+          3    2   4    4      3    1   1    1      3    1   1    1
+                 total 23             total 20             total 16
+
+        * moved between ranks
+
+    Every microbatch is still trained once per window. Ranks that share a
+    data-parallel rank (CP, TP, PP stages) read the same microbatches and
+    compute the same plan; each exchanges over a gloo group of the global ranks
+    of its data-parallel group (``dp_ranks``, passed in by the trainer). Every
+    rank must fill full windows, which the loader guarantees by requiring
+    ``repeat`` with DP > 1.
+
+    Any picklable microbatch can move, including ``model_kwargs`` with image
+    tensors; received tensors are pinned like the collators' output.
+
+    Failure handling: if a peer stops producing microbatches (it crashed or
+    hung), the exchange waits up to 30 minutes, which also covers loader
+    startup on the first window, then the loader raises. It does not fall back
+    to training the rank's own microbatches: CP and TP peers must train the
+    same microbatch at every step, and each balances in its own gloo group, so
+    a rank that fell back while its peers did not would silently train
+    different data than them.
+
+    Limitations:
+        - Pipeline parallelism is not balanced per step. Ranks synchronize
+          once per step of M microbatches, so what matters is each rank's sum
+          over the step; this balancer balances each microbatch slot instead
+          and can add pipeline bubbles.
+        - A row that is one full-length document stays as heavy as it is.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MicrobatchBalancer.Config):
+        pass
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        dp_world_size: int,
+        dp_ranks: Sequence[int] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(config)
+        self._closed = threading.Event()
+        self._dp_gloo_group: dist.ProcessGroup | None = None
+        if dp_world_size == 1:
+            return  # nothing to exchange: each window is planned alone
+        if dp_ranks is None:
+            raise ValueError("GlobalBalancer needs the data-parallel ranks (dp_ranks)")
+        # A CPU group over the data-parallel group's ranks; only its members
+        # create it.
+        group = dist.new_group(
+            list(dp_ranks),
+            backend="gloo",
+            timeout=timedelta(minutes=30),
+            use_local_synchronization=True,
+        )
+        assert isinstance(group, dist.ProcessGroup)
+        self._dp_gloo_group = group
+
+    def close(self) -> None:
+        self._closed.set()
+
+    def _wait_for_peers(self, work: Any) -> None:
+        """Wait for the window's cost all-gather, giving up if ``close()`` is called.
+
+        At shutdown a peer may stop before joining the next window, and grain's
+        ``close()`` waits for the prefetch thread to finish, so a blocking wait
+        here could hold up shutdown until the gloo timeout. The point-to-point
+        rounds that follow can't wait on an absent peer (every rank has passed
+        the all-gather) and gloo send/recv work only completes inside
+        ``wait()``, so they block normally.
+        """
+        while not work.is_completed():
+            if self._closed.is_set():
+                raise RuntimeError("GlobalBalancer closed while waiting for peers")
+            time.sleep(0.01)
+        work.wait()  # raises gloo errors and timeouts
+
+    @staticmethod
+    def _plan_window(
+        costs: Sequence[Sequence[float]],
+    ) -> list[list[tuple[int, int]]]:
+        """Plan one window across ``N`` ranks.
+
+        ``costs[s][i]`` is the cost of rank ``s``'s ``i``-th microbatch; every
+        rank holds the same number, ``W``. All ``N * W`` microbatches are sorted
+        by cost (ties by rank, then index) and cut into ``W`` groups of ``N``:
+        step ``k`` runs the ``k``-th group, so each step's microbatches cost
+        about the same. Within a step, each microbatch stays on the rank that
+        holds it when it can. Deterministic, so every rank computes the same
+        plan from the same costs.
+
+        Returns:
+            ``plan[k][d] = (s, i)``: at step ``k``, rank ``d`` trains rank
+            ``s``'s ``i``-th microbatch.
+        """
+        order = sorted(
+            ((c, s, i) for s, row in enumerate(costs) for i, c in enumerate(row)),
+            key=lambda x: (-x[0], x[1], x[2]),
+        )
+        rows = GlobalBalancer._assign_keep_local(
+            [s for _, s, _ in order], num_ranks=len(costs)
+        )
+        return [[order[j][1:] for j in row] for row in rows]
+
+    @staticmethod
+    def _assign_keep_local(owners: Sequence[int], *, num_ranks: int) -> list[list[int]]:
+        """Assign rows of ``num_ranks`` sorted bins to ranks, moving as few as possible.
+
+        ``owners[j]`` is the rank that already holds bin ``j``. Each bin stays on
+        its owner when possible (at most one per rank per row) and the rest go
+        to the ranks left free. Returns, per row, the bin index each rank trains.
+
+        With one microbatch per rank per step, a row's cost is its heaviest bin
+        whatever the ranks, so keeping bins local is free. RL's batcher, which
+        gathers the batch in one place, uses the same rows with a different
+        rank choice (``rl.trainer.batcher.assign_sorted_bins_to_dp_ranks``).
+
+        TODO: with PP (M microbatches per step), also balance each rank's step
+        total, trading moves against balance.
+
+        Example: sorted bins 9, 8 | 4, 3 held by ranks 0, 0 | 1, 1 give
+        ``[[0, 1], [3, 2]]``: rank 0 keeps 9 and sends 8 to rank 1; rank 1
+        keeps 4 and sends 3 to rank 0.
+        """
+        assignments = []
+        for row_start in range(0, len(owners), num_ranks):
+            slots: list[int | None] = [None] * num_ranks
+            moved = []
+            for bin_index in range(row_start, row_start + num_ranks):
+                if slots[owners[bin_index]] is None:
+                    slots[owners[bin_index]] = bin_index
+                else:
+                    moved.append(bin_index)
+            free = [rank for rank in range(num_ranks) if slots[rank] is None]
+            for rank, bin_index in zip(free, moved):
+                slots[rank] = bin_index
+            assignments.append([i for i in slots if i is not None])
+        return assignments
+
+    @staticmethod
+    def _unpickle(payload: bytes) -> Any:
+        """Unpickle a received microbatch, pinning its tensors as collators do so
+        the trainer's host-to-device copy stays asynchronous."""
+        if not HAS_PIN_MEMORY:
+            return pickle.loads(payload)
+
+        class _PinningUnpickler(pickle.Unpickler):
+            def find_class(self, module: str, name: str) -> Any:
+                found = super().find_class(module, name)
+                # TODO: relies on torch's private tensor pickle layout
+                # (_rebuild_tensor_v2); if it changes, received tensors silently
+                # stay pageable and the trainer's H2D copy becomes synchronous.
+                if (module, name) == ("torch._utils", "_rebuild_tensor_v2"):
+                    return lambda *args: found(*args).pin_memory()
+                return found
+
+        return _PinningUnpickler(io.BytesIO(payload)).load()
+
+    def balance(self, rows: list[Any]) -> list[Any]:
+        """Return the microbatches this rank trains in the next W steps.
+
+        All-gathers the costs, computes the shared plan, keeps the rows the plan
+        leaves here, and exchanges the rest point to point (pickled; one round
+        of sizes, one of payloads).
+        """
+        group = self._dp_gloo_group
+        if group is None:  # a single data-parallel rank: heaviest first
+            plan = self._plan_window([[self._cost_fn(r) for r in rows]])
+            return [rows[step[0][1]] for step in plan]
+        me = group.rank()
+        start = time.perf_counter()
+        try:
+            # 1. Gather every rank's costs and compute the shared plan.
+            costs = torch.tensor([self._cost_fn(r) for r in rows], dtype=torch.float64)
+            gathered = [torch.empty_like(costs) for _ in range(group.size())]
+            self._wait_for_peers(
+                dist.all_gather(gathered, costs, group=group, async_op=True)
+            )
+            plan = self._plan_window([g.tolist() for g in gathered])
+
+            # 2. List my moves: (step k, receiver d, my row i) for each row I
+            # send, and (step k, sender s) for each step I train another rank's
+            # row. Both sides enumerate moves in step order, and a rank trains
+            # one microbatch per step, so k is a unique tag per (sender,
+            # receiver) pair.
+            sends = [
+                (k, d, i)
+                for k, step in enumerate(plan)
+                for d, (s, i) in enumerate(step)
+                if s == me and d != me
+            ]
+            recvs = [
+                (k, step[me][0]) for k, step in enumerate(plan) if step[me][0] != me
+            ]
+
+            def exchange(recv: dict[int, torch.Tensor], send: list[torch.Tensor]):
+                ops = [
+                    dist.P2POp(dist.irecv, recv[k], group=group, group_peer=s, tag=k)
+                    for k, s in recvs
+                ] + [
+                    dist.P2POp(dist.isend, t, group=group, group_peer=d, tag=k)
+                    for (k, d, _), t in zip(sends, send)
+                ]
+                for work in dist.batch_isend_irecv(ops) if ops else []:
+                    work.wait()
+
+            # 3. Pickle the rows I send, then exchange sizes (so receivers can
+            # allocate buffers) and payloads.
+            payloads = [
+                torch.frombuffer(bytearray(pickle.dumps(rows[i])), dtype=torch.uint8)
+                for _, _, i in sends
+            ]
+            sizes = {k: torch.empty(1, dtype=torch.int64) for k, _ in recvs}
+            exchange(sizes, [torch.tensor([p.numel()]) for p in payloads])
+            received = {
+                k: torch.empty(int(sizes[k]), dtype=torch.uint8) for k, _ in recvs
+            }
+            exchange(received, payloads)
+        except RuntimeError as e:
+            raise RuntimeError(
+                "GlobalBalancer exchange failed or timed out; a data-parallel peer "
+                "stopped producing microbatches"
+            ) from e
+
+        logger.debug(
+            "GlobalBalancer: %d in, %d out, %d bytes received, %.1f ms",
+            len(recvs),
+            len(sends),
+            sum(t.numel() for t in received.values()),
+            (time.perf_counter() - start) * 1e3,
+        )
+        # 4. Assemble my window in step order: kept rows plus received ones.
+        return [
+            self._unpickle(received[k].numpy().tobytes()) if s != me else rows[i]
+            for k, (s, i) in enumerate(step[me] for step in plan)
+        ]
 
 
 class MicrobatchBalancingIterDataset(grain.IterDataset):
