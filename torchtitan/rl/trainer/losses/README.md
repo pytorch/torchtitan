@@ -42,7 +42,7 @@ The controller then asks the generator for its top-k logprobs on every training 
 (validation requests get none) and the loss receives them as `[T, k]` inputs:
 
 ```
-generator (vLLM)            batcher                          PolicyGradientLoss
+generator (vLLM, SGLang)    batcher                          PolicyGradientLoss
   top-k ids, logprobs  -->    one row per loss token   -->     correction = sum_H c_v * log p_v
   [num_generated, k]          scattered to [T, k] on device    token_loss += A * correction
 ```
@@ -54,8 +54,8 @@ enables score centering, and the RL loss golden checks that it stays a no-op the
 
 Requirements and limits:
 
-- `VLLMEngine` only for now: `SGLangEngine` raises, and Verifiers rollouts, which carry no top-k
-  rows yet, fail the batcher's row check.
+- `VLLMEngine` and `SGLangEngine`; Verifiers rollouts, which carry no top-k rows yet, fail
+  the batcher's row check.
 - Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs).
 - Trainer cost: the top-k scoring saves one more fp32 `[T, V_local]` for backward (TODO in
   `score_centering.py`). For one loss chunk of 4,096 tokens and a 151,936-token vocabulary on
