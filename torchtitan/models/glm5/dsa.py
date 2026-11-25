@@ -222,6 +222,14 @@ class Glm5CPMLAAttention(Glm5MLAAttention, AllGatherKVMLAFlexAttention):
         )
 
 
+def validate_selector_device(device: torch.device, *, cp_enabled: bool) -> None:
+    if device.type != "cuda":
+        return
+    minimum = 8 if cp_enabled else 9
+    if torch.version.hip or torch.cuda.get_device_capability(device)[0] < minimum:
+        raise ValueError(f"GLM low-precision DSA indexer requires NVIDIA SM{minimum}0+")
+
+
 class DSAIndexerTopK(Module):
     """Compute local-query top-k indices against a global key sequence.
 
@@ -257,10 +265,8 @@ class DSAIndexerTopK(Module):
             torch.float16, torch.bfloat16
         )
         if low_precision_cuda:
-            # Configs may be built on CPU/meta, before dtype and rank device are known.
-            minimum = 8 if cp_group is not None else 9
-            if torch.version.hip or torch.cuda.get_device_capability(q_QNH.device)[0] < minimum:
-                raise ValueError(f"GLM low-precision DSA indexer requires NVIDIA SM{minimum}0+")
+            # Direct callers need not have gone through training setup.
+            validate_selector_device(q_QNH.device, cp_enabled=cp_group is not None)
 
         # Keep token order within each document while moving padding to the end.
         # Fixed-capacity offsets use repeated endpoints for empty documents.

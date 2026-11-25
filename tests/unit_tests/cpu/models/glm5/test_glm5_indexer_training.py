@@ -38,6 +38,25 @@ def test_indexer_rejects_unsupported_topk_before_device_build(topk):
         replace(indexer, topk=replace(indexer.topk, index_topk=topk))
 
 
+@pytest.mark.parametrize(
+    ("hip", "major", "cp", "supported"),
+    [(None, 7, True, False), (None, 8, True, True),
+     (None, 8, False, False), (None, 9, False, True), ("6", 9, True, False)],
+)
+def test_selector_training_device_preflight(hip, major, cp, supported):
+    from torchtitan.models.glm5.dsa import validate_selector_device
+
+    with (
+        patch.object(torch.version, "hip", hip),
+        patch.object(torch.cuda, "get_device_capability", return_value=(major, 0)),
+    ):
+        if supported:
+            validate_selector_device(torch.device("cuda:0"), cp_enabled=cp)
+        else:
+            with pytest.raises(ValueError, match="requires NVIDIA SM"):
+                validate_selector_device(torch.device("cuda:0"), cp_enabled=cp)
+
+
 def test_training_configuration_does_not_mutate_source():
     from torchtitan.models.glm5.flavors import configure_glm5_training
 

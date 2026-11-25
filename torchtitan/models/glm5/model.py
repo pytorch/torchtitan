@@ -45,7 +45,7 @@ from torchtitan.models.deepseek_v3.model import (
 )
 from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
 
-from .dsa import DsaMetadata, Glm5DsaIndexer, Glm5SparseAttention
+from .dsa import DsaMetadata, Glm5DsaIndexer, Glm5SparseAttention, validate_selector_device
 from .state_dict_adapter import Glm5StateDictAdapter
 
 # Tensor dimensions used in this file:
@@ -436,6 +436,22 @@ class Glm5Model(DeepSeekV3Model):
                 if isinstance(module, Glm5DsaIndexer):
                     module.requires_grad_(True)
         self.index_sources = config.index_sources
+
+    def parallelize(self, *, parallelism_context, precision, **kwargs):
+        # Configs are also built on CPU/meta. Here the rank device, compute
+        # precision and pipeline stage's actual selector consumers are known.
+        if precision.param_dtype == "bfloat16" and any(
+            isinstance(module, Glm5DsaIndexer) and module.training_stage != "warmup"
+            for module in self.modules()
+        ):
+            from torchtitan.tools.utils import get_local_device
+
+            validate_selector_device(
+                get_local_device(), cp_enabled=parallelism_context.cp_enabled
+            )
+        return super().parallelize(
+            parallelism_context=parallelism_context, precision=precision, **kwargs
+        )
 
     def preprocess_inputs(
         self,
