@@ -820,24 +820,45 @@ _SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
 
 
 @pytest.mark.parametrize(
-    "model, debug, match",
+    "model, config_kwargs, debug, error, match",
     [
         (
             _MODEL_CONFIG,
+            {},
             DebugConfig(batch_invariant=True),
+            ValueError,
             "batch_invariant needs kv_cache_dtype='auto'",
         ),
         (
             _SLIDING_WINDOW_MODEL_CONFIG,
+            {},
             DebugConfig(),
+            ValueError,
             r"untested with sliding-window attention, but \(layer, window\) \[\(0, 128\)\]",
         ),
+        (
+            SimpleNamespace(
+                first_full_attention=_MODEL_CONFIG.first_full_attention,
+                layers=[],
+                max_context_length=1024,
+            ),
+            dict(num_speculative_tokens=3),
+            DebugConfig(),
+            RuntimeError,
+            "needs an FA4 whose forward takes query_len_in_heads",
+        ),
     ],
-    ids=["batch_invariant", "sliding_window"],
+    ids=["batch_invariant", "sliding_window", "drafts_without_query_len_in_heads"],
 )
-def test_fp8_kv_cache_refusals(tmp_path, model, debug, match):
-    with pytest.raises(ValueError, match=match):
-        VLLMEngine.Config(kv_cache_dtype="fp8").build(
+def test_fp8_kv_cache_refusals(
+    tmp_path, monkeypatch, model, config_kwargs, debug, error, match
+):
+    monkeypatch.setattr(
+        "torchtitan.rl.generator.vllm.engine.fa4_takes_query_len_in_heads",
+        lambda: False,
+    )
+    with pytest.raises(error, match=match):
+        VLLMEngine.Config(kv_cache_dtype="fp8", **config_kwargs).build(
             model=model,
             parallelism=_PARALLELISM,
             model_path="unused",
@@ -856,11 +877,6 @@ def test_fp8_kv_cache_refusals(tmp_path, model, debug, match):
             generator_name="generator",
             output_dir=str(tmp_path),
         )
-
-
-def test_fp8_kv_cache_refuses_drafts_at_config_time():
-    with pytest.raises(ValueError, match="does not support num_speculative_tokens=3"):
-        VLLMEngine.Config(kv_cache_dtype="fp8", num_speculative_tokens=3)
 
 
 def test_qwen36_27b_perf_config():

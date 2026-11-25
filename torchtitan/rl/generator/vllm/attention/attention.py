@@ -374,16 +374,21 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         seqused_k = attn_metadata.seq_lens
 
         # A verify step: every row holds one token plus its drafts (FULL graphs pad with whole rows).
-        # TODO: run each verify row as one FA4 call, without the fp32 tail, once torch's varlen
-        # API passes FA4's query_len_in_heads (Dao-AILab/flash-attention#3217 adds it to FA4; no
-        # torch issue filed yet).
+        # TODO: run each bf16 verify row as one FA4 call, like fp8 rows in `_verify_rows_as_decode`,
+        # once torch's varlen API passes FA4's query_len_in_heads (Dao-AILab/flash-attention#3217 adds
+        # it to FA4; no torch issue filed yet).
         is_uniform_verify = (
             max_seqlen_q == self.verify_query_len
             and num_actual_tokens == max_seqlen_q * seqused_k.shape[0]
         )
+        # fp8 rows run as one SwapAB call (the engine refuses an FA4 without query_len_in_heads):
+        # 0.47-0.92x the varlen call's time at 1-7 rows (head dim 256, GB300), so no row cutoff.
         if (
             is_uniform_verify
-            and seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
+            and (
+                descales is not None
+                or seqused_k.shape[0] >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
+            )
             and current_flash_attention_impl() == "FA4"
             and sliding_window_size == (-1, 0)
             and self.out_transform is None
@@ -395,6 +400,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata,
+                descales=descales,
             )
 
         if (
@@ -451,6 +457,7 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
+        descales: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Attention of a verify step, every row `n` query tokens, on FA4's decode kernel.
 
@@ -463,6 +470,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
             merge                        logsumexp of the two parts
 
+        With fp8 `descales` (q, k, v): one decode call over keys 0 .. L-1, and FA4 hides key L-n+i
+        from the tokens before token i (`query_len_in_heads=n`).
+
         Shape suffixes: R rows, K KV heads, J tokens of a row, G query heads per KV head,
         I tail keys (the last n - 1), D head dim, V value head dim.
         """
@@ -474,11 +484,44 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         num_queries_per_kv = num_heads // num_kv_heads
         page_size = key_cache.shape[1]
 
-        # ======== Keys every token sees: one decode row of n x heads per row ========
         # Heads ordered (KV head, token, head in group), so FA4's GQA maps each to its KV head.
         query_RKJGD = query.view(
             num_rows, query_len, num_kv_heads, num_queries_per_kv, head_dim
         ).transpose(1, 2)
+
+        # ======== fp8: one call; FA4 hides each token's later keys ========
+        # TODO: two reorder copies (q, out) cost ~9 us per layer (26 rows, GB300).
+        if descales is not None:
+            out_RKJGV = output.new_empty(
+                num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v
+            )
+            paged_varlen_attention_out(
+                out_RKJGV.view(num_rows, -1, head_dim_v),
+                query_RKJGD.reshape(num_rows, -1, head_dim),
+                key_cache,
+                value_cache,
+                cu_seqlens_q=torch.arange(
+                    num_rows + 1, device=query.device, dtype=torch.int32
+                ),
+                max_seqlen_q=1,
+                max_seqlen_k=attn_metadata.max_seq_len,
+                seqused_k=attn_metadata.seq_lens,
+                block_table=attn_metadata.block_table,
+                scale=self.scale,
+                window_size=(-1, 0),
+                enable_gqa=True,
+                return_lse=False,
+                descales=descales,
+                query_len_in_heads=query_len,
+            )
+            output.view(num_rows, query_len, num_heads, head_dim_v).copy_(
+                out_RKJGV.transpose(1, 2).reshape(
+                    num_rows, query_len, num_heads, head_dim_v
+                )
+            )
+            return output
+
+        # ======== Keys every token sees: one decode row of n x heads per row ========
         num_shared_keys_R = (attn_metadata.seq_lens - (query_len - 1)).clamp_(min=0)
         shared_out_RKJGV = query.new_empty(
             num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v

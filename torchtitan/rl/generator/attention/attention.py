@@ -9,6 +9,8 @@
 the generator computes attention with the trainer's kernel whatever the engine. An fp8 KV
 cache instead calls FA4's fp8 forward, which the trainer does not run."""
 
+import functools
+import inspect
 from typing import Any
 
 import torch
@@ -34,6 +36,7 @@ def paged_varlen_attention_out(
     enable_gqa: bool,
     return_lse: bool,
     descales: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    query_len_in_heads: int = 1,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Causal varlen attention of new query tokens over a paged KV cache, written into ``out``.
 
@@ -53,10 +56,16 @@ def paged_varlen_attention_out(
         return_lse: Also return the ``(num_heads, num_tokens)`` logsumexp.
         descales: With fp8 e4m3 ``query`` and caches: their ``(batch, num_kv_heads)`` fp32
             dequantization scales (q, k, v). Runs FA4's fp8 forward (SM100 family only).
+        query_len_in_heads: fp8 single-token rows only: each KV head's query heads hold this
+            many tokens, token-major; token j sees keys up to
+            ``seqused_k - query_len_in_heads + j``. Needs ``fa4_takes_query_len_in_heads``.
 
     Returns:
         The written ``out[:num_tokens]``, and the logsumexp with ``return_lse``.
     """
+    assert (
+        query_len_in_heads == 1 or descales is not None
+    ), "query_len_in_heads > 1 needs the fp8 path (descales)"
     if descales is not None:
         # TODO: call torch's varlen attention once it takes fp8 descales (no torch issue filed yet).
         # Until then, call FA4's private `_flash_attn_fwd` with the arguments torch's FA4 bridge
@@ -85,6 +94,11 @@ def paged_varlen_attention_out(
             return_lse=return_lse,
             out=out,
             scales=TensorwiseScales(*descales),
+            **(
+                {"query_len_in_heads": query_len_in_heads}
+                if query_len_in_heads > 1
+                else {}
+            ),
         )
         return (out, lse) if return_lse else out
 
@@ -135,3 +149,11 @@ def paged_varlen_attention_out(
             seqused_k=seqused_k,
             **extra_kwargs,
         )
+
+
+@functools.cache
+def fa4_takes_query_len_in_heads() -> bool:
+    """Whether FA4's forward hides each packed query token's later keys (`query_len_in_heads`)."""
+    from flash_attn.cute.interface import _flash_attn_fwd
+
+    return "query_len_in_heads" in inspect.signature(_flash_attn_fwd).parameters

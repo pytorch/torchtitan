@@ -10,6 +10,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from torchtitan.rl.generator.attention.attention import fa4_takes_query_len_in_heads
+from torchtitan.rl.generator.vllm.attention import attention as vllm_attention
 from torchtitan.rl.generator.vllm.attention.attention import (
     TorchTitanVarlenInnerAttentionImpl,
 )
@@ -29,7 +31,7 @@ pytestmark = pytest.mark.skipif(
     [
         # 8 rows of 1 + 3 tokens; the 30k row gets KV splits; a padded row (seq_len 0).
         ([4] * 8, [4, 130, 1000, 257, 30_000, 0, 513, 2_048], True),
-        # Fewer than 8 verify rows: FA4's varlen call.
+        # Fewer than 8 verify rows: FA4's varlen call, unless fp8 rows run as one call.
         ([4, 4, 4], [130, 30_000, 257], True),
         # A leading 1-token row: FA4's decode call for it, the varlen call for the rest.
         ([1, 4, 4], [257, 130, 30_000], False),
@@ -45,13 +47,13 @@ def test_forward_matches_causal_attention(
     K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
     writes them; the reference runs on the dequantized values.
     """
-    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`).
-    takes_decode_kernel = is_uniform_verify and len(query_lens) >= 8
-    if kv_cache_dtype == "fp8" and takes_decode_kernel:
-        # TODO: drop once `_verify_rows_as_decode` passes the fp8 descales.
+    is_one_call = kv_cache_dtype == "fp8" and is_uniform_verify
+    if is_one_call and not fa4_takes_query_len_in_heads():
         pytest.skip(
-            "fp8 verify rows pass no descales yet; the engine refuses fp8 with drafts"
+            "fp8 verify rows need an FA4 whose forward takes query_len_in_heads"
         )
+    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`) for bf16 rows.
+    takes_decode_kernel = is_uniform_verify and (is_one_call or len(query_lens) >= 8)
     max_seq_len = 262144  # Qwen3.8-27B's max_model_len
     torch.manual_seed(0)
     device = torch.device("cuda")
@@ -138,9 +140,19 @@ def test_forward_matches_causal_attention(
         patch.object(
             impl, "_verify_rows_as_decode", wraps=impl._verify_rows_as_decode
         ) as verify_rows_as_decode,
+        patch.object(
+            vllm_attention,
+            "paged_varlen_attention_out",
+            wraps=vllm_attention.paged_varlen_attention_out,
+        ) as attention_calls,
     ):
         impl.forward(layer, query, None, None, stored_cache, metadata, output=output)
     assert verify_rows_as_decode.called == takes_decode_kernel
+    query_lens_in_heads = [
+        call.kwargs.get("query_len_in_heads", 1)
+        for call in attention_calls.call_args_list
+    ]
+    assert (4 in query_lens_in_heads) == is_one_call
 
     for row, (num_queries, num_keys) in enumerate(zip(query_lens, seq_lens)):
         if num_keys == 0:
