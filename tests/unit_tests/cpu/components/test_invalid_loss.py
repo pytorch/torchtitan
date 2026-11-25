@@ -12,6 +12,7 @@ import torch
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.optim import GradientClipper, Optim
+from torchtitan.distributed.sharding_backend import FullyShardBackend
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import TrainingEngine
 
@@ -54,6 +55,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.flops_estimator = lambda inputs: inputs["input"].numel()
 
         parallelism_context = MagicMock()
+        parallelism_context.sharding_backend = FullyShardBackend.Config().build()
         parallelism_context.dp_enabled = False
         parallelism_context.pp_enabled = False
         parallelism_context.dp_cp_enabled = False
@@ -107,7 +109,7 @@ class TestInvalidLoss(unittest.TestCase):
         with (
             patch("torchtitan.training_engine.sl", MagicMock()),
             patch(
-                "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
+                "torchtitan.distributed.utils.clip_grad_norm_",
                 return_value=torch.tensor(1.0),
             ),
             patch("torchtitan.trainer.collect_aux_loss_metrics", return_value={}),

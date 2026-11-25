@@ -14,12 +14,11 @@ from torchtitan.components.checkpointer.dcp import CheckpointManager
 from torchtitan.components.checkpointer.torch_checkpointing import (
     TorchCheckpointingManager,
 )
-from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
-from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed.flex_shard_fsdp import validate_flex_shard_training
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
@@ -293,17 +292,23 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
     config.__post_init__()
 
 
-# CPU CI doesn't install flex_shard, which validate_flex_shard_training
-# requires last.
-@mock.patch("torchtitan.distributed.flex_shard_fsdp.find_spec", mock.Mock())
+# CPU CI doesn't install flex_shard, which FlexShardBackend.validate_model requires
+# last.
+@mock.patch("torchtitan.distributed.flex_shard_backend.find_spec", mock.Mock())
 def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
     # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
     # than silently shard with FSDP2.
     def validate(config):
-        config.parallelism.fsdp_backend = FlexShardConfig()
-        config.loss = CrossEntropyLoss.Config()
+        config.parallelism.fsdp_backend = FlexShardBackend.Config()
         config.training.disable_accelerator_graphs = True
-        validate_flex_shard_training(config, config.model)
+        validate_model_training_config(
+            config.model,
+            parallelism=config.parallelism,
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
 
     validate(llama3_debugmodel())
     with pytest.raises(
@@ -347,24 +352,23 @@ def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
         ),
     ],
 )
-@mock.patch("torchtitan.distributed.flex_shard_fsdp.find_spec", mock.Mock())
+@mock.patch("torchtitan.distributed.flex_shard_backend.find_spec", mock.Mock())
 def test_flex_shard_rejects_checkpointers_that_drop_shard_layouts(
     checkpointer, unsupported: str | None
 ) -> None:
     # Each rejected checkpointer would save every rank's local shard as the
     # whole tensor, without an error.
     config = llama3_debugmodel()
-    config.parallelism.fsdp_backend = FlexShardConfig()
-    config.loss = CrossEntropyLoss.Config()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     config.training.disable_accelerator_graphs = True
     config.checkpointer = checkpointer
     if unsupported is None:
-        validate_flex_shard_training(config, config.model)
+        config.__post_init__()
         return
     with pytest.raises(
         ValueError, match=rf"does not support {re.escape(unsupported)} yet"
     ):
-        validate_flex_shard_training(config, config.model)
+        config.__post_init__()
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
