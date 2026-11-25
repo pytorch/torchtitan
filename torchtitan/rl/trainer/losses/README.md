@@ -54,9 +54,10 @@ enables score centering, and the RL loss golden checks that it stays a no-op the
 
 Requirements and limits:
 
-- `VLLMEngine` and `SGLangEngine`; Verifiers rollouts, which carry no top-k rows yet, fail
-  the batcher's row check.
-- Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs).
+- `VLLMEngine` and `SGLangEngine`, with the message-env and Verifiers rollouters.
+- Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs). A
+  Verifiers rollout worker can hold more: glibc keeps the freed rows, ~4.5 KiB per in-flight
+  token at k = 128 in a CPU repro (TODO in `verifiers/generation_server.py`).
 - Trainer cost: the top-k scoring saves one more fp32 `[T, V_local]` for backward (TODO in
   `score_centering.py`). For one loss chunk of 4,096 tokens and a 151,936-token vocabulary on
   one GB300 without TP, with the compiled loss region the recipes use, score centering (k = 32)
