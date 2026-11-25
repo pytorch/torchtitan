@@ -1489,7 +1489,7 @@ class Controller(Configurable):
                     step_timer.record("timing/step/send_replica_columns"),
                 ):
                     columns = self._replica_columns(plan)
-                    # By value: the leaders now hold the bytes.
+                    # The leaders now hold these groups' bytes (or handles).
                     for group_id in plan.trainable_group_ids:
                         del self._packed_groups_by_id[group_id]
                     await self._send_replica_columns(columns)
