@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
@@ -33,9 +34,10 @@ from torchtitan.config import (
 )
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
-    BatchInvariantFlexConverter,
-    ModelConfigConverter,
-    MXFP8LinearConverter,
+    apply_transforms,
+    BatchInvariantFlexTransform,
+    ModelConfigTransform,
+    MXFP8LinearTransform,
 )
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -63,6 +65,7 @@ from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.rollout.data import IterableRolloutDataLoader
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 from torchtitan.rl.rollout.rubric import Rubric
+from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.trainer.losses import GRPOLoss
 from torchtitan.rl.trainer.trainer import Trainer
 
@@ -77,7 +80,7 @@ _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 # verified.
 
 
-def _alphabet_sort_rollouter_config() -> Rollouter.Config:
+def _alphabet_sort_rollouter_config(*, max_rollout_tokens: int) -> Rollouter.Config:
     return Rollouter.Config(
         training_dataloader=IterableRolloutDataLoader.Config(
             dataset=AlphabetSortDataset.Config(seed=42)
@@ -86,6 +89,7 @@ def _alphabet_sort_rollouter_config() -> Rollouter.Config:
         worker=MessageEnvRolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardAlphabetSort.Config(weight=1.0)]),
             message_env=AlphabetSortEnv.Config(),
+            token_env=TokenEnv.Config(max_rollout_tokens=max_rollout_tokens),
         ),
     )
 
@@ -97,7 +101,7 @@ def _qwen3_rl_model_configs(
     attn_backend: str,
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
+    transforms: Sequence[ModelConfigTransform] = (),
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -105,9 +109,9 @@ def _qwen3_rl_model_configs(
         flavor,
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        transforms=transforms,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
 
 
@@ -137,7 +141,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -224,7 +228,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -305,11 +309,11 @@ def rl_grpo_qwen3_0_6b_flex_slurm() -> "MonarchControllerWithLauncher.Config":
 def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
     """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
     config = rl_grpo_qwen3_0_6b_varlen()
-    # TODO: Allow LMHeadCastConverter and QuantizationConverter to
-    # co-exist, since they target different layers
-    converter = MXFP8LinearConverter.Config(fqns=["layers."]).build()
-    config.trainer.model = converter.convert(config.trainer.model)
-    config.generator.model = converter.convert(config.generator.model)
+    # Quantize only the decoder layers: the lm_head keeps the fp32-output
+    # HiMidLoLinear that the base recipe set.
+    transforms: list[ModelConfigTransform] = [MXFP8LinearTransform(fqns=["layers."])]
+    config.trainer = apply_transforms(config.trainer, transforms)
+    config.generator = apply_transforms(config.generator, transforms)
     return config
 
 
@@ -346,7 +350,7 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
-        converters=[BatchInvariantFlexConverter.Config()],
+        transforms=[BatchInvariantFlexTransform()],
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
@@ -394,7 +398,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -467,7 +471,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -537,7 +541,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -617,7 +621,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -731,7 +735,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         trainer=Trainer.Config(
@@ -785,7 +789,6 @@ def _qwen3_5_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
-    converters: list[ModelConfigConverter.Config] | None = None,
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Qwen3.5 ``(trainer, generator)`` model configs for RL, with fp32 lm_head logits."""
     return build_rl_model_configs(
@@ -795,7 +798,6 @@ def _qwen3_5_rl_model_configs(
         generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
     )
 
 
@@ -827,7 +829,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(steps=20),
         ),
-        rollouter=_alphabet_sort_rollouter_config(),
+        rollouter=_alphabet_sort_rollouter_config(max_rollout_tokens=seq_len),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(loggers=[WandBLogger.Config()]),
         precision=PrecisionConfig(dtype="bfloat16"),
@@ -963,6 +965,8 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     config.generator = dataclasses.replace(
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
+    # The 9B config's rollouter caps prompts at the 9B seq_len; rebuild it with this recipe's.
+    config.rollouter = _alphabet_sort_rollouter_config(max_rollout_tokens=seq_len)
     # Validation beside training would change the step times this recipe measures: validate at the end.
     config.async_loop.validation.validate_at_step_0 = False
     config.async_loop.validation.validate_after_training = True

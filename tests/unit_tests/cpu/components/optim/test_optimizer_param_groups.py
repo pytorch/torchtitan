@@ -162,13 +162,42 @@ class TestOptimizerConfig(unittest.TestCase):
         self.assertIsInstance(container.optimizers[0], ExternalSGD)
         self.assertEqual(container.optimizers[0].param_groups[0]["lr"], 0.25)
 
-    def test_bfloat16_moments_require_fused_adam(self):
-        with self.assertRaisesRegex(ValueError, "require fused=True"):
-            AdamW.Config(
-                pattern=r".*",
-                fused=False,
-                moment_dtype="bfloat16",
-            )
+    def test_moment_options_checked_at_config_time(self):
+        """Catches bf16 or CPU-offloaded moments silently using a non-fused
+        kernel, which lacks mixed-precision support and passes over the moments
+        several times, an out-of-range offload fraction, and CPU-offloaded moments
+        on an accelerator other than CUDA."""
+        for moment_kwargs in (
+            {"moment_dtype": "bfloat16"},
+            {"moment_cpu_offload_fraction": 0.5},
+        ):
+            with self.subTest(**moment_kwargs):
+                with self.assertRaisesRegex(ValueError, "require fused=True"):
+                    AdamW.Config(pattern=r".*", fused=False, **moment_kwargs)
+        for fraction in (-0.1, 1.5):
+            with self.subTest(fraction=fraction):
+                with self.assertRaisesRegex(ValueError, "must be in \\[0, 1\\]"):
+                    AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=fraction)
+        cuda = torch.device("cuda")
+        for name, accelerator, hip in (
+            ("rocm", cuda, "6.0"),
+            ("xpu", torch.device("xpu"), None),
+        ):
+            with (
+                self.subTest(name),
+                patch.object(
+                    torch.accelerator, "current_accelerator", return_value=accelerator
+                ),
+                patch.object(torch.version, "hip", hip),
+            ):
+                with self.assertRaisesRegex(ValueError, "require CUDA"):
+                    AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=1.0)
+                AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=0.0)
+        with (
+            patch.object(torch.accelerator, "current_accelerator", return_value=cuda),
+            patch.object(torch.version, "hip", None),
+        ):
+            AdamW.Config(pattern=r".*", moment_cpu_offload_fraction=1.0)
 
     def test_catch_all_optimizer(self):
         """A catch-all optimizer selects every trainable parameter."""
