@@ -74,13 +74,13 @@ class Rubric(Configurable):
     cases need no subclass. Subclass and override `score_group` for cross-sibling
     scoring (pairwise comparison, diversity, rank normalization).
 
-    Setting `truncation_reward` / `error_reward` short-circuits the reward fns for
-    rollouts whose status is truncated / errored.
+    Setting `error_reward` short-circuits the reward fns for errored rollouts.
+    `truncation_penalty` is subtracted from a truncated rollout's score.
 
     Example:
         rubric = Rubric.Config(
             reward_fns=[RewardCorrect.Config(weight=1.0), RewardFormat.Config(weight=0.3)],
-            truncation_reward=0.0,
+            truncation_penalty=0.2,
         ).build()
     """
 
@@ -89,13 +89,21 @@ class Rubric(Configurable):
         reward_fns: list[RewardFn.Config] = field(default_factory=list)
         """The rubric's reward fns + weights; built and weight-normalized at init."""
 
-        truncation_reward: float | None = None
-        """Reward for a truncated rollout. If set, the reward fns are SKIPPED and this fixed
-        reward is used. If None, the reward fns run on the truncated rollout."""
+        truncation_penalty: float = 0.0
+        """Subtracted from the weighted score of a rollout truncated by max turns, max output
+        tokens or context length, e.g. 0.2: it keeps its partial credit but scores below the
+        same rollout finished. 0 disables it."""
 
         error_reward: float | None = None
         """Reward for a errored rollout. If set, the reward fns are SKIPPED and this fixed
         reward is used. If None, the reward fns run on the errored rollout."""
+
+        def __post_init__(self) -> None:
+            if self.truncation_penalty < 0:
+                raise ValueError(
+                    "truncation_penalty is subtracted, so it must be >= 0; got "
+                    f"{self.truncation_penalty}"
+                )
 
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -117,8 +125,8 @@ class Rubric(Configurable):
     async def _score_single_rollout(
         self, rollout: Rollout, env_input: object
     ) -> RubricOutput:
-        """Score one rollout. Short-circuits to `truncation_reward` /
-        `error_reward` when those are set and the rollout truncated / errored.
+        """Score one rollout. Short-circuits to `error_reward` when it is set and the
+        rollout errored.
 
         Args:
             rollout: Rollout to score.
@@ -127,14 +135,9 @@ class Rubric(Configurable):
         Returns:
             Final weighted reward + per-fn raw breakdown.
         """
-        # Short-circuit on truncate / error and return the configured reward. The
+        # Short-circuit on error and return the configured reward. The
         # breakdown records the short-circuit reason so it shows up in metrics.
         cfg = self._config
-        if cfg.truncation_reward is not None and rollout.status.is_truncated():
-            return RubricOutput(
-                reward=cfg.truncation_reward,
-                reward_breakdown={"truncated": cfg.truncation_reward},
-            )
         if cfg.error_reward is not None and rollout.status.is_error():
             return RubricOutput(
                 reward=cfg.error_reward,
@@ -151,6 +154,10 @@ class Rubric(Configurable):
         for fn, r in zip(self._reward_fns, per_fn_rewards, strict=True):
             reward_breakdown[type(fn).__name__] = r
             total_reward += (fn.weight / self._weight_sum) * r
+
+        if cfg.truncation_penalty > 0 and rollout.status.is_truncated():
+            reward_breakdown["truncation_penalty"] = cfg.truncation_penalty
+            total_reward -= cfg.truncation_penalty
 
         return RubricOutput(reward=total_reward, reward_breakdown=reward_breakdown)
 

@@ -9,7 +9,7 @@
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    MXFP8GroupedLinearConverter,
+    MXFP8GroupedLinearTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.experiments.graph_trainer.configs import (
@@ -24,14 +24,9 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
-from torchtitan.models.deepseek_v3 import (
-    build_model_config as build_deepseek_v3_model_config,
-)
 
 from torchtitan_recipes.graph_trainer.deepseek_v3 import _dist_moe_graph_config
-from torchtitan_recipes.models.deepseek_v3 import (
-    deepseek_v3_mxfp8_linear_converter_config,
-)
+from torchtitan_recipes.models.deepseek_v3 import deepseek_v3_mxfp8_linear_transform
 
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_16b_dist_moe_bf16,
@@ -54,18 +49,13 @@ def graph_trainer_deepseek_v3_debugmodel(
 
 
 def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
-    base = deepseek_v3_debugmodel()
     # Quantize dense and moe gemms to mxfp8
-    base.model = build_deepseek_v3_model_config(
-        "debugmodel",
-        seq_len=base.model.max_context_length,
-        converters=[
-            deepseek_v3_mxfp8_linear_converter_config(),
-            MXFP8GroupedLinearConverter.Config(
-                pad_multiple=128,
-            ),
+    base = apply_transforms(
+        deepseek_v3_debugmodel(),
+        [
+            deepseek_v3_mxfp8_linear_transform(),
+            MXFP8GroupedLinearTransform(pad_multiple=128),
         ],
-        parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()

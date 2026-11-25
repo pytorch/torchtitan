@@ -22,7 +22,8 @@ jobs:
       # Opt into Fable with "fable" in the comment (e.g. "@claude fable review").
       # Branch on event_name so an issue/PR body mentioning "fable" doesn't affect
       # an unrelated @claude comment.
-      model: ${{ ((github.event_name == 'issue_comment' && contains(github.event.comment.body, 'fable')) || (github.event_name == 'issues' && contains(github.event.issue.body, 'fable'))) && 'global.anthropic.claude-fable-5' || 'global.anthropic.claude-opus-5-5' }}
+      # "[1m]": without it Claude Code assumes a 200K window for this Bedrock id.
+      model: ${{ ((github.event_name == 'issue_comment' && contains(github.event.comment.body, 'fable')) || (github.event_name == 'issues' && contains(github.event.issue.body, 'fable'))) && 'global.anthropic.claude-fable-5' || 'global.anthropic.claude-opus-5-5[1m]' }}
       # Keep the comment text out of claude_args: only these hardcoded effort values
       # can reach the CLI. "effort=max" wins if multiple values appear.
       # gh commands are read-only except `gh pr review`. The review tools
