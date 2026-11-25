@@ -1,7 +1,7 @@
 # Model state dict transport
 
 `ModelStateDictTransport` (`model_state_dict_transport.py`) moves the trainer's
-model state dict into the generators' prefetched model state dicts with
+model state dict into the generators' prefetch buffers or GPU weights with
 one-sided RDMA reads over a `torch.distributed._transport` backend
 (`backend="nixl"`, the default, or `"mooncake"`). It is the default
 `Controller.Config.model_state_dict_transport`; select Mooncake with:
@@ -17,9 +17,8 @@ metadata exchange. The trainer stages a pinned CPU copy already resharded per
 generator rank, so the optimizer can step while generators read and the
 trainer keeps no persistent GPU copy.
 
-`None` uses TorchStore instead, which is still needed for
-`model_state_dict_load_mode="gpu_fetch"`. TODO: delete the TorchStore path once
-this one covers `gpu_fetch`.
+`None` uses TorchStore instead. TODO: delete the TorchStore path once
+this one has rolled out.
 
 Mooncake needs `mooncake-transfer-engine-cuda13==0.3.14` (installed by
 `scripts/install_rl_env.sh`) and a PyTorch nightly from 2026-11-10 or later
@@ -82,16 +81,22 @@ does not cover every element of a generator shard, or on `Partial` and uneven
 1. Init (`ActorSystem.initialize_model_state_dict_transport`): every generator
    reports its ranks' `shard_layout`s, which must match
    (`shared_rank_layouts`); each trainer rank allocates and registers its
-   staging buffer (`register_trainer_source`); every generator rank registers
-   its prefetch buffers, connects to every trainer rank and plans its reads
-   (`connect_generator`).
+   staging buffer (`register_trainer_source`); every generator rank connects to
+   every trainer rank and plans its reads: with
+   `model_state_dict_load_mode="cpu_prefetch"` into its registered prefetch
+   buffers (`connect_generator`), with `"gpu_fetch"` into two registered GPU
+   staging buffers, each the size of its largest FSDP load group
+   (`connect_generator_gpu`).
 2. Push: the trainer casts its shards and copies them into the staging buffer
    (`stage`), with no collectives.
-3. Pull: each generator rank issues its reads (`read`) and waits for them,
-   raising after `read_timeout_s` (600 s). A timeout leaves the reads in flight;
-   restart the job.
-4. Load: the generator copies its weights from the prefetch buffers, unpacking
-   packed keys (`copy_prefetched_`).
+3. Pull (`cpu_prefetch`): each generator rank issues its reads (`read`) and
+   waits for them, raising after `read_timeout_s` (600 s). A timeout leaves the
+   reads in flight; restart the job.
+4. Load: `cpu_prefetch` copies the weights from the prefetch buffers, unpacking
+   packed keys (`copy_prefetched_`). `gpu_fetch` reads each FSDP group into a
+   staging buffer while the previous group is copied out of the other buffer
+   into its GPU shards (unpacking packed pieces) and goes through the existing
+   FSDP all-gather (`read_into`).
 
 The controller finishes pull N before push N+1, so a single staging buffer is
 enough.
