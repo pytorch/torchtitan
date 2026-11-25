@@ -59,7 +59,8 @@ class GenerationEngine(Configurable, abc.ABC):
         mooncake_master_address: ``host:port`` of the Mooncake Store master the
             controller started when ``config.uses_mooncake_store``, else None.
         rank: Global rank of this process.
-        generator_name: Name of the generator, for engine metrics.
+        generator_name: Name of the generator, unique within a run and shared by its
+            ranks; names engine metrics and per-generator connector resources.
         output_dir: Output directory, for engine metrics.
     """
 
@@ -97,7 +98,11 @@ class GenerationEngine(Configurable, abc.ABC):
 
     @abc.abstractmethod
     def has_unfinished_requests(self) -> bool:
-        """Whether any admitted request is still running."""
+        """Whether requests or their remaining engine work need more steps.
+
+        All ranks must call this together before stepping: implementations may
+        synchronize local work so every rank makes the same continue/idle decision.
+        """
 
     @abc.abstractmethod
     def step(self) -> list[FinishedRequest]:

@@ -51,7 +51,7 @@ def _build(family, flavor="debugmodel", **kwargs):
         ("qwen3", "debugmodel_moe", 331_126_272),
         ("gpt_oss", "debugmodel", 298_042_560),
         ("deepseek_v3", "debugmodel", 189_040_128),
-        ("deepseek_v4", "debugmodel", 59_824_686),
+        ("deepseek_v4", "debugmodel", 59_791_918),
         ("kimi_k2_7", "debugmodel", 189_040_128),
         ("muse_glimmer", "debugmodel", 47_236_608),
         ("muse_glimmer", "debugmodel_mm", 47_236_608),

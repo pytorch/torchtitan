@@ -986,11 +986,11 @@ def test_train_passes_failure_to_profiler_close(failure_kind: str) -> None:
 
     if failure is None:
         with patch("torchtitan.trainer.torch.distributed.get_rank", return_value=1):
-            Trainer.train.__wrapped__(trainer)
+            Trainer.train(trainer)
         memory_snapshot.close.assert_called_once_with(None)
     else:
         with pytest.raises(type(failure)) as excinfo:
-            Trainer.train.__wrapped__(trainer)
+            Trainer.train(trainer)
         assert excinfo.value is failure
         memory_snapshot.close.assert_called_once_with(failure)
 
