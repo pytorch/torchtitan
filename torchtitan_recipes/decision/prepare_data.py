@@ -4,21 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Flatten BEV decision rows into one letter-slot prompt per question.
+"""Prepare BEV labels or GS1 target distributions for letter-slot training.
 
-BEV (``avbiswas/bev-decision-150K``) stores a ``state`` and a JSON object of
-typed questions (``choice``, ``noul``, ``score``) with labels. Each question
-becomes a prompt that lists its options as letters and ends in ``Answer:``;
-the target is the gold letter with a leading space (one token). ``choice``
-options and ``noul``'s Yes/No order are shuffled with a seeded RNG so the model
-cannot learn letter-position priors; ``score`` levels stay ordered.
-
-States over ``MAX_STATE_CHARS`` and questions with fewer than 2 or more than 26
-options are dropped. Writes ``train.jsonl``, ``calib.jsonl`` (every question
-from the first 250 test states, for the temperature fit), and ``eval.jsonl``
-(1,500 questions from the remaining test states).
-
-Usage: python -m torchtitan_recipes.decision.prepare_data [--out DIR]
+Each typed question becomes a prompt ending in ``Answer:`` with ordered
+candidate keys and aligned target probabilities. Preparation shuffles choice
+and yes/no options, preserves score order, and writes separate training,
+calibration, and evaluation JSONL files. See README.md for commands.
 """
 
 import argparse
@@ -119,9 +110,7 @@ def _contains_media(value: Any) -> bool:
     return False
 
 
-def flatten_record(
-    row: dict[str, Any], rng: random.Random | None = None
-) -> list[dict[str, Any]]:
+def flatten_record(row: dict[str, Any], rng: random.Random) -> list[dict[str, Any]]:
     request = row["request"]
     targets = row["targets"]
     questions = request["questions"]
@@ -175,7 +164,7 @@ def flatten_record(
                 f"Invalid target distribution for question {question_id!r}"
             )
         order = list(range(len(candidate_ids)))
-        if rng is not None and kind != "score":
+        if kind != "score":
             rng.shuffle(order)
         rows.append(
             render_options(
@@ -190,7 +179,9 @@ def flatten_record(
     return rows
 
 
-def sample_gs1(path: Path, count: int, seed: int, split: str) -> list[dict]:
+def sample_gs1(
+    path: Path, count: int, seed: int, split: str, *, excluded_states: set[str]
+) -> list[dict]:
     rng = random.Random(f"sample:{split}:{seed}")
     option_rng = random.Random(f"options:{split}:{seed}")
     rows = []
@@ -199,6 +190,7 @@ def sample_gs1(path: Path, count: int, seed: int, split: str) -> list[dict]:
             row
             for line in source
             for row in flatten_record(json.loads(line), option_rng)
+            if row["state"] not in excluded_states
         )
         for seen, row in enumerate(questions, start=1):
             if seen <= count:
@@ -239,20 +231,28 @@ def main() -> None:
     )
     args.out.mkdir(parents=True, exist_ok=True)
     if args.input:
-        splits = {}
-        states = set()
-        for name, path, count in (
-            ("train", args.input, args.num_samples),
-            ("calib", args.calibration, args.num_held_out),
-            ("eval", args.eval, args.num_held_out),
-        ):
-            rows = sample_gs1(path, count, args.seed, name)
-            split_states = {row["state"] for row in rows}
-            if states & split_states:
-                raise ValueError(f"Sampled {name} states overlap an earlier split")
-            states.update(split_states)
-            splits[name] = rows
-        for name, rows in splits.items():
+        calib = sample_gs1(
+            args.calibration,
+            args.num_held_out,
+            args.seed,
+            "calib",
+            excluded_states=set(),
+        )
+        evals = sample_gs1(
+            args.eval, args.num_held_out, args.seed, "eval", excluded_states=set()
+        )
+        calib_states = {row["state"] for row in calib}
+        eval_states = {row["state"] for row in evals}
+        if calib_states & eval_states:
+            raise ValueError("Sampled calibration and evaluation states overlap")
+        train = sample_gs1(
+            args.input,
+            args.num_samples,
+            args.seed,
+            "train",
+            excluded_states=calib_states | eval_states,
+        )
+        for name, rows in (("train", train), ("calib", calib), ("eval", evals)):
             write(rows, args.out / f"{name}.jsonl")
         return
     write(flatten("train"), args.out / "train.jsonl")

@@ -18,7 +18,6 @@ Usage:
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import torch
@@ -51,21 +50,45 @@ def letter_logits(model, tokenizer, rows: list[dict], batch_size: int = 16):
 
 
 def target_probs(row, like):
-    if "target_probs" in row:
-        target = like.new_tensor(row["target_probs"])
-        return target / target.sum()
-    target = torch.zeros_like(like)
-    target[row["gold"]] = 1
-    return target
+    target = like.new_tensor(row["target_probs"])
+    return target / target.sum()
 
 
-def nll(logits, rows, temperature: float) -> float:
-    return sum(
-        -(target_probs(row, scores) * (scores / temperature).log_softmax(-1))
-        .sum()
-        .item()
-        for scores, row in zip(logits, rows, strict=True)
-    ) / len(rows)
+def fit_inverse_temperature(logits, rows) -> float:
+    """Minimize calibration NLL over nonnegative inverse temperatures."""
+    centered = [scores.double() - scores.max() for scores in logits]
+    scores = torch.nn.utils.rnn.pad_sequence(centered, batch_first=True)
+    targets = torch.nn.utils.rnn.pad_sequence(
+        [target_probs(row, lg) for lg, row in zip(centered, rows, strict=True)],
+        batch_first=True,
+    )
+    valid = (
+        torch.arange(scores.size(1))
+        < torch.tensor([len(lg) for lg in centered])[:, None]
+    )
+    target_mean = (scores * targets).sum()
+
+    def derivative(scale: float) -> float:
+        probs = (scores * scale).masked_fill(~valid, -torch.inf).softmax(-1)
+        return ((scores * probs).sum() - target_mean).item()
+
+    # NLL is convex in the inverse temperature. These endpoints give the
+    # uniform distribution and the uniform distribution over maximizers.
+    if derivative(0.0) >= 0:
+        return 0.0
+    if target_mean == 0:
+        return float("inf")
+
+    lower, upper = 0.0, 1.0
+    while derivative(upper) < 0:
+        lower, upper = upper, 2 * upper
+    for _ in range(40):
+        middle = (lower + upper) / 2
+        if derivative(middle) < 0:
+            lower = middle
+        else:
+            upper = middle
+    return (lower + upper) / 2
 
 
 def metrics(probs, rows, num_bins: int = 10) -> dict:
@@ -152,14 +175,15 @@ def main() -> None:
 
     calib, rows = load("calib.jsonl"), load("eval.jsonl")
     calib_logits = letter_logits(model, tokenizer, calib)
-    grid = [math.exp(x / 20) for x in range(-40, 61)]
-    temperature = min(grid, key=lambda t: nll(calib_logits, calib, t))
-    probs = [
-        torch.softmax(lg / temperature, -1)
-        for lg in letter_logits(model, tokenizer, rows)
-    ]
+    scale = fit_inverse_temperature(calib_logits, calib)
+    logits = letter_logits(model, tokenizer, rows)
+    if scale == float("inf"):
+        probs = [lg.eq(lg.max()).float() for lg in logits]
+        probs = [p / p.sum() for p in probs]
+    else:
+        probs = [torch.softmax(lg * scale, -1) for lg in logits]
 
-    report: dict[str, object] = {"temperature": round(temperature, 3)}
+    report: dict[str, object] = {"temperature": 1 / scale if scale else "infinity"}
     for kind in ("all", "choice", "noul", "score"):
         idx = [i for i, r in enumerate(rows) if kind in ("all", r["type"])]
         if idx:

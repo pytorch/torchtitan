@@ -20,6 +20,7 @@ from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention.cp_attention import UlyssesVarlenInnerAttention
 from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan_recipes.decision.evaluate import fit_inverse_temperature
 from torchtitan_recipes.decision.prepare_data import flatten_record, LETTERS, render
 from torchtitan_recipes.decision.qwen3 import (
     AnswerTokenLoss,
@@ -49,7 +50,8 @@ def test_only_answer_letter_is_supervised() -> None:
     processor = _processor()
     sample = {
         "prompt": "Context:\nhi\nOptions:\nA) Yes\nB) No\nAnswer:",
-        "answer": " B",
+        "keys": ["yes", "no"],
+        "target_probs": [0.0, 1.0],
     }
     seq = processor(sample, np.random.default_rng(0))
     prompt = processor._tokenizer.encode(sample["prompt"], add_bos=False, add_eos=False)
@@ -59,17 +61,21 @@ def test_only_answer_letter_is_supervised() -> None:
     assert seq.labels.tolist() == [IGNORE_INDEX] * (len(prompt) - 1) + [answer_id]
 
 
-def test_multi_token_answer_raises() -> None:
-    with pytest.raises(ValueError, match="one token"):
-        _processor()({"prompt": "Answer:", "answer": " AB"}, np.random.default_rng(0))
+def test_misaligned_targets_raise() -> None:
+    with pytest.raises(ValueError, match="aligned target probabilities"):
+        _processor()(
+            {"prompt": "Answer:", "keys": ["yes", "no"], "target_probs": [1.0]},
+            np.random.default_rng(0),
+        )
 
 
 def test_overlong_prompt_raises() -> None:
     # "x" * n is n tokens with the test tokenizer: 16 fills the context, 17 overflows.
     processor = _processor(max_context_length=16)
-    processor({"prompt": "x" * 16, "answer": " A"}, np.random.default_rng(0))
+    sample = {"prompt": "x" * 16, "keys": ["a", "b"], "target_probs": [1.0, 0.0]}
+    processor(sample, np.random.default_rng(0))
     with pytest.raises(ValueError, match="max_context_length"):
-        processor({"prompt": "x" * 17, "answer": " A"}, np.random.default_rng(0))
+        processor({**sample, "prompt": "x" * 17}, np.random.default_rng(0))
 
 
 def test_answer_token_loss_matches_full_cross_entropy() -> None:
@@ -93,9 +99,6 @@ def test_answer_token_loss_matches_full_cross_entropy() -> None:
     (expected_grad,) = torch.autograd.grad(expected, hidden_TD)
     torch.testing.assert_close(loss, expected)
     torch.testing.assert_close(grad, expected_grad)
-    labels_T[5] = CANDIDATE_LABEL_START
-    with pytest.raises(RuntimeError, match="vocabulary token IDs"):
-        loss_fn(hidden_TD, labels_T)
 
 
 def test_answer_token_loss_rejects_too_many_supervised_positions() -> None:
@@ -216,8 +219,11 @@ def test_native_distribution_record_flattens_by_candidate_identity() -> None:
             "choice": {"candidate_ids": ["b", "a"], "distribution": [0.25, 0.75]}
         },
     }
-    rows = flatten_record(record)
-    assert rows[0]["target_probs"] == [0.75, 0.25]
+    rows = flatten_record(record, random.Random(0))
+    assert dict(zip(rows[0]["keys"], rows[0]["target_probs"], strict=True)) == {
+        "a": 0.75,
+        "b": 0.25,
+    }
     assert json.loads(rows[0]["state"]) == {"balance": 18}
 
 
@@ -239,7 +245,7 @@ def test_preparation_filters_states(state, eligible: bool) -> None:
         },
         "targets": {"q": {"candidate_ids": ["a", "b"], "distribution": [0.5, 0.5]}},
     }
-    assert len(flatten_record(record)) == int(eligible)
+    assert len(flatten_record(record, random.Random(0))) == int(eligible)
 
 
 def _distribution_processor(max_context_length: int) -> DecisionLetterProcessor:
@@ -269,15 +275,12 @@ def test_distribution_processor_rejects_overlength_rows() -> None:
         _distribution_processor(2)(_sample(), np.random.default_rng(0))
 
 
-def test_sampled_nll_brier_has_soft_target_expectation(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "torchtitan_recipes.decision.qwen3.HuggingFaceTokenizer",
-        lambda **_: _Tokenizer(),
-    )
+def test_sampled_nll_brier_has_soft_target_expectation() -> None:
     weight = 0.7
     loss_fn = CandidateDistributionLoss(
-        CandidateDistributionLoss.Config(tokenizer_path="unused", brier_weight=weight)
+        CandidateDistributionLoss.Config(brier_weight=weight)
     )
+    loss_fn.set_tokenizer(_Tokenizer())
     with pytest.raises(RuntimeError, match="encoded option counts"):
         loss_fn(torch.zeros((1, 40)), torch.tensor([10]))
     logits = torch.zeros((1, 40))
@@ -297,3 +300,15 @@ def test_sampled_nll_brier_has_soft_target_expectation(monkeypatch) -> None:
     torch.testing.assert_close(
         torch.tensor(observed), expected_nll + weight * expected_brier
     )
+
+
+@pytest.mark.parametrize("target", [0.49, 0.5, 0.51, 0.9, 1.0])
+def test_temperature_fit_handles_optima_outside_the_old_grid(target) -> None:
+    logits = [torch.tensor([0.0, 4.0])]
+    rows = [{"target_probs": [1 - target, target]}]
+    scale = fit_inverse_temperature(logits, rows)
+    if target == 1:
+        assert scale == float("inf")
+    else:
+        expected = torch.logit(torch.tensor(max(target, 0.5), dtype=torch.float64))
+        assert scale == pytest.approx(float(expected) / 4)

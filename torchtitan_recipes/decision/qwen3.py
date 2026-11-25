@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Typed-decision fine-tuning of Qwen3-1.7B-Base with a letter-slot readout.
+"""Typed-decision fine-tuning of Qwen3 and Qwen3.5 with a letter-slot readout.
 
 Trains on ``prepare_data.py`` prompts, supervising only the answer-letter
 token that ``evaluate.py`` reads. Each row is packed as its own document, and
@@ -42,7 +42,7 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
@@ -88,7 +88,6 @@ class AnswerTokenLoss(ChunkedLossWrapper):
     def __init__(self, config: Config):
         super().__init__(config)
         self.max_num_supervised = config.max_num_supervised
-        self._candidate_loss = isinstance(self.loss_fn, CandidateDistributionLoss)
 
     def __call__(
         self,
@@ -107,11 +106,6 @@ class AnswerTokenLoss(ChunkedLossWrapper):
             is_supervised_T, size=self.max_num_supervised, fill_value=-1
         ).squeeze(-1)
         labels_S = labels[index_S].masked_fill(index_S < 0, IGNORE_INDEX)
-        if not self._candidate_loss:
-            torch._assert_async(
-                ((labels_S >= 0) | (labels_S == IGNORE_INDEX)).all(),
-                "Answer token loss requires vocabulary token IDs",
-            )
         return super().__call__(
             pred[index_S], labels_S, global_loss_token_counts, **loss_inputs
         )
@@ -132,17 +126,14 @@ class DecisionLetterProcessor(SampleProcessor):
         self, sample: dict[str, Any], rng: np.random.Generator
     ) -> TextSequence:
         prompt = self._tokenizer.encode(sample["prompt"], add_bos=False, add_eos=False)
-        if "target_probs" in sample:
-            probs = np.asarray(sample["target_probs"], dtype=np.float64)
-            count = len(sample["keys"])
-            if not MIN_CANDIDATES <= count <= MAX_CANDIDATES or probs.shape != (count,):
-                raise ValueError(
-                    "Expected 2 to 26 candidates with aligned target probabilities"
-                )
-            slot = int(rng.choice(count, p=probs))
-            label = self._label(count, slot)
-        else:
-            label = self._legacy_label(sample["answer"])
+        probs = np.asarray(sample["target_probs"], dtype=np.float64)
+        count = len(sample["keys"])
+        if not MIN_CANDIDATES <= count <= MAX_CANDIDATES or probs.shape != (count,):
+            raise ValueError(
+                "Expected 2 to 26 candidates with aligned target probabilities"
+            )
+        slot = int(rng.choice(count, p=probs))
+        label = self._label(count, slot)
         # Packing would split an over-length row into separate documents, and
         # the answer token would be supervised without the start of its prompt.
         if len(prompt) > self._max_context_length:
@@ -155,9 +146,7 @@ class DecisionLetterProcessor(SampleProcessor):
         return TextSequence(input_ids=np.asarray(prompt, dtype=np.int64), labels=labels)
 
     def _label(self, count: int, slot: int) -> int:
-        return self._legacy_label(" " + LETTERS[slot])
-
-    def _legacy_label(self, answer: str) -> int:
+        answer = " " + LETTERS[slot]
         ids = self._tokenizer.encode(answer, add_bos=False, add_eos=False)
         if len(ids) != 1:
             raise ValueError(f"Answer must be one token, got {answer!r}")
@@ -174,22 +163,23 @@ class CandidateLetterProcessor(DecisionLetterProcessor):
             (count - MIN_CANDIDATES) * MAX_CANDIDATES + slot
         )
 
-    def _legacy_label(self, answer: str) -> int:
-        raise ValueError("Candidate loss requires target_probs and keys")
-
 
 class CandidateDistributionLoss(Loss[torch.Tensor]):
     """Estimate candidate-distribution NLL plus expected multiclass Brier."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Loss.Config):
-        tokenizer_path: str
         brier_weight: float = 1.0
 
     def __init__(self, config: Config) -> None:
         if not math.isfinite(config.brier_weight) or config.brier_weight < 0:
             raise ValueError("brier_weight must be finite and nonnegative")
-        tokenizer = HuggingFaceTokenizer(tokenizer_path=config.tokenizer_path)
+        self.brier_weight = config.brier_weight
+        self._candidates_by_device: dict[
+            torch.device, tuple[torch.Tensor, torch.Tensor]
+        ] = {}
+
+    def set_tokenizer(self, tokenizer: BaseTokenizer) -> None:
         encoded = [
             tokenizer.encode(f" {letter}", add_bos=False, add_eos=False)
             for letter in LETTERS
@@ -200,10 +190,6 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         ):
             raise ValueError("Expected distinct single-token IDs for A through Z")
         self.candidate_token_ids = [ids[0] for ids in encoded]
-        self.brier_weight = config.brier_weight
-        self._candidates_by_device: dict[
-            torch.device, tuple[torch.Tensor, torch.Tensor]
-        ] = {}
 
     def __call__(
         self,
@@ -259,6 +245,24 @@ class CandidateDistributionLoss(Loss[torch.Tensor]):
         }
 
 
+class DecisionTrainer(Trainer):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Trainer.Config):
+        pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        loss = self.engine.loss_fn
+        if isinstance(loss, AnswerTokenLoss) and isinstance(
+            loss.loss_fn, CandidateDistributionLoss
+        ):
+            try:
+                loss.loss_fn.set_tokenizer(self.tokenizer)
+            except ValueError:
+                self.close()
+                raise
+
+
 def qwen3_1_7b_decision(parallelism: ParallelismConfig | None = None) -> Trainer.Config:
     """FSDP over all GPUs by default; ``parallelism`` adds TP (with loss
     parallel) or CP (Ulysses varlen attention). PP is unsupported: Qwen3-1.7B ties
@@ -280,7 +284,9 @@ def qwen3_1_7b_decision(parallelism: ParallelismConfig | None = None) -> Trainer
             global_vocab_size=decoder_vocab_size(model_config)
         ),
         batch_contexts=16,
+        prefetch_microbatches=16,
         warmup_steps=20,
+        steps=600,
     )
 
 
@@ -291,7 +297,7 @@ def qwen3_5_distribution(
     brier_weight: float = 1.0,
     loss_fn: Loss.Config | None = None,
 ) -> Trainer.Config:
-    """Train on GS1-format targets, optionally using full-vocabulary CE as a baseline."""
+    """Train on typed decisions with candidate NLL and Brier or full-vocabulary CE."""
     parallelism = parallelism or ParallelismConfig()
     # Candidate indexing assumes a local vocabulary, and the hybrid backbone
     # uses a packed context per rank. Use the tested data-parallel path here.
@@ -309,17 +315,17 @@ def qwen3_5_distribution(
         model_size, seq_len=8192, parallelism=parallelism
     )
     assets = f"./assets/hf/Qwen3.5-{model_size}-Base"
-    loss_fn = loss_fn or CandidateDistributionLoss.Config(
-        tokenizer_path=assets, brier_weight=brier_weight
-    )
+    loss_fn = loss_fn or CandidateDistributionLoss.Config(brier_weight=brier_weight)
     return _decision_config(
         model_config=model_config,
         parallelism=parallelism,
         hf_assets_path=assets,
-        data_path="./assets/hf/gs1-distribution/train.jsonl",
+        data_path="./assets/hf/bev-decision-150K/train.jsonl",
         loss_fn=loss_fn,
-        batch_contexts=4,
+        batch_contexts=2,
+        prefetch_microbatches=2,
         warmup_steps=0,
+        steps=120,
     )
 
 
@@ -331,10 +337,12 @@ def _decision_config(
     data_path,
     loss_fn,
     batch_contexts,
+    prefetch_microbatches,
     warmup_steps,
+    steps,
 ):
     max_num_documents = 256
-    return Trainer.Config(
+    return DecisionTrainer.Config(
         loss=AnswerTokenLoss.Config(
             loss_fn=loss_fn,
             max_num_supervised=max_num_documents,
@@ -356,7 +364,7 @@ def _decision_config(
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=batch_contexts
             * model_config.max_context_length,
-            steps=600,
+            steps=steps,
         ),
         dataloader=GrainDataLoader.Config(
             dataset=FirstFitPackingConfig(
@@ -377,7 +385,7 @@ def _decision_config(
             # Per-sample work is Python-heavy (tokenization); grain's default
             # 16 reader threads contend on the GIL and starve the GPU.
             read_options=grain.ReadOptions(num_threads=0),
-            num_prefetch_microbatches=batch_contexts,
+            num_prefetch_microbatches=prefetch_microbatches,
         ),
         metrics=MetricsProcessor.Config(log_freq=10),
         checkpointer=CheckpointManager.Config(
