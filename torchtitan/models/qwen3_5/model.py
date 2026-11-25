@@ -318,6 +318,8 @@ class Qwen35Model(Decoder):
                     "partial_rope",
                     "shared_expert_gate",
                     "fp32_to_bf16_split",
+                    "moe_score_scale",
+                    "moe_gather_sum",
                 ]
             )
         )

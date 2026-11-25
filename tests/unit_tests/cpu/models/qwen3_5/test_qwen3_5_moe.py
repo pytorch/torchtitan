@@ -111,6 +111,50 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
             )
             self.assertEqual(redistribute.call_args_list, expected_redistributions)
 
+    def test_gather_topk_rows_and_score_scale_match_eager(self) -> None:
+        from torchtitan.models.common.moe.token_dispatcher import (
+            LocalTokenDispatcher,
+            scale_by_router_scores,
+        )
+
+        torch.manual_seed(0)
+        num_tokens, dim, num_experts, top_k = 12, 16, 8, 4
+        dispatcher = LocalTokenDispatcher.Config(
+            num_experts=num_experts, top_k=top_k
+        ).build()
+        x_TD = torch.randn(num_tokens, dim, dtype=torch.bfloat16, requires_grad=True)
+        x_ref = x_TD.detach().clone().requires_grad_()
+        scores_TK = torch.softmax(torch.randn(num_tokens, top_k), dim=-1)
+        expert_ids_TK = torch.randint(0, num_experts, (num_tokens, top_k))
+
+        routed_ND, tok_idx_N, sorted_scores_N = dispatcher._local_reorder(
+            x_TD, scores_TK, expert_ids_TK
+        )
+        perm_ref = torch.argsort(expert_ids_TK.view(-1).to(torch.uint8), stable=True)
+        routed_ref = x_ref[perm_ref // top_k]
+        torch.testing.assert_close(routed_ND, routed_ref, rtol=0, atol=0)
+
+        grad_ND = torch.randn_like(routed_ND)
+        routed_ND.backward(grad_ND)
+        routed_ref.backward(grad_ND)
+        torch.testing.assert_close(x_TD.grad, x_ref.grad, rtol=1e-2, atol=1e-2)
+
+        # Verify score scaling matches fp32 multiply-and-cast bitwise.
+        y_ND = torch.randn(
+            num_tokens * top_k, dim, dtype=torch.bfloat16, requires_grad=True
+        )
+        y_ref = y_ND.detach().clone().requires_grad_()
+        s_N = sorted_scores_N.detach().clone().requires_grad_()
+        s_ref = s_N.detach().clone().requires_grad_()
+        out = scale_by_router_scores(y_ND, s_N)
+        out_ref = (y_ref * s_ref.reshape(-1, 1).to(torch.float32)).to(y_ref.dtype)
+        torch.testing.assert_close(out, out_ref, rtol=0, atol=0)
+        g_out = torch.randn_like(out)
+        out.backward(g_out)
+        out_ref.backward(g_out)
+        torch.testing.assert_close(y_ND.grad, y_ref.grad, rtol=0, atol=0)
+        torch.testing.assert_close(s_N.grad, s_ref.grad, rtol=0, atol=0)
+
 
 if __name__ == "__main__":
     unittest.main()

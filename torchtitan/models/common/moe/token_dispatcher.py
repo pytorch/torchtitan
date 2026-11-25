@@ -12,10 +12,66 @@ import torch
 import torch_remat as remat
 from torch.distributed._functional_collectives import all_to_all_single
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_group
 from torchtitan.models.base.module import Module
 from torchtitan.ops.scatter_add import deterministic_scatter_add
+
+
+@local_compile("moe_score_scale", batch_invariant=True)
+def scale_by_router_scores(x_RD: torch.Tensor, scores_R: torch.Tensor) -> torch.Tensor:
+    """Scale routed activations by fp32 router scores without materializing an fp32 copy."""
+    return (x_RD * scores_R.reshape(-1, 1).to(torch.float32)).to(x_RD.dtype)
+
+
+@local_compile("moe_gather_sum", batch_invariant=True)
+def _gather_sum_topk(
+    grad_ND: torch.Tensor,
+    inv_N: torch.Tensor,
+    num_tokens: int,
+    top_k: int,
+) -> torch.Tensor:
+    """Gather each token's ``top_k`` routed gradients via ``inv_N`` and sum in fp32."""
+    gathered_TKD = grad_ND[inv_N].view(num_tokens, top_k, grad_ND.shape[-1])
+    return gathered_TKD.sum(dim=1, dtype=torch.float32).to(grad_ND.dtype)
+
+
+@spmd.register_local_autograd_function
+class _GatherTopKRows(torch.autograd.Function):
+    """Gather ``top_k`` copies per token via ``perm_N // top_k`` with atomic-free backward.
+
+    ``perm_N`` is a bijection of ``[0, T * top_k)`` produced by sorting expert IDs.
+    Plain ``x_TD[perm_N // top_k]`` falls back to PyTorch's generic ``indexing_backward``
+    (radix sort + zero-fill + uncoalesced atomicAdd). Because every token appears in
+    exactly ``top_k`` known positions ``inv_N[t * top_k : (t + 1) * top_k]``, backward
+    inverts ``perm_N`` and reduces each token's ``top_k`` gradients with a coalesced
+    gather-sum.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        x_TD: torch.Tensor,
+        token_indices_N: torch.Tensor,
+        perm_N: torch.Tensor,
+        top_k: int,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(perm_N)
+        ctx.num_tokens = x_TD.shape[0]
+        ctx.top_k = top_k
+        return x_TD[token_indices_N]
+
+    @staticmethod
+    def backward(ctx, grad_ND: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (perm_N,) = ctx.saved_tensors
+        inv_N = _inverse_permutation(perm_N)
+        return (
+            _gather_sum_topk(grad_ND, inv_N, ctx.num_tokens, ctx.top_k),
+            None,
+            None,
+            None,
+        )
 
 
 @spmd.register_local_autograd_function
@@ -133,14 +189,14 @@ class LocalTokenDispatcher(Module):
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
         # Reorder the token indices to match the order of the experts where N = T*K
-        token_indices_experts_sorted_N = torch.argsort(
+        perm_N = torch.argsort(
             topk_expert_ids_TK.view(-1).to(self._expert_ids_sort_dtype), stable=True
         )
-        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
-            token_indices_experts_sorted_N
-        ]
-        token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
-        routed_input_ND = x_TD[token_indices_experts_sorted_N]
+        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[perm_N]
+        token_indices_experts_sorted_N = perm_N // self.top_k
+        routed_input_ND = _GatherTopKRows.apply(
+            x_TD, token_indices_experts_sorted_N, perm_N, self.top_k
+        )
 
         return (
             routed_input_ND,
@@ -214,12 +270,7 @@ class LocalTokenDispatcher(Module):
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
         """Weight expert-sorted outputs by their router scores and sum them per token."""
-        # Type promotion computes the product in float32 without materializing a
-        # float32 copy of the routed output, which the multiply would save for
-        # backward (twice the bytes of the routed output itself).
-        routed_output_ND = (
-            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-        ).to(routed_output_ND.dtype)
+        routed_output_ND = scale_by_router_scores(routed_output_ND, topk_scores_N)
         return deterministic_scatter_add(
             torch.zeros_like(x_TD),
             token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
