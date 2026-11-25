@@ -112,10 +112,10 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
                 for group in results[4][0].microbatch_groups
             ]
             # A builder error surfaces at call_one.
-            no_advantage = _group(5, [0.0, 1.0])
-            no_advantage.rollouts[0].advantage = None
-            with pytest.raises(ActorError, match="has no advantage"):
-                await actor.add_group.call_one(rollout_group=no_advantage)
+            bad_prefix = _group(5, [0.0, 1.0])
+            bad_prefix.rollouts[0].turns[0].prompt_prefix_len = 99
+            with pytest.raises(ActorError, match="reuses 99 tokens"):
+                await actor.add_group.call_one(rollout_group=bad_prefix)
             return results, by_value_results, microbatch_groups_b
         finally:
             await mesh.stop()

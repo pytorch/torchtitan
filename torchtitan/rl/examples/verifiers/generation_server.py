@@ -172,7 +172,8 @@ class GenerationServer(Configurable):
         """Run one model call through `generate_fn`. Its error answers:
 
             503  `generate_fn` is not set yet
-            400  no X-Session-ID header, a malformed body, or a prompt with no room for an output token
+            400  a prompt with no room for an output token
+            422  no X-Session-ID header, or a malformed body
             500  `generate_fn` raised, or the completion's token ids and logprobs differ in length
             502  no completion, or a finish reason other than "stop" or "length"
 
@@ -193,10 +194,11 @@ class GenerationServer(Configurable):
             return web.json_response(
                 {"error": "TorchTitan GenerateFn is not ready"}, status=503
             )
+
         session_id = request.headers.get(_SESSION_ID_HEADER)
         if not session_id:
             return web.json_response(
-                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=400
+                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=422
             )
 
         try:
@@ -204,14 +206,6 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            # vLLM needs room for one output token. Keep vLLM's wording: Verifiers'
-            # harnesses match it as a context overflow.
-            if len(prompt_token_ids) >= self.max_rollout_tokens:
-                raise ValueError(
-                    f"This model's maximum context length is {self.max_rollout_tokens} "
-                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
-                    "leaving no room for an output token"
-                )
             sampling_params = body.get("sampling_params")
             if not isinstance(sampling_params, dict):
                 raise ValueError("sampling_params must be an object")
@@ -225,16 +219,24 @@ class GenerationServer(Configurable):
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
-            return web.json_response({"error": str(error)}, status=400)
+            return web.json_response({"error": str(error)}, status=422)
+
+        # vLLM needs room for one output token. Keep vLLM's wording: Verifiers' harnesses match it
+        # as a context overflow.
+        if len(prompt_token_ids) >= self.max_rollout_tokens:
+            return web.json_response(
+                {
+                    "error": f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
+                    "leaving no room for an output token"
+                },
+                status=400,
+            )
 
         # ======== Generate ========
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
         request_id = f"{session_id}/request={request_index}"
-        # TODO(monarch): when Verifiers gives up on a call (e.g. its rollout timeout), `run_group`
-        # returns and `Rollouter.close` doesn't wait for this handler. Cancelling the handler wouldn't
-        # help: the generator still answers, and an answer that reaches a worker that already stopped
-        # fails the generator, so the job exits 130 (https://github.com/meta-pytorch/monarch/issues/5301).
         try:
             completion = await self.generate_fn(
                 Prompt(token_ids=prompt_token_ids),
