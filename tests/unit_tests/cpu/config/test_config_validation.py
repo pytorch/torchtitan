@@ -369,6 +369,53 @@ def test_flex_shard_rejects_checkpointers_that_drop_shard_layouts(
         config.__post_init__()
 
 
+@mock.patch("torchtitan.distributed.flex_shard_backend.find_spec", mock.Mock())
+def test_flex_shard_pipeline_parallelism(monkeypatch) -> None:
+    from torch.distributed.pipelining import _utils as pipelining_utils
+
+    config = llama3_debugmodel()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
+    config.parallelism.pipeline_parallel_degree = 2
+
+    def validate_model() -> None:
+        validate_model_training_config(
+            config.model,
+            parallelism=config.parallelism,
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+    # Pipeline schedules that recognize data-parallel stages only by
+    # FSDPModule wouldn't defer or finalize FlexShard's gradient reductions.
+    monkeypatch.delattr(pipelining_utils, "_is_sharded_data_parallel", raising=False)
+    with pytest.raises(
+        ValueError,
+        match=r"don't recognize FlexShard modules \(pytorch/pytorch#205659\)",
+    ):
+        validate_model()
+    monkeypatch.setattr(
+        pipelining_utils,
+        "_is_sharded_data_parallel",
+        lambda module: False,
+        raising=False,
+    )
+    validate_model()
+
+    # load_hf_into_local_shards groups and broadcasts over all ranks, which
+    # assumes every rank holds the same keys.
+    config.checkpointer = CheckpointManager.Config(
+        initial_load_in_hf=True, initial_load_path="/checkpoint"
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"does not support checkpointer\.initial_load_in_hf=True with "
+        r"pipeline parallelism yet",
+    ):
+        config.__post_init__()
+
+
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
     with pytest.raises(ValueError, match="SPMD typechecking"):
         TrainingEngine.Config(
