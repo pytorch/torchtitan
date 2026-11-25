@@ -6,12 +6,13 @@
 
 """Parallelism configuration."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import get_args, Literal, TypeAlias
 
 import torch
 
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
+from torchtitan.distributed.sharding_backend import FullyShardBackend, ShardingBackend
 
 
 FSDPSymmMemScope: TypeAlias = Literal["all", "dense", None]
@@ -88,6 +89,19 @@ class ParallelismConfig:
     ``tok_embeddings -> layers -> norm/lm_head``, which is the chain the
     explicit prefetching follows. Raises for models with MTP layers or
     multimodal encoders, and for Flux.
+    """
+
+    fsdp_backend: ShardingBackend.Config = field(
+        default_factory=FullyShardBackend.Config
+    )
+    """
+    How parameters are sharded over ``dp_shard``: a ``ShardingBackend``
+    (``torchtitan/distributed/sharding_backend.py``). ``FullyShardBackend``, the
+    default, applies PyTorch's FSDP2 ``fully_shard``. ``FlexShardBackend``
+    (``torchtitan/distributed/flex_shard_backend.py``) applies FlexShard
+    (meta-pytorch/flex_shard), with one ``fsdp2_compatible`` bucket per unit
+    FSDP2 would shard, so training from the same parameters is bitwise identical
+    to FSDP2. It rejects what it doesn't support yet.
     """
 
     tensor_parallel_degree: int = 1

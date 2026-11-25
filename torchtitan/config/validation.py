@@ -250,6 +250,10 @@ def validate_model_training_config(
             "debug.spmd_typechecking."
         )
 
+    parallelism.fsdp_backend.build().validate_model(
+        model, parallelism=parallelism, training=training, debug=debug
+    )
+
     validate_context_parallel(model, parallelism)
 
 

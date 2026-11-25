@@ -728,6 +728,32 @@ def clip_grad_norm_(
             norm = norm.full_tensor()
         norms.append(norm)
 
+    return clip_grads_with_mesh_norms_(
+        list(params_by_mesh.values()),
+        norms,
+        max_norm=max_norm,
+        norm_type=norm_type,
+        foreach=foreach,
+        pp_mesh=pp_mesh,
+    )
+
+
+def clip_grads_with_mesh_norms_(
+    param_groups: list[list[torch.Tensor]],
+    norms: list[torch.Tensor],
+    *,
+    max_norm: float,
+    norm_type: float,
+    foreach: bool | None,
+    pp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    """Combine the grad norms of parameter groups whose meshes differ into one
+    total norm, reduce it across PP stages, clip every group's grads by it, and
+    return it.
+
+    ``norms`` holds each group's norm, already reduced over its own mesh, or a
+    single norm of nothing (``tensor(0.)``) when there are no groups.
+    """
     if len(norms) == 1:
         total_norm = norms[0]
     elif math.isinf(norm_type):
@@ -743,6 +769,6 @@ def clip_grad_norm_(
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
 
-    for params in params_by_mesh.values():
+    for params in param_groups:
         torch.nn.utils.clip_grads_with_norm_(params, max_norm, total_norm, foreach)
     return total_norm

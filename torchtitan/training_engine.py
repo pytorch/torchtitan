@@ -245,6 +245,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "are enabled: set sdc_replayer.num_replays=1 or "
                         "training.disable_accelerator_graphs=True."
                     )
+            # The sharding backend's model checks run in
+            # validate_model_training_config (config/validation.py), which
+            # doesn't receive the loss, checkpointer or optimizers, so its
+            # trainer checks run here.
+            self.parallelism.fsdp_backend.build().validate_trainer(
+                loss=self.loss,
+                checkpointer=self.checkpointer,
+                optim=self.optim,
+                trainer=type(self)._owner,
+            )
 
     config: Config
     device: torch.device

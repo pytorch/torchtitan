@@ -105,13 +105,13 @@ def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
     with mock.patch("torchtitan.distributed.fsdp.fully_shard") as fully_shard:
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
         )
 
-    block_call = next(c for c in fully_shard.call_args_list if c.args[0] is block)
+    block_call = next(c for c in fully_shard.call_args_list if c.args[0] == [block])
     shard_placement_fn = block_call.kwargs["shard_placement_fn"]
     assert shard_placement_fn(moe.routed_experts.weight) == Shard(0)
 
