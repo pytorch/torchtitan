@@ -202,6 +202,7 @@ def _leader_microbatch_groups(
                 column=column,
                 training_sample_builder=config.training_sample_builder.build(),
                 microbatch_packer=packer,
+                rdma_byte_buffers=None,
             )
         )
         for column in Controller._replica_columns(controller, plan)

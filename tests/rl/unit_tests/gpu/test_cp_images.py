@@ -306,7 +306,11 @@ def _run(layout: str) -> dict[str, dict]:
         cp_mesh = trainer.engine.parallelism_context.get_optional_mesh("cp")
         if cp_mesh is None or cp_mesh.get_local_rank() == 0:
             # One group of one microbatch: every spec of the case, in rollout order.
-            column = ReplicaColumn(microbatch_groups=[[specs]], rollout_groups=[packed])
+            column = ReplicaColumn(
+                microbatch_groups=[[specs]],
+                rollout_groups=[packed],
+                rollout_group_handles=[],
+            )
             asyncio.run(trainer.receive_replica_column(column))
         # Without CP, both FSDP ranks train the microbatch: the global counts double.
         asyncio.run(

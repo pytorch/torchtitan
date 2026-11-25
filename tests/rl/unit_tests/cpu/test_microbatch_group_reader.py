@@ -233,6 +233,7 @@ def _run_rank(
             column=column,
             training_sample_builder=TrainingSampleBuilder.Config().build(),
             microbatch_packer=_packer(),
+            rdma_byte_buffers=None,
         )
         try:
             microbatch_groups = list(reader)
@@ -426,6 +427,7 @@ def fake_column(microbatch_groups: list[list[list[int]]]) -> ReplicaColumn:
             for group in microbatch_groups
         ],
         rollout_groups=[pack_rollout_group(RolloutGroup(group_id=0, rollouts=[]))[1]],
+        rollout_group_handles=[],
     )
 
 
@@ -454,6 +456,7 @@ def _counting_reader(
         microbatch_packer=SimpleNamespace(
             pack_planned=lambda specs, samples: (pack or default_pack)(samples)
         ),
+        rdma_byte_buffers=None,
     )
 
 
@@ -544,7 +547,9 @@ def test_the_leader_frees_each_groups_bytes_before_the_next_materializes() -> No
         num_microbatch_groups=1,
         replica_group=None,
         column=ReplicaColumn(
-            microbatch_groups=[[specs]], rollout_groups=rollout_groups
+            microbatch_groups=[[specs]],
+            rollout_groups=rollout_groups,
+            rollout_group_handles=[],
         ),
         training_sample_builder=builder,
         microbatch_packer=SimpleNamespace(
@@ -552,6 +557,7 @@ def test_the_leader_frees_each_groups_bytes_before_the_next_materializes() -> No
                 preprocess_images=lambda: len(samples)
             )
         ),
+        rdma_byte_buffers=None,
     )
     del rollout_groups
 
@@ -602,7 +608,11 @@ def test_the_leader_raises_when_a_sample_disagrees_with_its_spec(builder_class) 
     reader = MicrobatchGroupReader(
         num_microbatch_groups=1,
         replica_group=None,
-        column=ReplicaColumn(microbatch_groups=[[[spec]]], rollout_groups=[packed]),
+        column=ReplicaColumn(
+            microbatch_groups=[[[spec]]],
+            rollout_groups=[packed],
+            rollout_group_handles=[],
+        ),
         training_sample_builder=builder,
         # The spec's labels fill the microbatch.
         microbatch_packer=MicrobatchPacker.Config().build(
@@ -612,6 +622,7 @@ def test_the_leader_raises_when_a_sample_disagrees_with_its_spec(builder_class) 
             temperature=1.0,
             vision_processor=None,
         ),
+        rdma_byte_buffers=None,
     )
 
     with pytest.raises(ValueError, match="rollout_to_training_sample_specs"):

@@ -29,7 +29,7 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch.distributed as dist
@@ -78,7 +78,7 @@ class ReplicaColumn:
     """Each group the column names, packed, with only the rollouts it names
     (`PackedRolloutGroup.select`)."""
 
-    rollout_group_handles: list[PackedRolloutGroupHandle] = field(default_factory=list)
+    rollout_group_handles: list[PackedRolloutGroupHandle]
     """Each group the column names that stays in its rollout worker: where the rollouts it names
     and their images sit there (`PackedRolloutGroupHandle.select`)."""
 
@@ -110,6 +110,7 @@ class MicrobatchGroupReader:
             column=column,  # on the leader; None on the other ranks
             training_sample_builder=builder,
             microbatch_packer=packer,
+            rdma_byte_buffers=None,  # the leader's buffers when its column carries handles
         )
         len(reader)  # 2
         for microbatch_group in reader:
@@ -129,7 +130,7 @@ class MicrobatchGroupReader:
         column: ReplicaColumn | None,
         training_sample_builder: TrainingSampleBuilder,
         microbatch_packer: MicrobatchPacker,
-        rdma_byte_buffers: RDMAByteBuffers | None = None,
+        rdma_byte_buffers: RDMAByteBuffers | None,
     ) -> None:
         # The replica's rank 0 is its leader.
         assert column is not None or replica_group is not None
