@@ -10,6 +10,7 @@ import asyncio
 import functools
 import json
 import logging
+import logging.config
 import os
 import pickle
 import subprocess
@@ -1785,31 +1786,54 @@ class TestRegisterJsonlHandler:
             ("second", 1),
         ]
 
-    def test_records_after_close_written_synchronously(
+    def test_records_after_dictconfig_written_off_the_emitting_thread(
         self, tmp_path, structured_logger_fixture
     ):
-        """After close() (e.g. logging.shutdown at exit), records are still
-        written, synchronously, as with the old FileHandler."""
+        """logging.config.dictConfig (which ``import vllm`` runs) closes every
+        handler. Later records are still written by the listener thread, not
+        by the thread that emits them."""
         init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
-        log_trace_instant("before_close")
-        for handler in structured_logger_fixture.handlers:
-            if isinstance(handler, QueueHandler):
-                handler.close()
-        log_trace_instant("after_close")
+        log_trace_instant("before_dictconfig")
+        logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+        writer_threads = []
+        file_emit = TraceJsonlHandler.emit
 
-        assert [line["log_type_name"] for line in _read_trace_lines(tmp_path)] == [
-            "before_close",
-            "after_close",
+        def recording_emit(self, record):
+            writer_threads.append(threading.get_ident())
+            file_emit(self, record)
+
+        with mock.patch.object(TraceJsonlHandler, "emit", recording_emit):
+            log_trace_instant("after_dictconfig")
+            lines = _read_trace_lines(tmp_path)
+
+        assert [line["log_type_name"] for line in lines] == [
+            "before_dictconfig",
+            "after_dictconfig",
         ]
+        assert len(writer_threads) == 1
+        assert writer_threads[0] != threading.get_ident()
 
-    def test_queued_records_written_at_exit(self, tmp_path):
-        """At a normal exit, logging.shutdown writes every queued record,
-        including ones emitted by atexit hooks registered before init."""
+    @pytest.mark.parametrize("call_dictconfig", [False, True])
+    def test_queued_records_written_at_exit(self, tmp_path, call_dictconfig):
+        """At a normal exit, every queued record is written, including ones
+        emitted by atexit hooks registered before init, also after
+        logging.config.dictConfig dropped the handler from logging's exit list.
+        Records emitted after the handler closes at exit are written
+        synchronously."""
+        dictconfig_line = (
+            "logging.config.dictConfig({'version': 1, 'disable_existing_loggers': False})\n"
+            if call_dictconfig
+            else ""
+        )
         script = (
             "import atexit\n"
+            "import logging.config\n"
+            # Registered before the handler module's exit hook, so it runs after it.
+            "atexit.register(lambda: sl.log_trace_instant('after_close_at_exit'))\n"
             "from torchtitan.observability import structured_logger as sl\n"
             "atexit.register(sl.log_trace_instant, 'from_atexit_hook')\n"
             f"sl.init_structured_logger(source='exit', output_dir={str(tmp_path)!r}, rank=0)\n"
+            f"{dictconfig_line}"
             "for _ in range(1000):\n"
             "    with sl.log_trace_span('s'):\n"
             "        pass\n"
@@ -1827,5 +1851,8 @@ class TestRegisterJsonlHandler:
         )
 
         lines = _read_trace_lines(tmp_path)
-        assert len(lines) == 2001
-        assert lines[-1]["log_type_name"] == "from_atexit_hook"
+        assert len(lines) == 2002
+        assert [line["log_type_name"] for line in lines[-2:]] == [
+            "from_atexit_hook",
+            "after_close_at_exit",
+        ]
