@@ -36,8 +36,11 @@ class _GeneratorHandle(RoutingCandidate):
     to run."""
 
     reserved_load: int = 0
-    """Estimated KV tokens on this generator: each in-flight call's ``num_tokens``, and
-    each session's last ``num_tokens`` until ``release_session``."""
+    """Number of in-flight generate calls reserved on this generator."""
+
+    held_session_tokens: int = 0
+    """KV tokens sessions hold on this generator between turns: each session's last
+    ``num_tokens``, until its next call or ``release_session``."""
 
     draining: bool = False
     """True while the generator drains for a model state dict load (hot_swap=False only)."""
@@ -52,22 +55,24 @@ class InterGeneratorRouter(Configurable):
 
     Look-aside routing:
         The router never sees a generate call's payload. ``reserve`` picks a
-        generator, adds the call's estimated KV tokens to its load and returns its
-        rank-0 handle; the caller sends the generate call there directly, then calls
+        generator, adds one unit of load to it and returns its rank-0 handle; the
+        caller sends the generate call there directly, then calls
         ``release_reservation``.
 
-    Load:
-        A generator's load estimates the KV it holds. A call without a session adds
-        its tokens until ``release_reservation``. A session's call also leaves its KV
-        on the generator between turns (prefix cache, or the session KV holder), so
-        its tokens stay until the session's next call replaces them or
-        ``release_session``. With 2 generators, a 10k-token turn of session ``a``
-        that finished, and an in-flight 2k-token call::
+    Held session KV:
+        A session's call leaves its KV on the generator between turns (prefix cache,
+        or the session KV holder), which in-flight counts don't see. Each session's
+        last ``num_tokens`` stays in ``held_session_tokens`` until its next call
+        replaces it or ``release_session``. Sticky routing places new sessions and
+        repins by it; in-flight calls are still balanced by count. With 2
+        generators, a 10k-token turn of session ``a`` that finished, and an
+        in-flight call::
 
-            gen0: a (10k, idle between turns)   -> load 10k
-            gen1: one in-flight call (2k)       -> load 2k
+            gen0: a (10k, idle between turns)   -> load 0, held 10k
+            gen1: one in-flight call            -> load 1, held 0
 
-        One unit per call would see loads [0, 1] and send a new session to gen0.
+        A new session goes to gen1, next to less held KV; a call without a session
+        goes to gen0, the generator with fewer calls in flight.
 
     Singleton:
         Routing decisions read and write mutable states such as
@@ -131,8 +136,7 @@ class InterGeneratorRouter(Configurable):
             raise ValueError("InterGeneratorRouter requires at least one generator")
 
         self._strategy = config.strategy.build()
-        # request_id -> (generator, tokens release_reservation frees).
-        self._reservations: dict[str, tuple[_GeneratorHandle, int]] = {}
+        self._reservations: dict[str, _GeneratorHandle] = {}
         # routing session -> (generator, tokens its last call left there).
         self._session_tokens: dict[str, tuple[_GeneratorHandle, int]] = {}
         # A session whose release_session never arrives (e.g. the RPC failed) is
@@ -142,13 +146,15 @@ class InterGeneratorRouter(Configurable):
     def reserve(
         self, request_id: str, *, routing_session_id: str | None, num_tokens: int
     ) -> Any:
-        """Pick a generator for one generate call, add ``num_tokens`` to its load, and
-        return its rank-0 handle.
+        """Pick a generator for one generate call, add one unit of load to it, and
+        return its rank-0 handle. A session call's ``num_tokens`` stay held there
+        until the session's next call or ``release_session``.
 
         Args:
             request_id: Unique per call; ``release_reservation`` takes the same id.
             routing_session_id: Session the call belongs to, or ``None``.
             num_tokens: KV tokens the call can hold: prompt tokens plus ``max_tokens``.
+                Used only for session calls.
 
         Returns:
             The chosen generator's rank-0 actor handle.
@@ -175,33 +181,31 @@ class InterGeneratorRouter(Configurable):
             candidates = [g for g in self._generators if not g.draining]
             h = self._strategy.choose(routing_ctx, candidates or self._generators)
         # TODO: num_tokens is an upper bound (max_tokens, not the tokens generated so
-        #   far) and ignores prefix sharing. Refresh the load from generator-reported KV
-        #   usage, and stop sending to nearly full generators; both need the generators
-        #   to report KV capacity and usage, including held sessions' KV (vLLM reports
-        #   only running requests' KV).
-        h.reserved_load += num_tokens
-        if routing_session_id is None:
-            self._reservations[request_id] = (h, num_tokens)
-        else:
+        #   far) and ignores prefix sharing. Refresh held_session_tokens from
+        #   generator-reported KV usage, and stop sending to nearly full generators; both
+        #   need the generators to report KV capacity and usage, including held sessions'
+        #   KV (vLLM reports only running requests' KV).
+        h.reserved_load += 1
+        self._reservations[request_id] = h
+        if routing_session_id is not None:
+            h.held_session_tokens += num_tokens
             self._session_tokens[routing_session_id] = (h, num_tokens)
-            self._reservations[request_id] = (h, 0)
         # Returning the handle keeps callers simple. If router CPU becomes a bottleneck,
         #   return the generator index and have callers keep the handle list.
         return h.rank0_actor
 
     def release_reservation(self, request_id: str) -> None:
-        """End ``request_id``'s call: free its tokens, unless its session keeps them
-        until its next call or ``release_session``. Routing bookkeeping only; unlike
-        ``release_session``, it doesn't call a generator."""
-        h, num_tokens = self._reservations.pop(request_id)
-        h.reserved_load -= num_tokens
+        """Free the load unit ``reserve`` placed for ``request_id``. A session's held
+        tokens stay. Routing bookkeeping only; unlike ``release_session``, it doesn't
+        call a generator."""
+        self._reservations.pop(request_id).reserved_load -= 1
 
     def _drop_session_tokens(self, routing_session_id: str) -> None:
         """Remove the tokens a session's last call left on its generator."""
         held = self._session_tokens.pop(routing_session_id, None)
         if held is not None:
             h, num_tokens = held
-            h.reserved_load -= num_tokens
+            h.held_session_tokens -= num_tokens
 
     async def _fanout(
         self,

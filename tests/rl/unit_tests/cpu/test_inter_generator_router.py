@@ -89,13 +89,15 @@ def test_least_loaded_routes_to_lowest_reserved_load():
     assert [h.reserved_load for h in router._generators] == [0, 0]
 
 
-def test_load_counts_tokens_not_calls():
+def test_in_flight_calls_count_as_units_whatever_their_size():
     router = _router([_Actor("gen0"), _Actor("gen1")])
     assert router.reserve("r0", routing_session_id=None, num_tokens=1000).name == "gen0"
-    # One unit per call would tie at [1, 1] and send r2 to gen0.
     assert router.reserve("r1", routing_session_id=None, num_tokens=10).name == "gen1"
-    assert router.reserve("r2", routing_session_id=None, num_tokens=10).name == "gen1"
-    assert [h.reserved_load for h in router._generators] == [1000, 20]
+    # Tied at one call each, the tie-break picks gen0, chosen less recently.
+    assert router.reserve("r2", routing_session_id=None, num_tokens=10).name == "gen0"
+    assert [h.reserved_load for h in router._generators] == [2, 1]
+    # Calls without a session hold no KV between turns.
+    assert [h.held_session_tokens for h in router._generators] == [0, 0]
 
     for request_id in ("r0", "r1", "r2"):
         router.release_reservation(request_id)
@@ -108,18 +110,37 @@ def test_session_keeps_its_tokens_between_turns():
     )
     # s0's 10k-token turn finished; its KV stays on gen0 between turns.
     assert _route(router, session_id="s0", num_tokens=10_000) == "gen0"
+    assert [h.held_session_tokens for h in router._generators] == [10_000, 0]
+    # A call without a session is balanced by in-flight count: both are idle, and
+    # the tie-break picks gen1, chosen less recently.
     assert (
         router.reserve("r0", routing_session_id=None, num_tokens=2_000).name == "gen1"
     )
-    # gen0 has no call in flight, yet it holds more KV: the new s1 goes to gen1.
+    # gen1 has a call in flight, yet gen0 holds more session KV: the new s1 goes to gen1.
     assert _route(router, session_id="s1", num_tokens=1_000) == "gen1"
     router.release_reservation("r0")
-    assert [h.reserved_load for h in router._generators] == [10_000, 1_000]
+    assert [h.reserved_load for h in router._generators] == [0, 0]
+    assert [h.held_session_tokens for h in router._generators] == [10_000, 1_000]
 
     # gen0 holds 10k > 1.5 x mean 5.5k, but all of it is s0's: its next turn replaces
     # that KV, so s0 stays instead of moving to gen1 and re-prefilling 11k tokens.
     assert _route(router, session_id="s0", num_tokens=11_000) == "gen0"
-    assert [h.reserved_load for h in router._generators] == [11_000, 1_000]
+    assert [h.held_session_tokens for h in router._generators] == [11_000, 1_000]
+
+
+def test_sticky_session_repins_off_a_generator_holding_too_much_session_kv():
+    router = _router(
+        [_Actor("gen0"), _Actor("gen1")], strategy=StickySessionRoutingStrategy.Config()
+    )
+    assert _route(router, session_id="s0", num_tokens=100) == "gen0"
+    assert _route(router, session_id="s1", num_tokens=100) == "gen1"
+    # s2 lands on gen0 (tie on held KV, gen0 chosen less recently) and grows to 10k.
+    assert _route(router, session_id="s2", num_tokens=100) == "gen0"
+    assert _route(router, session_id="s2", num_tokens=10_000) == "gen0"
+    # Without its own 100 tokens, gen0 holds 10k vs gen1's 100: 10k > 1.5 x mean
+    # 5.05k, so s0 moves to gen1 and re-prefills there.
+    assert _route(router, session_id="s0", num_tokens=200) == "gen1"
+    assert [h.held_session_tokens for h in router._generators] == [10_000, 300]
 
 
 def test_least_loaded_tie_break_spreads_over_a_changing_candidate_set():
@@ -263,12 +284,12 @@ def test_sticky_session_respects_max_sessions():
     )
 
     assert _route(router, session_id="s0") == "gen0"
-    # s0's KV keeps gen0 busier, so the least-loaded fallback assigns the new s1
-    # session to gen1. Since max_sessions=1, s1 evicts s0.
+    # s0's held KV is on gen0, so the new s1 session goes to gen1. Since
+    # max_sessions=1, s1 evicts s0.
     assert _route(router, session_id="s1") == "gen1"
-    # gen0 gets busier than gen1. Pinned, s0 would stay on gen0; evicted, it is a
-    # new session, and least-loaded picks gen1.
-    router._generators[0].reserved_load += 5
+    # gen0 now holds more session KV than gen1. Pinned, s0 would stay on gen0;
+    # evicted, it is a new session and goes to gen1.
+    router._generators[0].held_session_tokens += 5
     assert _route(router, session_id="s0") == "gen1"
 
 
@@ -283,7 +304,7 @@ def test_evicted_session_frees_its_tokens():
     assert _route(router, session_id="s0", num_tokens=8) == "gen0"
     # s1 evicts s0 (max_sessions=1), and s0's tokens leave gen0's load with it.
     assert _route(router, session_id="s1", num_tokens=4) == "gen1"
-    assert [h.reserved_load for h in router._generators] == [0, 4]
+    assert [h.held_session_tokens for h in router._generators] == [0, 4]
     assert "s0" not in router._session_tokens
 
 
@@ -295,11 +316,11 @@ def test_release_session_unpins_it_and_frees_its_kv_on_its_generator():
     )
     assert _route(router, session_id="s0", num_tokens=8) == "gen0"
     # The finished call's KV stays on gen0 until the session ends.
-    assert [h.reserved_load for h in router._generators] == [8, 0]
+    assert [h.held_session_tokens for h in router._generators] == [8, 0]
 
     asyncio.run(router.release_session("s0"))
 
-    assert [h.reserved_load for h in router._generators] == [0, 0]
+    assert [h.held_session_tokens for h in router._generators] == [0, 0]
     assert actors[0].release_sessions.calls == [((["s0"],), {})]
     assert actors[1].release_sessions.calls == []
     # Unpinned, s0 is a new session: the tie-break picks gen1, chosen less recently.

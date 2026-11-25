@@ -29,6 +29,12 @@ class RoutingCandidate(ABC):
     def reserved_load(self) -> int:
         """Caller-defined reserved load on this target."""
 
+    @property
+    def held_session_tokens(self) -> int:
+        """KV tokens that sessions leave on this target between turns. 0 for routing
+        layers that don't track it."""
+        return 0
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RoutingContext:

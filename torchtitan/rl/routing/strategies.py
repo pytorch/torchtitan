@@ -154,8 +154,9 @@ class StickySessionRoutingStrategy(RoutingStrategy):
 
         repin_load_ratio: float | None = 1.5
         """Move a session off its pinned candidate once that candidate's load is above
-        `repin_load_ratio` x the mean load. The fallback picks the new candidate; the move
-        re-prefills the session's context. None never moves it.
+        `repin_load_ratio` x the mean load. The load is ``held_session_tokens`` when any
+        candidate holds session KV, else ``reserved_load``. The fallback picks the new
+        candidate; the move re-prefills the session's context. None never moves it.
 
         With 1.5, pinned candidate first:
 
@@ -189,7 +190,8 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         """Return the session's assigned candidate, or assign a new one.
 
         - no ``session_id``: the fallback chooses; nothing is pinned.
-        - new session: the fallback chooses; the session is pinned there.
+        - new session: the fallback chooses among the candidates holding the least
+          session KV (``held_session_tokens``); the session is pinned there.
         - pinned session: reuse its candidate, unless that candidate is gone from
           ``candidates`` or overloaded (``repin_load_ratio``); then the fallback
           chooses and the session is re-pinned.
@@ -204,10 +206,21 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         # Reuse the pinned candidate while it is still a candidate and not overloaded.
         sticky_candidate = self._sessions.get(routing_ctx.session_id)
         if sticky_candidate is not None:
-            mean_load = sum(h.reserved_load for h in candidates) / len(candidates)
+            # Held session KV is what a move re-prefills; layers that don't track it
+            # (all zeros) compare in-flight counts instead.
+            by_held = any(h.held_session_tokens for h in candidates)
+            loads = [
+                h.held_session_tokens if by_held else h.reserved_load
+                for h in candidates
+            ]
+            pinned_load = (
+                sticky_candidate.held_session_tokens
+                if by_held
+                else sticky_candidate.reserved_load
+            )
             overloaded = (
                 self._repin_load_ratio is not None
-                and sticky_candidate.reserved_load > self._repin_load_ratio * mean_load
+                and pinned_load > self._repin_load_ratio * sum(loads) / len(loads)
             )
             if any(h is sticky_candidate for h in candidates) and not overloaded:
                 # End of the dict means it's the most-recently-used session.
@@ -215,7 +228,10 @@ class StickySessionRoutingStrategy(RoutingStrategy):
                 return sticky_candidate
 
         # New session, or the pinned candidate is gone or overloaded: (re)pin to the fallback's choice.
-        chosen = self._fallback_strategy.choose(routing_ctx, candidates)
+        fewest_held = min(h.held_session_tokens for h in candidates)
+        chosen = self._fallback_strategy.choose(
+            routing_ctx, [h for h in candidates if h.held_session_tokens == fewest_held]
+        )
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
         self._sessions.move_to_end(routing_ctx.session_id)
