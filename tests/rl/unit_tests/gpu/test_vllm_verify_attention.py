@@ -13,7 +13,6 @@ import torch
 from torchtitan.rl.generator.attention.attention import fa4_takes_query_len_in_heads
 from torchtitan.rl.generator.vllm.attention import attention as vllm_attention
 from torchtitan.rl.generator.vllm.attention.attention import (
-    _MIN_VERIFY_ROWS_ON_DECODE_KERNEL,
     TorchTitanVarlenInnerAttentionImpl,
 )
 from vllm.config import set_current_vllm_config, VllmConfig
@@ -68,9 +67,8 @@ def test_forward_matches_causal_attention(
             vllm_attention, "fa4_takes_query_len_in_heads", lambda: False
         )
     is_one_call = fp8_verify_call == "one_call" and is_uniform_verify
-    takes_decode_kernel = is_uniform_verify and (
-        is_one_call or len(query_lens) >= _MIN_VERIFY_ROWS_ON_DECODE_KERNEL
-    )
+    # 8: the impl's row cutoff (`_MIN_VERIFY_ROWS_ON_DECODE_KERNEL`) for the decode + tail path.
+    takes_decode_kernel = is_uniform_verify and (is_one_call or len(query_lens) >= 8)
 
     torch.manual_seed(0)
     device = torch.device("cuda")
