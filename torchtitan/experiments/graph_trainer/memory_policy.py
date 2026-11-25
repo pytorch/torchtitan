@@ -41,6 +41,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
     _NOT_IN_LAYERS,
+    collect_forward_recompute_regions,
     matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
@@ -48,9 +49,14 @@ from torchtitan.experiments.graph_trainer.cpu_offload import (
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_outputs_by_param,
+    uses_flex_shard,
 )
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
+)
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_target_nodes,
 )
 from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
@@ -296,6 +302,8 @@ def tag_sac_policy(
     includes the final layer output consumed by the model epilogue.
 
     ``getitem`` / ``wait_tensor`` nodes inherit the parent's tag.
+    ``recompute_region`` groups nodes under one decision; ``recompute`` remains
+    the per-node CheckpointPolicy consumed by rematerialization.
 
     The model must have been annotated with ``annotate_module_fqns`` before
     tracing so that nodes carry ``module_fqn`` metadata.
@@ -375,12 +383,26 @@ def tag_sac_policy(
     for node in gm.graph.nodes:
         if (
             _is_backward_node(node)
-            or "recompute" not in node.meta
             or not isinstance(node.target, torch._ops.OpOverload)
             or not node.target._schema.is_mutable
+            or node.meta.get("recompute_region") is not None
         ):
             continue
-        node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        if "recompute" in node.meta:
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        # The mutation's result may be unused while backward reads its target.
+        # Save target and base; remat could otherwise recreate zeros without the copy:
+        #
+        # buffer = zeros_like(x)                 # MUST_SAVE: keep the written values.
+        # target = view(buffer, [2, 2])          # MUST_SAVE: aliases the same storage.
+        # source = view(x, [2, 2])
+        # _foreach_copy_([target], [source])     # Loss writer; no recompute tag.
+        # forward = sin(buffer)                 # Reads the initialized buffer.
+        # backward = mul(forward, x)            # Remat must reuse the saved buffer.
+        for target in mutation_target_nodes(node):
+            for buffer in (target, base_tensor_for_mutation_target(target)):
+                if "recompute" in buffer.meta:
+                    buffer.meta["recompute"] = CheckpointPolicy.MUST_SAVE
         for user in node.users:
             if not _is_backward_node(user) and "recompute" in user.meta:
                 user.meta["recompute"] = CheckpointPolicy.MUST_SAVE
@@ -409,6 +431,15 @@ def tag_sac_policy(
                 node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
                 boundary_saves += 1
                 break
+
+    for region in collect_forward_recompute_regions(gm.graph).values():
+        region_policy = region[0].meta["recompute"]
+        if any(
+            node.meta.get("recompute") is CheckpointPolicy.MUST_SAVE for node in region
+        ):
+            region_policy = CheckpointPolicy.MUST_SAVE
+        for node in region:
+            node.meta["recompute"] = region_policy
 
     gm.recompile()
 
@@ -464,16 +495,28 @@ def _default_memory_policy_pass(
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
     """SAC policy that saves compute-intensive ops and required FSDP unshards."""
-    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
-        config.parallelism.fsdp_reshard_after_forward,
-        pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
-    )
-    force_save_nodes = (
-        _find_fsdp_unshard_save_nodes(gm) if not fsdp_reshard_after_forward else None
-    )
+    policy_fn = _make_default_memory_policy()
+    if uses_flex_shard(config.parallelism):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            prepare_flex_shard_recompute,
+        )
+
+        force_save_nodes = prepare_flex_shard_recompute(
+            gm, policy_fn=policy_fn, parallelism=config.parallelism
+        )
+    else:
+        fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+            config.parallelism.fsdp_reshard_after_forward,
+            pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+        )
+        force_save_nodes = (
+            _find_fsdp_unshard_save_nodes(gm)
+            if not fsdp_reshard_after_forward
+            else None
+        )
     tag_sac_policy(
         gm,
-        policy_fn=_make_default_memory_policy(),
+        policy_fn=policy_fn,
         force_save_nodes=force_save_nodes,
     )
     return gm
@@ -486,10 +529,17 @@ def _full_memory_policy_pass(
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
     """Full recompute except for user-selected module operations."""
-    tag_sac_policy(
-        gm,
-        policy_fn=_make_full_memory_policy(config.compile.full_recompute_save_ops),
-    )
+    policy_fn = _make_full_memory_policy(config.compile.full_recompute_save_ops)
+    force_save_nodes = None
+    if uses_flex_shard(config.parallelism):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            prepare_flex_shard_recompute,
+        )
+
+        force_save_nodes = prepare_flex_shard_recompute(
+            gm, policy_fn=policy_fn, parallelism=config.parallelism
+        )
+    tag_sac_policy(gm, policy_fn=policy_fn, force_save_nodes=force_save_nodes)
     return gm
 
 
@@ -500,7 +550,17 @@ def _eager_memory_policy_pass(
     config: "GraphTrainer.Config",
 ) -> torch.fx.GraphModule:
     """SAC policy that alternates mm ops between save/recompute."""
-    tag_sac_policy(gm, policy_fn=_make_eager_memory_policy())
+    policy_fn = _make_eager_memory_policy()
+    force_save_nodes = None
+    if uses_flex_shard(config.parallelism):
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            prepare_flex_shard_recompute,
+        )
+
+        force_save_nodes = prepare_flex_shard_recompute(
+            gm, policy_fn=policy_fn, parallelism=config.parallelism
+        )
+    tag_sac_policy(gm, policy_fn=policy_fn, force_save_nodes=force_save_nodes)
     return gm
 
 

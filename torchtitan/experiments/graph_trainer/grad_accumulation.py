@@ -15,6 +15,10 @@ import torch.fx as fx
 
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import graph_outputs
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    mutation_deps,
+)
 
 _GRAD_ACCUMULATOR_INPUT_META = "grad_accumulator_input"
 
@@ -375,6 +379,8 @@ def insert_graph_gradient_accumulation_before_reduction(
     )
     graph_input_accumulators: list[Any] = []
     seen_accumulators: set[tuple[str, int]] = set()
+    writers = mutation_deps(gm.graph)
+    positions = {node: index for index, node in enumerate(gm.graph.nodes)}
     for grad, accumulator, accumulator_value in zip(
         grad_inputs,
         accumulator_nodes,
@@ -391,8 +397,10 @@ def insert_graph_gradient_accumulation_before_reduction(
         if accumulator_key not in seen_accumulators:
             seen_accumulators.add(accumulator_key)
             graph_input_accumulators.append(accumulator_value)
-        old_users = list(grad.users)
-        with gm.graph.inserting_after(grad):
+        grad_writers = writers.get(base_tensor_for_mutation_target(grad), ())
+        anchor = max((grad, *grad_writers), key=positions.__getitem__)
+        old_users = [user for user in grad.users if positions[user] > positions[anchor]]
+        with gm.graph.inserting_after(anchor):
             sink = gm.graph.call_function(
                 torch.ops.aten.add_.Tensor,
                 args=(accumulator, grad),

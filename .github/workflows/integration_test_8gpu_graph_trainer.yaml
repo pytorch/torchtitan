@@ -6,11 +6,13 @@ on:
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
+      - '.github/requirements-flex-shard.txt'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'torchtitan/experiments/graph_trainer/**'
       - '.github/workflows/integration_test_8gpu_graph_trainer.yaml'
+      - '.github/requirements-flex-shard.txt'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -74,6 +76,7 @@ jobs:
           --index-url https://download.pytorch.org/whl/nightly/cu132 \
           --extra-index-url https://pypi.org/simple
         python -m pip install git+https://github.com/meta-pytorch/autoparallel.git
+        python -m pip install --no-deps -r .github/requirements-flex-shard.txt
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"

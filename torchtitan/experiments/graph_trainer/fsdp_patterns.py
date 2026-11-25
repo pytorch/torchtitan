@@ -26,6 +26,8 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     mutation_deps,
@@ -36,6 +38,11 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_MET
 _FSDP_UNSHARD_OUTPUT_PARAM_NAMES = "fsdp_unshard_output_param_names"
 _FSDP_UNSHARD_CONSUMER_INPUT_PATHS = "fsdp_unshard_consumer_input_paths"
 _FSDP_UNSHARD_ANNOTATED = "fsdp_unshard_annotated"
+
+
+def uses_flex_shard(parallelism: ParallelismConfig) -> bool:
+    """Whether the configured sharding backend produces FlexShard annotations."""
+    return isinstance(parallelism.fsdp_backend, FlexShardBackend.Config)
 
 
 def is_wait_tensor(node: fx.Node) -> bool:
@@ -70,9 +77,11 @@ def is_reduce_grad_collective(node: fx.Node) -> bool:
     return is_reduce_scatter_tensor(node) or is_all_reduce(node)
 
 
-def fsdp_param_fqns(node: fx.Node) -> tuple[str, ...]:
-    """Return the SimpleFSDP parameter provenance attached to a graph node."""
-    return node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META, ())
+def fsdp_param_fqns(
+    node: fx.Node, *, meta_key: str = FSDP_PARAM_FQNS_META
+) -> tuple[str, ...]:
+    """Return parameter provenance using the backend's FSDP metadata key."""
+    return node.meta.get("custom", {}).get(meta_key, ())
 
 
 def _find_last_all_gather_in_chain(start_node: fx.Node) -> fx.Node | None:

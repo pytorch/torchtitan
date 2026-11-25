@@ -17,11 +17,15 @@ from torch._functorch.partitioners import (
     has_recomputable_rng_ops,
     must_recompute,
 )
+from torch._guards import detect_fake_mode
+from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_module_fqn,
     _is_backward_node,
+    collect_forward_recompute_regions,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import is_mutation_node
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +75,8 @@ def _collect_backward_regions(
     # Skip everything up to and including the last loss / lm_head node.
     start_idx = 0
     for idx, node in enumerate(all_nodes):
+        if _is_backward_node(node) and _get_module_fqn(node).startswith("layers."):
+            break
         if _get_module_fqn(node) in _NON_AC_MODULE_FQNS:
             start_idx = idx + 1
 
@@ -113,6 +119,9 @@ def selective_activation_remat_pass(
     The graph is mutated in place: original node identities and names are
     preserved, only the duplicates carry a ``_recomputed`` suffix. No
     whole-graph DCE or topological reorder is performed.
+
+    ``recompute`` keeps its per-node meaning. Optional ``recompute_region``
+    membership also gathers initialization writes missing from value edges.
 
     Backward regions are identified by
     ``node.meta["autograd_backward"] == True``, set by both Dynamo and
@@ -163,6 +172,7 @@ def selective_activation_remat_pass(
     # inserted in front of. The earliest bwd consumer (in graph order)
     # wins via ``setdefault`` below.
     remat_targets: dict[fx.Node, fx.Node] = {}
+    recompute_regions = collect_forward_recompute_regions(gm.graph)
 
     def collect_fw_nodes_to_recompute_for(bwd_node: fx.Node) -> None:
         seen: set[fx.Node] = set()
@@ -174,6 +184,8 @@ def selective_activation_remat_pass(
             remat_targets.setdefault(n, bwd_node)
             for inp in n.all_input_nodes:
                 _gather(inp)
+            for member in recompute_regions.get(n.meta.get("recompute_region"), ()):
+                _gather(member)
 
         # bwd_node itself may not be must_recompute; start from its inputs.
         for inp in bwd_node.all_input_nodes:
@@ -382,7 +394,9 @@ def selective_activation_remat_pass(
         for user in fwd_node.users
         if _is_backward_node(user)
     }
-    for bwd_node in direct_bwd_consumers:
+    # Earlier lm_head/loss consumers still need the original forward values;
+    # the recomputed copies only exist inside the model backward region.
+    for bwd_node in direct_bwd_consumers.intersection(bwd_nodes):
         bwd_node.args = torch.fx.map_arg(bwd_node.args, remat_input)
         bwd_node.kwargs = torch.fx.map_arg(bwd_node.kwargs, remat_input)
 
@@ -392,7 +406,8 @@ def selective_activation_remat_pass(
     # order so downstream originals are erased first, freeing their upstream
     # originals' user lists for erase in the same pass.
     for orig in reversed(list(recomputed_nodes)):
-        if not orig.users:
+        # A forward buffer fill must execute even without value users.
+        if not orig.users and not is_mutation_node(orig):
             logger.debug(
                 "erased %s, in replace of %s",
                 orig.name,
@@ -404,4 +419,17 @@ def selective_activation_remat_pass(
     gm = raise_getitems(gm)
 
     gm.recompile()
+    # node_copy copies meta["val"], remat buffers will have the same storage in this case.
+    # Here we assign new storages for recomputed ACs via FakeTensorProp for recomputed.
+    if any(
+        node.meta.get("recompute_region") is not None and _is_backward_node(node)
+        for node in gm.graph.nodes
+    ):
+        fake_inputs = [
+            node.meta["val"] for node in gm.graph.nodes if node.op == "placeholder"
+        ]
+        with torch.no_grad():
+            FakeTensorProp(
+                gm, mode=detect_fake_mode(fake_inputs)
+            ).propagate_dont_convert_inputs(*fake_inputs)
     return gm

@@ -59,6 +59,7 @@ jobs:
           uv pip install "flash-attn-4[cu13]>=4.0.0b31"
           uv pip install \
             "git+https://github.com/meta-pytorch/dist_moe.git@main"
+          uv pip install --no-deps -r .github/requirements-flex-shard.txt
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 

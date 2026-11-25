@@ -15,7 +15,8 @@ import copy
 import hashlib
 import inspect
 import operator
-from collections.abc import Iterable, Mapping
+from collections import Counter
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -253,6 +254,69 @@ def graph_outputs(graph: fx.Graph) -> tuple[Any, ...]:
     return tuple(pytree.arg_tree_leaves(outputs[0].args[0]))
 
 
+def set_flat_graph_outputs(graph: fx.Graph, outputs: Sequence[fx.Node]) -> None:
+    """Install graph-local flat outputs and align their output metadata.
+
+    Flat outputs have no tensor-subclass descriptors. Changing args alone
+    would leave descriptors, stack traces, and existing values out of sync.
+
+    INPUT:
+        weight = ...
+        scratch = ...
+        output(weight, scratch)  # Two entries in each output metadata sequence.
+
+    OUTPUT for outputs=[weight]:
+        weight = ...
+        scratch = ...
+        output(weight)           # Metadata now describes one output.
+    """
+    values = tuple(outputs)
+    output_node = graph.find_nodes(op="output")[0]
+    output_node.args = (values,)
+    output_node.meta["desc"] = [None] * len(values)
+    output_node.meta["output_stack_traces"] = [
+        node.meta.get("stack_trace") for node in values
+    ]
+    if "val" in output_node.meta:
+        output_node.meta["val"] = tuple(node.meta.get("val") for node in values)
+
+
+def remove_region_side_effect_outputs(
+    outputs_and_descs: Iterable[tuple[Any, Any]],
+    *,
+    side_effect_output_names: Collection[str],
+    region_node_names: Collection[str],
+) -> list[tuple[Any, Any]]:
+    """Remove requested side-effect occurrences owned by an extracted region.
+
+    Remove matching occurrences from the right, preserving the order and
+    descriptors of retained outputs. One FX node can also be a user output.
+
+    INPUT with side_effect_output_names=[copied.name]:
+        computed = ...
+        copied = copy_(...)
+        output(computed, copied, copied)  # Last occurrence preserves the effect.
+
+    OUTPUT:
+        computed = ...
+        copied = copy_(...)
+        output(computed, copied)          # Keep the user-visible occurrence.
+    """
+    remaining_effects = Counter(side_effect_output_names)
+    retained = []
+    for output, desc in reversed(list(outputs_and_descs)):
+        if (
+            isinstance(output, fx.Node)
+            and remaining_effects[output.name]
+            and output.name in region_node_names
+        ):
+            remaining_effects[output.name] -= 1
+        else:
+            retained.append((output, desc))
+    retained.reverse()
+    return retained
+
+
 def graph_module_outputs(gm: fx.GraphModule) -> tuple[Any, ...]:
     """Return flattened output values from ``gm``."""
 
@@ -308,6 +372,27 @@ def node_order(graph: fx.Graph) -> dict[fx.Node, int]:
     """Map each node in ``graph`` to its topological position."""
 
     return {node: index for index, node in enumerate(graph.nodes)}
+
+
+def has_users_outside_region(node: fx.Node, region_nodes: Collection[fx.Node]) -> bool:
+    """Return whether an FX value user is outside ``region_nodes``."""
+    return any(user not in region_nodes for user in node.users)
+
+
+def eliminate_dead_code_with_region_effects(
+    graph: fx.Graph, *, region_node_names: Collection[str]
+) -> None:
+    """Run FX DCE, retaining required effects from the supplied region.
+
+    Impure call_function nodes in the region and all other impure node types
+    remain DCE roots. Live value dependencies are kept normally.
+    """
+    graph.eliminate_dead_code(
+        is_impure_node=lambda node: (
+            node.op != "call_function" or node.name in region_node_names
+        )
+        and node.is_impure()
+    )
 
 
 def unique_in_order(values: Iterable[T]) -> list[T]:

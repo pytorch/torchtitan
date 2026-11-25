@@ -7,6 +7,7 @@
 import fnmatch
 import logging
 import time
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from typing import Any, TypeAlias
@@ -314,9 +315,14 @@ def accumulate_param_grads_(
         clone_grads_to_initialize_param_grad: Whether to initialize empty
             ``param.grad`` fields with clones instead of input aliases.
     """
+    sources: dict[int, list[torch.Tensor]] = {}
     for param, grad in zip(params, grads, strict=True):
         if grad is None:
             continue
+        param_sources = sources.setdefault(id(param), [])
+        if any(_is_same_tensor_view(source, grad) for source in param_sources):
+            continue
+        param_sources.append(grad)
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
         if param.grad is None:
             param.grad = grad.clone() if clone_grads_to_initialize_param_grad else grad
@@ -329,6 +335,17 @@ def accumulate_param_grads_(
 
 def _is_backward_node(node: torch.fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
+
+
+def collect_forward_recompute_regions(
+    graph: torch.fx.Graph,
+) -> dict[int, list[torch.fx.Node]]:
+    """Group forward nodes by recompute_region, keeping members in graph order."""
+    regions: dict[int, list[torch.fx.Node]] = defaultdict(list)
+    for node in graph.nodes:
+        if "recompute_region" in node.meta and not _is_backward_node(node):
+            regions[node.meta["recompute_region"]].append(node)
+    return regions
 
 
 def _get_module_fqn(node: torch.fx.Node) -> str:

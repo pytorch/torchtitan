@@ -19,6 +19,7 @@ from .common_utils import annotate_graph_trainer_model, apply_simple_fsdp
 from .compile import apply_compile
 from .configs import GraphTrainerCompileConfig
 from .ep_eager_chunk import maybe_apply_ep_overlap_eager_chunking
+from .fsdp_patterns import uses_flex_shard
 from .simple_fsdp import disable_active_parametrization
 
 
@@ -61,11 +62,20 @@ class GraphTrainerModel:
 
         annotate_graph_trainer_model(self)
         self._parallelize(parallelism_context)
-        model = apply_simple_fsdp(
-            self,
-            parallelism_context=parallelism_context,
-            precision=precision,
-        )
+        if uses_flex_shard(parallelism):
+            parallelism.fsdp_backend.build().apply_to_decoder(
+                self,
+                parallelism_context=parallelism_context,
+                precision=precision,
+                parallelism=parallelism,
+            )
+            model = self
+        else:
+            model = apply_simple_fsdp(
+                self,
+                parallelism_context=parallelism_context,
+                precision=precision,
+            )
         maybe_apply_ep_overlap_eager_chunking(model, compile_config)
         return apply_compile(
             model,

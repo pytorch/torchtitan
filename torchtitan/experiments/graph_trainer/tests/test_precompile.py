@@ -120,6 +120,62 @@ def _make_stub_model(params=None, buffers=None):
 
 
 class TestPrecompileMain(unittest.TestCase):
+    def test_custom_flex_shard_placements_reach_parallelize(self):
+        from torchtitan.experiments.graph_trainer import precompile_main
+        from torchtitan.experiments.graph_trainer.flex_shard import (
+            GraphTrainerFlexShardBackend,
+        )
+
+        def placement_fn(named_params, mesh):
+            return {name: ("custom",) for name, _ in named_params}
+
+        backend = GraphTrainerFlexShardBackend.Config(placement_fn=placement_fn)
+
+        class ParallelizedError(Exception):
+            pass
+
+        test = self
+
+        class Model(torch.nn.Module):
+            def parallelize(self, *, parallelism, **kwargs):
+                test.assertIs(parallelism.fsdp_backend, backend)
+                test.assertIs(backend.placement_fn, placement_fn)
+                test.assertEqual(
+                    backend.placement_fn([("weight", None)], None),
+                    {"weight": ("custom",)},
+                )
+                raise ParallelizedError
+
+        config = SimpleNamespace(
+            compile=SimpleNamespace(precompile_artifact_dir="unused"),
+            parallelism=SimpleNamespace(
+                data_parallel_replicate_degree=1,
+                data_parallel_shard_degree=2,
+                context_parallel_degree=1,
+                tensor_parallel_degree=1,
+                pipeline_parallel_degree=1,
+                expert_parallel_degree=1,
+                enable_sequence_parallel=False,
+                fsdp_backend=backend,
+            ),
+            debug=SimpleNamespace(deterministic=False),
+            override=SimpleNamespace(imports=[]),
+            model=SimpleNamespace(build=Model),
+            precision=SimpleNamespace(dtype="bfloat16", param_dtype="float32"),
+            training=None,
+            activation_remat=None,
+            dump_folder="unused",
+        )
+        with (
+            patch.object(precompile_main.dist, "init_process_group"),
+            patch.object(precompile_main, "_register_coor_ops"),
+            patch.object(precompile_main, "ParallelismContext"),
+            patch.object(torch.accelerator, "set_device_index"),
+            patch("torch.distributed.config.compile_on_one_rank", False),
+            self.assertRaises(ParallelizedError),
+        ):
+            precompile_main._common_setup(config)
+
     def test_attention_metadata_reaches_tracing_with_and_without_mla(self):
         from torchtitan.experiments.graph_trainer import (
             make_fx_tracer,

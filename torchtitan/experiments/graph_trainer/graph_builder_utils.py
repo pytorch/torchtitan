@@ -40,6 +40,7 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
 )
+from torchtitan.experiments.graph_trainer.fsdp_patterns import uses_flex_shard
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
@@ -88,11 +89,12 @@ class GraphTrainerConfigView:
 
 def _find_fsdp_bucketing_pass(
     passes: list[Callable],
+    scheduling_fn: Callable,
 ) -> Callable | None:
     for pass_fn in passes:
         if (
             isinstance(pass_fn, functools.partial)
-            and pass_fn.func is joint_transformer_block_bucketing_reordering_pass
+            and pass_fn.func is scheduling_fn
         ):
             return pass_fn
     return None
@@ -111,14 +113,25 @@ def _configure_fsdp_bucketing_pass(
     ):
         return None
     assert isinstance(fsdp_bucketing_pass, functools.partial)
+    if fsdp_bucketing_pass.func is joint_transformer_block_bucketing_reordering_pass:
+        options = dict(
+            bucket_all_gathers=bucket_all_gathers,
+            bucket_reduce_scatters=bucket_reduce_scatters,
+            bucket_all_reduces=bucket_all_reduces,
+        )
+    else:
+        if not (bucket_all_gathers or bucket_reduce_scatters):
+            return None
+        options = dict(
+            schedule_all_gathers=bucket_all_gathers,
+            schedule_reduce_scatters=bucket_reduce_scatters,
+        )
     return functools.partial(
         fsdp_bucketing_pass.func,
         *fsdp_bucketing_pass.args,
         **dict(
             fsdp_bucketing_pass.keywords or {},
-            bucket_all_gathers=bucket_all_gathers,
-            bucket_reduce_scatters=bucket_reduce_scatters,
-            bucket_all_reduces=bucket_all_reduces,
+            **options,
         ),
     )
 
@@ -298,7 +311,10 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
         [
             eliminate_dead_code_pass,
             canonicalize_graph_pass,
-            deduplicate_fsdp_unshard_chains_pass,
+            functools.partial(
+                deduplicate_fsdp_unshard_chains_pass,
+                use_flex_shard=uses_flex_shard(config.parallelism),
+            ),
         ],
         compile_config=compile_config,
         respect_disable_passes=False,
@@ -325,7 +341,14 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     fsdp_bucketing_pass: Callable | None = None
     if split_fsdp_param_unshard or split_fsdp_grad_reduction:
         # Step 1: retain the original pass for extracted action graphs.
-        fsdp_bucketing_pass = _find_fsdp_bucketing_pass(passes)
+        scheduling_fn = joint_transformer_block_bucketing_reordering_pass
+        if uses_flex_shard(config.parallelism):
+            from torchtitan.experiments.graph_trainer.flex_shard import (
+                flex_shard_fsdp_scheduling,
+            )
+
+            scheduling_fn = flex_shard_fsdp_scheduling
+        fsdp_bucketing_pass = _find_fsdp_bucketing_pass(passes, scheduling_fn)
 
     # Step 2: apply the pipeline without bucketing extracted collectives.
     _apply_passes_with_extracted_fsdp_bucketing(
