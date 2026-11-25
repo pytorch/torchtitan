@@ -108,6 +108,17 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             "language_model.model.layers.{}.self_attn.kv_b_proj.weight": "layers.{}.attention.inner_attention.wkv_b.weight",
             "language_model.model.layers.{}.self_attn.g_proj.weight": "layers.{}.attention.gate.weight",
             "language_model.model.layers.{}.self_attn.o_proj.weight": "layers.{}.attention.wo.weight",
+            "language_model.model.layers.{}.self_attn.indexer.wq_b.weight": "layers.{}.attention.indexer.wq_b.weight",
+            "language_model.model.layers.{}.self_attn.indexer.wk.weight": "layers.{}.attention.indexer.wk.weight",
+            "language_model.model.layers.{}.self_attn.indexer.k_norm.weight": (
+                "layers.{}.attention.indexer.k_norm.weight"
+            ),
+            "language_model.model.layers.{}.self_attn.indexer.k_norm.bias": (
+                "layers.{}.attention.indexer.k_norm.bias"
+            ),
+            "language_model.model.layers.{}.self_attn.indexer.weights_proj.weight": (
+                "layers.{}.attention.indexer.weights_proj.weight"
+            ),
         }
         self.kda_from_hf_map = {
             "language_model.model.layers.{}.self_attn.q_proj.weight": "layers.{}.attention.q_proj.weight",

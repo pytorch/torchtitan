@@ -21,14 +21,14 @@ Each MTP layer follows the normal decoder layer structure, with the following MT
 
 ### 1.2 Model Integration
 
-`DeepSeekV3Model` inherits from `MTPDecoder`. If `mtp_layers` is empty, `MTPDecoder.forward()` falls back to the normal `Decoder.forward()` path, preserving non-MTP behavior.
+`DeepSeekV3Model` inherits from `MTPDecoder` (`torchtitan/models/common/mtp.py`), which DeepSeek-V4 shares. `MTPDecoder` owns the MTP input preprocessing, FSDP wrapping, remat containers, and FLOPs; each model owns its MTP block and MTP forward. If `mtp_layers` is empty, `MTPDecoder` and `DeepSeekV3Model.forward()` fall back to the normal `Decoder` paths, preserving non-MTP behavior.
 
 When `mtp_layers` is non-empty, execution is split into two stages:
 
 1. `MTPDecoder.preprocess_inputs()` prepares one shifted token/label pair per
    MTP depth before the common CP/SPMD input handling.
 2. Forward runs the main decoder on the original tokens, then each
-   `MTPTransformerBlock` consumes its prepared shifted tokens and the previous
+   `DeepSeekV3MTPBlock` consumes its prepared shifted tokens and the previous
    depth's hidden state.
 
 The dataloader does not need to extend the input sequence for MTP. The model's
@@ -168,7 +168,7 @@ The current implementation therefore:
 
 1. Constructs `mtp_input_tokens` at the token-id level.
 2. Reuses `tok_embeddings(mtp_input_tokens)` so the shifted embedding output follows the configured sharding strategy.
-3. Passes `mtp_input_valid_mask` into `MTPTransformerBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
+3. Passes `mtp_input_valid_mask` into `DeepSeekV3MTPBlock`; under SP, the block-level `ShardingConfig` aligns this mask to the activation layout.
 
 In other words, SP handling does not call `redistribute` explicitly in the forward code. The placement conversion for the mask input is described by the MTP layer sharding config.
 
@@ -176,7 +176,7 @@ In other words, SP handling does not call `redistribute` explicitly in the forwa
 
 ### 3.1 FSDP
 
-The current implementation integrates FSDP through `apply_fsdp_to_mtp_decoder()`. It temporarily inserts `mtp_layers` into `model.layers` and reuses the normal decoder `apply_fsdp_to_decoder()` path. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
+`MTPDecoder._apply_fsdp()` temporarily inserts `mtp_layers` into `model.layers` and calls `Decoder._apply_fsdp()`. This gives MTP layers the same FSDP wrapping, expert wrapping, and reshard policy as normal decoder layers.
 
 The benefit is that MTP reuses the existing DeepSeek-V3 FSDP policy instead of duplicating the full wrapper logic. The drawback is that the implementation is indirect. A future cleanup can factor the common FSDP apply logic into a helper shared by normal decoder layers and MTP layers.
 
@@ -215,7 +215,7 @@ boundary exchange between CP ranks.
 ### 4.1 Input Form
 
 `MTPDecoder.preprocess_inputs()` returns aligned tuples containing the main and
-per-depth token inputs and labels. `MTPDecoder` returns a prediction tuple with
+per-depth token inputs and labels. `DeepSeekV3Model.forward()` returns a prediction tuple with
 the same ordering. Predictions are logits on the ordinary path and hidden
 states when `_skip_lm_head=True` for `ChunkedLossWrapper`.
 

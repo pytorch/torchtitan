@@ -135,6 +135,15 @@ def parallelize_hf_transformers(
         )
         logger.info("Un-tied embedding/lm_head weights for FSDP compatibility")
 
+    # Only MoE flavors build Titan MoE, so a dense model would leave EP unused.
+    # Check the config: under PP, model.layers holds only this stage's layers.
+    if parallelism.expert_parallel_degree > 1 and not model.model.config.is_moe:
+        raise ValueError(
+            "parallelism.expert_parallel_degree > 1 needs an MoE flavor "
+            f"(TitanMoeModelConfig), got {parallelism.expert_parallel_degree} "
+            "for a dense model."
+        )
+
     # 1. Build and swap Titan MoE (sets _sharding_config, does NOT parallelize)
     if any(getattr(b, "moe_enabled", False) for b in model.layers):
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
