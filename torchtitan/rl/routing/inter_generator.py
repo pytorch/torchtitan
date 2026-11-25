@@ -21,6 +21,7 @@ from torchtitan.rl.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.rl.torch_transport_rdma import RDMAProbe
 
 
 @dataclass(kw_only=True, slots=True)
@@ -252,6 +253,16 @@ class InterGeneratorRouter(Configurable):
         #     (`Generator.release_groups`);
         #   - free the held KV under non-sticky routing (see `release_session`).
         await self._fanout("release_groups", group_ids)
+
+    async def check_rdma_probes(self, probes: list[RDMAProbe]) -> None:
+        """Have rank 0 of every generator, which reads the prompt image files rollout workers
+        keep, read every worker's probe (`Generator.check_rdma_probes`)."""
+        await asyncio.gather(
+            *(
+                h.rank0_actor.check_rdma_probes.call_one(probes)
+                for h in self._generators
+            )
+        )
 
     async def close_generators(self) -> list[Any | BaseException]:
         """Close every generator, returning each one's result or exception."""

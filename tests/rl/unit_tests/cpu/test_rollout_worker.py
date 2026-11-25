@@ -22,15 +22,16 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.rdma_object import RDMAImageFiles
 from torchtitan.rl.rollout import Prompt, PromptImage, RolloutStatus
 from torchtitan.rl.rollout.message_env import MessageEnvInitOutput, MessageEnvStepOutput
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker
 from torchtitan.rl.rollout.rubric import RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv, TokenEnvOutput
 from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.torch_transport_rdma import RDMAImageFiles
 
 from tests.rl.unit_tests.cpu.test_rollout_utils import rollout_to_training_samples
+from tests.rl.unit_tests.cpu.test_torch_transport_rdma import loopback_buffers
 
 
 class _Config:
@@ -286,7 +287,7 @@ def test_delta_prompts_rebuild_the_full_prompt_samples() -> None:
                 generate_fn=generate_fn,
                 release_session_fn=release_session_fn,
                 env=env,
-                image_files=RDMAImageFiles(register_rdma_object=None, min_bytes=None),
+                image_files=RDMAImageFiles(buffers=None, min_bytes=None, group_id=0),
                 sampling=SamplingConfig(),
                 group_id=0,
                 rollout_id=rollout_id,
@@ -349,7 +350,7 @@ def test_rollout_sends_and_records_prompt_images() -> None:
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             env=_ImageTokenEnv(),
-            image_files=RDMAImageFiles(register_rdma_object=None, min_bytes=None),
+            image_files=RDMAImageFiles(buffers=None, min_bytes=None, group_id=0),
             sampling=SamplingConfig(),
             group_id=0,
             rollout_id=0,
@@ -390,24 +391,7 @@ def test_group_keeps_each_image_file_once_until_its_last_generate_call() -> None
                 next_prompt=image_prompt, status=RolloutStatus.ONGOING
             )
 
-    class _RegisteredFile:
-        def __init__(self, data: bytes) -> None:
-            self.data = data
-            self.dropped = False
-
-        async def read(self) -> bytes:
-            assert not self.dropped
-            return self.data
-
-        async def drop(self) -> None:
-            self.dropped = True
-
-    registered: list[_RegisteredFile] = []
-
-    def register_rdma_object(value, *, min_bytes):
-        registered.append(_RegisteredFile(value))
-        return registered[-1]
-
+    worker_buffers, generator_buffers = loopback_buffers()
     token_env_config = SimpleNamespace(build=lambda **kwargs: _TwoTurnImageTokenEnv())
     worker = MessageEnvRolloutWorker(
         SimpleNamespace(
@@ -417,14 +401,14 @@ def test_group_keeps_each_image_file_once_until_its_last_generate_call() -> None
             advantage=_Config(_AdvantageEstimator()),
             rdma_min_image_bytes=64,
         ),
-        register_rdma_object=register_rdma_object,
+        rdma_byte_buffers=worker_buffers,
     )
     worker._renderer = None
     read_prompts = []
 
     async def generate_fn(prompt, **kwargs) -> Completion:
         # The generator reads the file while the group runs.
-        read_prompts.append(await prompt.read())
+        read_prompts.append(prompt.read(generator_buffers))
         return await _GenerateFn()(prompt, **kwargs)
 
     async def release_session_fn(**kwargs) -> None:
@@ -442,6 +426,7 @@ def test_group_keeps_each_image_file_once_until_its_last_generate_call() -> None
     )
 
     assert all(r.status == RolloutStatus.COMPLETED for r in group.rollouts)
-    # 2 siblings x 2 turns read one registered file, dropped after the group.
+    # 2 siblings x 2 turns read one kept file, back in the pool after the group.
     assert [p.images[0].data for p in read_prompts] == [image.data] * 4
-    assert len(registered) == 1 and registered[0].dropped
+    assert worker_buffers.pool.num_registrations == 1
+    assert worker_buffers.pool.bytes_in_use == 0

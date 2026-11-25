@@ -21,8 +21,8 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rdma_object import RDMAPrompt
 from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.torch_transport_rdma import RDMAProbe, RDMAPrompt
 
 
 class _GeneratorActorEndpoints:
@@ -103,6 +103,10 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:
         await super().release_groups(group_ids)
+
+    @concurrent_endpoint
+    async def check_rdma_probes(self, probes: list[RDMAProbe]) -> None:
+        await super().check_rdma_probes(probes)
 
     @concurrent_endpoint
     async def release_sessions(self, session_ids: list[str]) -> None:

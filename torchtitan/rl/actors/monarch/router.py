@@ -17,6 +17,7 @@ from monarch.actor import concurrent_endpoint, current_size
 from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.system import ServiceHandle
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.torch_transport_rdma import RDMAProbe
 
 
 class _InterGeneratorRouterActorEndpoints:
@@ -63,6 +64,10 @@ class _InterGeneratorRouterActorEndpoints:
     @concurrent_endpoint
     async def pull_model_state_dict(self, policy_version: int) -> None:
         await super().pull_model_state_dict(policy_version)
+
+    @concurrent_endpoint
+    async def check_rdma_probes(self, probes: list[RDMAProbe]) -> None:
+        await super().check_rdma_probes(probes)
 
     @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:

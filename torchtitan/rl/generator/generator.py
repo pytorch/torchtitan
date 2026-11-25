@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,9 +41,14 @@ from torchtitan.rl.model_state_dict_transport import (
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rdma_object import RDMAPrompt
-from torchtitan.rl.rollout.types import Completion
+from torchtitan.rl.rollout.types import Completion, Prompt
 from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.torch_transport_rdma import (
+    check_rdma_probes,
+    RDMAByteBuffers,
+    RDMAProbe,
+    RDMAPrompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -316,6 +322,13 @@ class Generator(Configurable):
         self._model_state_dict_transport: ModelStateDictTransport | None = None
         # Set by `initialize_torchstore_client`: the event loop TorchStore reads run on.
         self._torchstore_loop: asyncio.AbstractEventLoop | None = None
+        # Rank 0 reads the image files rollout workers kept (`RDMAPrompt`) on one thread: torch
+        # transport reads block, and one transport serves one thread. The transport is made by
+        # the setup probe (`check_rdma_probes`), so runs without the images knob never start NIXL.
+        self._image_file_reader = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="image-file-reader"
+        )
+        self._image_file_buffers: RDMAByteBuffers | None = None
 
         broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
         # The engine loop owns the engine from here on and releases it on exit, so this
@@ -441,12 +454,48 @@ class Generator(Configurable):
                 # cache already has the image (`VLLMEngine._preprocess_images` looks up
                 # `hash_value` first), and the engine loop still broadcasts the bytes to the
                 # other generator ranks. Read only on a cache miss.
-                prompt=await prompt.read(),
+                prompt=await self._read_prompt(prompt),
                 sampling=sampling,
                 group_id=group_id,
                 routing_session_id=routing_session_id,
                 arrival_time=arrival_time,
             )
+        )
+
+    async def _read_prompt(self, prompt: RDMAPrompt) -> Prompt:
+        """`prompt` with every image file, reading the files the rollout worker kept on the
+        image-file thread."""
+        if not prompt.has_kept_image_files:
+            return prompt.prompt
+        with sl.log_trace_span("read_prompt_image_files"):
+            return await asyncio.get_running_loop().run_in_executor(
+                self._image_file_reader, self._read_prompt_on_reader_thread, prompt
+            )
+
+    def _read_prompt_on_reader_thread(self, prompt: RDMAPrompt) -> Prompt:
+        return prompt.read(self._image_file_buffers_on_reader_thread())
+
+    def _image_file_buffers_on_reader_thread(self) -> RDMAByteBuffers:
+        if self._image_file_buffers is None:
+            self._image_file_buffers = RDMAByteBuffers()
+        return self._image_file_buffers
+
+    async def check_rdma_probes(self, probes: list[RDMAProbe]) -> None:
+        """On rank 0, at setup when prompt image files go by RDMA: read each rollout worker's
+        probe on the image-file thread (`check_rdma_probes`), which also makes this rank's
+        transport and connects it to every worker.
+
+        Raises:
+            ValueError: a probe read failed; the message names the hosts.
+        """
+        await asyncio.get_running_loop().run_in_executor(
+            self._image_file_reader,
+            lambda: check_rdma_probes(
+                self._image_file_buffers_on_reader_thread(),
+                probes,
+                reader="Generator rank 0",
+                knob="rdma_min_image_bytes",
+            ),
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:

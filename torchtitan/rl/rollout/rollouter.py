@@ -22,7 +22,6 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
-from torchtitan.rl.rdma_object import RDMAImageFiles, RegisterRDMAObject
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
@@ -40,6 +39,7 @@ from torchtitan.rl.rollout.types import (
     RolloutTurn,
     RolloutTurnID,
 )
+from torchtitan.rl.torch_transport_rdma import RDMAByteBuffers, RDMAImageFiles
 
 if TYPE_CHECKING:
     from renderers import Renderer
@@ -348,9 +348,9 @@ class BaseRolloutWorker(Configurable, ABC):
     """Runs one rollout group in a rollout worker process, then scores it and computes its
     advantages. Subclasses implement `run_group`.
 
-    With `rdma_min_image_bytes` set, `register_rdma_object` (the actor system's RDMA
-    registration, e.g. `MonarchRDMAObject.register`) is required, and `run_group` keeps a group's
-    large image files in this worker (`RDMAImageFiles`).
+    With `rdma_min_image_bytes` set, `rdma_byte_buffers` (this worker's torch transport and
+    buffer pool, which its packed groups share) is required, and `run_group` keeps a group's large
+    image files in this worker (`RDMAImageFiles`).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -365,14 +365,18 @@ class BaseRolloutWorker(Configurable, ABC):
         set `AdvantageEstimator.Config(should_std_normalize=True)` for standard GRPO."""
 
         rdma_min_image_bytes: int | None = None
-        """Keep each prompt image file of at least this many bytes in this worker as an RDMA
-        buffer, which generator rank 0 reads, instead of sending it in every `generate` call:
+        """Keep each prompt image file of at least this many bytes in this worker, in a buffer of
+        its torch transport pool (the one `rdma_min_group_bytes` uses), which generator rank 0
+        reads (NIXL), instead of sending it in every `generate` call:
             None (default): every file in the call.
             e.g. 5_000_000: files of >= 5 MB stay here, one buffer per file per group,
-            until the group's last `generate` call returns.
+            until the group's last `generate` call returns; then the buffer goes back to the
+            pool for later files and packed groups.
         Each read is a round trip back to this worker, so only multi-MB files gain: across GB300
-        hosts with ibverbs, reading broke even with sending at ~2 MB per file, was ~2x faster
-        from 5 MB, and 2-6x slower below 1 MB (e.g. Geometry3K's ~15 KB files)."""
+        hosts with ibverbs and Monarch RDMA buffers (this knob's earlier transport), reading broke
+        even with sending at ~2 MB per file, was ~2x faster from 5 MB, and 2-6x slower below 1 MB
+        (e.g. Geometry3K's ~15 KB files). Needs NIXL in every rollout worker and in generator rank
+        0 of every generator, as `rdma_min_group_bytes` does."""
 
         rdma_min_group_bytes: int | None = None
         """Keep each training group whose packed bytes (`pack_rollout_group`) are at least this
@@ -400,8 +404,8 @@ class BaseRolloutWorker(Configurable, ABC):
         def __post_init__(self) -> None:
             if self.rdma_min_image_bytes is not None and self.rdma_min_image_bytes < 1:
                 raise ValueError(
-                    "rdma_min_image_bytes must be None or >= 1 (RDMABuffer rejects empty "
-                    f"buffers), got {self.rdma_min_image_bytes}"
+                    "rdma_min_image_bytes must be None or >= 1, got "
+                    f"{self.rdma_min_image_bytes}"
                 )
             if self.rdma_min_group_bytes is not None and self.rdma_min_group_bytes < 1:
                 raise ValueError(
@@ -413,15 +417,17 @@ class BaseRolloutWorker(Configurable, ABC):
         self,
         config: Config,
         *,
-        register_rdma_object: RegisterRDMAObject | None = None,
+        rdma_byte_buffers: RDMAByteBuffers | None = None,
     ) -> None:
-        if config.rdma_min_image_bytes is not None and register_rdma_object is None:
+        if config.rdma_min_image_bytes is not None and rdma_byte_buffers is None:
             raise ValueError(
-                "rdma_min_image_bytes is set, but no register_rdma_object was given: the "
-                "rollout worker must run in an actor system that provides RDMA."
+                "rdma_min_image_bytes is set, but no rdma_byte_buffers was given: the rollout "
+                "worker's actor must create this worker's torch transport buffers."
             )
         self._rdma_min_image_bytes = config.rdma_min_image_bytes
-        self._register_rdma_object = register_rdma_object
+        self._rdma_byte_buffers = (
+            rdma_byte_buffers if config.rdma_min_image_bytes is not None else None
+        )
         self.rubric: Rubric = config.rubric.build()
         self.advantage_estimator: AdvantageEstimator = config.advantage.build()
 
@@ -496,9 +502,9 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
         self,
         config: Config,
         *,
-        register_rdma_object: RegisterRDMAObject | None = None,
+        rdma_byte_buffers: RDMAByteBuffers | None = None,
     ) -> None:
-        super().__init__(config, register_rdma_object=register_rdma_object)
+        super().__init__(config, rdma_byte_buffers=rdma_byte_buffers)
         self._message_env_config = config.message_env
         self._token_env_config = config.token_env
         self._renderer: Renderer
@@ -568,8 +574,9 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
 
         # The siblings' prompts share the group's large image files.
         image_files = RDMAImageFiles(
-            register_rdma_object=self._register_rdma_object,
+            buffers=self._rdma_byte_buffers,
             min_bytes=self._rdma_min_image_bytes,
+            group_id=group_id,
         )
         # TODO(perf): siblings in a group share the first-turn prompt; tokenize it once per group and
         # reuse across the group_size rollouts (truest spot is the worker's first-turn render).
@@ -599,11 +606,13 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
             # close the envs
             await asyncio.gather(*(env.close() for env in envs), return_exceptions=True)
             # Every generate call has returned: `_run_single_rollout` catches its errors, and a
-            # cancelled gather cancels the calls first (a read rank 0 is still doing then fails).
+            # cancelled gather cancels the calls first (a read rank 0 is still doing then reads a
+            # released buffer: its tags catch a reuse, and the call's result goes nowhere).
             # A sibling raising a BaseException (e.g. CancelledError from an inner await) ends the
             # gather early; a sibling still running then fails its next registration
-            # (`RDMAImageFiles.register` after drop) instead of keeping a buffer nothing drops.
-            await image_files.drop()
+            # (`RDMAImageFiles.register` after release) instead of keeping a buffer nothing
+            # releases.
+            image_files.release()
 
         # score
         outputs = await self.score_group(rollouts, sample)
@@ -641,7 +650,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                 with its `routing_session_id`.
             env: The env for this rollout; `run_group` closes it.
             image_files: The group's image files (`RDMAImageFiles`) that every prompt goes
-                through; `run_group` drops them.
+                through; `run_group` releases them.
             sampling: Sampling config for every generate call.
             group_id: The GRPO group id.
             rollout_id: Sibling index within the group; combined with the turn index into the

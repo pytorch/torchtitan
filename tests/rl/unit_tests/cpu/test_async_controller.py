@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import torch
 from torchtitan.rl.controller.controller import (
-    check_rdma_probes_on_leaders,
+    check_rdma_probes_within_timeout,
     Controller,
     ValidationConfig,
 )
@@ -1000,24 +1000,26 @@ def test_a_group_that_fails_after_packing_is_released_as_untrainable() -> None:
     assert controller._packed_groups_by_id == {}
 
 
-def test_a_probe_read_that_hangs_fails_setup_naming_the_leader_and_hosts() -> None:
+def test_a_probe_read_that_hangs_fails_setup_naming_the_reader_and_hosts() -> None:
     """A fabric that hangs instead of failing must still fail setup with a clear error."""
-
-    async def hang(probes) -> None:
-        await asyncio.Event().wait()
-
-    leaders = [
-        SimpleNamespace(check_rdma_probes=SimpleNamespace(call_one=AsyncMock())),
-        SimpleNamespace(check_rdma_probes=SimpleNamespace(call_one=hang)),
-    ]
     probes = [SimpleNamespace(host="worker-b"), SimpleNamespace(host="worker-a")]
 
     with pytest.raises(
         ValueError,
-        match=r"DP rank 1 did not finish .* \['worker-a', 'worker-b'\] .* within 0.05 s",
+        match=(
+            r"Rank 0 of a generator did not finish .* \['worker-a', 'worker-b'\] .* "
+            r"within 0.05 s.*Config\.rdma_min_image_bytes=None"
+        ),
     ):
-        asyncio.run(check_rdma_probes_on_leaders(leaders, probes, timeout_s=0.05))
-    leaders[0].check_rdma_probes.call_one.assert_awaited_once_with(probes)
+        asyncio.run(
+            check_rdma_probes_within_timeout(
+                asyncio.Event().wait(),
+                probes,
+                reader="Rank 0 of a generator",
+                knob="rdma_min_image_bytes",
+                timeout_s=0.05,
+            )
+        )
 
 
 def test_batcher_loop_drops_the_packed_bytes_of_untrainable_groups() -> None:

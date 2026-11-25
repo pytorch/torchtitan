@@ -14,13 +14,12 @@ unpacks them like any packed group (`unpack_rollout_group`).
 
     registered buffer, laid out by pack_rollout_group(..., region_padding=16):
     | tag | rollout 0 | tag | tag | rollout 1 | tag | ... | tag | image a | tag |
-      tag = (group_id, generation), written by the worker, checked by the reader
+      tag = REGION_TAG: (group_id, the buffer allocation's generation), written by the worker,
+            checked by the reader
 """
 
 from __future__ import annotations
 
-import itertools
-import struct
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -34,13 +33,12 @@ from torchtitan.rl.rollout.packed_group import (
     PackedRolloutGroup,
     selected_rollout_fields,
 )
+from torchtitan.rl.torch_transport_rdma import REGION_TAG
 
 if TYPE_CHECKING:
     from torchtitan.rl.rollout.types import RolloutGroup, RolloutGroupSummary
     from torchtitan.rl.torch_transport_rdma import RDMAByteBuffer, RDMAByteBuffers
 
-# What the worker writes before and after each region: (group_id, generation).
-_REGION_TAG = struct.Struct("<qq")
 # Regions closer than this (only alignment padding and tags between them) are read as one range.
 _MERGE_GAP_BYTES = 64
 
@@ -72,9 +70,11 @@ class PackedRolloutGroupHandle:
 
     group_id: int
 
-    generation: int
-    """The worker's count of packed groups, so `(group_id, generation)` names one use of a
-    pooled buffer."""
+    @property
+    def generation(self) -> int:
+        """The buffer allocation's generation (`RDMAByteBuffer.generation`), so
+        `(group_id, generation)` names one use of a pooled buffer."""
+        return self.buffer.generation
 
     rollout_ids: tuple[int, ...]
     """Each rollout region's `Rollout.rollout_id`, as `PackedRolloutGroup.rollout_ids`."""
@@ -114,16 +114,14 @@ class RolloutGroupBuffers:
     def __init__(self, *, min_bytes: int, buffers: RDMAByteBuffers) -> None:
         self._min_bytes = min_bytes
         self._buffers = buffers
-        self._generations = itertools.count(1)
         self._handles_by_group_id: dict[int, PackedRolloutGroupHandle] = {}
-        self._num_registrations_logged = 0
 
     def pack(
         self, group: RolloutGroup
     ) -> tuple[RolloutGroupSummary, PackedRolloutGroup | PackedRolloutGroupHandle]:
         """`pack_rollout_group(group)`: into a registered buffer here, returning a handle, if the
         packed group is at least `min_bytes`; else by value, as `pack_rollout_group`. Adds the
-        worker's buffer metrics to the summary's group metrics for groups kept here."""
+        pack time to the summary's group metrics for groups kept here."""
         pack_start = time.perf_counter()
         registered: list[tuple[np.ndarray, RDMAByteBuffer]] = []
 
@@ -135,31 +133,29 @@ class RolloutGroupBuffers:
             return registered[-1][0]
 
         summary, packed = pack_rollout_group(
-            group, allocate=allocate, region_padding=_REGION_TAG.size
+            group, allocate=allocate, region_padding=REGION_TAG.size
         )
         if not registered:
             return summary, packed
         [(destination, buffer)] = registered
-        generation = next(self._generations)
         tag = np.frombuffer(
-            _REGION_TAG.pack(group.group_id, generation), dtype=np.uint8
+            REGION_TAG.pack(group.group_id, buffer.generation), dtype=np.uint8
         )
 
         def tagged(region: np.ndarray) -> PackedRegion:
             # A view into `destination` with `region_padding` free bytes on each side.
             start = region.ctypes.data - destination.ctypes.data
             end = start + region.nbytes
-            destination[start - _REGION_TAG.size : start] = tag
-            destination[end : end + _REGION_TAG.size] = tag
+            destination[start - REGION_TAG.size : start] = tag
+            destination[end : end + REGION_TAG.size] = tag
             return PackedRegion(
-                offset=start - _REGION_TAG.size,
-                num_bytes=region.nbytes + 2 * _REGION_TAG.size,
+                offset=start - REGION_TAG.size,
+                num_bytes=region.nbytes + 2 * REGION_TAG.size,
             )
 
         handle = PackedRolloutGroupHandle(
             buffer=buffer,
             group_id=group.group_id,
-            generation=generation,
             rollout_ids=packed.rollout_ids,
             rollout_regions=tuple(tagged(region) for region in packed.rollout_regions),
             rollout_image_hashes=packed.rollout_image_hashes,
@@ -169,21 +165,11 @@ class RolloutGroupBuffers:
             },
         )
         self._handles_by_group_id[group.group_id] = handle
-        pool = self._buffers.pool
-        new_registrations = pool.num_registrations - self._num_registrations_logged
-        self._num_registrations_logged = pool.num_registrations
-        summary.group.metrics.extend(
-            [
-                m.Metric(
-                    "timing/rollout_worker/pack_group",
-                    m.Mean(time.perf_counter() - pack_start),
-                ),
-                # 0 once the pool has a free buffer for every group size it sees.
-                m.Metric("rollout_worker/pool_registrations", m.Sum(new_registrations)),
-                m.Metric("rollout_worker/pool_bytes", m.Max(pool.registered_bytes)),
-                # The pool's buffers handed out to live groups, size-class rounded.
-                m.Metric("rollout_worker/pool_bytes_in_use", m.Max(pool.bytes_in_use)),
-            ]
+        summary.group.metrics.append(
+            m.Metric(
+                "timing/rollout_worker/pack_group",
+                m.Mean(time.perf_counter() - pack_start),
+            )
         )
         return summary, handle
 
@@ -213,7 +199,7 @@ def read_packed_rollout_group_handles(
     for handle, (_, ranges), chunks in zip(
         handles, requests, chunks_by_request, strict=True
     ):
-        tag = _REGION_TAG.pack(handle.group_id, handle.generation)
+        tag = REGION_TAG.pack(handle.group_id, handle.generation)
 
         def region_bytes(region: PackedRegion) -> np.ndarray:
             # The merged range holding the region, then the region within it, without its tags.
@@ -221,17 +207,17 @@ def read_packed_rollout_group_handles(
                 if range_start <= region.offset < range_start + range_length:
                     start = region.offset - range_start
                     data = chunk[start : start + region.num_bytes]
-                    head = data[: _REGION_TAG.size].tobytes()
-                    tail = data[-_REGION_TAG.size :].tobytes()
+                    head = data[: REGION_TAG.size].tobytes()
+                    tail = data[-REGION_TAG.size :].tobytes()
                     if head != tag or tail != tag:
                         raise RuntimeError(
                             f"Rollout group {handle.group_id} (generation "
                             f"{handle.generation}): bytes {region.offset}.."
                             f"{region.offset + region.num_bytes} of its buffer hold "
-                            f"{_REGION_TAG.unpack(head)} ... {_REGION_TAG.unpack(tail)}, so "
+                            f"{REGION_TAG.unpack(head)} ... {REGION_TAG.unpack(tail)}, so "
                             "the rollout worker reused the buffer before this read."
                         )
-                    return data[_REGION_TAG.size : -_REGION_TAG.size]
+                    return data[REGION_TAG.size : -REGION_TAG.size]
             raise AssertionError(f"region {region} is in no read range")
 
         packed_groups.append(

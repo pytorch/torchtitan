@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 """Unit tests for `torchtitan.rl.torch_transport_rdma`: the registered-buffer pool, range reads,
-and the setup probe.
+the setup probe, and the prompt image files a rollout worker keeps for generator rank 0
+(`RDMAImageFiles`, `BaseRolloutWorker.Config.rdma_min_image_bytes`).
 
 Most tests use `LoopbackTransport`, an in-process stand-in for torch transport. The tests marked
 `requires_nixl` use the real NIXL backend (two transports in this process) and skip without the
@@ -22,12 +23,16 @@ from dataclasses import dataclass, replace
 import numpy as np
 import pytest
 import torch
+from renderers import PlaceholderRange
 
+from torchtitan.rl.rollout.types import Prompt, PromptImage
 from torchtitan.rl.torch_transport_rdma import (
     buffer_size_class,
     check_rdma_probes,
     make_rdma_probe,
     RDMAByteBuffers,
+    RDMAImageFiles,
+    RDMAPrompt,
     RegisteredBufferPool,
 )
 
@@ -199,11 +204,15 @@ def test_a_probe_read_that_fails_raises_at_setup() -> None:
     instead of failing mid-step."""
     owner, reader = loopback_buffers()
     probe = replace(make_rdma_probe(owner), host="rollout-host-3")
-    check_rdma_probes(reader, [probe])
+    names = {"reader": "Generator rank 0", "knob": "rdma_min_image_bytes"}
+    check_rdma_probes(reader, [probe], **names)
     reader._transport.fail_reads = True
 
-    with pytest.raises(ValueError, match="rollout-host-3"):
-        check_rdma_probes(reader, [probe])
+    with pytest.raises(
+        ValueError,
+        match=r"Generator rank 0 on .*rollout-host-3.*Config\.rdma_min_image_bytes=None",
+    ):
+        check_rdma_probes(reader, [probe], **names)
 
 
 def _nixl_available() -> bool:
@@ -280,3 +289,92 @@ def test_nixl_reads_new_bytes_from_reused_buffers_without_registering() -> None:
         np.testing.assert_array_equal(
             tail, (np.arange(13 * MiB, 15 * MiB) + value) % 251
         )
+
+
+def _image(name: str, num_bytes: int) -> PromptImage:
+    return PromptImage(
+        hash_value=name,
+        source_path=f"{name}.png",
+        grid_thw=(1, 2, 2),
+        data=name.encode()[:1] * num_bytes,
+    )
+
+
+def _image_prompt(*images: PromptImage) -> Prompt:
+    return Prompt(
+        token_ids=[1, 2, 3],
+        images=images,
+        image_placeholders=tuple(PlaceholderRange(offset=0, length=1) for _ in images),
+    )
+
+
+def test_image_files_keep_each_large_file_once_and_release_them() -> None:
+    owner, reader = loopback_buffers()
+    image_files = RDMAImageFiles(buffers=owner, min_bytes=100, group_id=7)
+    large, small = _image("large", 200), _image("small", 1)
+    # A sibling renders the same file into a new bytes object; a later turn adds an image.
+    sibling_large = replace(large, data=bytes(large.data))
+    later_turn = _image_prompt(large, small, _image("new", 300))
+
+    sent = [
+        image_files.register(prompt)
+        for prompt in (
+            _image_prompt(large, small),
+            _image_prompt(sibling_large),
+            later_turn,
+        )
+    ]
+
+    # Each large file takes one buffer, on the first prompt that carries it.
+    assert owner.pool.num_registrations == 2
+    assert sent[0].image_files[0] is sent[1].image_files[0] is sent[2].image_files[0]
+    # Only the handle goes with the prompt; small files go by value.
+    assert sent[0].prompt.images[0].data == b"" and sent[0].image_files[1] is None
+    assert sent[0].prompt.images[1].data == small.data
+    read = sent[2].read(reader)
+    assert [image.data for image in read.images] == [
+        image.data for image in later_turn.images
+    ]
+    assert read.token_ids == later_turn.token_ids
+
+    image_files.release()
+    assert owner.pool.bytes_in_use == 0
+    # A sibling still running after the release can't keep a buffer nothing would release.
+    with pytest.raises(RuntimeError, match="after release"):
+        image_files.register(_image_prompt(large))
+    assert image_files.register(_image_prompt(small)) == RDMAPrompt(
+        _image_prompt(small)
+    )
+
+
+def test_image_files_send_the_prompt_whole_below_the_threshold_or_without_one() -> None:
+    owner, reader = loopback_buffers()
+    prompt = _image_prompt(_image("small", 10))
+    for image_files in (
+        RDMAImageFiles(buffers=owner, min_bytes=11, group_id=1),
+        RDMAImageFiles(buffers=None, min_bytes=None, group_id=1),
+    ):
+        sent = image_files.register(prompt)
+        assert sent == RDMAPrompt(prompt) and sent.prompt is prompt
+        assert not sent.has_kept_image_files
+        assert sent.read(reader) is prompt
+    assert owner.pool.num_registrations == 0
+
+
+def test_a_read_after_the_worker_reused_the_files_buffer_raises() -> None:
+    """A group's file buffer goes back to the pool when its generate calls end, and the next
+    allocation of the same size class reuses it, e.g. the same group's packed buffer: same
+    `group_id`, so only the pool's per-allocation generation tells the two uses apart. A late
+    read of the file's handle then sees the new tags instead of returning the new bytes as the
+    file."""
+    owner, reader = loopback_buffers()
+    first_use = RDMAImageFiles(buffers=owner, min_bytes=100, group_id=1)
+    stale = first_use.register(_image_prompt(_image("a", 1000)))
+    first_use.release()
+    second_use = RDMAImageFiles(buffers=owner, min_bytes=100, group_id=1)
+    fresh = second_use.register(_image_prompt(_image("b", 1000)))
+
+    assert owner.pool.num_registrations == 1
+    assert fresh.read(reader).images[0].data == b"b" * 1000
+    with pytest.raises(RuntimeError, match=r"group 1 \(generation 1\).*\(1, 2\)"):
+        stale.read(reader)
