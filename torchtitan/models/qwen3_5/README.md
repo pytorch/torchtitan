@@ -74,7 +74,7 @@ checkpoint. Append `_mm` (e.g. `9B_mm`, `35B-A3B_mm`) for
 | Tensor Parallelism (TP) | With Sequence Parallel; head-sharded TP on GatedDeltaNet projections |
 | Expert Parallelism (EP) | For MoE variants |
 | Pipeline Parallel (PP) | Vision encoder assigned to first stage; 1F1B and Interleaved1F1B schedules |
-| Context Parallelism (CP) | Attention Gym native CP for GatedDeltaNet; full attention supports K/V all-gather with contiguous, head-tail, or PTRR partitions and Ulysses with contiguous partitions. |
+| Context Parallelism (CP) | Attention Gym native CP for GatedDeltaNet; full attention supports K/V all-gather with contiguous, head-tail, or PTRR partitions and Ulysses with contiguous partitions. See `UlyssesInnerAttention` for the Ulysses head count rules. |
 | Sample Packing | Opt-in via `MMSamplePackingConfig` |
 
 ## Numerical Parity

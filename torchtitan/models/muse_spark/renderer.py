@@ -836,7 +836,7 @@ class MuseSparkRenderer:
             message_indices=message_indices,
             sampled_mask=sampled_mask,
             is_content=is_content,
-            message_roles=[cast(str, message.get("role")) for message in messages],
+            message_roles=[message.get("role") for message in messages],
             message_tool_names=[message.get("name") for message in messages],
             multi_modal_data=(
                 None
