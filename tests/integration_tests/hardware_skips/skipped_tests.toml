@@ -27,4 +27,5 @@ rocm = [
   "fsdp+hybridep",                           # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
   "dist_gemm",                               # symmetric memory is CUDA-only.
   "qwen3_fsdp+deepep",
+  "pp_dp_tp",                                # CPU-offloaded Adam moments require CUDA.
 ]

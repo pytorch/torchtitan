@@ -11,13 +11,17 @@ import functools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from monarch.actor import Actor, concurrent_endpoint, current_rank
+from monarch.actor import concurrent_endpoint, current_rank
 
+# TODO: load the `grain` and `datasets` packages only where they are used, to save ~450 MiB per rollout worker.
+#   This import runs `torchtitan/components/data/__init__.py`, which loads both. The renderer and
+#   `rl/rollout/data.py` import them too. First check that a worker doesn't need them.
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
+from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 

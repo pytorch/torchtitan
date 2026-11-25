@@ -126,10 +126,10 @@ def _rollouter_without_datasets() -> Rollouter:
     worker_config = WorkerConfig()
     rollouter = object.__new__(Rollouter)
     rollouter._config = SimpleNamespace(
-        worker=worker_config,
-        worker_pool_size=3,
-        num_threads_per_worker=2,
+        worker=worker_config, num_threads_per_worker=2, rollouts_per_worker=7
     )
+    # 20 training rollouts in flight / 7 per worker -> 3 workers
+    rollouter._max_rollouts_in_flight = 20
     rollouter._worker_actors = None
     rollouter._actor_system = None
     rollouter._inflight_run_group_calls = set()
