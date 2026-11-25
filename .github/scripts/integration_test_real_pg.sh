@@ -37,6 +37,10 @@ fi
 python -m pip install --force-reinstall --pre \
   "${TORCH_SPEC}" torchvision --index-url "${INDEX_URL}"
 USE_CPP=0 python -m pip install --pre -r .github/requirements-torchao.txt --index-url "${INDEX_URL}"
+# For the FlexShard tests, which skip ROCm.
+if [[ "${GPU_ARCH_TYPE}" == "cuda" ]]; then
+  bash .github/scripts/install_flex_shard.sh
+fi
 
 GPU_ARCH="a10g"
 if [[ "${GPU_ARCH_TYPE}" == "rocm" ]]; then

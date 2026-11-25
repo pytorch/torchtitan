@@ -128,7 +128,7 @@ the [model guide](torchtitan/models/README.md).
 <td valign="top" width="50%">
 
 **Parallelism**
-- [FSDP2](torchtitan/distributed/FSDP.md), HSDP, and DDP
+- [FSDP2](torchtitan/distributed/FSDP.md), HSDP, and DDP; [FlexShard](torchtitan/distributed/FLEX_SHARD_FSDP.md) as an experimental FSDP backend
 - Tensor parallel, including async TP
 - [Pipeline parallel](torchtitan/distributed/PIPELINE_PARALLEL.md): 1F1B, Interleaved 1F1B, GPipe, and other `torch.distributed.pipelining` schedules
 - Context parallel: all-gather KV and Ulysses
