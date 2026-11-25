@@ -529,16 +529,11 @@ class Glm5SparseAttention(InnerAttention):
 
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
-        training_stage: Literal["frozen", "warmup", "sparse"] = "frozen"
         indexer_loss: Glm5IndexerLoss.Config | None = None
-        max_context_length: int | None = None
+        warmup_context_length: int | None = None
 
         def __post_init__(self):
-            if self.training_stage not in ("frozen", "warmup", "sparse"):
-                raise ValueError("Unknown GLM indexer training stage")
-            if self.training_stage == "warmup" and (
-                self.max_context_length is None or self.max_context_length <= 0
-            ):
+            if self.warmup_context_length is not None and self.warmup_context_length <= 0:
                 raise ValueError("GLM warmup requires a positive max_context_length")
 
         @property
@@ -548,9 +543,8 @@ class Glm5SparseAttention(InnerAttention):
     def __init__(self, config):
         super().__init__()
         require_attn_gym(gather_attn)
-        self.training_stage = config.training_stage
         self.indexer_loss = config.indexer_loss.build() if config.indexer_loss else None
-        self.max_context_length = config.max_context_length
+        self.warmup_context_length = config.warmup_context_length
 
     def forward(
         self,
@@ -563,13 +557,12 @@ class Glm5SparseAttention(InnerAttention):
         indexer_features: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.training_stage == "warmup":
+        if self.warmup_context_length is not None:
             # Packed documents do not attend across boundaries. Allocate one
             # document's key capacity, not the whole flattened microbatch.
-            assert self.max_context_length is not None
             outputs = []
             offsets_S = torch.arange(
-                min(self.max_context_length, k_KH.shape[0]),
+                min(self.warmup_context_length, k_KH.shape[0]),
                 device=q_THK.device,
                 dtype=torch.int32,
             )

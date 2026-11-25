@@ -102,8 +102,9 @@ arbitrary learned Top-K key set for each query.
 The indexer delegates discrete weighted-ReLU Top-K selection to Attention Gym's
 `lightning_indexer`, using the repository's existing `attn-gym==0.0.17`
 dependency. Like DeepSeek V4, it selects the fused implementation for FP16/BF16
-query features on NVIDIA SM90 or newer; other inputs use the model-local
-FP32 tiled reference selector without a full query/key score tensor.
+query features on NVIDIA SM90 or newer without CP. Low-precision CUDA inputs
+on unsupported hardware raise rather than silently running an FP32 loop.
+FP32 selection uses a tiled reference without a full query/key score tensor.
 Mixing-weight parameters and projection remain FP32; weights
 are cast to the query dtype at the indexer kernel boundary, as required by
 Attention Gym. Valid tokens are packed by document
@@ -113,7 +114,8 @@ indexer keeps queries and mixing weights local and gathers only indexer keys.
 Device-resident candidate bounds describe each local query's valid document
 prefix in the packed global key pool; only local queries are ranked.
 
-CP uses a model-local streaming selector: CUDA FP16/BF16 scores key tiles and
+CP uses a model-local streaming selector: on NVIDIA SM80 or newer it scores
+FP16/BF16 key tiles and
 merges a bounded running top-k in one kernel per local query. The PyTorch
 reference path bounds query/key tiles rather than materializing full scores.
 This requires neither modified Attention Gym nor DeepSelect/cuDNN dependencies;

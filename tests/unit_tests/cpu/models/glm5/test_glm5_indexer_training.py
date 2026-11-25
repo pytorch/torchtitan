@@ -363,7 +363,7 @@ def test_warmup_chunk_boundary_matches_packed_dense_attention_and_gradients():
     from torchtitan.models.glm5.dsa import gather_attn
 
     attention = Glm5SparseAttention.Config(
-        training_stage="warmup", max_context_length=80
+        warmup_context_length=80
     ).build()
     with patch("torchtitan.models.glm5.dsa.gather_attn", wraps=gather_attn) as kernel:
         actual = attention(
@@ -502,7 +502,7 @@ def test_config_overrides_cannot_silently_desynchronize_stages(mutation):
     if mutation == "model":
         config.indexer_training_stage = "warmup"
     elif mutation == "attention":
-        producer.inner_attention.inner_attention.training_stage = "frozen"
+        producer.inner_attention.inner_attention.warmup_context_length = 128
     elif mutation == "loss":
         producer.inner_attention.inner_attention.indexer_loss = None
     else:

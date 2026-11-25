@@ -36,7 +36,10 @@ def test_cp1_low_precision_indexer_rejects_unsupported_device():
                     reason="requires NVIDIA fused gather attention")
 @pytest.mark.parametrize("stage", ["warmup", "sparse"])
 def test_bf16_indexer_training_with_default_remat(stage):
-    if torch.cuda.get_device_capability()[0] < 9:
+    major = torch.cuda.get_device_capability()[0]
+    if major < 8:
+        pytest.skip("BF16 training requires SM80 or newer")
+    if stage == "sparse" and major < 9:
         pytest.skip("stock fused indexer requires SM90 or newer")
     config = build_model_config(
         "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=128,

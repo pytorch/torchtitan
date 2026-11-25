@@ -48,7 +48,7 @@ class Glm5MTPTransformerBlock(MTPTransformerBlock):
         remat.recompute_needs_tensor(prev_embed)
         prev_embed = prev_embed * local_valid_T.unsqueeze(-1).to(prev_embed.dtype)
         kl_only = (
-            self.attention.inner_attention.inner_attention.training_stage == "warmup"
+            self.attention.inner_attention.inner_attention.warmup_context_length is not None
             and self.training and torch.is_grad_enabled()
         )
         with torch.set_grad_enabled(torch.is_grad_enabled() and not kl_only):

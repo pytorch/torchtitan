@@ -74,7 +74,7 @@ class Glm5Attention(DeepSeekMLAAttention):
             assert isinstance(leaf, Glm5SparseAttention.Config)
             attended_keys = (
                 seq_len
-                if leaf.training_stage == "warmup"
+                if leaf.warmup_context_length is not None
                 else min(seq_len, self.index_topk)
             )
             return quadratic_attention_flops_per_token(
@@ -86,10 +86,17 @@ class Glm5Attention(DeepSeekMLAAttention):
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.indexer = (
-            config.indexer.build(training_stage=self.inner_attention.inner_attention.training_stage)
-            if config.indexer is not None else None
-        )
+        self.indexer = None
+        if config.indexer is not None:
+            leaf = config.inner_attention.inner_attention
+            assert isinstance(leaf, Glm5SparseAttention.Config)
+            if leaf.warmup_context_length is not None:
+                stage = "warmup"
+            elif leaf.indexer_loss is not None:
+                stage = "sparse"
+            else:
+                stage = "frozen"
+            self.indexer = config.indexer.build(training_stage=stage)
 
     # DSA specializes the parent's attention metadata contract.
     def forward(  # pyrefly: ignore[bad-override]
@@ -190,7 +197,7 @@ class Glm5TransformerBlock(DeepSeekV3TransformerBlock):
         self, x_TD, attention_masks, positions=None, topk_indices_TS=None, **kwargs
     ):
         leaf = self.attention.inner_attention.inner_attention
-        if leaf.training_stage == "warmup" and self.training and torch.is_grad_enabled():
+        if leaf.warmup_context_length is not None and self.training and torch.is_grad_enabled():
             return self.warmup_forward(x_TD, attention_masks, positions, **kwargs)
         return self._forward_decoder(
             x_TD, attention_masks, positions, topk_indices_TS, **kwargs
@@ -318,7 +325,8 @@ class Glm5Model(DeepSeekV3Model):
             for layer in self.layers + list(self.mtp_layers or ()):
                 attention = layer.attention
                 leaf = attention.inner_attention.inner_attention
-                if leaf.training_stage != stage:
+                expected_context = self.max_context_length if stage == "warmup" else None
+                if leaf.warmup_context_length != expected_context:
                     raise ValueError("GLM model and attention indexer stages disagree")
                 indexer = attention.indexer
                 needs_loss = indexer is not None and stage != "frozen"

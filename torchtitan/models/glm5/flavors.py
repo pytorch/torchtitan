@@ -570,8 +570,7 @@ def configure_glm5_training(
         assert isinstance(attention, Glm5Attention.Config)
         leaf = attention.inner_attention.inner_attention
         assert isinstance(leaf, Glm5SparseAttention.Config)
-        leaf.max_context_length = context_len
-        leaf.training_stage = indexer_stage
+        leaf.warmup_context_length = context_len if indexer_stage == "warmup" else None
         if isinstance(layer.feed_forward, MoE.Config):
             # Keep checkpointed routing bias, but freeze its optimizer-side update.
             layer.feed_forward.freeze_expert_bias = indexer_stage == "warmup"
