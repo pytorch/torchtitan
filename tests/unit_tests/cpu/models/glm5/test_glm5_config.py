@@ -53,13 +53,12 @@ class TestGlm5Config(unittest.TestCase):
         config = build_model_config(
             "glm5_2_debugmodel", parallelism=ParallelismConfig(), seq_len=8
         )
-        indexer_config = config.layers[0].attention.indexer
-        assert indexer_config is not None
         original_dtype = torch.get_default_dtype()
         for dtype in (torch.float32, torch.bfloat16):
             with self.subTest(dtype=dtype), torch.device("meta"):
                 with set_default_dtype(dtype):
-                    indexer = indexer_config.build()
+                    indexer = config.layers[0].attention.build().indexer
+                    assert indexer is not None
                     self.assertEqual(torch.get_default_dtype(), dtype)
                 self.assertEqual(torch.get_default_dtype(), original_dtype)
                 self.assertEqual(indexer.weights_proj.weight.dtype, torch.float32)
@@ -116,6 +115,9 @@ class TestGlm5Config(unittest.TestCase):
             # Exercise Decoder._cp_shard and the real GLM metadata preparation;
             # only distributed transport and SPMD annotations need a process group.
             with (
+                # This value-level CPU test has no named SPMD mesh. The real
+                # CP2 GPU regression checks the annotations with a mesh.
+                patch("torchtitan.models.glm5.dsa.DsaMetadata.annotate_spmd_types"),
                 patch(
                     "torchtitan.models.glm5.dsa.spmd_mesh_group", return_value=group
                 ),
