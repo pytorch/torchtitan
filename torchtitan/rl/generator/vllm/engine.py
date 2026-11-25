@@ -306,21 +306,30 @@ class VLLMEngine(GenerationEngine):
                 "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
                 "with kernels the trainer does not run"
             )
+        if config.kv_cache_dtype == "fp8":
+            windowed_layers = [
+                (layer_id, layer.attention.sliding_window_size)
+                for layer_id, layer in enumerate(model.layers)
+                if getattr(layer.attention, "sliding_window_size", None) is not None
+            ]
+            if windowed_layers:
+                # TODO: test fp8 with sliding windows (and gpt-oss's attention sinks), then lift this.
+                raise ValueError(
+                    "kv_cache_dtype='fp8' is untested with sliding-window attention, but "
+                    f"(layer, window) {windowed_layers[:2]} use one; set kv_cache_dtype='auto'"
+                )
         if (
             config.kv_cache_dtype == "fp8"
             and config.num_speculative_tokens > 0
             and not fa4_takes_query_len_in_heads()
         ):
-            import flash_attn.cute
-
             # fp8 verify rows run as one FA4 call with query_len_in_heads (`_verify_rows_as_decode`).
             # TODO: once a released FA4 takes query_len_in_heads (Dao-AILab/flash-attention#3217),
             # raise the FA4 floor pin and drop this check.
             raise RuntimeError(
                 f"kv_cache_dtype='fp8' with num_speculative_tokens={config.num_speculative_tokens} "
-                "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows), but "
-                f"flash_attn.cute comes from {flash_attn.cute.__file__}. Install an FA4 with "
-                "query_len_in_heads (Dao-AILab/flash-attention#3217), or set "
+                "needs an FA4 whose forward takes query_len_in_heads (fp8 SwapAB verify rows). "
+                "Install an FA4 with query_len_in_heads (Dao-AILab/flash-attention#3217), or set "
                 "num_speculative_tokens=0 or kv_cache_dtype='auto'"
             )
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):

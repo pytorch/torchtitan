@@ -15,9 +15,8 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 import asyncio
 import concurrent.futures
 import inspect
-import sys
 from contextlib import nullcontext
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -812,42 +811,55 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
         )
 
 
+# A model whose first layer uses a 128-token sliding window; the check reads only that field.
+_SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
+    first_full_attention=_MODEL_CONFIG.first_full_attention,
+    layers=[SimpleNamespace(attention=SimpleNamespace(sliding_window_size=128))],
+    max_context_length=1024,
+)
+
+
 @pytest.mark.parametrize(
-    "config_kwargs, debug, error, match",
+    "model, config_kwargs, debug, error, match",
     [
         (
-            dict(kv_cache_dtype="fp8"),
+            _MODEL_CONFIG,
+            {},
             DebugConfig(batch_invariant=True),
             ValueError,
             "batch_invariant needs kv_cache_dtype='auto'",
         ),
         (
-            dict(kv_cache_dtype="fp8", num_speculative_tokens=3),
+            _SLIDING_WINDOW_MODEL_CONFIG,
+            {},
+            DebugConfig(),
+            ValueError,
+            r"untested with sliding-window attention, but \(layer, window\) \[\(0, 128\)\]",
+        ),
+        (
+            SimpleNamespace(
+                first_full_attention=_MODEL_CONFIG.first_full_attention,
+                layers=[],
+                max_context_length=1024,
+            ),
+            dict(num_speculative_tokens=3),
             DebugConfig(),
             RuntimeError,
-            "query_len_in_heads.*from /venv/flash_attn/cute/__init__.py",
+            "needs an FA4 whose forward takes query_len_in_heads",
         ),
     ],
-    ids=["batch_invariant", "drafts_without_query_len_in_heads"],
+    ids=["batch_invariant", "sliding_window", "drafts_without_query_len_in_heads"],
 )
 def test_fp8_kv_cache_refusals(
-    tmp_path, monkeypatch, config_kwargs, debug, error, match
+    tmp_path, monkeypatch, model, config_kwargs, debug, error, match
 ):
-    # Fake FA4 modules: the RL CPU CI installs no FA4, and the drafts check imports `flash_attn.cute` for its path.
-    fake_cute = ModuleType("flash_attn.cute")
-    fake_cute.__file__ = "/venv/flash_attn/cute/__init__.py"
-    fake_flash_attn = ModuleType("flash_attn")
-    fake_flash_attn.cute = fake_cute
-    monkeypatch.setitem(sys.modules, "flash_attn", fake_flash_attn)
-    monkeypatch.setitem(sys.modules, "flash_attn.cute", fake_cute)
     monkeypatch.setattr(
         "torchtitan.rl.generator.vllm.engine.fa4_takes_query_len_in_heads",
         lambda: False,
     )
-
     with pytest.raises(error, match=match):
-        VLLMEngine.Config(**config_kwargs).build(
-            model=_MODEL_CONFIG,
+        VLLMEngine.Config(kv_cache_dtype="fp8", **config_kwargs).build(
+            model=model,
             parallelism=_PARALLELISM,
             model_path="unused",
             max_num_seqs=8,
