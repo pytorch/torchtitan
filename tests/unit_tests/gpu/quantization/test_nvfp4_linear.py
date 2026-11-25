@@ -199,3 +199,48 @@ def test_nvfp4_linear_runs_outside_plain_eager(execution_mode):
     assert output.shape == (2, 128, 2, 128)
     assert input_BMK.grad is not None
     assert linear.weight.grad is not None
+
+
+def test_nvfp4_shared_input_and_no_grad_match_torchao():
+    torch.manual_seed(7)
+    linears = [_make_nvfp4_linear(bias=False) for _ in range(3)]
+    refs = []
+    for linear in linears:
+        ref = TorchAONVFP4Linear(
+            128,
+            128,
+            bias=False,
+            device="cuda",
+            dtype=torch.bfloat16,
+            rht_sign_vector=_HARDCODED_SIGN_VECTOR,
+        )
+        with torch.no_grad():
+            ref.weight.copy_(linear.weight._tensor)
+            ref._sr_seed.copy_(linear._sr_seed)
+        refs.append(ref)
+
+    x_tt = torch.randn(
+        128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    x_ao = x_tt.detach().clone().requires_grad_()
+
+    # Pass 1 (no_grad) and sibling reuse (3 linears sharing x) must match TorchAO bitwise.
+    with torch.no_grad():
+        for linear, ref in zip(linears, refs, strict=True):
+            torch.testing.assert_close(linear(x_tt), ref(x_ao), rtol=0, atol=0)
+
+    outs_tt = [linear(x_tt) for linear in linears]
+    outs_ao = [ref(x_ao) for ref in refs]
+    for o_tt, o_ao in zip(outs_tt, outs_ao, strict=True):
+        torch.testing.assert_close(o_tt, o_ao, rtol=0, atol=0)
+
+    grad_out = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+    rng_state = torch.cuda.get_rng_state()
+    sum(outs_tt).backward(grad_out)
+    torch.cuda.set_rng_state(rng_state)
+    sum(outs_ao).backward(grad_out)
+
+    torch.testing.assert_close(x_tt.grad, x_ao.grad, rtol=0, atol=0)
+    for linear, ref in zip(linears, refs, strict=True):
+        assert linear.weight.grad is not None
+        torch.testing.assert_close(linear.weight.grad, ref.weight.grad, rtol=0, atol=0)
