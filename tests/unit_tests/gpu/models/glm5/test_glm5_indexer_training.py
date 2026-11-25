@@ -53,7 +53,6 @@ def test_bf16_indexer_training_with_default_remat(stage):
         assert gradients and all(torch.isfinite(g).all() for g in gradients.values())
         assert any(".indexer." in name and g.abs().sum() > 0 for name, g in gradients.items())
         assert any(".indexer." not in name for name in gradients) == (stage == "sparse")
-        print(f"GLM BF16 {stage}: fused gather/LSE/KL, shared-index consumer and default remat backward completed")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.version.hip is not None,
@@ -116,7 +115,6 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
         norm = torch.nn.utils.clip_grad_norm_(trainable, 1.0)
         assert torch.isfinite(norm)
         optimizer.step()
-        print(f"{stage} step={number} loss={loss.item():.9g} grad_norm={norm.item():.9g}")
 
     with patch.dict(AuxLoss.group_acc, clear=True), patch.dict(AuxLoss._group_counts, clear=True):
         warmup, optimizer = build("warmup", 61)
@@ -152,6 +150,3 @@ def test_bf16_warmup_dcp_handoff_to_sparse_with_default_remat(tmp_path):
             assert any(not torch.equal(updated[name], saved[name])
                        for name, _ in sparse.named_parameters()
                        if (".indexer." in name) == indexer)
-        print("GLM BF16 DCP handoff: warmup 2 steps -> strict model load -> sparse 2 steps; "
-              "fresh optimizer, gradient ownership and default remat passed")
-        print(f"checkpoint={checkpoint}")

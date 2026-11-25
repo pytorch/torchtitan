@@ -555,7 +555,8 @@ def configure_glm5_training(
     indexer_stage: Literal["frozen", "warmup", "sparse"],
     indexer_loss_coeff: float,
 ) -> Glm5Model.Config:
-    """Apply the shared GLM stage and parallelism contract to a built config."""
+    """Return an independent config with the GLM stage and parallelism contract."""
+    config = copy.deepcopy(config)
     if indexer_stage not in ("frozen", "warmup", "sparse"):
         raise ValueError("GLM indexer_stage must be frozen, warmup or sparse")
     if indexer_loss_coeff < 0:
