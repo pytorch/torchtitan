@@ -2189,6 +2189,7 @@ def mock_grain_loader():
     loader._dp_world_size = 1
     loader._rank_id = "dp_rank_0"
     loader._iterator = mock.Mock()
+    loader._balancer = None
     return loader
 
 
