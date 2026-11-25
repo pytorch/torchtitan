@@ -72,7 +72,10 @@ def test_forward_matches_causal_attention(
     )
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     page_order = torch.randperm(kv_cache.shape[0])
-    block_table = torch.zeros(len(seq_lens), max(num_pages), dtype=torch.int32)
+    # As wide as vLLM sizes it (max_model_len / page_size), so FA4 runs its per-sequence splits.
+    block_table = torch.zeros(
+        len(seq_lens), max_seq_len // page_size, dtype=torch.int32
+    )
     start = 0
     for row, count in enumerate(num_pages):
         block_table[row, :count] = page_order[start : start + count]
