@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import tempfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from hashlib import sha256
 from typing import Any
 
 import torch
@@ -46,6 +49,7 @@ from torchtitan.rl.generator.vllm.batch_invariance import (
     force_trainer_logprobs_for_batch_invariance,
 )
 from torchtitan.rl.generator.vllm.config import (
+    MooncakeStoreKVOffloadConfig,
     SimpleCPUKVOffloadConfig,
     VLLMCudaGraphConfig,
 )
@@ -141,6 +145,26 @@ def _validate_platform(
         )
 
 
+def _use_mooncake_master(address: str) -> None:
+    """Point this process's Store config (``MOONCAKE_CONFIG_PATH``) at the master the
+    controller started. vLLM reads the master address only from that file, so write
+    a copy with the address."""
+    with open(os.environ["MOONCAKE_CONFIG_PATH"]) as f:
+        store_config = json.load(f)
+    # A copy this function wrote already holds the address.
+    if store_config.get("master_server_address", address) != address:
+        raise ValueError(
+            f"Remove master_server_address from {os.environ['MOONCAKE_CONFIG_PATH']}: "
+            "the controller starts the job's Mooncake master on its host and sets this "
+            f"address for every generator (got {store_config['master_server_address']!r})"
+        )
+    store_config["master_server_address"] = address
+    fd, path = tempfile.mkstemp(prefix="mooncake_store_", suffix=".json")
+    with os.fdopen(fd, "w") as f:
+        json.dump(store_config, f)
+    os.environ["MOONCAKE_CONFIG_PATH"] = path
+
+
 class VLLMEngine(GenerationEngine):
     """The generator's vLLM ``LLMEngine``, behind the calls the engine loop makes.
 
@@ -171,8 +195,12 @@ class VLLMEngine(GenerationEngine):
             no request running: admitted at any watermark
         """
 
-        kv_offload: SimpleCPUKVOffloadConfig | None = None
-        """Offload GPU prefix KV to CPU DRAM. None: no offload."""
+        kv_offload: SimpleCPUKVOffloadConfig | MooncakeStoreKVOffloadConfig | None = (
+            None
+        )
+        """Offload GPU prefix KV: to local CPU DRAM (``SIMPLE_CPU_OFFLOAD.md``) or a
+        Mooncake Store shared across generators (``MOONCAKE_STORE.md``). None: no
+        offload."""
 
         extra_engine_args: dict[str, Any] = field(default_factory=dict)
         """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
@@ -186,12 +214,16 @@ class VLLMEngine(GenerationEngine):
 
         session_kv_holder: VLLMSessionKVHolder.Config | None = None
         """Keep each multi-turn session's cached prefix on GPU between its turns (see
-        `VLLMSessionKVHolder`). With KV offload configured, also send CPU cache
-        release hints when sessions end. None disables both session behaviors."""
+        `VLLMSessionKVHolder`). With SimpleCPU offload configured, also send CPU
+        cache release hints when sessions end. None disables both behaviors."""
+
+        @property
+        def uses_mooncake_store(self) -> bool:
+            return isinstance(self.kv_offload, MooncakeStoreKVOffloadConfig)
 
         def __post_init__(self):
             if (
-                self.kv_offload is not None
+                isinstance(self.kv_offload, SimpleCPUKVOffloadConfig)
                 and self.extra_engine_args.get("enable_prefix_caching") is False
             ):
                 raise ValueError(
@@ -221,8 +253,8 @@ class VLLMEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        # TODO(acisseJZhong): use it once vLLM's Mooncake Store connector lands.
-        del mooncake_master_address
+        if mooncake_master_address is not None:
+            _use_mooncake_master(mooncake_master_address)
         self._uses_kv_offload = config.kv_offload is not None
         # Multi-rank offload: TP ranks' schedulers must agree (KVOffloadScheduler,
         # a no-op for TP=1), and all ranks keep stepping while any rank has KV work
@@ -284,6 +316,7 @@ class VLLMEngine(GenerationEngine):
             max_num_batched_tokens=max_num_batched_tokens,
             seed=debug.seed,
             serves_images=vision_processor is not None,
+            generator_name=generator_name,
         )
         tp_degree = parallelism.tensor_parallel_degree
         stat_loggers = None
@@ -311,7 +344,7 @@ class VLLMEngine(GenerationEngine):
             self._session_kv_holder = config.session_kv_holder.build(
                 scheduler=scheduler,
                 offload_connector=scheduler.connector
-                if self._uses_kv_offload
+                if isinstance(config.kv_offload, SimpleCPUKVOffloadConfig)
                 else None,
             )
 
@@ -356,6 +389,7 @@ class VLLMEngine(GenerationEngine):
         max_num_batched_tokens: int | None,
         seed: int | None,
         serves_images: bool,
+        generator_name: str,
     ) -> EngineArgs:
         """Build the vLLM ``EngineArgs`` (see ``GenerationEngine`` for the arguments;
         ``serves_images``: the engine has a vision processor)."""
@@ -422,9 +456,20 @@ class VLLMEngine(GenerationEngine):
         #   when the request moves past them; hashed ones stay reusable until evicted.
         engine_kwargs["prefix_cache_retention_interval"] = None
         if self.config.kv_offload is not None:
-            engine_kwargs[
-                "kv_transfer_config"
-            ] = self.config.kv_offload.get_vllm_kv_transfer_config()
+            kv_transfer_config = self.config.kv_offload.get_vllm_kv_transfer_config()
+            if isinstance(self.config.kv_offload, MooncakeStoreKVOffloadConfig):
+                # This option names an IPC socket, not a network port. Independent
+                # generators on the same host must not bind/unlink each other's socket;
+                # cache_prefix separates runs that reuse generator names, and hashing
+                # bounds the socket path length.
+                kv_transfer_config.kv_connector_extra_config[
+                    "lookup_rpc_port"
+                ] = sha256(
+                    f"{self.config.kv_offload.cache_prefix}:{generator_name}".encode()
+                ).hexdigest()[
+                    :16
+                ]
+            engine_kwargs["kv_transfer_config"] = kv_transfer_config
             if self._coordinate_kv_offload:
                 engine_kwargs[
                     "scheduler_cls"

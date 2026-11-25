@@ -14,6 +14,8 @@ metrics that ride with it), the SamplingParams contract, and the vLLM metric tim
 
 import asyncio
 import concurrent.futures
+import json
+import os
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
@@ -41,6 +43,7 @@ from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
 from torchtitan.rl.generator.vllm.config import (
+    MooncakeStoreKVOffloadConfig,
     SimpleCPUKVOffloadConfig,
     VLLMCudaGraphConfig,
 )
@@ -839,7 +842,14 @@ def test_qwen36_27b_perf_config():
 # --- vLLM engine kwargs (what VLLMEngine passes to EngineArgs) ---
 
 
-def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dict:
+def _build_engine_kwargs(
+    monkeypatch,
+    tmp_path,
+    config: Generator.Config,
+    *,
+    generator_name="generator",
+    mooncake_master_address=None,
+) -> dict:
     """Build ``config.engine`` as the generator does, with vLLM's ``EngineArgs``,
     ``LLMEngine`` and model registration mocked; return the ``EngineArgs`` kwargs."""
     engine_args = Mock()
@@ -861,9 +871,9 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: Generator.Config) -> dic
         reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
         vision_processor=None,
-        mooncake_master_address=None,
+        mooncake_master_address=mooncake_master_address,
         rank=0,
-        generator_name="generator",
+        generator_name=generator_name,
         output_dir=str(tmp_path),
     )
     return engine_args.call_args.kwargs
@@ -884,6 +894,57 @@ def test_engine_config_reaches_engine_args(monkeypatch, tmp_path):
     assert engine_kwargs["watermark"] == 0.03
     assert engine_kwargs["long_prefill_token_threshold"] == 4096
     assert engine_kwargs["scheduling_policy"] == "priority"
+
+
+def test_mooncake_engine_args(monkeypatch, tmp_path):
+    store_config = tmp_path / "store.json"
+    store_config.write_text(json.dumps({"protocol": "tcp"}))
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(store_config))
+    holder_build = Mock()
+    monkeypatch.setattr(VLLMSessionKVHolder.Config, "build", holder_build)
+    config = Generator.Config(
+        model=_MODEL_CONFIG,
+        engine=VLLMEngine.Config(
+            kv_offload=MooncakeStoreKVOffloadConfig(
+                cache_prefix="run-1", save_decode_cache=True
+            ),
+            session_kv_holder=VLLMSessionKVHolder.Config(),
+        ),
+    )
+    assert config.engine.uses_mooncake_store
+    first = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        config,
+        generator_name="first",
+        mooncake_master_address="controller:1234",
+    )
+    # vLLM reads the controller's master from a copy of the Store config.
+    with open(os.environ["MOONCAKE_CONFIG_PATH"]) as f:
+        assert json.load(f) == {
+            "protocol": "tcp",
+            "master_server_address": "controller:1234",
+        }
+    # Mooncake has no CPU release hints: the session holder gets no connector.
+    scheduler = (
+        vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
+    )
+    holder_build.assert_called_once_with(scheduler=scheduler, offload_connector=None)
+    second = _build_engine_kwargs(
+        monkeypatch, tmp_path, config, generator_name="second"
+    )
+    resolved = first["kv_transfer_config"]
+    assert resolved.kv_connector_module_path == "torchtitan.rl.generator.vllm.mooncake"
+    # Generators on one host must not share a lookup IPC socket.
+    first_port = resolved.kv_connector_extra_config.pop("lookup_rpc_port")
+    second_port = second["kv_transfer_config"].kv_connector_extra_config[
+        "lookup_rpc_port"
+    ]
+    assert first_port != second_port
+    assert resolved.kv_connector_extra_config == {
+        "cache_prefix": "run-1",
+        "save_decode_cache": True,
+    }
 
 
 @pytest.mark.parametrize("hold_sessions", [False, True])
@@ -925,6 +986,11 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
         )
     else:
         holder_build.assert_not_called()
+
+
+def test_mooncake_store_requires_cache_prefix():
+    with pytest.raises(ValueError, match="non-empty cache_prefix"):
+        MooncakeStoreKVOffloadConfig(cache_prefix="")
 
 
 def test_kv_offload_without_prefix_caching_rejected_before_engine_creation():

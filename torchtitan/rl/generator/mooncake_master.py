@@ -5,7 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 """The job's Mooncake Store master, which the controller starts on its host for
-the generators' Mooncake Store (used by SGLang's HiCache storage backend)."""
+the generators' Mooncake Store (SGLang's HiCache storage backend and vLLM's
+MooncakeStoreConnector)."""
 
 import ctypes
 import ipaddress

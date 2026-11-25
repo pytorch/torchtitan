@@ -239,3 +239,34 @@ class SimpleCPUKVOffloadConfig:
                 "lazy_offload": self.lazy_offload,
             },
         )
+
+
+@dataclass(kw_only=True, slots=True)
+class MooncakeStoreKVOffloadConfig:
+    """Share GPU prefix KV across generators through a Mooncake Store with vLLM's
+    MooncakeStoreConnector. See ``MOONCAKE_STORE.md``."""
+
+    cache_prefix: str
+    """Namespace of every Store key. Use a new value for each launch, including
+    checkpoint resume: the Store outlives a run and policy versions restart."""
+
+    save_decode_cache: bool = False
+    """Also save generated tokens' KV, so the next turn reuses the previous
+    completion."""
+
+    def __post_init__(self) -> None:
+        if not self.cache_prefix:
+            raise ValueError("Mooncake Store requires a non-empty cache_prefix")
+
+    def get_vllm_kv_transfer_config(self) -> KVTransferConfig:
+        """vLLM's connector config, with Titan's subclass of the connector, which
+        coordinates Store lookups and saves across TP ranks."""
+        return KVTransferConfig(
+            kv_connector="MooncakeStoreConnector",
+            kv_role="kv_both",
+            kv_connector_module_path="torchtitan.rl.generator.vllm.mooncake",
+            kv_connector_extra_config={
+                "cache_prefix": self.cache_prefix,
+                "save_decode_cache": self.save_decode_cache,
+            },
+        )
