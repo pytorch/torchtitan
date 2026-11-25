@@ -228,7 +228,15 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseCheckpointManager.Config):
-        pass
+        def __post_init__(self) -> None:
+            BaseCheckpointManager.Config.__post_init__(self)
+            # Async saves stage into pinned memory and write from a background
+            # process; there is no threaded mode.
+            if self.async_mode == "async":
+                raise ValueError(
+                    "TorchCheckpointingManager does not support async_mode='async'; "
+                    "use 'disabled' or 'async_with_pinned_mem'."
+                )
 
     def __init__(
         self,
@@ -288,11 +296,12 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             config.purge_exempt.build() if config.purge_exempt is not None else None
         )
 
-        save_config = (
-            _sync_save_config(use_barrier=False)
-            if self.load_only
-            else _async_save_config()
-        )
+        if self.load_only:
+            save_config = _sync_save_config(use_barrier=False)
+        elif config.async_mode == "disabled":
+            save_config = _sync_save_config()
+        else:
+            save_config = _async_save_config()
         manager_config = _default_backend_config(
             save_config,
             storage_config=storage_config,
@@ -541,8 +550,9 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             states = self.states
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
 
-        # The final save must land before the process exits, so retire the async
-        # manager and write synchronously through a fresh one.
+        # The final save must land before the process exits, so retire the
+        # training manager, which may be async, and write synchronously through
+        # a fresh one.
         self._manager.close()
         storage_config = self._manager_config.storage_config
         input_checkpoint_id = checkpoint_id
@@ -605,4 +615,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         GarbageCollector.collect("GC collection invoked by checkpointer.")
 
     def _should_prewarm(self) -> bool:
-        return not self._prewarmed and not self.load_only
+        # Only async saves stage into pinned buffers.
+        return not self._prewarmed and isinstance(
+            self._manager_config.save, AsyncCheckpointSaverConfig
+        )

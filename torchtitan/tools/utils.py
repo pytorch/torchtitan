@@ -108,6 +108,25 @@ def get_device_info() -> tuple[str, ModuleType]:
 device_type, device_module = get_device_info()
 
 
+# Env var each accelerator runtime reads to restrict which devices a process
+# sees. CUDA and ROCm read CUDA_VISIBLE_DEVICES; Level Zero (XPU) reads
+# ZE_AFFINITY_MASK.
+_VISIBLE_DEVICES_ENV_VARS = {
+    "cuda": "CUDA_VISIBLE_DEVICES",
+    "xpu": "ZE_AFFINITY_MASK",
+}
+
+
+def get_visible_devices_env_var() -> str:
+    """Return the env var that masks the accelerators a launched process sees."""
+    if device_type not in _VISIBLE_DEVICES_ENV_VARS:
+        raise ValueError(
+            f"No visible-device mask env var is known for device type "
+            f"{device_type!r}. Supported: {sorted(_VISIBLE_DEVICES_ENV_VARS)}."
+        )
+    return _VISIBLE_DEVICES_ENV_VARS[device_type]
+
+
 def get_local_device() -> torch.device:
     """Return this process's device under LOCAL_RANK or visible-device launch.
 

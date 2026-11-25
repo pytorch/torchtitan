@@ -33,13 +33,14 @@ from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
 from torchtitan.config import PrecisionConfig
-from torchtitan.config.parallelism import FlexShardConfig, ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_remat import (
     DefaultActivationRematConfig,
     FullActivationRematConfig,
 )
 from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.models.base import BaseModel
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
@@ -297,7 +298,7 @@ def llama3_debugmodel_checkpoint_and_hf_save() -> Trainer.Config:
 def llama3_debugmodel_flex_shard_checkpoint_load() -> Trainer.Config:
     """Resumes the FSDP2 checkpoint at step 5 with FlexShard, and saves at step 10."""
     config = llama3_debugmodel(seq_len=2048)
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     config.checkpointer = CheckpointManager.Config(
         interval=5,
         last_save_model_only=False,
@@ -311,7 +312,7 @@ def llama3_debugmodel_flex_shard_hf_checkpoint_load() -> Trainer.Config:
     The integration runner supplies the per-test output directory to each run.
     """
     config = llama3_debugmodel(seq_len=2048)
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     # A folder of its own, so that this run doesn't resume the full checkpoints.
     config.checkpointer = CheckpointManager.Config(folder="hf_load", load_only=True)
     test_output_dir = os.getenv(
@@ -443,6 +444,9 @@ def llama3_debugmodel_fsdp2_tp2_pp2_save() -> Trainer.Config:
 def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_pp2_save()
     config.training.steps = 20
+    # Resume device moments into half pinned host, half device moments.
+    optimizers = config.optim.optimizer.optimizers
+    optimizers[0] = replace(optimizers[0], moment_cpu_offload_fraction=0.5)
     return config
 
 
