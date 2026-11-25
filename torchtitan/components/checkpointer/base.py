@@ -21,6 +21,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed.checkpoint import CheckpointableTensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -164,6 +165,8 @@ def export_state_dict(
 
     Parameters of ``model_parts`` listed in ``preserve_dtype_params`` are never
     cast to a lower precision. Model parts that are not a ``Module`` list none.
+    A local shard keeps the layout it declares to DCP (``CheckpointableTensor``),
+    which a cast would drop.
     """
     preserve_dtype_keys = {
         canonical_fqn(key)
@@ -174,11 +177,20 @@ def export_state_dict(
     exported = {}
     for key, value in state_dict.items():
         if isinstance(value, torch.Tensor) and value.is_floating_point():
-            value = value.to(
+            cast = value.to(
                 torch.promote_types(value.dtype, dtype)
                 if key in preserve_dtype_keys
                 else dtype
             )
+            if isinstance(value, CheckpointableTensor):
+                for name in (
+                    "global_shape",
+                    "global_offsets",
+                    "local_offsets",
+                    "local_sizes",
+                ):
+                    setattr(cast, name, getattr(value, name))
+            value = cast
         exported[key] = value
     return exported
 
