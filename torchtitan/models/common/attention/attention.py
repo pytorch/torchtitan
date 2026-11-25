@@ -510,10 +510,13 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
         attn_dtype = _varlen_attn_dtype(v_THV.dtype)
 
         sdpa_backends = self.sdpa_backends
-        if torch.are_deterministic_algorithms_enabled():
-            # TODO: Remove once the cuDNN varlen backward honors
-            # use_deterministic_algorithms (upstream issue not filed yet). It
-            # neither raises nor runs deterministically, so repeated runs differ.
+        # TODO: Remove the deterministic case once the cuDNN varlen backward
+        # honors use_deterministic_algorithms (upstream issue not filed yet). It
+        # neither raises nor runs deterministically, so repeated runs differ.
+        # cuDNN also has no backward for the lse that out_transform consumes;
+        # only Flash with FA4 does, and other implementations raise in backward.
+        lse_needs_grad = out_transform is not None and torch.is_grad_enabled()
+        if torch.are_deterministic_algorithms_enabled() or lse_needs_grad:
             sdpa_backends = [
                 backend
                 for backend in sdpa_backends
@@ -521,7 +524,8 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             ]
             if not sdpa_backends:
                 raise ValueError(
-                    "Deterministic mode needs a varlen backend other than cuDNN. "
+                    "Deterministic mode and backpropagating through out_transform's "
+                    "lse need a varlen backend other than cuDNN. "
                     'Add "FLASH_ATTENTION" to sdpa_backends.'
                 )
 

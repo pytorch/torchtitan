@@ -15,12 +15,14 @@ from dataclasses import replace
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_remat import DefaultActivationRematConfig
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
     deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,
 )
+from torchtitan_recipes.tests.models.gpt_oss import gpt_oss_debugmodel
 from torchtitan_recipes.tests.models.multimodal import (
     set_rank_conditional_image_presence,
 )
@@ -269,6 +271,23 @@ def qwen38_flash_next_debugmodel_dist_moe_fsdp2_ep2() -> Trainer.Config:
     return apply_transforms(config, [DistMoeTransform()])
 
 
+def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
+    # Varlen backpropagates through the lse the sinks consume only with FA4.
+    config = gpt_oss_debugmodel(
+        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=4)
+    )
+    _set_spmd_typechecking(config, typechecking=False)
+    config.training.num_tokens_per_microbatch_per_dp_rank = 1024
+    config.training.num_tokens_per_train_step = 131072
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.activation_remat = DefaultActivationRematConfig()
+    config.training.disable_accelerator_graphs = True
+    return config
+
+
 def build_b200_tests_list() -> list[IntegrationTestDefinition]:
     """Build integration tests that require B200-class hardware."""
     return [
@@ -307,6 +326,12 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_name="kimi_k3_dist_moe_fsdp_ep_cp_pp",
             ngpu=8,
             use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
+            test_descr="GPT-OSS PP+FSDP+EP+selective AC with VarlenInnerAttention",
+            test_name="gpt_oss_pp+fsdp+ep+sacop",
+            ngpu=8,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_mxfp8_fsdp2],
