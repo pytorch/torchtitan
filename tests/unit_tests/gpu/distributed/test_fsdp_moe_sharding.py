@@ -143,7 +143,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -162,7 +162,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -185,7 +185,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -219,7 +219,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -276,7 +276,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
                 apply_fsdp_to_decoder(
                     model,
-                    dp_mesh,
+                    dp_mesh=dp_mesh,
                     param_dtype=torch.bfloat16,
                     reduce_dtype=torch.float32,
                     pp_enabled=False,
@@ -360,7 +360,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
 
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -410,7 +410,7 @@ class TestSharedOuterLoRAExpertParallel(DTensorTestBase):
         model._parallelize(parallelism_context)
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -485,7 +485,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -561,7 +561,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         sharded._parallelize(parallelism_context)
         apply_fsdp_to_decoder(
             sharded,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
@@ -620,7 +620,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,

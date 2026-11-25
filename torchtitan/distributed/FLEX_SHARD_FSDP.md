@@ -3,14 +3,16 @@
 `parallelism.fsdp_backend` selects what shards parameters over the
 data-parallel mesh:
 
-- `FSDP2Config()`, the default, applies FSDP2's `fully_shard` (see
+- `FullyShardBackend.Config()`, the default, applies FSDP2's `fully_shard` (see
   [FSDP.md](FSDP.md)).
-- `FlexShardConfig()` applies [FlexShard](https://github.com/meta-pytorch/flex_shard)
+- `FlexShardBackend.Config()` applies [FlexShard](https://github.com/meta-pytorch/flex_shard)
   instead. It is experimental.
 
-The code is in `flex_shard_fsdp.py` and `fsdp.py`. The
-[`flex_shard/`](flex_shard/README.md) package is a different thing: the
-optimizer-compute layouts DistMuon uses.
+Each is a `ShardingBackend` (`sharding_backend.py`), which owns what depends on
+how the parameters are sharded: validating the config, sharding a decoder,
+clipping grad norms, and the rest. `FlexShardBackend` is in
+`flex_shard_backend.py`. The [`flex_shard/`](flex_shard/README.md) package is a
+different thing: the optimizer-compute layouts DistMuon uses.
 
 ## Using it
 
@@ -19,7 +21,7 @@ Set the backend in your configuration. Here `llama3_flex_shard` is
 
 ```python
 # my_runs.py
-from torchtitan.config.parallelism import FlexShardConfig
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
@@ -30,7 +32,7 @@ def llama3_fsdp2() -> Trainer.Config:
 
 def llama3_flex_shard() -> Trainer.Config:
     config = llama3_fsdp2()
-    config.parallelism.fsdp_backend = FlexShardConfig()
+    config.parallelism.fsdp_backend = FlexShardBackend.Config()
     return config
 ```
 
@@ -46,22 +48,23 @@ bash .github/scripts/install_flex_shard.sh
 
 It installs with `--no-deps`, so the environment must already have what
 flex_shard requires: a PyTorch 2.16 nightly and torchao. torchtitan imports
-flex_shard only when `FlexShardConfig()` is selected, and raises an
-`ImportError` when the training engine is built if it isn't installed.
+flex_shard only when `FlexShardBackend.Config()` is selected, and raises an
+`ImportError` when the config is validated if it isn't installed.
 
 ## How it shards
 
-`apply_fsdp_to_decoder` computes the decoder's FSDP groups once: the embedding,
-the final norm with the output projection, each transformer block, and the
-parameters left to the root. FSDP2 calls `fully_shard` on each group. FlexShard
-gets one bucket per group, with the group's mesh, placements, mixed precision
-and reshard policy, and `fsdp2_compatible=True`, so its all-gathers and
-reduce-scatters match FSDP2's byte for byte. Under expert parallelism, each MoE
-block gets a second bucket for its routed experts on `edp_shard`, as FSDP2
-gives it a second group. Under context parallelism, the buckets shard over
-`dp_shard` and `cp` flattened, as `fully_shard` does. Under tensor parallelism,
-each parameter is its tp rank's shard and declares TP's split, or tp as the
-group its grad is partial over, before FlexShard shards it.
+Both backends shard the decoder's sharding units, from `decoder_sharding_units`
+in `fsdp.py`: the embedding, the final norm with the output projection, each
+transformer block, and the parameters left to the root. FSDP2 calls
+`fully_shard` on each unit. FlexShard gets one bucket per unit, with the unit's
+mesh, placements, mixed precision and reshard policy, and
+`fsdp2_compatible=True`, so its all-gathers and reduce-scatters match FSDP2's
+byte for byte. Under expert parallelism, each MoE block gets a second bucket for
+its routed experts on `edp_shard`, as FSDP2 gives it a second group. Under
+context parallelism, the buckets shard over `dp_shard` and `cp` flattened, as
+`fully_shard` does. Under tensor parallelism, each parameter is its tp rank's
+shard and declares TP's split, or tp as the group its grad is partial over,
+before FlexShard shards it.
 
 Outside forward and backward, FlexShard parameters, their grads and the
 optimizer states are plain `torch.Tensor` local shards, not DTensors:
@@ -81,9 +84,9 @@ optimizer states are plain `torch.Tensor` local shards, not DTensors:
   backends therefore start from different weights. FlexShard briefly holds each
   full parameter on every rank while it initializes it, e.g. a routed-expert
   parameter with all its experts.
-- **Grad-norm clipping.** `clip_grad_norm_` reduces the local shards' norms
-  over each bucket's mesh in the order DTensor uses, so the norm matches
-  FSDP2's.
+- **Grad-norm clipping.** `FlexShardBackend.clip_grad_norm_` reduces the local
+  shards' norms over each bucket's mesh in the order DTensor uses, so the norm
+  matches FSDP2's.
 - **DistMuon.** DistMuon plans its redistributions from each parameter's
   storage layout. For a FlexShard parameter, torchtitan gives it a
   `StorageLayout` (mesh, placements and global shape) derived from the
@@ -126,7 +129,7 @@ Memory and communication timing differ from FSDP2's in two places:
 
 ## What it supports
 
-| | Supported with `FlexShardConfig()` |
+| | Supported with `FlexShardBackend.Config()` |
 | --- | --- |
 | Models | Decoders that shard through `Decoder._apply_fsdp`, also with tied embedding and output weights (`enable_weight_tying`). The parity tests cover Llama 3 (also with tied weights), Qwen3 MoE, and DeepSeek V3, also with an MTP layer |
 | Parallelism | FSDP over `dp_shard`; tensor parallelism, with or without sequence parallelism; context parallelism; expert parallelism with `AllToAllTokenDispatcher`; and their combinations |
@@ -135,8 +138,10 @@ Memory and communication timing differ from FSDP2's in two places:
 
 ## What it rejects
 
-`validate_flex_shard_training` in `flex_shard_fsdp.py` raises a `ValueError`
-for these when the training engine is built, before anything else:
+`flex_shard_backend.py` raises a `ValueError` for these when the config is
+validated, before anything is built: `FlexShardBackend.validate_model` checks the
+model, parallelism and debug options, and `FlexShardBackend.validate_trainer` the
+checkpointer, optimizers and trainer:
 
 | Rejected | Why |
 | --- | --- |
@@ -144,7 +149,7 @@ for these when the training engine is built, before anything else:
 | Pipeline parallelism | PyTorch's pipeline schedules drive FSDP through `FSDPModule`, which FlexShard modules aren't. |
 | `fsdp_symm_mem_scope`, `fsdp_enable_cpu_offloading`, `fsdp_unshard_in_current_stream` | torchtitan's FlexShard path has no equivalent of these yet. |
 | `fsdp_defer_gradient_reduction` | FlexShard has no equivalent of FSDP2's `set_is_last_backward`. |
-| Models that override `_apply_fsdp`: multimodal models, DeepSeek V4, FLUX and the transformers modeling backend | Only `Decoder._apply_fsdp` passes `fsdp_backend` on, so these would shard with FSDP2. |
+| Models that override `_apply_fsdp`: multimodal models, DeepSeek V4, FLUX and the transformers modeling backend | Only `Decoder._apply_fsdp` applies `fsdp_backend`, so these would shard with FSDP2. |
 | Modules without `param_init` that have a `reset_parameters()` | FlexShard initializes parameters only through `param_init`. `reset_parameters()` would draw each rank's shard as the whole parameter, with the same values on every rank. The check reads the model config, so it also rejects modules with no parameters, such as the `RMSNorm(elementwise_affine=False)` QK norms of muse_glimmer and muse_spark. |
 | `preserve_dtype_params` | A bucket all-gathers in one dtype. |
 | MXFP8 and NVFP4 weights | FlexShard's plain-tensor parameters drop the quantized all-gather these weights implement for FSDP2. |

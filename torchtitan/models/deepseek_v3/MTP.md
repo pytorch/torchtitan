@@ -176,7 +176,7 @@ In other words, SP handling does not call `redistribute` explicitly in the forwa
 
 ### 3.1 FSDP
 
-`MTPDecoder` uses `Decoder._apply_fsdp`. The decoder's FSDP groups (`_decoder_fsdp_groups()` in `torchtitan/distributed/fsdp.py`) treat each MTP layer as a transformer block after `layers`. This gives MTP layers the same FSDP wrapping, expert wrapping, reshard policy, and expert-parallel prefetching as normal decoder layers. `parallelism.fsdp_backend=FlexShardConfig()` gives FlexShard the same groups.
+`MTPDecoder` uses `Decoder._apply_fsdp`. The decoder's sharding units (`decoder_sharding_units()` in `torchtitan/distributed/fsdp.py`) treat each MTP layer as a transformer block after `layers`. This gives MTP layers the same FSDP wrapping, expert wrapping, reshard policy, and expert-parallel prefetching as normal decoder layers. `parallelism.fsdp_backend=FlexShardBackend.Config()` gives FlexShard the same units.
 
 ### 3.2 TP/SP
 

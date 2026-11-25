@@ -5,7 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Installs flex_shard for parallelism.fsdp_backend=FlexShardConfig(). It has no
+# Installs flex_shard for parallelism.fsdp_backend=FlexShardBackend.Config(). It has no
 # release yet, so this pins a commit; --no-deps keeps the torch installed before.
 
 set -eux

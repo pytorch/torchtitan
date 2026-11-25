@@ -230,17 +230,23 @@ def test_prompt_images_are_recorded_without_their_file_bytes(tmp_path) -> None:
 
 
 def test_empty_turns_rollout(tmp_path) -> None:
-    # A rollout with no turns (e.g. a prompt too long): no turns, no crash.
+    # A rollout with no turns (e.g. its first prompt is too long): no turns, no crash.
     rollout = Rollout(
         group_id=0,
         rollout_id=0,
-        status=RolloutStatus.TRUNCATED_PROMPT_TOO_LONG,
+        status=RolloutStatus.FIRST_PROMPT_TOO_LONG,
         turns=[],
-        reward=0.0,
     )
-    record = _record_one(tmp_path, rollout)
+    recorder = _recorder(
+        tmp_path, filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+    )
+    recorder.record(
+        is_validation=False,
+        rollout_groups=[RolloutGroup(group_id=0, rollouts=[rollout])],
+    )
+    (record,) = _close_and_read_lines(recorder, tmp_path)
     assert record["turns"] == []
-    assert record["reward"] == 0.0
+    assert record["reward"] is None
 
 
 def test_turn_metrics_are_excluded_not_serialized(tmp_path) -> None:
