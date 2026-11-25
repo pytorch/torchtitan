@@ -820,26 +820,34 @@ _SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
 
 
 @pytest.mark.parametrize(
-    "model, debug, match",
+    "model, parallelism, debug, match",
     [
         (
             _MODEL_CONFIG,
+            _PARALLELISM,
             DebugConfig(batch_invariant=True),
             "batch_invariant needs kv_cache_dtype='auto'",
         ),
         (
+            _MODEL_CONFIG,
+            InferenceParallelismConfig(tensor_parallel_degree=2),
+            DebugConfig(),
+            "untested with tensor parallelism, but tensor_parallel_degree=2",
+        ),
+        (
             _SLIDING_WINDOW_MODEL_CONFIG,
+            _PARALLELISM,
             DebugConfig(),
             r"untested with sliding-window attention, but \(layer, window\) \[\(0, 128\)\]",
         ),
     ],
-    ids=["batch_invariant", "sliding_window"],
+    ids=["batch_invariant", "tensor_parallel", "sliding_window"],
 )
-def test_fp8_kv_cache_refusals(tmp_path, model, debug, match):
+def test_fp8_kv_cache_refusals(tmp_path, model, parallelism, debug, match):
     with pytest.raises(ValueError, match=match):
         VLLMEngine.Config(kv_cache_dtype="fp8").build(
             model=model,
-            parallelism=_PARALLELISM,
+            parallelism=parallelism,
             model_path="unused",
             max_num_seqs=8,
             precision=PrecisionConfig(),
