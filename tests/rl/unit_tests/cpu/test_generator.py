@@ -811,26 +811,34 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
         )
 
 
+# A model whose first layer uses a 128-token sliding window; the check reads only that field.
+_SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
+    first_full_attention=_MODEL_CONFIG.first_full_attention,
+    layers=[SimpleNamespace(attention=SimpleNamespace(sliding_window_size=128))],
+    max_context_length=1024,
+)
+
+
 @pytest.mark.parametrize(
-    "config_kwargs, debug, match",
+    "model, debug, match",
     [
         (
-            dict(kv_cache_dtype="fp8"),
+            _MODEL_CONFIG,
             DebugConfig(batch_invariant=True),
             "batch_invariant needs kv_cache_dtype='auto'",
         ),
         (
-            dict(kv_cache_dtype="fp8", num_speculative_tokens=3),
+            _SLIDING_WINDOW_MODEL_CONFIG,
             DebugConfig(),
-            "does not support num_speculative_tokens=3",
+            r"untested with sliding-window attention, but \(layer, window\) \[\(0, 128\)\]",
         ),
     ],
-    ids=["batch_invariant", "drafts"],
+    ids=["batch_invariant", "sliding_window"],
 )
-def test_fp8_kv_cache_refusals(tmp_path, config_kwargs, debug, match):
+def test_fp8_kv_cache_refusals(tmp_path, model, debug, match):
     with pytest.raises(ValueError, match=match):
-        VLLMEngine.Config(**config_kwargs).build(
-            model=_MODEL_CONFIG,
+        VLLMEngine.Config(kv_cache_dtype="fp8").build(
+            model=model,
             parallelism=_PARALLELISM,
             model_path="unused",
             max_num_seqs=8,
@@ -848,6 +856,11 @@ def test_fp8_kv_cache_refusals(tmp_path, config_kwargs, debug, match):
             generator_name="generator",
             output_dir=str(tmp_path),
         )
+
+
+def test_fp8_kv_cache_refuses_drafts_at_config_time():
+    with pytest.raises(ValueError, match="does not support num_speculative_tokens=3"):
+        VLLMEngine.Config(kv_cache_dtype="fp8", num_speculative_tokens=3)
 
 
 def test_qwen36_27b_perf_config():

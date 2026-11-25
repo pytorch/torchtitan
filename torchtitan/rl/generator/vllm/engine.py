@@ -259,6 +259,14 @@ class VLLMEngine(GenerationEngine):
                 raise ValueError(
                     f"num_speculative_tokens must be >= 0, got {self.num_speculative_tokens}"
                 )
+            if self.kv_cache_dtype == "fp8" and self.num_speculative_tokens > 0:
+                # TODO: support MTP drafts with fp8: `_verify_rows_as_decode` doesn't pass the
+                # fp8 descales to FA4 yet.
+                raise ValueError(
+                    f"kv_cache_dtype='fp8' does not support num_speculative_tokens="
+                    f"{self.num_speculative_tokens} yet: MTP verify rows don't pass the fp8 "
+                    "descales to FA4. Set num_speculative_tokens=0 or kv_cache_dtype='auto'"
+                )
 
     def __init__(
         self,
@@ -305,14 +313,18 @@ class VLLMEngine(GenerationEngine):
                 "debug.batch_invariant=False: the target verifies 1 + k tokens per step "
                 "with kernels the trainer does not run"
             )
-        if config.kv_cache_dtype == "fp8" and config.num_speculative_tokens > 0:
-            # TODO: support MTP drafts with fp8: `_verify_rows_as_decode` doesn't pass the
-            # fp8 descales to FA4 yet.
-            raise ValueError(
-                f"kv_cache_dtype='fp8' does not support num_speculative_tokens="
-                f"{config.num_speculative_tokens} yet: MTP verify rows don't pass the fp8 "
-                "descales to FA4. Set num_speculative_tokens=0 or kv_cache_dtype='auto'"
-            )
+        if config.kv_cache_dtype == "fp8":
+            windowed_layers = [
+                (layer_id, layer.attention.sliding_window_size)
+                for layer_id, layer in enumerate(model.layers)
+                if getattr(layer.attention, "sliding_window_size", None) is not None
+            ]
+            if windowed_layers:
+                # TODO: test fp8 with sliding windows (and gpt-oss's attention sinks), then lift this.
+                raise ValueError(
+                    "kv_cache_dtype='fp8' is untested with sliding-window attention, but "
+                    f"(layer, window) {windowed_layers[:2]} use one; set kv_cache_dtype='auto'"
+                )
         if config.cuda_graph.uses_breakable_cuda_graphs(config.num_speculative_tokens):
             _enable_breakable_cuda_graphs()
         if config.num_speculative_tokens > 0 and vision_processor is not None:
