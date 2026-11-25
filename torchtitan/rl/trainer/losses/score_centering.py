@@ -79,6 +79,8 @@ class ScoreCentering(Configurable):
         self,
         logits: torch.Tensor,
         *,
+        labels: torch.Tensor,
+        label_logprobs: torch.Tensor,
         temperature: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
@@ -95,6 +97,9 @@ class ScoreCentering(Configurable):
 
         Args:
             logits: [T, V] current-policy logits (a vocab shard under TP).
+            labels: [T] the sampled tokens.
+            label_logprobs: [T] their trainer logprobs (with autograd), from which the top-k
+                logprobs are scored.
             temperature: [T] temperature each token was sampled at.
             advantages: [T] per-token advantages.
             loss_mask: [T] loss tokens with a finite generator logprob.
@@ -112,6 +117,8 @@ class ScoreCentering(Configurable):
         trainer_topk_logprobs = compute_topk_logprobs(
             logits,
             generator_topk_token_ids,
+            labels=labels,
+            label_logprobs=label_logprobs,
             vocab_parallel_group=vocab_parallel_group,
             global_vocab_size=global_vocab_size,
             temperature=temperature,
@@ -167,8 +174,6 @@ class ScoreCentering(Configurable):
             }
         # log p - sg(log p): the gradient of sum_H c_v * log p_v with a forward value of 0, so
         # loss/mean stays comparable with runs without score centering.
-        # TODO: score the label and the top-k ids in one call; this separate call saves one
-        # more fp32 [T, V_local] per chunk for backward.
         correction = (
             coefficients * (trainer_topk_logprobs - trainer_topk_logprobs.detach())
         ).sum(-1)

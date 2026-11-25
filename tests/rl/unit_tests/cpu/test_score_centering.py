@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from torchtitan.components.loss import compute_topk_logprobs
+from torchtitan.components.loss import compute_logprobs, compute_topk_logprobs
 from torchtitan.rl.trainer.losses import (
     CISPOLoss,
     DAPOLoss,
@@ -178,6 +178,10 @@ def test_score_centering_is_a_bitwise_noop_when_the_generator_matches(name) -> N
         generator_topk_logprobs=compute_topk_logprobs(
             logits,
             topk_ids,
+            labels=labels,
+            label_logprobs=compute_logprobs(
+                logits, labels, vocab_parallel_group=None, temperature=temperature
+            ),
             vocab_parallel_group=None,
             global_vocab_size=None,
             temperature=temperature,

@@ -155,3 +155,5 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     assert topk_logits is logits
     torch.testing.assert_close(topk_ids, token_ids[:, 1:].to(torch.int64))
     assert topk_kwargs["vocab_parallel_group"] is None
+    # The top-k is scored from the sampled token's logprob.
+    torch.testing.assert_close(topk_kwargs["labels"], token_ids[:, 0].to(torch.int64))
