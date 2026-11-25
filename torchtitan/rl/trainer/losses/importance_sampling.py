@@ -55,8 +55,12 @@ class CISPOLoss(PolicyGradientLoss):
         return -tokens.advantages * weight * tokens.trainer_logprobs
 
     def log_token_weight(
-        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+        self,
+        log_ratio: torch.Tensor,
+        advantages: torch.Tensor,
+        trainer_logprobs: torch.Tensor,
     ) -> torch.Tensor:
+        del trainer_logprobs  # the weight reads the ratio alone
         # The weight reads PolicyGradientLoss's ratio, whose |log r| is clamped.
         clamped = torch.clamp(log_ratio, -MAX_LOG_RATIO, MAX_LOG_RATIO)
         return torch.clamp(clamped, max=math.log(self.max_ratio))
@@ -107,8 +111,12 @@ class IcePopLoss(PolicyGradientLoss):
         return -tokens.advantages * weight * tokens.trainer_logprobs
 
     def log_token_weight(
-        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+        self,
+        log_ratio: torch.Tensor,
+        advantages: torch.Tensor,
+        trainer_logprobs: torch.Tensor,
     ) -> torch.Tensor:
+        del trainer_logprobs  # the weight reads the ratio alone
         # The band lies inside PolicyGradientLoss's |log r| <= MAX_LOG_RATIO clamp.
         in_band = (log_ratio >= math.log(self.ratio_mask_low)) & (
             log_ratio <= math.log(self.ratio_mask_high)

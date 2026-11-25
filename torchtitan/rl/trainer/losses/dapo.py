@@ -49,8 +49,12 @@ class DAPOLoss(PolicyGradientLoss):
         return -torch.min(ratio * advantages, clipped_ratio * advantages)
 
     def log_token_weight(
-        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+        self,
+        log_ratio: torch.Tensor,
+        advantages: torch.Tensor,
+        trainer_logprobs: torch.Tensor,
     ) -> torch.Tensor:
+        del trainer_logprobs  # the weight reads the ratio alone
         # min(r * A, clip(r) * A) follows r (weight r) unless the clip binds in A's direction;
         # PolicyGradientLoss's clamp of |log r| to MAX_LOG_RATIO also stops the gradient.
         unclipped = torch.where(

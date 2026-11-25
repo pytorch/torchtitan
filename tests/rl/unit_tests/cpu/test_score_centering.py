@@ -13,6 +13,7 @@ from torchtitan.components.loss import compute_topk_logprobs
 from torchtitan.rl.trainer.losses import (
     CISPOLoss,
     DAPOLoss,
+    DPPOLoss,
     GRPOLoss,
     IcePopLoss,
     ScoreCentering,
@@ -24,6 +25,8 @@ _LOSS_CONFIGS = {
     "grpo": GRPOLoss.Config(clip_eps=0.1),
     "cispo": CISPOLoss.Config(max_ratio=1.2),
     "icepop": IcePopLoss.Config(ratio_mask_low=0.8, ratio_mask_high=1.25),
+    # A tight trust region, so the drift tests see dropped tokens.
+    "dppo": DPPOLoss.Config(divergence_threshold=0.15, max_ratio=1.5),
 }
 
 
@@ -58,7 +61,7 @@ def test_log_token_weight_matches_token_loss_gradient(name) -> None:
 
     loss.token_loss(tokens).sum().backward()
 
-    weight = torch.exp(loss.log_token_weight(log_ratio, advantages))
+    weight = torch.exp(loss.log_token_weight(log_ratio, advantages, trainer_logprobs))
     torch.testing.assert_close(trainer_logprobs.grad, -advantages * weight)
     # The clip, cap or band binds on some tokens and not on others.
     ratio = torch.exp(log_ratio)
@@ -124,10 +127,12 @@ def test_score_centering_tail_model_is_exact_for_a_proportional_tail(
     name, tail_scale
 ) -> None:
     """With only the top-k, cancellation is exact when the generator's tail is the trainer's
-    scaled by rho, whether the tail's ratio 1 / rho is inside the clip band (0.95) or not."""
+    scaled by rho, whether the tail's ratio 1 / rho is inside the clip band (0.95) or not.
+    For DPPO the tail masses differ by more than its threshold at tail scale 0.5, but no
+    single tail token moves that far."""
     torch.manual_seed(1)
-    vocab_size, num_topk = 16, 4
-    logits_row = torch.randn(vocab_size)
+    vocab_size, num_topk = 64, 16
+    logits_row = torch.randn(vocab_size) * 0.5
     trainer_probs = torch.softmax(logits_row / 0.7, dim=-1)
     head = torch.argsort(trainer_probs, descending=True)[:num_topk]
     tail = torch.ones(vocab_size, dtype=torch.bool)

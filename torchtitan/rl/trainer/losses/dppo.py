@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 
 from torchtitan.rl.trainer.losses.policy_gradient import (
+    MAX_LOG_RATIO,
     PolicyGradientLoss,
     ScoredTokens,
 )
@@ -61,14 +63,6 @@ class DPPOLoss(PolicyGradientLoss):
                     "DPPOLoss needs divergence_threshold > 0 and max_ratio >= 1, got "
                     f"{self.divergence_threshold} and {self.max_ratio}"
                 )
-            # Score centering's top-k needs one weight for all tail tokens; DPPO's weight
-            # depends on each token's p - p_gen, not on the ratio alone.
-            # TODO: score centering with a full-vocabulary tail term for DPPO.
-            if self.score_centering is not None:
-                raise ValueError(
-                    "DPPOLoss does not support score_centering: its trust region depends "
-                    "on p - p_gen, so the generator's tail can't be folded into its top-k."
-                )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -77,18 +71,31 @@ class DPPOLoss(PolicyGradientLoss):
 
     def token_loss(self, tokens: ScoredTokens) -> torch.Tensor:
         # TODO: add the binary-KL variant (paper Eq. 14); the paper finds it on par.
-        weight = torch.clamp(tokens.ratio, max=self.max_ratio) * ~self._dropped(tokens)
+        dropped = self._dropped(
+            tokens.trainer_logprobs, tokens.generator_logprobs, tokens.advantages
+        )
+        weight = torch.clamp(tokens.ratio, max=self.max_ratio) * ~dropped
         return -tokens.advantages * weight.detach() * tokens.trainer_logprobs
 
     def log_token_weight(
-        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+        self,
+        log_ratio: torch.Tensor,
+        advantages: torch.Tensor,
+        trainer_logprobs: torch.Tensor,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "DPPOLoss's weight depends on p - p_gen, not on the ratio alone"
+        # The weight reads PolicyGradientLoss's ratio, whose |log r| is clamped.
+        clamped = torch.clamp(log_ratio, -MAX_LOG_RATIO, MAX_LOG_RATIO)
+        log_weight = torch.clamp(clamped, max=math.log(self.max_ratio))
+        # log p_gen = log p - log r.
+        dropped = self._dropped(
+            trainer_logprobs, trainer_logprobs - log_ratio, advantages
         )
+        return torch.where(dropped, -torch.inf, log_weight)
 
     def token_metrics(self, tokens: ScoredTokens) -> dict[str, torch.Tensor]:
-        dropped = self._dropped(tokens)
+        dropped = self._dropped(
+            tokens.trainer_logprobs, tokens.generator_logprobs, tokens.advantages
+        )
         return {
             "loss/trust_region_dropped_frac": dropped.float(),
             "loss/ratio_truncated_frac": (
@@ -96,9 +103,14 @@ class DPPOLoss(PolicyGradientLoss):
             ).float(),
         }
 
-    def _dropped(self, tokens: ScoredTokens) -> torch.Tensor:
+    def _dropped(
+        self,
+        trainer_logprobs: torch.Tensor,
+        generator_logprobs: torch.Tensor,
+        advantages: torch.Tensor,
+    ) -> torch.Tensor:
         # How far p moved in the direction A pushes it; negative if it moved back.
-        prob_change = tokens.advantages.sign() * (
-            torch.exp(tokens.trainer_logprobs) - torch.exp(tokens.generator_logprobs)
+        prob_change = advantages.sign() * (
+            torch.exp(trainer_logprobs) - torch.exp(generator_logprobs)
         )
         return prob_change.detach() > self.divergence_threshold

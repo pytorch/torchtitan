@@ -43,6 +43,14 @@ class ScoreCentering(Configurable):
         c_v = q_v * w(p_v / q_v) - alpha * p_v   for v in H,
         rho = (1 - sum_H q) / (1 - sum_H p),    alpha = rho * w(1 / rho)
 
+    A weight that also reads ``p`` (DPPO drops a token once ``sign(A) * (p - q)`` passes a
+    threshold) differs across tail tokens. Under the tail model a tail token moves by
+    ``(1 - rho) * p_v``, which grows with ``p_v``, so ``w`` is evaluated at the largest
+    ``p_v`` a tail token can have: ``min(trainer tail mass, min_H q / rho)``, since a tail
+    token is outside the generator's top-k. That is exact unless a tail token could move past
+    the threshold, e.g. k = 32 needs ``rho < 0.14`` with ``A > 0``; past it the whole tail
+    counts as dropped.
+
     Example (k = 2, w = 1): p = [0.40, 0.30, 0.15, 0.10, 0.05],
     q = [0.50, 0.22, 0.14, 0.09, 0.05] -> rho = 0.28 / 0.30, c = [0.127, -0.060]. Averaged over
     the sampled token, the logit gradient at a constant advantage goes from q - p =
@@ -76,7 +84,9 @@ class ScoreCentering(Configurable):
         loss_mask: torch.Tensor,
         generator_topk_token_ids: torch.Tensor,
         generator_topk_logprobs: torch.Tensor,
-        log_token_weight: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+        log_token_weight: Callable[
+            [torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
+        ],
         vocab_parallel_group: dist.ProcessGroup | None,
         global_vocab_size: int | None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -90,7 +100,8 @@ class ScoreCentering(Configurable):
             loss_mask: [T] loss tokens with a finite generator logprob.
             generator_topk_token_ids: [T, k] the generator's top-k token ids (0 off the mask).
             generator_topk_logprobs: [T, k] the generator's logprobs of those ids.
-            log_token_weight: the loss's ``log w(log_ratio, advantages)``; -inf where w = 0.
+            log_token_weight: the loss's ``log w(log_ratio, advantages, trainer_logprobs)``;
+                -inf where w = 0.
             vocab_parallel_group: TP group when ``logits`` hold a vocab shard, else None.
             global_vocab_size: full vocabulary size; required under TP.
 
@@ -115,18 +126,33 @@ class ScoreCentering(Configurable):
             generator_probs = torch.exp(generator_logprobs)
             trainer_topk_mass = trainer_probs.sum(-1)
             generator_topk_mass = generator_probs.sum(-1)
-            log_rho = torch.log(
-                (1 - generator_topk_mass).clamp_min(_MIN_TAIL_MASS)
-            ) - torch.log((1 - trainer_topk_mass).clamp_min(_MIN_TAIL_MASS))
+            log_trainer_tail_mass = torch.log(
+                (1 - trainer_topk_mass).clamp_min(_MIN_TAIL_MASS)
+            )
+            log_rho = (
+                torch.log((1 - generator_topk_mass).clamp_min(_MIN_TAIL_MASS))
+                - log_trainer_tail_mass
+            )
             # q * w(p / q) in log space: inside a ratio band q * (p / q) is p, exactly and
             # without overflow when q underflows.
             weighted_generator_probs = torch.exp(
                 generator_logprobs
                 + log_token_weight(
-                    trainer_logprobs - generator_logprobs, advantages.unsqueeze(-1)
+                    trainer_logprobs - generator_logprobs,
+                    advantages.unsqueeze(-1),
+                    trainer_logprobs,
                 )
             )
-            alpha = torch.exp(log_rho + log_token_weight(-log_rho, advantages))
+            # A weight that reads p (DPPO) is evaluated at the largest p a tail token can
+            # have under the tail model: at most the whole tail's trainer mass, and, since a
+            # tail token is outside the generator's top-k, q_v = rho * p_v <= min_H q.
+            log_max_tail_trainer_prob = torch.minimum(
+                log_trainer_tail_mass, generator_logprobs.amin(-1) - log_rho
+            )
+            alpha = torch.exp(
+                log_rho
+                + log_token_weight(-log_rho, advantages, log_max_tail_trainer_prob)
+            )
             coefficients = torch.where(
                 row_mask,
                 weighted_generator_probs - alpha.unsqueeze(-1) * trainer_probs,
