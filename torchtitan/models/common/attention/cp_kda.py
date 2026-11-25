@@ -22,6 +22,8 @@ from torchtitan.models.common.attn_gym import (
 
 from .cp_attention import CPInnerAttention, Ulysses
 from .cp_linear_attention import (
+    check_num_head_chunks,
+    chunk_heads,
     ContextParallelLinearAttentionMetadata,
     prepare_cp_linear_attention_metadata,
     prepare_ulysses_linear_attention_metadata,
@@ -131,7 +133,16 @@ class ContextParallelInnerKDA(
 
     @dataclass(kw_only=True, slots=True)
     class Config(CPInnerAttention.Config, InnerKDA.Config):
-        pass
+        num_head_chunks: int = 1
+        """Run the KDA kernel on this many chunks of heads, one after another.
+        Heads are independent, so the result is the same; each call's kernel
+        workspace is ``1 / num_head_chunks`` of one call over all heads."""
+
+        def __post_init__(self) -> None:
+            # Explicit parent: slots dataclasses can't use zero-arg super();
+            # InnerKDA.Config checks head_dim.
+            InnerKDA.Config.__post_init__(self)
+            check_num_head_chunks(self.num_head_chunks)
 
     def __init__(self, config: Config):
         # Every attn_gym export this module calls; keep the list in sync.
@@ -139,6 +150,7 @@ class ContextParallelInnerKDA(
             context_parallel_kda, context_parallel_conv_history, ContextParallelRouting
         )
         super().__init__(config)
+        self.num_head_chunks = config.num_head_chunks
 
     @staticmethod
     def prepare_cp_metadata(
@@ -252,13 +264,10 @@ class ContextParallelInnerKDA(
             raise RuntimeError(
                 "KDA context parallelism requires an active multi-rank CP mesh axis."
             )
-        output_1THV, _ = context_parallel_kda(
-            q_1THK,
-            k_1THK,
-            v_1THV,
-            gate_1THK,
-            beta_1TH,
+        return chunk_heads(
+            context_parallel_kda,
+            (q_1THK, k_1THK, v_1THV, gate_1THK, beta_1TH),
+            self.num_head_chunks,
             routing=routing,
             group=cp_group,
         )
-        return output_1THV

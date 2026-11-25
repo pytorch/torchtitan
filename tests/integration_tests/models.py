@@ -250,10 +250,10 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2_pp2() -> Trainer.Config:
     return config
 
 
-def deepseek_v4_debugmodel_fsdp4_ep4() -> Trainer.Config:
-    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
+def deepseek_v4_mtp_debugmodel_fsdp4_ep4() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_mtp_debugmodel
 
-    config = deepseek_v4_debugmodel(
+    config = deepseek_v4_mtp_debugmodel(
         seq_len=512, parallelism=ParallelismConfig(expert_parallel_degree=4)
     )
     _set_spmd_typechecking(config, typechecking=False)
@@ -734,8 +734,8 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
-            configs=[deepseek_v4_debugmodel_fsdp4_ep4],
-            test_descr="DeepSeek V4 DistMuon FSDP+EP",
+            configs=[deepseek_v4_mtp_debugmodel_fsdp4_ep4],
+            test_descr="DeepSeek V4 MTP DistMuon FSDP+EP",
             test_name="deepseek_v4_dist_muon_fsdp+ep",
             ngpu=4,
             # DistMuon optimizer-state redistribution requires real collectives.

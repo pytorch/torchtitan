@@ -12,7 +12,7 @@ from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import AdamW, Optim, OptimizersContainer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.config.transform import MXFP8LinearTransform
 from torchtitan.distributed.activation_remat import (
     BlockRematOverride,
     DefaultActivationRematConfig,
@@ -21,15 +21,15 @@ from torchtitan.distributed.activation_remat import (
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.llama3 import build_model_config, Llama3Model
 from torchtitan.observability.metrics import MetricsProcessor, TensorBoardLogger
-from torchtitan.observability.profiler import Profiler
+from torchtitan.observability.profiler import KinetoTraceProfiler, Profiler
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.data import c4_document_capacity
 
 
-def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
+def llama3_mxfp8_linear_transform() -> MXFP8LinearTransform:
     """Build the MXFP8 policy shared by eager and GraphTrainer recipes."""
-    return MXFP8LinearConverter.Config(
+    return MXFP8LinearTransform(
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.qkv_linear.wqkv",
             "feed_forward.w2",
@@ -48,7 +48,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-8B",
-        profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]),
         model=model_config,
         parallelism=parallelism,
@@ -111,7 +111,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             ),
         ),
         hf_assets_path="./assets/hf/Llama-3.1-70B",
-        profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
+        profiler=Profiler.Config(trace=KinetoTraceProfiler.Config(freq=100)),
         metrics=MetricsProcessor.Config(loggers=[TensorBoardLogger.Config()]),
         model=model_config,
         optim=Optim.Config(

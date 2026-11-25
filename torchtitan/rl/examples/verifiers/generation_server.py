@@ -114,7 +114,9 @@ class GenerationServer(Configurable):
     async def start(self) -> None:
         if self.runner is not None:
             return
-        app = web.Application()
+        # aiohttp refuses a body over 1 MiB by default: a prompt past ~150K token ids. Verifiers'
+        # interception server, which forwards these calls, accepts 1 GiB.
+        app = web.Application(client_max_size=1024**3)
         app.router.add_get("/healthz", self._handle_health_request)
         app.router.add_get("/v1/models", self._handle_models_request)
         app.router.add_post("/inference/v1/generate", self._handle_generate_request)
@@ -172,7 +174,8 @@ class GenerationServer(Configurable):
         """Run one model call through `generate_fn`. Its error answers:
 
             503  `generate_fn` is not set yet
-            400  no X-Session-ID header, a malformed body, or a prompt with no room for an output token
+            400  a prompt with no room for an output token
+            422  no X-Session-ID header, or a malformed body
             500  `generate_fn` raised, or the completion's token ids and logprobs differ in length
             502  no completion, or a finish reason other than "stop" or "length"
 
@@ -193,10 +196,11 @@ class GenerationServer(Configurable):
             return web.json_response(
                 {"error": "TorchTitan GenerateFn is not ready"}, status=503
             )
+
         session_id = request.headers.get(_SESSION_ID_HEADER)
         if not session_id:
             return web.json_response(
-                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=400
+                {"error": f"missing {_SESSION_ID_HEADER} header"}, status=422
             )
 
         try:
@@ -204,14 +208,6 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            # vLLM needs room for one output token. Keep vLLM's wording: Verifiers'
-            # harnesses match it as a context overflow.
-            if len(prompt_token_ids) >= self.max_rollout_tokens:
-                raise ValueError(
-                    f"This model's maximum context length is {self.max_rollout_tokens} "
-                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
-                    "leaving no room for an output token"
-                )
             sampling_params = body.get("sampling_params")
             if not isinstance(sampling_params, dict):
                 raise ValueError("sampling_params must be an object")
@@ -225,7 +221,19 @@ class GenerationServer(Configurable):
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
-            return web.json_response({"error": str(error)}, status=400)
+            return web.json_response({"error": str(error)}, status=422)
+
+        # vLLM needs room for one output token. Keep vLLM's wording: Verifiers' harnesses match it
+        # as a context overflow.
+        if len(prompt_token_ids) >= self.max_rollout_tokens:
+            return web.json_response(
+                {
+                    "error": f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"tokens, and the prompt has {len(prompt_token_ids)} tokens, "
+                    "leaving no room for an output token"
+                },
+                status=400,
+            )
 
         # ======== Generate ========
         request_index = self.request_counts.get(session_id, 0)
@@ -360,6 +368,8 @@ def _parse_sampling_config(value: object):
     supported = {
         "temperature",
         "top_p",
+        "top_k",
+        "min_p",
         "max_tokens",
         "seed",
         "stop_token_ids",
@@ -372,6 +382,14 @@ def _parse_sampling_config(value: object):
     unsupported = set(value) - supported - protocol_fields
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
+    # Verifiers sends top_k=-1 and min_p=0.0 on every call. Refuse values that filter: the trainer
+    # computes logprobs over the full vocabulary. TODO(mask-replay): allow them, as for top_p < 1.
+    top_k, min_p = value.get("top_k", -1), value.get("min_p", 0.0)
+    if top_k not in (-1, 0) or min_p != 0.0:
+        raise ValueError(
+            "sampling_params must not filter (top_k -1 or 0, min_p 0.0), "
+            f"got top_k={top_k!r}, min_p={min_p!r}"
+        )
 
     # The generator stops only on these ids; the renderer client always sends them.
     stop_token_ids = _validate_token_ids(

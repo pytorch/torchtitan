@@ -31,6 +31,7 @@ import os
 # See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+from torch.distributed.elastic.multiprocessing.errors import record
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
@@ -95,6 +96,7 @@ def _shutdown_engine(engine: LLMEngine) -> None:
     cleanup_dist_env_and_memory()
 
 
+@record
 def generate() -> None:
     args, config_args = _parse_args()
     config = ConfigLoader().load(config_args)

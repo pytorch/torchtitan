@@ -13,11 +13,24 @@ import torch
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import Attention
 from torchtitan.models.common.flops import (
     active_parameter_flops_per_token,
+    delta_rule_flops_per_token,
     get_parameter_counts,
 )
+from torchtitan.models.qwen3_5.model import Qwen35Attention
 from torchtitan.training_engine import TrainingEngine
+
+
+def _text(num_tokens, seq_len=128):
+    # Every query attends to seq_len keys, so the estimate matches main's
+    # full-length estimate.
+    return {
+        "input": torch.empty(num_tokens, dtype=torch.long),
+        "positions": torch.full((num_tokens,), seq_len - 1),
+        "padding_mask": torch.zeros(num_tokens, dtype=torch.bool),
+    }
 
 
 def _build(family, flavor="debugmodel", **kwargs):
@@ -49,7 +62,32 @@ def test_text_estimates_preserve_main(family, flavor, expected):
     # Values recorded from main before introducing the shared estimator.
     config, model = _build(family, flavor)
     estimate = config.build_flops_estimator(model, seq_len=128)
-    assert estimate({"input": torch.empty(256, dtype=torch.long)}) == expected * 256
+    assert estimate(_text(256)) == expected * 256
+
+
+def test_attention_counts_each_query_at_its_document_position():
+    # Qwen3.5 mixes full attention, whose cost grows with the keys a query
+    # sees, with GatedDeltaNet, whose cost per token is fixed.
+    config, model = _build("qwen3_5")
+    estimate = config.build_flops_estimator(model, seq_len=128)
+    # Two packed documents of lengths 3 and 2, then one padding token. The five
+    # real queries attend to 1 + 2 + 3 + 1 + 2 = 9 keys in total.
+    inputs = {
+        "input": torch.empty(6),
+        "positions": torch.tensor([0, 1, 2, 0, 1, 2]),
+        "padding_mask": torch.tensor([False] * 5 + [True]),
+    }
+    expected = 5 * active_parameter_flops_per_token(model)
+    for _, attention, _, _ in config.traverse(Attention.Config):
+        if isinstance(attention, Qwen35Attention.Config):
+            expected += 9 * 6 * attention.n_heads * 2 * attention.head_dim
+        else:
+            expected += 5 * delta_rule_flops_per_token(
+                num_heads=attention.n_heads,
+                key_head_dim=attention.key_head_dim,
+                v_head_dim=attention.value_head_dim,
+            )
+    assert estimate(inputs) == expected
 
 
 def test_parameter_counts_include_embeddings_and_deduplicate_tied_weights():
@@ -73,16 +111,17 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
         config = replace(base_config, mtp_layers=config.mtp_layers)
         with torch.device("meta"):
             model = config.build()
-    inputs = {"input": torch.empty(128)}
+    inputs = _text(128)
     base_flops = base_config.build_flops_estimator(base_model, seq_len=128)(inputs)
     flops = config.build_flops_estimator(model, seq_len=128)(inputs)
     mtp_parameter_flops = active_parameter_flops_per_token(model.mtp_layers)
     repeated_head_flops = 2 * active_parameter_flops_per_token(model.lm_head)
     mtp_attention_flops = sum(
-        layer.attention.flops_per_token(128) for layer in config.mtp_layers
+        layer.attention.flops(inputs["positions"]) for layer in config.mtp_layers
     )
-    assert flops - base_flops == 128 * (
-        mtp_parameter_flops + repeated_head_flops + mtp_attention_flops
+    assert (
+        flops - base_flops
+        == 128 * (mtp_parameter_flops + repeated_head_flops) + mtp_attention_flops
     )
     if family == "kimi_k2_7":
         image_inputs = {
@@ -102,6 +141,7 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
     "family,flavor",
     [
         ("kimi_k2_7", "debugmodel"),
+        ("qwen3_8_flash_next", "debugmodel_mm"),
         ("muse_glimmer", "debugmodel_mm"),
         ("muse_spark", "debugmodel_mm"),
     ],
@@ -109,7 +149,7 @@ def test_mtp_counts_attention_and_repeated_output_projection(family):
 def test_multimodal_estimate_sums_items_and_modalities(family, flavor):
     config, model = _build(family, flavor)
     estimate = config.build_flops_estimator(model, seq_len=128)
-    text = {"input": torch.empty(128, dtype=torch.long)}
+    text = _text(128)
     image = {"pixel_values": torch.empty(16, 1), "grid_thw": torch.tensor([[1, 4, 4]])}
     video = {
         "pixel_values_videos": torch.empty(32, 1),
@@ -138,7 +178,7 @@ def test_multimodal_estimate_sums_items_and_modalities(family, flavor):
 def test_spark_audio_uses_each_stage_token_count():
     config, model = _build("muse_spark", "debugmodel_mm")
     estimate = config.build_flops_estimator(model, seq_len=128)
-    text = {"input": torch.empty(128, dtype=torch.long)}
+    text = _text(128)
     num_tokens = 32
     expected = 0
     for stage in model.audio_encoder.layers.values():
@@ -219,7 +259,7 @@ def test_lazy_preprocessing_counts_flops_for_streamed_groups():
 @pytest.mark.parametrize("family", ["muse_glimmer", "muse_spark"])
 def test_muse_projection_is_charged_only_per_vision_output_token(family):
     config, model = _build(family, "debugmodel_mm")
-    text = {"input": torch.empty(128, dtype=torch.long)}
+    text = _text(128)
     image = {
         **text,
         "pixel_values": torch.empty(16, 1),
@@ -237,7 +277,7 @@ def test_muse_projection_is_charged_only_per_vision_output_token(family):
 
 def test_spark_shared_perception_norm_is_charged_for_both_encoders():
     config, model = _build("muse_spark", "debugmodel_mm")
-    text = {"input": torch.empty(128, dtype=torch.long)}
+    text = _text(128)
     multimodal = {
         **text,
         "pixel_values": torch.empty(16, 1),

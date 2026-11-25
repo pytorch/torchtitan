@@ -59,8 +59,9 @@ register_dataclass(LinearAttentionMetadata)
 
 
 def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
-    """Attention Gym chunk-kernel options: the fused kernels for every input. Takes `q` for the TODO's cuDNN choice."""
-    # TODO: use backend="cudnn" again for packed fp16/bf16 on SM100/SM103 (GDN fwd+bwd ~2x faster on GB300) once a
-    # model using it scores a token the same in a sequence and in that token's own prefix: one 78k-token sequence
-    # broke this, random inputs don't. No Attention Gym issue filed yet. KDA's cuDNN kernel shares the vendored code.
+    """Attention Gym chunk-kernel options for `q`: the fused kernels, for every input."""
+    # TODO: bring back backend="warpdrive" (GDN fwd+bwd 2.3-3.9x faster on GB300) once it is causally consistent at
+    # long packed lengths. The old backend "cudnn" was not (Qwen3.8-27B, 78k tokens, pos 562: full -1.91, prefix
+    # -10.35; fused -0.0146). KDA's is unchecked too. File an Attention Gym issue with this repro and link it here.
+    del q
     return KernelOptions(backend="fused")
