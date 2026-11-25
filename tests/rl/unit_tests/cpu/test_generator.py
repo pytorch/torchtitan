@@ -812,33 +812,28 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
         )
 
 
-def test_batch_invariant_rejects_fp8_kv_cache(tmp_path):
-    with pytest.raises(ValueError, match="batch_invariant needs kv_cache_dtype='auto'"):
-        VLLMEngine.Config(kv_cache_dtype="fp8").build(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            model_path="unused",
-            max_num_seqs=8,
-            precision=PrecisionConfig(),
-            gpu_memory_limit=0.9,
-            max_num_batched_tokens=None,
-            checkpointer=None,
-            dist_moe_runtime=None,
-            debug=DebugConfig(batch_invariant=True),
-            reset_kv_cache_on_model_state_dict_load=True,
-            model_state_dict_load_mode="cpu_prefetch",
-            vision_processor=None,
-            mooncake_master_address=None,
-            rank=0,
-            generator_name="generator",
-            output_dir=str(tmp_path),
-        )
-
-
-def test_fp8_kv_with_drafts_rejects_an_fa4_without_query_len_in_heads(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "config_kwargs, debug, error, match",
+    [
+        (
+            dict(kv_cache_dtype="fp8"),
+            DebugConfig(batch_invariant=True),
+            ValueError,
+            "batch_invariant needs kv_cache_dtype='auto'",
+        ),
+        (
+            dict(kv_cache_dtype="fp8", num_speculative_tokens=3),
+            DebugConfig(),
+            RuntimeError,
+            "query_len_in_heads.*from /venv/flash_attn/cute/__init__.py",
+        ),
+    ],
+    ids=["batch_invariant", "drafts_without_query_len_in_heads"],
+)
+def test_fp8_kv_cache_refusals(
+    tmp_path, monkeypatch, config_kwargs, debug, error, match
 ):
-    # Fake FA4 modules: the RL CPU CI installs no FA4, and the check imports `flash_attn.cute` for its path.
+    # Fake FA4 modules: the RL CPU CI installs no FA4, and the drafts check imports `flash_attn.cute` for its path.
     fake_cute = ModuleType("flash_attn.cute")
     fake_cute.__file__ = "/venv/flash_attn/cute/__init__.py"
     fake_flash_attn = ModuleType("flash_attn")
@@ -850,10 +845,8 @@ def test_fp8_kv_with_drafts_rejects_an_fa4_without_query_len_in_heads(
         lambda: False,
     )
 
-    with pytest.raises(
-        RuntimeError, match="query_len_in_heads.*from /venv/flash_attn/cute/__init__.py"
-    ):
-        VLLMEngine.Config(kv_cache_dtype="fp8", num_speculative_tokens=3).build(
+    with pytest.raises(error, match=match):
+        VLLMEngine.Config(**config_kwargs).build(
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             model_path="unused",
@@ -863,7 +856,7 @@ def test_fp8_kv_with_drafts_rejects_an_fa4_without_query_len_in_heads(
             max_num_batched_tokens=None,
             checkpointer=None,
             dist_moe_runtime=None,
-            debug=DebugConfig(),
+            debug=debug,
             reset_kv_cache_on_model_state_dict_load=True,
             model_state_dict_load_mode="cpu_prefetch",
             vision_processor=None,

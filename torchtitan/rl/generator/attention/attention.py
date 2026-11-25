@@ -69,8 +69,8 @@ def paged_varlen_attention_out(
         )
     if descales is not None:
         # TODO: call torch's varlen attention once it takes fp8 descales (no torch issue filed yet).
-        # Until then, FA4's private `_flash_attn_fwd` with torch's FA4 bridge's arguments
-        # (torch/nn/attention/_fa4.py): FA4's public varlen call has no `out=`.
+        # Until then, call FA4's private `_flash_attn_fwd` with the arguments torch's FA4 bridge
+        # passes (torch/nn/attention/_fa4.py); FA4's public varlen call has no `out=`.
         # TODO: raise the FA4 floor to the first release with fp8 SwapAB (Dao-AILab/flash-attention#3217).
         # FA4 4.0.0b40 runs fp8 decode on its standard kernel: 1.2x slower than bf16 SwapAB when
         # requests share prefix pages; fp8 SwapAB is 1.7x faster than bf16 SwapAB there (GB300).

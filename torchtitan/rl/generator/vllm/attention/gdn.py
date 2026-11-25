@@ -362,9 +362,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
 
     @functools.cached_property
     def _forward_speculative_eager(self) -> Callable[..., None]:
-        """``_forward_speculative`` as a graph break under vLLM's breakable CUDA graphs
+        """`_forward_speculative` as a graph break under vLLM's breakable CUDA graphs
         (VLLMCudaGraphConfig): steps with prefill read per-step metadata, so it runs eagerly
-        between graph pieces. Wrapped on first use, after ``VLLMEngine`` sets the variable."""
+        between graph pieces. Wrapped on first use, after `VLLMEngine` sets the variable."""
         return eager_break_during_capture(self._forward_speculative)
 
     def _forward_speculative(
@@ -377,7 +377,7 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         dt_bias: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """Write one step's convolution and recurrence into ``output`` when the engine
+        """Write one step's convolution and recurrence into `output` when the engine
         drafts tokens; rows past the step's tokens, and runs without metadata, get zeros.
 
         A port of vLLM's `QwenGatedDeltaNetAttention._forward_core` (vLLM 9f03b51).

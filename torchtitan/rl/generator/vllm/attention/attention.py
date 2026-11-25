@@ -457,11 +457,11 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         descales: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention of a verify step, every row ``n`` query tokens, on FA4's decode kernel.
+        """Attention of a verify step, every row `n` query tokens, on FA4's decode kernel.
 
-        FA4 sends rows of ``n`` > 1 tokens to its prefill kernel: 25.5 ms of attention per
-        Qwen3.8-27B verify step (26 rows sharing 3 prompts, GB300), 14.9 ms this way.
-        Row with ``seq_len`` L, n = 4:
+        FA4 sends rows of `n` > 1 tokens to its prefill kernel: 25.5 ms of attention kernels per
+        Qwen3.8-27B verify step (26 rows sharing 3 prompts, GB300); this way, 14.9 ms plus 1.2 ms
+        for the fp32 tail's kernels. Row with `seq_len` L, n = 4:
 
             tokens at positions          L-4, L-3, L-2, L-1
             FA4 decode, 4 x heads        keys 0 .. L-4             every token
