@@ -65,6 +65,12 @@ def _wait_async_collective_inputs(
 
 _LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[["LocalCompileConfig"], None]]] = {}
 _ALWAYS_COMPILE_CALLBACKS: list[Callable[["LocalCompileConfig"], None]] = []
+_ENABLED_REGIONS: set[str] = set()
+
+
+def is_local_compile_enabled(name: str) -> bool:
+    """Return whether ``name`` is currently compiled via ``LocalCompileConfig.apply()``."""
+    return name in _ENABLED_REGIONS
 
 
 @dataclass(kw_only=True, slots=True)
@@ -137,8 +143,10 @@ def local_compile(
                 fn = _wait_async_collective_inputs(
                     config._compile(reference, fullgraph=True, **compile_kwargs)
                 )
+                _ENABLED_REGIONS.add(name)
             else:
                 fn = reference
+                _ENABLED_REGIONS.discard(name)
 
         @functools.wraps(reference)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
@@ -179,6 +187,7 @@ def compile(
 
 __all__ = [
     "compile",
+    "is_local_compile_enabled",
     "local_compile",
     "LocalCompileConfig",
 ]
