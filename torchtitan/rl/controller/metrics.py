@@ -12,10 +12,10 @@
 import contextlib
 import logging
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import Rollout
+from torchtitan.rl.rollout.types import Rollout, RolloutStatus
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +99,9 @@ def compute_perf_ratio_metrics(
     fwd_bwd_s = seconds.get("timing/step/forward_backward")
     optimizer_s = seconds.get("timing/step/optimizer")
 
-    # How long the trainer waited for the background push/pull to finish.
-    # NOTE: **not** how long it took. We overlap push/pull with the next the step.
+    # How long the trainer waited for the push and for the background pull.
+    # The push runs inline, so its wait is the whole push; the pull's wait is only the part
+    # that forward/backward didn't hide.
     blocking_trainer_push_s = seconds.get(
         "timing/step/blocking_trainer_push_model_state_dict"
     )
@@ -278,6 +279,28 @@ def compute_rollout_metrics(prefix: str, rollouts: list[Rollout]) -> list[m.Metr
         m.Metric(f"{prefix}/truncation_rate", m.Mean.from_list(truncated)),
         m.Metric(f"{prefix}_reward", m.SummaryStats.from_list(rewards)),
     ]
+
+    # Rate per rollout status, e.g. 2 ERROR_INFRA of 200 -> Mean(2, count=200)
+    num_rollouts_by_status = Counter(rollout.status for rollout in rollouts)
+    out.extend(
+        m.Metric(
+            f"{prefix}/status_rate/{status.value}",
+            m.Mean(num_rollouts_by_status[status], count=len(rollouts)),
+        )
+        for status in RolloutStatus
+        if status.is_terminal()
+    )
+
+    # One count per error type in `Rollout.logs["errors"]`, e.g. rollout/errors/TimeoutError.
+    num_errors_by_type = Counter(
+        error["type"]
+        for rollout in rollouts
+        for error in rollout.logs.get("errors", [])
+    )
+    out.extend(
+        m.Metric(f"{prefix}/errors/{error_type}", m.Sum(count))
+        for error_type, count in sorted(num_errors_by_type.items())
+    )
 
     # Per-component reward breakdown
     values_by_name: dict[str, list[float]] = defaultdict(list)
