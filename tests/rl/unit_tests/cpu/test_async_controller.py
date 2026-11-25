@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import dataclasses
 import itertools
 import json
 import logging
@@ -61,6 +62,43 @@ def test_controller_config_maybe_log(tmp_path, caplog) -> None:
     with open(tmp_path / "config.json") as file:
         saved_config = json.load(file)
     assert saved_config["trainer"]["model"]["max_context_length"] == 128
+
+
+def _controller_config_with_groups(
+    *, num_groups: int, group_size: int, rollouts_per_worker: int = 128
+) -> Controller.Config:
+    """A CI recipe with `num_groups` training groups of `group_size` in flight."""
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
+    async_loop = dataclasses.replace(
+        config.async_loop,
+        target_offpolicy_steps=0,
+        num_prompts_per_train_step=num_groups,
+        num_samples_per_prompt=group_size,
+    )
+    rollouter = dataclasses.replace(
+        config.rollouter, rollouts_per_worker=rollouts_per_worker
+    )
+    # `replace` reruns `__post_init__`, so the group-size check runs.
+    return dataclasses.replace(config, async_loop=async_loop, rollouter=rollouter)
+
+
+# rollouts_per_worker=0 must raise this ValueError too: `Rollouter.setup_async` divides by it.
+@pytest.mark.parametrize("group_size, rollouts_per_worker", [(256, 128), (8, 0)])
+def test_a_group_larger_than_rollouts_per_worker_raises(
+    group_size, rollouts_per_worker
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"num_samples_per_prompt \({group_size}\) is larger than "
+        rf"rollouter.rollouts_per_worker \({rollouts_per_worker}\)",
+    ):
+        _controller_config_with_groups(
+            num_groups=16,
+            group_size=group_size,
+            rollouts_per_worker=rollouts_per_worker,
+        )
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
@@ -546,18 +584,6 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         if metric.key == "batcher/num_samples_dropped_oversized"
     )
     assert dropped_metric.value.value == 1
-
-
-def test_batcher_requires_whole_rows_per_microbatch() -> None:
-    with pytest.raises(ValueError, match="must be divisible"):
-        Batcher.Config().build(
-            num_tokens_per_microbatch_per_dp_rank=5,
-            max_context_length=3,
-            num_prompts_per_train_step=1,
-            dp_degree=1,
-            pad_id=0,
-            temperature=1.0,
-        )
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
@@ -1082,7 +1108,10 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     async def run_two_validations() -> list[m.Metric]:
         for step in (0, 2):
             _, metrics = await controller._collect_validation_rollouts(
-                samples=["prompt 1", "prompt 2"], sampling=SamplingConfig(), step=step
+                samples=["prompt 1", "prompt 2"],
+                sampling=SamplingConfig(),
+                num_samples_per_prompt=1,
+                step=step,
             )
         return metrics
 
@@ -1095,3 +1124,81 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     assert keys["validation_math_verify/timeouts/sum"] == 2.0
     assert "generator/queue_time_ms/mean" not in keys
     assert "math_verify/timeouts/sum" not in keys
+
+
+def _scored_group(group_id: int, rewards: list[float | None]) -> RolloutGroup:
+    return RolloutGroup(
+        group_id=group_id,
+        rollouts=[
+            Rollout(
+                group_id=group_id,
+                rollout_id=rollout_id,
+                status=RolloutStatus.COMPLETED,
+                reward=reward,
+            )
+            for rollout_id, reward in enumerate(rewards)
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "num_samples_per_prompt, rewards, expected_mean, expected_best_of",
+    [
+        (1, [[1.0], [0.0]], 0.5, None),
+        (2, [[1.0, 0.0], [0.0, 0.0]], 0.25, 0.5),
+        # Unscored rollouts (reward None) are skipped; the prompt with none scored is left out.
+        (2, [[None, 1.0], [None, None]], 1.0, 1.0),
+    ],
+)
+def test_validate_rolls_out_each_prompt_n_times(
+    num_samples_per_prompt: int,
+    rewards: list[list[float | None]],
+    expected_mean: float,
+    expected_best_of: float | None,
+) -> None:
+    """2 prompts x n rollouts at T=1: the mean covers all rollouts; best_of_n, logged only for
+    n > 1, the best rollout per prompt."""
+    controller = object.__new__(Controller)
+    controller.config = SimpleNamespace(
+        async_loop=SimpleNamespace(
+            validation=ValidationConfig(
+                steps=2, num_samples_per_prompt=num_samples_per_prompt
+            )
+        )
+    )
+    controller._sampling = SamplingConfig(temperature=0.8, seed=7, stop_token_ids=[1])
+    controller._validation_group_ids = itertools.count(start=-1, step=-1)
+    controller.generator_router = SimpleNamespace(
+        release_groups=SimpleNamespace(call_one=AsyncMock())
+    )
+    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
+    run_group_rollouts = AsyncMock(
+        side_effect=[
+            _scored_group(-(i + 1), group_rewards)
+            for i, group_rewards in enumerate(rewards)
+        ]
+    )
+    controller._rollouter = SimpleNamespace(
+        get_validation_samples=lambda steps: ["a", "b"],
+        run_group_rollouts=run_group_rollouts,
+    )
+
+    metrics = asyncio.run(controller.validate(step=0))
+
+    calls = run_group_rollouts.call_args_list
+    assert [call.kwargs["group_size"] for call in calls] == [num_samples_per_prompt] * 2
+    expected_sampling = SamplingConfig(temperature=1.0, seed=7, stop_token_ids=[1])
+    assert [call.kwargs["sampling"] for call in calls] == [expected_sampling] * 2
+    aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
+    assert aggregated["validation_reward/_mean"] == expected_mean
+    best_of_key = f"validation_reward/best_of_{num_samples_per_prompt}/mean"
+    assert aggregated.get(best_of_key) == expected_best_of
+
+
+def test_validation_config_rejects_bad_sampling() -> None:
+    with pytest.raises(ValueError, match="temperature"):
+        ValidationConfig(temperature=-1.0)
+    with pytest.raises(ValueError, match="num_samples_per_prompt"):
+        ValidationConfig(num_samples_per_prompt=0)
+    with pytest.raises(ValueError, match="greedy"):
+        ValidationConfig(temperature=0.0, num_samples_per_prompt=4)

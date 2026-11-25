@@ -105,7 +105,7 @@ def test_apply_fsdp_to_decoder_shards_an_moe_held_as_mlp() -> None:
     with mock.patch("torchtitan.distributed.fsdp.fully_shard") as fully_shard:
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,

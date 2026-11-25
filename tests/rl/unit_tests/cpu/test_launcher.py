@@ -23,6 +23,7 @@ from torchtitan.rl.actors.monarch.launcher.base import (
     MonarchControllerWithLauncher,
     MonarchLauncher,
 )
+from torchtitan.rl.actors.monarch.launcher.pbs import PBSLauncher
 from torchtitan.rl.actors.monarch.launcher.slurm import SlurmLauncher
 from torchtitan.rl.actors.monarch.provisioning import _check_gpus_per_host, HostMeshes
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
@@ -528,3 +529,108 @@ def test_slurm_acquire_hosts(monkeypatch):
 def test_slurm_config_validation(kwargs):
     with pytest.raises(ValueError):
         SlurmLauncher.Config(**kwargs)
+
+
+@pytest.fixture
+def pbs_job(monkeypatch):
+    """Patch `monarch.job.PBSJob`; record its kwargs, client script, env and cwd."""
+    import monarch.job
+
+    calls = {}
+
+    class FakePBSJob:
+        def __init__(self, **kwargs):
+            calls["kwargs"] = kwargs
+
+        def apply(self, client_script):
+            calls["client_script"] = client_script
+            calls["env"] = dict(os.environ)
+            calls["cwd"] = os.getcwd()
+            # Monarch writes the job state relative to the apply() cwd.
+            os.makedirs(".monarch", exist_ok=True)
+            with open(".monarch/job_state.pkl", "w") as f:
+                f.write("state")
+            self._pbs_job_id = "7.pbs"
+
+    monkeypatch.setattr(monarch.job, "PBSJob", FakePBSJob, raising=False)
+    for name in ("TRITON_CACHE_DIR", "VLLM_CACHE_ROOT", "FLASHINFER_WORKSPACE_BASE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sys, "executable", "/venv/python")
+    return calls
+
+
+def test_pbs_submit_builds_the_job(tmp_path, pbs_job, monkeypatch):
+    submit_dir = tmp_path / "repo"
+    submit_dir.mkdir()
+    monkeypatch.chdir(submit_dir)
+    launcher = PBSLauncher.Config(
+        gpus_per_node=12,
+        pbs_args=["-q debug", "-l walltime=01:00:00"],
+        mpiexec_args=["--cpu-bind=none"],
+    ).build()
+
+    assert launcher.submit(_slurm_plan(tmp_path)) == "7.pbs"
+    assert pbs_job["kwargs"] == dict(
+        meshes={"trainer": 2, "generator": 1},
+        python_exe="/venv/python",
+        pbs_args=["-V", "-q debug", "-l walltime=01:00:00"],
+        job_name="j-abcdef",
+        log_dir=str(tmp_path / "pbs"),
+        mpiexec_args=["--cpu-bind=none"],
+        bind_to=None,
+    )
+    assert shlex.split(pbs_job["client_script"]) == [
+        "/venv/python",
+        "-m",
+        "torchtitan.rl.train",
+        "--module",
+        "my recipes",
+    ]
+    assert pbs_job["env"]["FROM_PLAN"] == "1"
+    # The job runs in the submit directory; its state is kept per job.
+    assert pbs_job["cwd"] == str(submit_dir)
+    state_path = tmp_path / "launcher" / "j-abcdef" / "job_state.pkl"
+    assert pbs_job["env"]["TORCHTITAN_RL_PBS_JOB_STATE"] == str(state_path)
+    assert state_path.read_text() == "state"
+
+
+def test_pbs_acquire_hosts(monkeypatch):
+    import monarch.job
+
+    state = SimpleNamespace(trainer="t", generator="g")
+    monkeypatch.setenv("TORCHTITAN_RL_PBS_JOB_STATE", "/job/state.pkl")
+    monkeypatch.setattr(
+        monarch.job,
+        "job_load",
+        lambda path: SimpleNamespace(state=lambda: state)
+        if path == "/job/state.pkl"
+        else None,
+    )
+    launcher = PBSLauncher.Config().build()
+    layout = Layout(
+        gpus_per_node=8, mesh_nodes={"trainer": 1, "generator": 1}, role_mesh={}
+    )
+
+    assert asyncio.run(launcher.acquire_hosts(layout)) == {
+        "trainer": "t",
+        "generator": "g",
+    }
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(gpus_per_node=0),
+        dict(job_name="my job"),
+        dict(pbs_args=["debug"]),
+        dict(pbs_args=[" -q debug"]),
+        dict(pbs_args=["-N name"]),
+        dict(pbs_args=["-V"]),
+        dict(pbs_args=["-o /x"]),
+        dict(pbs_args=["-l select=2"]),
+        dict(pbs_args=["-q debug -N name"]),
+    ],
+)
+def test_pbs_config_validation(kwargs):
+    with pytest.raises(ValueError):
+        PBSLauncher.Config(**kwargs)
