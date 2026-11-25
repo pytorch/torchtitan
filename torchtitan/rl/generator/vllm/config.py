@@ -211,9 +211,11 @@ class SimpleCPUKVOffloadConfig:
     cpu_bytes_per_rank: int
     """CPU DRAM for KV per GPU process (TP=2 uses twice this)."""
 
-    lazy_offload: bool = False
-    """Save blocks only as they near eviction from the GPU cache. False: save every
-    full prompt and decode block as it is computed."""
+    lazy_offload: bool = True
+    """Save blocks only as they near eviction from the GPU cache. False (vLLM's
+    default): save every full prompt and decode block as it is computed, which
+    copies more and showed no speedup when the CPU tier was smaller than the GPU
+    cache."""
 
     def __post_init__(self) -> None:
         if self.cpu_bytes_per_rank <= 0:

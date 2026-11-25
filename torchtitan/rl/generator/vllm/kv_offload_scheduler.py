@@ -10,11 +10,10 @@ Each TP group shares request ordering and transfer completions. DP replicas hand
 independent requests in their own TP groups. Shared Titan request IDs match reports
 across ranks; each scheduler applies results using its own vLLM request IDs.
 
-TODO(acisseJZhong): upstream shared request IDs and TP KV completion aggregation
-before Scheduler.update_from_output so external-launcher engines can use the
-native scheduler. Until then this replaces the private `waiting`/`skipped_waiting`
-queues and overrides `_select_waiting_queue_for_scheduling`, `_free_blocks` and
-`_update_from_kv_xfer_finished`.
+vLLM's scheduler has no shared request IDs or TP KV completion aggregation, so this
+relies on private vLLM members: it replaces the `waiting`/`skipped_waiting` queues
+and overrides `_select_waiting_queue_for_scheduling`, `_free_blocks` and
+`_update_from_kv_xfer_finished`. Recheck them on a vLLM upgrade.
 """
 
 import heapq

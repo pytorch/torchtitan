@@ -37,7 +37,7 @@ buffers and other host processes. Prefix caching is required.
 
 | Step | Policy |
 | --- | --- |
-| GPU -> CPU | Default (eager): every full prompt and decode block, as it is computed, including single-turn requests. `lazy_offload=True`: only cached blocks near the head of the GPU free queue (LRU order), enough to keep about twice a step's token budget evictable. |
+| GPU -> CPU | Default (`lazy_offload=True`): only cached blocks near the head of the GPU free queue (LRU order), enough to keep about twice a step's token budget evictable. `lazy_offload=False` (eager): every full prompt and decode block, as it is computed, including single-turn requests. |
 | CPU -> discard | LRU over the CPU block pool. With the session holder, a [session release](#session-release) moves the session's unused blocks to the front, to be evicted next. |
 | CPU -> GPU | On demand, no prefetch: when a request's prefix lookup hits CPU at scheduling, the request waits while its blocks load. |
 

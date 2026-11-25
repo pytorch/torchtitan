@@ -84,7 +84,10 @@ def _generator_worker(
         model.local_compile.regions = []
         engine = VLLMEngine.Config(
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-            kv_offload=SimpleCPUKVOffloadConfig(cpu_bytes_per_rank=1 << 30),
+            # Eager: every block is in the CPU cache when the test clears the GPU one.
+            kv_offload=SimpleCPUKVOffloadConfig(
+                cpu_bytes_per_rank=1 << 30, lazy_offload=False
+            ),
             session_kv_holder=(VLLMSessionKVHolder.Config() if hold_sessions else None),
             # Pre-SM90 engines already select 256-token blocks. Exercise that
             # granularity on newer GPUs too, without overriding an owned arg.

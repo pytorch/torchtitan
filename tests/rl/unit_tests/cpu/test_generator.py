@@ -914,7 +914,7 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
     assert resolved.kv_role == "kv_both"
     assert resolved.kv_connector_extra_config == {
         "cpu_bytes_to_use_per_rank": 1 << 30,
-        "lazy_offload": False,
+        "lazy_offload": True,
     }
     if hold_sessions:
         scheduler = (

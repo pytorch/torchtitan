@@ -35,9 +35,9 @@ class SimpleCPUOffloadConnector(VllmSimpleCPUOffloadConnector):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         if self.scheduler_manager is not None:
-            # external_launcher world_size includes independent DP replicas.
-            # TODO(acisseJZhong): upstream a TP-scoped save quorum instead of
-            # setting the private _expected_worker_count.
+            # external_launcher world_size includes independent DP replicas, and
+            # vLLM has no TP-scoped save quorum: set the private
+            # _expected_worker_count (recheck on a vLLM upgrade).
             self.scheduler_manager._expected_worker_count = get_tp_group().world_size
 
     def get_pending_save_ids(self) -> set[int]:

@@ -625,6 +625,10 @@ class VLLMEngine(GenerationEngine):
         ``external_launcher`` uses does not, so the engine loop would otherwise sleep
         with pinned blocks and unsent hints until the next request.
         """
+        # LLMEngine exposes neither pending KV work nor DP dummy forwards, so this and
+        # step() use private vLLM members: engine_core.engine_core (scheduler,
+        # batch_queue), has_unfinished_requests_dp, should_execute_dummy_batch and
+        # execute_dummy_batch. Recheck them on a vLLM upgrade.
         core = self._engine.engine_core.engine_core
         return (
             self._engine.output_processor.has_unfinished_requests()
