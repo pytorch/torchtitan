@@ -46,7 +46,7 @@ enables score centering, and the RL loss golden checks that it stays a no-op the
 
 Requirements and limits:
 
-- `VLLMEngine` and `SGLangEngine`; Verifiers rollouts raise for now.
+- `VLLMEngine` and `SGLangEngine`, with the message-env and Verifiers rollouters.
 - Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs).
 - The paper evaluates score centering with REINFORCE, truncated IS and masked IS, not PPO
   clipping; its composition with `DAPOLoss`/`GRPOLoss` follows the same formula.

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
 
 pytest.importorskip("verifiers")
@@ -419,6 +420,77 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     ]
 
 
+def _two_turn_trace():
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    first_node = SimpleNamespace(
+        token_ids=[10, 11],
+        mask=[False, True],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="first"),
+    )
+    second_node = SimpleNamespace(
+        token_ids=[12, 13, 14],
+        mask=[False, True, True],
+        sampled=True,
+        message=VerifiersAssistantMessage(content="second"),
+    )
+    return SimpleNamespace(
+        nodes=[first_node, second_node],
+        branches=[
+            SimpleNamespace(
+                nodes=[first_node, second_node],
+                token_ids=[10, 11, 12, 13, 14],
+                logprobs=[0.0, -0.1, 0.0, -0.2, -0.3],
+            )
+        ],
+    )
+
+
+def _metadata_with_topk(topk_by_generation) -> VerifiersGenerationMetadata:
+    return VerifiersGenerationMetadata(
+        min_policy_version=3,
+        max_policy_version=4,
+        metrics=[],
+        topk_by_generation=topk_by_generation,
+    )
+
+
+def test_verifiers_trace_attaches_each_generations_topk_rows() -> None:
+    # Generations are keyed by (prompt length, completion tokens): prompts [10] and
+    # [10, 11, 12] sampled completions [11] and [13, 14].
+    second_logprobs = np.array([[-0.2, -1.5], [-0.3, -1.2]], dtype=np.float32)
+    topk_by_generation = {
+        (1, (11,)): (np.array([[11, 7]]), np.array([[-0.1, -2.0]])),
+        (3, (13, 14)): (np.array([[13, 8], [14, 9]]), second_logprobs),
+    }
+    turns = VerifiersRolloutWorker.trace_to_rollout_turns(
+        trace=_two_turn_trace(),
+        generation_metadata=_metadata_with_topk(topk_by_generation),
+        group_id=5,
+        rollout_id=2,
+    )
+
+    assert [turn.completion_token_ids.tolist() for turn in turns] == [[11], [13, 14]]
+    assert [turn.completion_topk_token_ids.tolist() for turn in turns] == [
+        [[11, 7]],
+        [[13, 8], [14, 9]],
+    ]
+    np.testing.assert_array_equal(turns[1].completion_topk_logprobs, second_logprobs)
+
+
+def test_verifiers_trace_rejects_a_node_without_its_topk_rows() -> None:
+    # Top-k was requested, but no generation produced the second node's tokens.
+    topk_by_generation = {(1, (11,)): (np.array([[11, 7]]), np.array([[-0.1, -2.0]]))}
+    with pytest.raises(ValueError, match="top-k logprobs are unknown"):
+        VerifiersRolloutWorker.trace_to_rollout_turns(
+            trace=_two_turn_trace(),
+            generation_metadata=_metadata_with_topk(topk_by_generation),
+            group_id=5,
+            rollout_id=2,
+        )
+
+
 def test_verifiers_second_branch_stores_its_prompt_as_a_delta_on_the_first() -> None:
     from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
 
@@ -669,6 +741,7 @@ def test_generation_server_forwards_token_request() -> None:
                                 "temperature": 1.0,
                                 "top_p": 1.0,
                                 "max_tokens": 2,
+                                "num_topk_logprobs": 0,
                                 "seed": 4,
                                 "logprobs": 1,
                                 "torchtitan_group_id": 1,
@@ -726,6 +799,62 @@ def test_generation_server_forwards_token_request() -> None:
     asyncio.run(run_test())
 
 
+def test_generation_server_records_topk_per_generation() -> None:
+    # Verifiers drops extra response fields, so the server keeps each generation's top-k,
+    # keyed by (prompt length, completion tokens), for trace_to_rollout_turns. A second
+    # prompt of the same length with the same completion would share the key: rejected.
+    topk_token_ids = np.array([[31, 5], [32, 6]], dtype=np.int32)
+    topk_logprobs = np.array([[-0.1, -2.0], [-0.2, -3.0]], dtype=np.float32)
+
+    async def run_test() -> None:
+        async def generate_fn(prompt_token_ids, *, request_id, **kwargs):
+            return Completion(
+                min_policy_version=1,
+                max_policy_version=1,
+                request_id=request_id,
+                token_ids=[31, 32],
+                token_logprobs=[-0.1, -0.2],
+                topk_token_ids=topk_token_ids,
+                topk_logprobs=topk_logprobs,
+                finish_reason="stop",
+            )
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            statuses = []
+            async with ClientSession() as session:
+                for prompt_token_ids in ([10, 11], [12, 13]):
+                    response = await session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "trace-a"},
+                        json={
+                            "token_ids": prompt_token_ids,
+                            "sampling_params": {
+                                "temperature": 1.0,
+                                "top_p": 1.0,
+                                "max_tokens": 2,
+                                "num_topk_logprobs": 2,
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
+                            },
+                        },
+                    )
+                    statuses.append(response.status)
+            generation_metadata = server.pop_generation_metadata("trace-a")
+        finally:
+            await server.close()
+
+        assert statuses == [200, 500]
+        assert generation_metadata is not None
+        ids, logprobs = generation_metadata.topk_by_generation[(2, (31, 32))]
+        np.testing.assert_array_equal(ids, topk_token_ids)
+        np.testing.assert_array_equal(logprobs, topk_logprobs)
+
+    asyncio.run(run_test())
+
+
 def test_generation_server_rejects_aborted_generation() -> None:
     async def run_test() -> None:
         async def generate_fn(
@@ -759,6 +888,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
                             "temperature": 1.0,
                             "top_p": 1.0,
                             "max_tokens": 2,
+                            "num_topk_logprobs": 0,
                             "torchtitan_group_id": 1,
                             "stop_token_ids": [99],
                         },
@@ -807,6 +937,7 @@ _GOOD_SAMPLING_PARAMS = {
     "temperature": 1.0,
     "top_p": 1.0,
     "max_tokens": 2,
+    "num_topk_logprobs": 0,
     "stop_token_ids": [99],
     "torchtitan_group_id": 1,
 }
@@ -915,6 +1046,7 @@ def test_generation_server_rejects_prompt_without_room_for_output() -> None:
                                 "temperature": 1.0,
                                 "top_p": 1.0,
                                 "max_tokens": 2,
+                                "num_topk_logprobs": 0,
                                 "torchtitan_group_id": 1,
                                 "stop_token_ids": [99],
                             },
@@ -1464,14 +1596,15 @@ def test_a_rollout_that_raises_fails_its_group_after_its_siblings_stop() -> None
     assert stopped == [1]
 
 
-def test_parse_sampling_config_requires_temperature_top_p_max_tokens() -> None:
+def test_parse_sampling_config_requires_the_fields_the_rollouter_sends() -> None:
     sampling_params = {
         "temperature": 0.0,
         "top_p": 1.0,
         "max_tokens": 5,
+        "num_topk_logprobs": 0,
         "stop_token_ids": [1],
     }
-    for name in ("temperature", "top_p", "max_tokens"):
+    for name in ("temperature", "top_p", "max_tokens", "num_topk_logprobs"):
         with pytest.raises(ValueError, match=rf"must include \['{name}'\]"):
             _parse_sampling_config(
                 {key: value for key, value in sampling_params.items() if key != name}
@@ -1496,6 +1629,7 @@ def test_parse_sampling_config_accepts_only_full_vocabulary_top_k_and_min_p(
         "temperature": 1.0,
         "top_p": 1.0,
         "max_tokens": 2,
+        "num_topk_logprobs": 0,
         "stop_token_ids": [99],
         **update,
     }

@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import numpy as np
 from aiohttp import web
 
 from torchtitan.config import Configurable
@@ -40,8 +41,8 @@ class VerifiersGenerationMetadata:
     """TorchTitan generation data aggregated over one Verifiers rollout.
 
     Verifiers sends the trace ID as the generation session ID, but does not
-    retain TorchTitan policy versions or generator metrics in the returned
-    trace. The generation server therefore records their rollout-wide span.
+    retain TorchTitan policy versions, generator metrics or top-k logprobs in the
+    returned trace. The generation server therefore records them per rollout.
     """
 
     min_policy_version: int
@@ -52,6 +53,20 @@ class VerifiersGenerationMetadata:
 
     metrics: list[m.Metric]
     """Metrics from every generation in the rollout, merged with `m.fold`."""
+
+    # TODO: glibc keeps freed top-k arrays: at k=128 a rollout worker held ~4.5 KiB per in-flight token (rows: 1 KiB).
+    # Setting M_MMAP_THRESHOLD to 256 KiB in rollout workers fixed it in a CPU repro; not yet checked in a run.
+    topk_by_generation: dict[
+        tuple[int, tuple[int, ...]], tuple[np.ndarray, np.ndarray]
+    ] = field(default_factory=dict)
+    """The generator's top-k ids and logprobs `[num_completion_tokens, k]` per generation,
+    keyed by `(len(prompt_token_ids), completion_token_ids)`; empty unless
+    `SamplingConfig.num_topk_logprobs` > 0.
+
+    Example:
+
+        {(2, (12, 13)): (array([[12, 5], [13, 6]]), array([[-0.1, -2.4], [-0.2, -1.9]]))}
+    """
 
 
 class GenerationServer(Configurable):
@@ -274,6 +289,21 @@ class GenerationServer(Configurable):
             )
 
         previous = self.generation_metadata.get(session_id)
+        topk_by_generation = {} if previous is None else previous.topk_by_generation
+        if completion.topk_token_ids is not None:
+            key = (len(prompt_token_ids), tuple(completion.token_ids))
+            if key in topk_by_generation:
+                return web.json_response(
+                    {
+                        "error": f"session {session_id}: two generations share prompt length "
+                        f"{key[0]} and completion tokens, so their top-k rows can't be told apart"
+                    },
+                    status=500,
+                )
+            topk_by_generation = {
+                **topk_by_generation,
+                key: (completion.topk_token_ids, completion.topk_logprobs),
+            }
         self.generation_metadata[session_id] = VerifiersGenerationMetadata(
             min_policy_version=(
                 completion.min_policy_version
@@ -292,6 +322,7 @@ class GenerationServer(Configurable):
                 if previous is None
                 else [*previous.metrics, *completion.metrics]
             ),
+            topk_by_generation=topk_by_generation,
         )
 
         # ======== Reply ========
@@ -373,6 +404,7 @@ def _parse_sampling_config(value: object):
         "max_tokens",
         "seed",
         "stop_token_ids",
+        "num_topk_logprobs",
     }
     protocol_fields = {
         "logprobs",
@@ -397,8 +429,9 @@ def _parse_sampling_config(value: object):
         field_name="stop_token_ids",
     )
     # The rollouter always sends these. Without them the generator would silently use
-    # SamplingConfig's defaults (temperature 0.8, max_tokens 100).
-    missing = {"temperature", "top_p", "max_tokens"} - set(value)
+    # SamplingConfig's defaults (temperature 0.8, max_tokens 100), and return no top-k rows
+    # for a loss that needs them.
+    missing = {"temperature", "top_p", "max_tokens", "num_topk_logprobs"} - set(value)
     if missing:
         raise ValueError(f"sampling_params must include {sorted(missing)}")
     return SamplingConfig(
@@ -407,4 +440,5 @@ def _parse_sampling_config(value: object):
         max_tokens=int(value["max_tokens"]),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
+        num_topk_logprobs=int(value["num_topk_logprobs"]),
     )
