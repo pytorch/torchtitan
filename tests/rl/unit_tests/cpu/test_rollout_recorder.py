@@ -20,13 +20,34 @@ from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutT
 
 from torchtitan.rl.rollout.recorder import (
     KeepExtremeRewardsFilter,
+    RolloutSampleEncoder,
     RolloutSampleRecorder,
 )
 from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
 
 
-def _recorder(tmp_path, **config_kwargs) -> RolloutSampleRecorder:
-    return RolloutSampleRecorder.Config(**config_kwargs).build(dump_dir=str(tmp_path))
+class _Recorder(RolloutSampleRecorder):
+    """The recorder, plus the encoding a rollout worker does with the same config
+    (`finish_rollout_group`)."""
+
+    def __init__(self, config: RolloutSampleRecorder.Config, *, dump_dir: str) -> None:
+        super().__init__(config, dump_dir=dump_dir)
+        self._worker_encoder = RolloutSampleEncoder(config)
+
+    def record(
+        self, *, is_validation: bool, rollout_groups: list[RolloutGroup]
+    ) -> None:
+        self.append_lines(
+            self._worker_encoder.encode(
+                is_validation=is_validation, rollout_groups=rollout_groups
+            )
+        )
+
+
+def _recorder(tmp_path, **config_kwargs) -> _Recorder:
+    return _Recorder(
+        RolloutSampleRecorder.Config(**config_kwargs), dump_dir=str(tmp_path)
+    )
 
 
 def _turn(*, completion_logprobs: list[float], policy_version: int = 1) -> RolloutTurn:
@@ -282,9 +303,11 @@ def test_none_policy_version_and_completion_message(tmp_path) -> None:
     assert record["turns"][0]["completion_message"] is None
 
 
-def test_encode_turn_covers_all_rollout_turn_fields(tmp_path) -> None:
-    recorder = _recorder(tmp_path, log_tensors=True, log_logprobs=True)
-    encoded = recorder._encode_turn(_turn(completion_logprobs=[-0.5, -1.5]))
+def test_encode_turn_covers_all_rollout_turn_fields() -> None:
+    encoder = RolloutSampleEncoder(
+        RolloutSampleRecorder.Config(log_tensors=True, log_logprobs=True)
+    )
+    encoded = encoder._encode_turn(_turn(completion_logprobs=[-0.5, -1.5]))
 
     # rollout_id is flattened to turn_id; metrics is not JSON-serializable;
     # prompt_delta_image_placeholders is folded into each prompt_delta_images entry.

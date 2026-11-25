@@ -20,6 +20,7 @@ from torchtitan.rl.actors.monarch.rollout_worker import RolloutWorkerActor
 from torchtitan.rl.actors.monarch.system import MonarchActorSystem
 
 from torchtitan.rl.rollout import rollouter as rollouter_module, RolloutGroup
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import MessageEnvRolloutWorker, Rollouter
 
 
@@ -149,6 +150,7 @@ async def _setup(
         tokenizer_config="tokenizer_config",
         renderer_config="renderer_config",
         hf_assets_path="hf_assets_path",
+        rollout_recorder_config=RolloutSampleRecorder.Config(),
     )
     return worker_mesh
 
@@ -166,11 +168,13 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
         )
         rollouter = _rollouter_without_datasets()
 
+        recorder_config = RolloutSampleRecorder.Config(log_logprobs=True)
         await rollouter.setup_async(
             actor_system=MonarchActorSystem(MonarchActorSystem.Config()),
             tokenizer_config="tokenizer_config",
             renderer_config="renderer_config",
             hf_assets_path="hf_assets_path",
+            rollout_recorder_config=recorder_config,
         )
 
         assert host.spawn_kwargs == {"per_host": {"cpus": 3}}
@@ -189,6 +193,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
                 "tokenizer_config": "tokenizer_config",
                 "renderer_config": "renderer_config",
                 "hf_assets_path": "hf_assets_path",
+                "rollout_recorder_config": recorder_config,
                 "vision_processor_config": None,
             }
         ]
@@ -213,6 +218,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
                 group_id=1,
                 group_size=2,
                 sampling="sampling",
+                is_validation=False,
             )
         )
         await actor_mesh.run_group.started.wait()
@@ -224,6 +230,7 @@ def test_rollout_group_dispatch_uses_choose(monkeypatch) -> None:
                 "group_id": 1,
                 "group_size": 2,
                 "sampling": "sampling",
+                "is_validation": False,
             }
         ]
 
@@ -247,6 +254,7 @@ async def _dispatch_then_cancel_caller(
             group_id=1,
             group_size=2,
             sampling="sampling",
+            is_validation=False,
         )
     )
     await actor_mesh.run_group.started.wait()

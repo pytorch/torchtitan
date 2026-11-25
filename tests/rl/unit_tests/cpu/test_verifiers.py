@@ -38,6 +38,7 @@ from torchtitan.rl.examples.verifiers.rollouter import (
 )
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.types import Completion, RolloutStatus
 
 
@@ -303,6 +304,7 @@ def test_setup_spawns_workers_with_the_env_server_address_and_close_stops_the_wo
             tokenizer_config="tokenizer_config",
             renderer_config=from_renderers(Qwen3RendererConfig()),
             hf_assets_path="hf_assets_path",
+            rollout_recorder_config=RolloutSampleRecorder.Config(),
         )
         await rollouter.close()
 

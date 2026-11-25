@@ -413,3 +413,7 @@ class RolloutGroup:
 
     metrics: list[m.Metric] = field(default_factory=list)
     """Rollout-origin metrics that ride with this group to the trainer (a failed group carries its failure metric)."""
+
+    recorder_lines: str = ""
+    """The group's `RolloutSampleRecorder` JSONL lines, encoded by the rollout worker that scored
+    it (`finish_rollout_group`); the controller appends them."""

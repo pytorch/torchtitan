@@ -31,6 +31,8 @@ from torchtitan.rl.controller.work_buffer import (
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
+from torchtitan.rl.rollout.finished_group import finish_rollout_group
+from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.types import (
     Prompt,
     Rollout,
@@ -823,6 +825,73 @@ def test_no_window_takes_oldest_ready_group_past_a_stuck_head() -> None:
     asyncio.run(run())
 
 
+def _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder) -> RolloutGroup:
+    """Run `_rollout_loop` on one admitted group and return the group it finalizes."""
+
+    async def run() -> RolloutGroup:
+        buffer = _buffer(capacity=1, window_size=None)
+        await _admit(buffer, 0)
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(num_samples_per_prompt=1)
+        )
+        controller._sampling = SamplingConfig()
+        controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+        controller.rollout_recorder = recorder
+        controller.generator_router = SimpleNamespace(
+            release_groups=SimpleNamespace(call_one=AsyncMock())
+        )
+        loop = asyncio.create_task(
+            controller._rollout_loop(
+                group_buffer=buffer, generate_fn=None, release_session_fn=None
+            )
+        )
+        group = await buffer.take_finalized()
+        await buffer.close()
+        await loop
+        return group
+
+    return asyncio.run(asyncio.wait_for(run(), timeout=10))
+
+
+def test_rollout_loop_appends_the_worker_lines_and_keeps_the_group_metrics() -> None:
+    """The rollout worker computes the group's rollout metrics and recorder lines; the
+    controller appends the lines and passes the group, with its metrics, to the batcher."""
+    run_group_kwargs = []
+
+    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+        run_group_kwargs.append(kwargs)
+        return RolloutGroup(
+            group_id=group_id,
+            rollouts=[],
+            metrics=[m.Metric("rollout/reward", m.Mean(1.0))],
+            recorder_lines='{"group_id": 0}\n',
+        )
+
+    recorder = Mock()
+    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
+
+    assert [metric.key for metric in group.metrics] == ["rollout/reward"]
+    assert [kwargs["is_validation"] for kwargs in run_group_kwargs] == [False]
+    recorder.append_lines.assert_called_once_with('{"group_id": 0}\n')
+    # The batcher does not get the lines.
+    assert group.recorder_lines == ""
+
+
+def test_rollout_loop_turns_a_failed_group_into_one_failure_metric() -> None:
+    async def run_group_rollouts(**kwargs) -> RolloutGroup:
+        raise RuntimeError("scoring failed")
+
+    recorder = Mock()
+    group = _finalize_one_group_with_rollout_loop(run_group_rollouts, recorder)
+
+    assert (group.group_id, group.rollouts) == (0, [])
+    assert m.MetricsProcessor._aggregate_metrics(group.metrics) == {
+        "rollout/group_failures/sum": 1.0
+    }
+    recorder.append_lines.assert_not_called()
+
+
 async def _block_forever(*args, **kwargs) -> None:
     await asyncio.Event().wait()
 
@@ -1072,7 +1141,10 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     """Validation prefixes its turns' metrics with `validation_` (`generator/x` -> `validation_generator/x`,
     `math_verify/x` -> `validation_math_verify/x`). Two validations never share a group id."""
 
-    async def run_group_rollouts(*, group_id: int, **kwargs) -> RolloutGroup:
+    async def run_group_rollouts(
+        *, group_id: int, is_validation: bool, **kwargs
+    ) -> RolloutGroup:
+        assert is_validation
         turn = RolloutTurn(
             rollout_id=RolloutTurnID(group_id=group_id, rollout_id=0, turn_id=0),
             prompt_prefix_len=0,
@@ -1093,7 +1165,8 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
             reward=0.0,
             turns=[turn],
         )
-        return RolloutGroup(group_id=group_id, rollouts=[rollout])
+        group = RolloutGroup(group_id=group_id, rollouts=[rollout])
+        return _finish_in_worker(group, is_validation=is_validation)
 
     controller = object.__new__(Controller)
     controller._validation_group_ids = itertools.count(start=-1, step=-1)
@@ -1124,6 +1197,15 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     assert keys["validation_math_verify/timeouts/sum"] == 2.0
     assert "generator/queue_time_ms/mean" not in keys
     assert "math_verify/timeouts/sum" not in keys
+
+
+def _finish_in_worker(group: RolloutGroup, *, is_validation: bool) -> RolloutGroup:
+    """What the rollout worker returns for `group` (`finish_rollout_group`)."""
+    return finish_rollout_group(
+        group,
+        is_validation=is_validation,
+        encoder=RolloutSampleEncoder(RolloutSampleRecorder.Config()),
+    )
 
 
 def _scored_group(group_id: int, rewards: list[float | None]) -> RolloutGroup:
@@ -1171,13 +1253,12 @@ def test_validate_rolls_out_each_prompt_n_times(
     controller.generator_router = SimpleNamespace(
         release_groups=SimpleNamespace(call_one=AsyncMock())
     )
-    controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
-    run_group_rollouts = AsyncMock(
-        side_effect=[
-            _scored_group(-(i + 1), group_rewards)
-            for i, group_rewards in enumerate(rewards)
-        ]
-    )
+    controller.rollout_recorder = Mock()
+    groups = [
+        _finish_in_worker(_scored_group(-(i + 1), group_rewards), is_validation=True)
+        for i, group_rewards in enumerate(rewards)
+    ]
+    run_group_rollouts = AsyncMock(side_effect=groups)
     controller._rollouter = SimpleNamespace(
         get_validation_samples=lambda steps: ["a", "b"],
         run_group_rollouts=run_group_rollouts,
@@ -1189,10 +1270,21 @@ def test_validate_rolls_out_each_prompt_n_times(
     assert [call.kwargs["group_size"] for call in calls] == [num_samples_per_prompt] * 2
     expected_sampling = SamplingConfig(temperature=1.0, seed=7, stop_token_ids=[1])
     assert [call.kwargs["sampling"] for call in calls] == [expected_sampling] * 2
+    assert [call.kwargs["is_validation"] for call in calls] == [True] * 2
     aggregated = m.MetricsProcessor._aggregate_metrics(metrics)
     assert aggregated["validation_reward/_mean"] == expected_mean
     best_of_key = f"validation_reward/best_of_{num_samples_per_prompt}/mean"
     assert aggregated.get(best_of_key) == expected_best_of
+    # The workers' lines, appended in prompt order.
+    assert [
+        call.args[0] for call in controller.rollout_recorder.append_lines.call_args_list
+    ] == [group.recorder_lines for group in groups]
+    # A prompt with no scored rollout records nothing (the filter skips unscored rollouts).
+    assert all(
+        '"is_validation": true' in group.recorder_lines
+        for group in groups
+        if any(rollout.reward is not None for rollout in group.rollouts)
+    )
 
 
 def test_validation_config_rejects_bad_sampling() -> None:

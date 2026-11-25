@@ -23,6 +23,8 @@ from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.monarch.rdma_object import MonarchRDMAObject
+from torchtitan.rl.rollout.finished_group import finish_rollout_group
+from torchtitan.rl.rollout.recorder import RolloutSampleEncoder, RolloutSampleRecorder
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.rollout.types import RolloutGroup
 
@@ -59,8 +61,10 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        rollout_recorder_config: RolloutSampleRecorder.Config,
         vision_processor_config: VisionProcessor.Config | None = None,
     ) -> None:
+        self._encoder = RolloutSampleEncoder(rollout_recorder_config)
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
@@ -78,14 +82,20 @@ class RolloutWorkerActor(Actor):
         group_id: int,
         group_size: int,
         sampling: Any,
+        is_validation: bool,
     ) -> RolloutGroup:
-        return await self._worker.run_group(
+        """Returns the scored group with its rollout metrics and recorder lines (see
+        `finish_rollout_group`)."""
+        group = await self._worker.run_group(
             generate_fn=generate_fn,
             release_session_fn=release_session_fn,
             sample=sample,
             group_id=group_id,
             group_size=group_size,
             sampling=sampling,
+        )
+        return finish_rollout_group(
+            group, is_validation=is_validation, encoder=self._encoder
         )
 
     @concurrent_endpoint

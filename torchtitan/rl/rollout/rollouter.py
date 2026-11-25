@@ -26,6 +26,7 @@ from torchtitan.rl.rdma_object import RDMAImageFiles, RegisterRDMAObject
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.data import RLDataset, RolloutDataLoader
 from torchtitan.rl.rollout.message_env import MessageEnv
+from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout.rubric import Rubric, RubricOutput
 from torchtitan.rl.rollout.token_env import TokenEnv
 from torchtitan.rl.rollout.types import (
@@ -70,7 +71,7 @@ class Rollouter(Configurable):
         group = await rollouter.run_group_rollouts(     # one worker runs and scores the group
             generate_fn=generate_fn, release_session_fn=release_session_fn,
             sample=sample, group_id=index,
-            group_size=N, sampling=sampling)
+            group_size=N, sampling=sampling, is_validation=False)
 
     Example:
         rollouter = Rollouter.Config(
@@ -90,8 +91,11 @@ class Rollouter(Configurable):
         Rollouter supports customization at several levels:
           - Sample source: provide source configs for training and validation.
           - Group execution, coarse: override `run_group_rollouts` for your own
-            orchestration. The worker then becomes optional -- but override
-            `setup_async` too, or the worker pool is still spawned unused.
+            orchestration. It must return `finish_rollout_group(group,
+            is_validation=is_validation, encoder=RolloutSampleEncoder(rollout_recorder_config))`
+            (the config `setup_async` receives): the controller logs the rollout metrics
+            and records the lines that call adds. The worker then becomes optional -- but
+            override `setup_async` too, or the worker pool is still spawned unused.
           - Group execution, fine: keep the stock orchestration and point `worker`
             at a `MessageEnvRolloutWorker.Config` subclass, overriding only what you need
             (`make_env_group`, `score_group`, `run_group`). A worker whose env isn't a
@@ -170,6 +174,7 @@ class Rollouter(Configurable):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        rollout_recorder_config: RolloutSampleRecorder.Config,
         vision_processor_config: VisionProcessor.Config | None = None,
         # Constructor args of each rollout worker known only at setup, e.g. a server address.
         # TODO: VerifiersRollouter is the only user. Once its env runs in the rollout worker, remove
@@ -177,7 +182,11 @@ class Rollouter(Configurable):
         worker_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Spawn one rollout worker per `rollouts_per_worker` training rollouts in flight, rounded up,
-        and initialize them."""
+        and initialize them.
+
+        ``rollout_recorder_config``: the controller's recorder config; each worker encodes the
+        recorder lines of its groups with it.
+        """
         if self._worker_actors is not None:
             raise RuntimeError("rollout worker pool is already initialized")
 
@@ -202,6 +211,7 @@ class Rollouter(Configurable):
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            rollout_recorder_config=rollout_recorder_config,
             vision_processor_config=vision_processor_config,
         )
 
@@ -247,6 +257,7 @@ class Rollouter(Configurable):
         group_id: int,
         group_size: int,
         sampling: SamplingConfig,
+        is_validation: bool,
     ) -> RolloutGroup:
         """Send one prompt group to a rollout worker and return its scored group.
 
@@ -258,9 +269,11 @@ class Rollouter(Configurable):
             group_id: Stable group id; siblings share it for advantage centering.
             group_size: Number of sibling rollouts.
             sampling: Sampling config for every generate call in the group.
+            is_validation: A validation group: its metrics are named `validation/*` and its
+                recorder lines carry `is_validation` (see `finish_rollout_group`).
 
         Returns:
-            One scored `RolloutGroup`.
+            One scored `RolloutGroup`, with its rollout metrics and recorder lines.
         """
         if self._worker_actors is None:
             raise RuntimeError("rollout worker pool is not initialized")
@@ -275,6 +288,7 @@ class Rollouter(Configurable):
                 group_id=group_id,
                 group_size=group_size,
                 sampling=sampling,
+                is_validation=is_validation,
             )
         )
         self._inflight_run_group_calls.add(call)
