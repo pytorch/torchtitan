@@ -5,6 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.rl.trainer.losses.dapo import DAPOLoss
+from torchtitan.rl.trainer.losses.dppo import DPPOLoss
 from torchtitan.rl.trainer.losses.grpo import GRPOLoss
+from torchtitan.rl.trainer.losses.importance_sampling import CISPOLoss, IcePopLoss
+from torchtitan.rl.trainer.losses.policy_gradient import PolicyGradientLoss
 
-__all__ = ["DAPOLoss", "GRPOLoss"]
+__all__ = [
+    "CISPOLoss",
+    "DAPOLoss",
+    "DPPOLoss",
+    "GRPOLoss",
+    "IcePopLoss",
+    "PolicyGradientLoss",
+]
