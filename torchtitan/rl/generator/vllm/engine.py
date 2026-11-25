@@ -308,6 +308,15 @@ class VLLMEngine(GenerationEngine):
                 "with kernels the trainer does not run"
             )
         if config.kv_cache_dtype == "fp8":
+            if parallelism.tensor_parallel_degree > 1:
+                # TODO: allow TP > 1 once tested: each rank expands the layer's fp8 scales over its
+                # local KV heads (`descales` in `TorchTitanVarlenInnerAttentionImpl.forward`); check
+                # that TP2 logprobs match TP1 with fp8.
+                raise ValueError(
+                    "kv_cache_dtype='fp8' is untested with tensor parallelism, but "
+                    f"tensor_parallel_degree={parallelism.tensor_parallel_degree}; set "
+                    "tensor_parallel_degree=1 or kv_cache_dtype='auto'"
+                )
             windowed_layers = [
                 (layer_id, layer.attention.sliding_window_size)
                 for layer_id, layer in enumerate(model.layers)

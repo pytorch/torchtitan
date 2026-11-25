@@ -820,17 +820,27 @@ _SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
 
 
 @pytest.mark.parametrize(
-    "model, config_kwargs, debug, error, match",
+    "model, parallelism, config_kwargs, debug, error, match",
     [
         (
             _MODEL_CONFIG,
+            _PARALLELISM,
             {},
             DebugConfig(batch_invariant=True),
             ValueError,
             "batch_invariant needs kv_cache_dtype='auto'",
         ),
         (
+            _MODEL_CONFIG,
+            InferenceParallelismConfig(tensor_parallel_degree=2),
+            {},
+            DebugConfig(),
+            ValueError,
+            "untested with tensor parallelism, but tensor_parallel_degree=2",
+        ),
+        (
             _SLIDING_WINDOW_MODEL_CONFIG,
+            _PARALLELISM,
             {},
             DebugConfig(),
             ValueError,
@@ -842,16 +852,22 @@ _SLIDING_WINDOW_MODEL_CONFIG = SimpleNamespace(
                 layers=[],
                 max_context_length=1024,
             ),
+            _PARALLELISM,
             dict(num_speculative_tokens=3),
             DebugConfig(),
             RuntimeError,
             "needs an FA4 whose forward takes query_len_in_heads",
         ),
     ],
-    ids=["batch_invariant", "sliding_window", "drafts_without_query_len_in_heads"],
+    ids=[
+        "batch_invariant",
+        "tensor_parallel",
+        "sliding_window",
+        "drafts_without_query_len_in_heads",
+    ],
 )
 def test_fp8_kv_cache_refusals(
-    tmp_path, monkeypatch, model, config_kwargs, debug, error, match
+    tmp_path, monkeypatch, model, parallelism, config_kwargs, debug, error, match
 ):
     monkeypatch.setattr(
         "torchtitan.rl.generator.vllm.engine.fa4_takes_query_len_in_heads",
@@ -860,7 +876,7 @@ def test_fp8_kv_cache_refusals(
     with pytest.raises(error, match=match):
         VLLMEngine.Config(kv_cache_dtype="fp8", **config_kwargs).build(
             model=model,
-            parallelism=_PARALLELISM,
+            parallelism=parallelism,
             model_path="unused",
             max_num_seqs=8,
             precision=PrecisionConfig(),
