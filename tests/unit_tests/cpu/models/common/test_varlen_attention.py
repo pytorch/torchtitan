@@ -458,7 +458,9 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
 )
 def test_deterministic_mode_skips_cudnn(deterministic, expected):
     # Guards the backend selection; cuDNN's varlen backward is not deterministic.
-    attention = VarlenInnerAttention.Config().build()
+    attention = VarlenInnerAttention.Config(
+        sdpa_backends=["CUDNN_ATTENTION", "FLASH_ATTENTION"]
+    ).build()
     metadata = create_varlen_metadata_for_document(torch.arange(4))
     q_THK = torch.randn(4, 2, 8, dtype=torch.bfloat16)
     with (

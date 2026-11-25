@@ -763,7 +763,7 @@ def muse_spark_816b_a42b_ultradata_lora_sft_cp16_128k() -> Trainer.Config:
         ),
     )
     config = apply_gb300_lora_dist_moe(config, _ultradata_lora_sft_transform())
-    # VarlenInnerAttention defaults to cuDNN first; on the 128k global layers it is ~13% slower than FA4.
+    # Pin Flash, whatever the default: on the 128k global layers cuDNN is ~13% slower than FA4.
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.sdpa_backends = ["FLASH_ATTENTION"]
     return config
