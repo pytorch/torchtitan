@@ -263,6 +263,12 @@ class VerifiersRolloutWorker(BaseRolloutWorker):
         sampling: SamplingConfig,
     ) -> RolloutGroup:
         """Run sibling rollouts through Verifiers, then compute advantages."""
+        # TODO: carry the generator's top-k logprobs through Verifiers' traces.
+        if sampling.num_topk_logprobs > 0:
+            raise ValueError(
+                "Verifiers rollouts do not carry the generator's top-k logprobs yet: "
+                "score centering (ScoreCentering.Config) needs another rollouter."
+            )
         # Each group replaces this one slot. That is safe because every group's generate_fn routes the
         # same way; keep per-group state out of it.
         self._generation_server.set_generate_fn(generate_fn)

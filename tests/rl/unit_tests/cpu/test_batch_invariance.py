@@ -116,18 +116,27 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
 
     calls = []
     compute_logprobs = loss_module.compute_logprobs
+    compute_topk_logprobs = loss_module.compute_topk_logprobs
 
     def recording_compute_logprobs(logits, labels, **kwargs):
-        calls.append((logits, labels.clone(), kwargs))
+        calls.append(("compute_logprobs", logits, labels.clone(), kwargs))
         return compute_logprobs(logits, labels, **kwargs)
 
+    def recording_compute_topk_logprobs(logits, token_ids, **kwargs):
+        calls.append(("compute_topk_logprobs", logits, token_ids.clone(), kwargs))
+        return compute_topk_logprobs(logits, token_ids, **kwargs)
+
     monkeypatch.setattr(loss_module, "compute_logprobs", recording_compute_logprobs)
+    monkeypatch.setattr(
+        loss_module, "compute_topk_logprobs", recording_compute_topk_logprobs
+    )
     batch_invariance.force_trainer_logprobs_for_batch_invariance()
 
     logits = torch.tensor(
         [[1.0, -0.5, 0.25, 2.0], [-1.0, 0.0, 1.5, 0.5]],
         dtype=torch.bfloat16,
     )
+    # The sampled token, then a top-2 (score centering).
     token_ids = torch.tensor([[3, 0, 2], [2, 1, 3]], dtype=torch.int32)
     actual = modules[module_names[-1]].compute_token_logprobs(logits, token_ids)
     expected = torch.log_softmax(logits.float(), dim=-1).gather(
@@ -135,8 +144,14 @@ def test_vllm_logprob_patch_keeps_trainer_fallback_path(monkeypatch):
     )
 
     torch.testing.assert_close(actual, expected)
-    assert len(calls) == token_ids.shape[1]
-    for column, (call_logits, call_labels, call_kwargs) in enumerate(calls):
-        assert call_logits is logits
-        torch.testing.assert_close(call_labels, token_ids[:, column].to(torch.int64))
-        assert call_kwargs == {"vocab_parallel_group": None}
+    # The trainer's functions: compute_logprobs for the sampled token (the importance
+    # ratio), compute_topk_logprobs for the top-k (score centering's coefficients).
+    assert [name for name, *_ in calls] == ["compute_logprobs", "compute_topk_logprobs"]
+    _, sampled_logits, sampled_labels, sampled_kwargs = calls[0]
+    assert sampled_logits is logits
+    torch.testing.assert_close(sampled_labels, token_ids[:, 0].to(torch.int64))
+    assert sampled_kwargs == {"vocab_parallel_group": None}
+    _, topk_logits, topk_ids, topk_kwargs = calls[1]
+    assert topk_logits is logits
+    torch.testing.assert_close(topk_ids, token_ids[:, 1:].to(torch.int64))
+    assert topk_kwargs["vocab_parallel_group"] is None

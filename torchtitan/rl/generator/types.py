@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from torchtitan.rl.rollout.types import Prompt
 
 
@@ -27,6 +29,11 @@ class SamplingConfig:
 
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
+
+    num_topk_logprobs: int = 0
+    """Per generated token, also return the generator's k most likely token ids and their
+    logprobs; 0 returns only the sampled token's logprob. Filled by the controller from the
+    policy loss's ``ScoreCentering.Config`` on training requests; leave 0 in recipes."""
 
     seed: int | None = None
     """Per-request RNG seed. The rollouter offsets this per sample so a group's
@@ -102,3 +109,7 @@ class FinishedRequest:
     token_logprobs: list[float]  # [generated_tokens], of each sampled token
     finish_reason: str | None
     metrics_inputs: RequestMetricsInputs
+    topk_token_ids: np.ndarray | None = None
+    """[generated_tokens, k] int32; None unless `SamplingConfig.num_topk_logprobs` > 0."""
+    topk_logprobs: np.ndarray | None = None
+    """[generated_tokens, k] float32 logprobs of `topk_token_ids`."""

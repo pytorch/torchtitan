@@ -103,6 +103,7 @@ from typing import Any
 import torch  # noqa: F401
 
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import (
@@ -137,6 +138,7 @@ from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseSessionFn
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
+from torchtitan.rl.trainer.losses import PolicyGradientLoss
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.tools.garbage_collector import GarbageCollector
 
@@ -543,6 +545,13 @@ class Controller(Configurable):
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
 
+            if self.generator.sampling.num_topk_logprobs != 0:
+                raise ValueError(
+                    "generator.sampling.num_topk_logprobs is filled by the controller from "
+                    "the policy loss's ScoreCentering.Config; leave it 0, got "
+                    f"{self.generator.sampling.num_topk_logprobs}."
+                )
+
             if self.trainer.debug.batch_invariant:
                 if torch.version.hip is not None:
                     raise ValueError(
@@ -570,6 +579,20 @@ class Controller(Configurable):
                         "SP uses reduce-scatter which only supports Ring in NCCL "
                         "and has not been validated for determinism."
                     )
+
+        @property
+        def num_topk_logprobs(self) -> int:
+            """Generator top-k logprobs per generated training token: what the policy loss's
+            score centering needs, else 0."""
+            loss = self.trainer.loss
+            if isinstance(loss, ChunkedLossWrapper.Config):
+                loss = loss.loss_fn
+            if (
+                isinstance(loss, PolicyGradientLoss.Config)
+                and loss.score_centering is not None
+            ):
+                return loss.score_centering.num_topk_logprobs
+            return 0
 
         @property
         def max_num_seqs_per_generator_dp_rank(self) -> int:
@@ -626,13 +649,14 @@ class Controller(Configurable):
             tokenizer=self.tokenizer, vision_processor=vision_processor
         )
 
-        # Carry the base seed and renderer stop tokens on the sampling config so
-        # the generator reads them off each request; the rollouter offsets the
+        # Carry the base seed, renderer stop tokens and the loss's top-k on the sampling
+        # config so the generator reads them off each request; the rollouter offsets the
         # seed per sample. Avoids the generator depending on request_id format.
         self._sampling = replace(
             config.generator.sampling,
             seed=config.generator.debug.seed,
             stop_token_ids=list(self.renderer.get_stop_token_ids()),
+            num_topk_logprobs=config.num_topk_logprobs,
         )
         self._rollouter: Rollouter = config.rollouter.build(
             max_rollouts_in_flight=config.async_loop.max_rollouts_in_flight
@@ -823,6 +847,7 @@ class Controller(Configurable):
                 precision=config.precision,
                 model_path=config.hf_assets_path,
                 max_num_seqs=max_num_seqs,
+                max_num_topk_logprobs=config.num_topk_logprobs,
                 output_dir=config.dump_folder,
                 vision_processor=config.vision_processor,
                 mooncake_master_address=mooncake_master_address,
@@ -842,6 +867,7 @@ class Controller(Configurable):
                 ),
                 pad_id=self.tokenizer.eos_id,
                 temperature=self._sampling.temperature,
+                num_topk_logprobs=config.num_topk_logprobs,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
                 vision_processor=config.vision_processor,
@@ -1007,7 +1033,10 @@ class Controller(Configurable):
         # in a rollouter's own limit. Do it when validation moves out of the controller.
         # Off the event loop: training runs meanwhile, and building the dataset can take seconds.
         samples = await asyncio.to_thread(self._rollouter.get_validation_samples, steps)
-        sampling = replace(self._sampling, temperature=validation.temperature)
+        # Validation rollouts are never trained, so skip the top-k transport.
+        sampling = replace(
+            self._sampling, temperature=validation.temperature, num_topk_logprobs=0
+        )
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
             samples=samples,
