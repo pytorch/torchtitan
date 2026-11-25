@@ -244,9 +244,20 @@ class RolloutGroupWorkBuffer(Configurable):
             self._condition.notify_all()
 
     def metrics(self) -> list[m.Metric]:
-        """Trainer loop: point-in-time buffer gauges for this step; resets the per-flush peak."""
+        """Trainer loop: point-in-time buffer gauges for this step; resets the per-flush peak.
+
+        Every slot is in exactly one of these five, so they sum to `max_active_rollout_groups`:
+
+            num_groups_waiting      admitted, no rollout started
+            num_groups_inflight     rollouts running
+            num_groups_finalized    rollouts done, not yet taken by the batcher
+            num_groups_taken        taken by the batcher: in the batcher, the batch queue or the trainer
+            available_active_slots  free
+        """
         states = [work.state for work in self._work_by_group_id.values()]
         state_enum = _RolloutGroupWorkState
+        # Taken groups left `_work_by_group_id` but keep their slot until `release_active_groups`.
+        num_groups_taken = self._active_rollout_groups - len(self._work_by_group_id)
         out = [
             m.Metric(
                 "rollout_buffer/num_groups_waiting",
@@ -259,6 +270,10 @@ class RolloutGroupWorkBuffer(Configurable):
             m.Metric(
                 "rollout_buffer/num_groups_finalized",
                 m.NoReduce(float(states.count(state_enum.FINALIZED))),
+            ),
+            m.Metric(
+                "rollout_buffer/num_groups_taken",
+                m.NoReduce(float(num_groups_taken)),
             ),
             m.Metric(
                 "rollout_buffer/active_slots_in_use_peak",
