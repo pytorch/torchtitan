@@ -20,9 +20,12 @@ Batch-invariant execution has two additional requirements:
 Decode and prefill update the paged convolution and SSM state pools directly.
 """
 
+import functools
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -145,11 +148,15 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         if self.num_speculative_tokens:
             # vLLM's runner hands the accepted-token counts and draft masks only to
-            # its own GDN builder, which the speculative path reads.
-            # TODO: speculative GDN kernels in Attention Gym, read by
-            # TorchTitanLinearAttentionMetadataBuilder, would allow cuda_graph.mode="FULL" with
-            # drafts: vLLM's GDN builder graphs uniform decode batches only. Blocked on those
-            # kernels and on vLLM passing the counts.
+            # GDNAttentionMetadataBuilder (or a subclass), which the speculative path reads.
+            # TODO: a TorchTitanLinearAttentionMetadataBuilder subclass of it that stages
+            # verify rows in fixed buffers would give steps with prefill FULL graphs, not
+            # piecewise ones (VLLMCudaGraphConfig): up to +13% tok/s at a prefill-heavy load
+            # (Qwen3.8-27B, 26 multi-turn sessions, GB300). Not done yet for size: the staging
+            # and its graph-vs-eager tests.
+            # TODO: vLLM's GDN builder has no update_block_table with drafts, so it builds
+            # once per GDN cache group (3 on Qwen3.8-27B, ~1.3 ms of CPU each). A subclass
+            # with update_block_table would build once per step; ~1%, mixed steps only.
             return GDNAttentionBackend
         return TorchTitanLinearAttentionBackend
 
@@ -205,22 +212,28 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         ), "Attention Gym convolution kernels do not support bias"
         num_tokens = mixed_qkv.shape[0]
         output_shape = (num_tokens, self.local_num_v_heads, self.head_v_dim)
-        attn_metadata = get_forward_context().attn_metadata
-        # vLLM's profiling/warmup runs have no attention metadata.
-        if attn_metadata is None:
-            return mixed_qkv.new_zeros(output_shape)
-        assert isinstance(attn_metadata, dict)
-        gdn_metadata = attn_metadata[self.prefix]
+
         if self.num_speculative_tokens:
-            return self._forward_speculative(
+            # Allocated inside the graph piece, so the next piece reads it. Before the
+            # metadata check: a piecewise capture has no metadata; replays run this call eagerly.
+            output = mixed_qkv.new_empty(output_shape)
+            self._forward_speculative_eager(
                 mixed_qkv=mixed_qkv,
                 a=a,
                 b=b,
                 conv_weight=conv_weight,
                 A_log=A_log,
                 dt_bias=dt_bias,
-                metadata=gdn_metadata,
+                output=output,
             )
+            return output
+
+        attn_metadata = get_forward_context().attn_metadata
+        # vLLM's profiling/warmup runs have no attention metadata.
+        if attn_metadata is None:
+            return mixed_qkv.new_zeros(output_shape)
+        assert isinstance(attn_metadata, dict)
+        gdn_metadata = attn_metadata[self.prefix]
         assert isinstance(gdn_metadata, TorchTitanLinearAttentionMetadata)
         assert (
             gdn_metadata.spec_sequence_masks is None
@@ -347,6 +360,13 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             output = torch.cat([output, padding])
         return output
 
+    @functools.cached_property
+    def _forward_speculative_eager(self) -> Callable[..., None]:
+        """`_forward_speculative` as a graph break under vLLM's breakable CUDA graphs
+        (VLLMCudaGraphConfig): steps with prefill read per-step metadata, so it runs eagerly
+        between graph pieces. Wrapped on first use, after `VLLMEngine` sets the variable."""
+        return eager_break_during_capture(self._forward_speculative)
+
     def _forward_speculative(
         self,
         mixed_qkv: torch.Tensor,
@@ -355,9 +375,10 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         conv_weight: torch.Tensor,
         A_log: torch.Tensor,
         dt_bias: torch.Tensor,
-        metadata: GDNAttentionMetadata,
-    ) -> torch.Tensor:
-        """Run one step's convolution and recurrence when the engine drafts tokens.
+        output: torch.Tensor,
+    ) -> None:
+        """Write one step's convolution and recurrence into `output` when the engine
+        drafts tokens; rows past the step's tokens, and runs without metadata, get zeros.
 
         A port of vLLM's `QwenGatedDeltaNetAttention._forward_core` (vLLM 9f03b51).
         Kernels per row kind:
@@ -372,13 +393,15 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         A verify row reads the state after its last accepted token and writes one state
         per draft position, so a rejected draft leaves the accepted state intact.
         """
-        num_tokens = mixed_qkv.shape[0]
-        output = mixed_qkv.new_zeros(
-            (num_tokens, self.local_num_v_heads, self.head_v_dim)
-        )
+        output.zero_()
+        attn_metadata = get_forward_context().attn_metadata
+        # vLLM's profiling, warmup and piecewise capture runs have no attention metadata.
+        if attn_metadata is None:
+            return
+        metadata: GDNAttentionMetadata = attn_metadata[self.prefix]
         num_actual_tokens = metadata.num_actual_tokens
         if num_actual_tokens == 0:
-            return output
+            return
 
         # vLLM's conv kernels take the state as (..., dim, width - 1 + k); the cache
         # stores it as (..., width - 1 + k, dim) (VLLM_SSM_CONV_STATE_LAYOUT=SD).
@@ -395,6 +418,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         has_non_spec = metadata.num_prefills > 0 or metadata.num_decodes > 0
 
         # ======== Split the tokens into verify rows and the rest ========
+        # TODO: slices instead of index_select / index_copy_ when the verify rows come first
+        # (needs reorder_batch_threshold 1 + k and the builder's CPU masks): saves 8 copies
+        # per layer, ~17 ms of CPU per Qwen3.8-27B step with prefill (GB300, profiled).
         spec_inputs = non_spec_inputs = inputs
         if has_spec and has_non_spec:
             spec_inputs = tuple(
@@ -406,6 +432,9 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             )
 
         # ======== Verify rows ========
+        # TODO: try vLLM's fused CUDA verify op (torch.ops._C.fused_gdn_decode_post_conv_mtp),
+        # which also applies the gated norm: 3.27 ms per Qwen3.8-27B verify step in stock vLLM
+        # vs 4.0 ms for this Triton kernel alone (GB300). Untested with this layer's layouts.
         out_spec = None
         if has_spec:
             mixed_qkv_spec, a_spec, b_spec = spec_inputs
@@ -530,7 +559,6 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             output[:num_actual_tokens] = (
                 out_spec if has_spec else out_non_spec
             ).squeeze(0)
-        return output
 
     def _split_qkv(
         self, mixed_qkv: torch.Tensor
