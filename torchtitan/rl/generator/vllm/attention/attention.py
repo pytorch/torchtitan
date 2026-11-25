@@ -378,6 +378,9 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             FA4 decode, 4 x heads        keys 0 .. L-4             every token
             here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
             merge                        logsumexp of the two parts
+
+        Shape suffixes: R rows, K KV heads, J tokens of a row, G query heads per KV head,
+        I tail keys (the last n - 1), D head dim, V value head dim.
         """
         num_rows = attn_metadata.seq_lens.shape[0]
         num_tokens, num_heads, head_dim = query.shape
@@ -389,16 +392,16 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
 
         # ======== Keys every token sees: one decode row of n x heads per row ========
         # Heads ordered (KV head, token, head in group), so FA4's GQA maps each to its KV head.
-        query_by_kv_head = query.view(
+        query_RKJGD = query.view(
             num_rows, query_len, num_kv_heads, num_queries_per_kv, head_dim
         ).transpose(1, 2)
-        num_shared_keys = (attn_metadata.seq_lens - (query_len - 1)).clamp_(min=0)
-        shared_out = query.new_empty(
-            num_rows, num_kv_heads * query_len * num_queries_per_kv, head_dim_v
+        num_shared_keys_R = (attn_metadata.seq_lens - (query_len - 1)).clamp_(min=0)
+        shared_out_RKJGV = query.new_empty(
+            num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v
         )
         _, shared_lse = paged_varlen_attention_out(
-            shared_out,
-            query_by_kv_head.reshape(num_rows, -1, head_dim),
+            shared_out_RKJGV.view(num_rows, -1, head_dim_v),
+            query_RKJGD.reshape(num_rows, -1, head_dim),
             key_cache,
             value_cache,
             cu_seqlens_q=torch.arange(
@@ -406,20 +409,17 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             ),
             max_seqlen_q=1,
             max_seqlen_k=attn_metadata.max_seq_len,
-            seqused_k=num_shared_keys,
+            seqused_k=num_shared_keys_R,
             block_table=attn_metadata.block_table,
             scale=self.scale,
             window_size=(-1, 0),
             enable_gqa=True,
             return_lse=True,
         )
-        # [rows, KV heads, tokens, query heads per KV head]
-        shared_lse = shared_lse.view(
+        # FA4's lse is [heads, rows], heads ordered (K, J, G).
+        shared_lse_RKJG = shared_lse.view(
             num_kv_heads, query_len, num_queries_per_kv, num_rows
         ).permute(3, 0, 1, 2)
-        shared_out = shared_out.view(
-            num_rows, num_kv_heads, query_len, num_queries_per_kv, head_dim_v
-        )
 
         # ======== The last n - 1 keys, causal among the row's tokens ========
         # TODO: one Triton kernel for this tail and the merge. These ~15 small kernels add 53-71 us
@@ -427,35 +427,39 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
         # steps under _MIN_VERIFY_ROWS_ON_DECODE_KERNEL rows off this path.
         # vLLM's merge_attn_states takes token-major outputs of one dtype: here that costs
         # three layout copies and a bf16 tail, for ~5 fewer kernels.
-        positions = num_shared_keys[:, None] + torch.arange(
+        tail_positions_RI = num_shared_keys_R[:, None] + torch.arange(
             query_len - 1, device=query.device
         )
-        pages = attn_metadata.block_table.gather(1, positions // page_size).long()
-        offsets = positions % page_size
-        tail_keys = key_cache[pages, offsets].float()
-        tail_values = value_cache[pages, offsets].float()
-        tail_scores = torch.einsum(
-            "rkjgd,rikd->rkjgi", query_by_kv_head.float(), tail_keys
+        tail_pages_RI = attn_metadata.block_table.gather(
+            1, tail_positions_RI // page_size
+        ).long()
+        tail_offsets_RI = tail_positions_RI % page_size
+        tail_keys_RIKD = key_cache[tail_pages_RI, tail_offsets_RI].float()
+        tail_values_RIKV = value_cache[tail_pages_RI, tail_offsets_RI].float()
+        tail_scores_RKJGI = torch.einsum(
+            "rkjgd,rikd->rkjgi", query_RKJGD.float(), tail_keys_RIKD
         ).mul_(self.scale)
-        key_index = torch.arange(query_len - 1, device=query.device)
-        token_index = torch.arange(query_len, device=query.device)
-        is_future = key_index[None, :] >= token_index[:, None]
-        tail_scores.masked_fill_(is_future[:, None, :], float("-inf"))
-        tail_lse = torch.logsumexp(tail_scores, dim=-1)
-        tail_out = torch.einsum(
-            "rkjgi,rikd->rkjgd",
-            torch.softmax(tail_scores, dim=-1).nan_to_num_(0.0),
-            tail_values,
+        key_index_I = torch.arange(query_len - 1, device=query.device)
+        token_index_J = torch.arange(query_len, device=query.device)
+        is_future_JI = key_index_I[None, :] >= token_index_J[:, None]
+        tail_scores_RKJGI.masked_fill_(is_future_JI[:, None, :], float("-inf"))
+        tail_lse_RKJG = torch.logsumexp(tail_scores_RKJGI, dim=-1)
+        tail_out_RKJGV = torch.einsum(
+            "rkjgi,rikv->rkjgv",
+            torch.softmax(tail_scores_RKJGI, dim=-1).nan_to_num_(0.0),
+            tail_values_RIKV,
         )
 
         # ======== Merge; token 0 has no tail keys (lse -inf) ========
-        lse = torch.logaddexp(shared_lse, tail_lse)
-        merged = (
-            torch.exp(shared_lse - lse).nan_to_num_(0.0)[..., None] * shared_out
-            + torch.exp(tail_lse - lse).nan_to_num_(0.0)[..., None] * tail_out
+        lse_RKJG = torch.logaddexp(shared_lse_RKJG, tail_lse_RKJG)
+        merged_RKJGV = (
+            torch.exp(shared_lse_RKJG - lse_RKJG).nan_to_num_(0.0)[..., None]
+            * shared_out_RKJGV
+            + torch.exp(tail_lse_RKJG - lse_RKJG).nan_to_num_(0.0)[..., None]
+            * tail_out_RKJGV
         )
         output.view(num_rows, query_len, num_heads, head_dim_v).copy_(
-            merged.permute(0, 2, 1, 3, 4).reshape(
+            merged_RKJGV.permute(0, 2, 1, 3, 4).reshape(
                 num_rows, query_len, num_heads, head_dim_v
             )
         )

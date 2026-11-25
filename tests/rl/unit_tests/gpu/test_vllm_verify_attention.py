@@ -23,7 +23,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("max_seq_len", [131072, 262144])
 @pytest.mark.parametrize(
     "query_lens, seq_lens, is_uniform_verify",
     [
@@ -31,18 +30,17 @@ pytestmark = pytest.mark.skipif(
         ([4] * 8, [4, 130, 1000, 257, 30_000, 0, 513, 2_048], True),
         # Fewer than 8 verify rows: FA4's varlen call.
         ([4, 4, 4], [130, 30_000, 257], True),
-        # A 1-token row: FA4's varlen call.
-        ([4, 4, 1], [130, 30_000, 257], False),
+        # A leading 1-token row: FA4's decode call for it, the varlen call for the rest.
+        ([1, 4, 4], [257, 130, 30_000], False),
     ],
     ids=["verify", "few_rows", "mixed"],
 )
-def test_forward_matches_causal_attention(
-    query_lens, seq_lens, is_uniform_verify, max_seq_len
-):
+def test_forward_matches_causal_attention(query_lens, seq_lens, is_uniform_verify):
     """Each query token attends causally to its row's keys, through the impl's dispatch.
 
     vLLM passes max_model_len as max_seq_len when it captures FULL graphs.
     """
+    max_seq_len = 262144  # Qwen3.8-27B's max_model_len
     torch.manual_seed(0)
     device = torch.device("cuda")
     num_heads, num_kv_heads, head_dim, page_size = 24, 4, 256, 128
