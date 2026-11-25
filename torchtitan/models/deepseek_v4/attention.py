@@ -360,9 +360,11 @@ class DeepSeekV4Attention(Attention):
                         max=self.indexer.inner_indexer.topk
                     )
                     # The indexer loss recomputes the top-k scores with grad.
+                    # The forward repeats the scoring pass, so only the
+                    # backward is new work.
                     if inner_attention.aux_loss is not None:
                         attention_op_flops += (
-                            6 * index_dim * int(num_compressed_keys.sum())
+                            4 * index_dim * int(num_compressed_keys.sum())
                         )
                 attention_op_flops += quadratic_attention_flops(
                     num_heads=self.n_heads,

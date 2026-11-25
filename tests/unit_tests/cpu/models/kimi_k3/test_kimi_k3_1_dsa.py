@@ -149,16 +149,18 @@ def test_dsa_flops_index_every_key_and_attend_to_topk() -> None:
 
     # Queries at positions 0 and topk have 1 and topk + 1 keys. Attention reads
     # 1 + topk of them. The indexer scores all topk + 2 without grad, and the
-    # indexer loss recomputes the 1 + topk selected scores with grad.
+    # indexer loss recomputes the 1 + topk selected scores with grad; only that
+    # backward counts, since its forward repeats the scoring.
     qk_head_dim = attention.qk_nope_head_dim + attention.qk_rope_head_dim
     index_dim = attention.indexer.num_index_heads * attention.indexer.index_head_dim
     attention_flops = (
         6 * attention.n_heads * (qk_head_dim + attention.v_head_dim) * (1 + topk)
     )
     scoring_flops = 2 * index_dim * (topk + 2)
-    recompute_flops = 6 * index_dim * (1 + topk)
+    recompute_backward_flops = 4 * index_dim * (1 + topk)
     assert (
-        attention.flops(positions) == attention_flops + scoring_flops + recompute_flops
+        attention.flops(positions)
+        == attention_flops + scoring_flops + recompute_backward_flops
     )
     # Without the indexer loss, nothing recomputes the selected scores.
     assert (

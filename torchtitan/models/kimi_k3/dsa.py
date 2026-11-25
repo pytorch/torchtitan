@@ -311,9 +311,10 @@ class KimiDSAAttention(KimiMLAAttention):
             # Scoring every key runs without grad: forward only.
             index_dim = self.indexer.num_index_heads * self.indexer.index_head_dim
             indexer_flops = 2 * index_dim * int(num_keys.sum())
-            # The indexer loss recomputes the top-k scores with grad.
+            # The indexer loss recomputes the top-k scores with grad. The forward
+            # repeats the scoring pass, so only the backward is new work.
             if self.inner_attention.aux_loss is not None:
-                indexer_flops += 6 * index_dim * int(num_selected_keys.sum())
+                indexer_flops += 4 * index_dim * int(num_selected_keys.sum())
             return attention_flops + indexer_flops
 
     def __init__(self, config: Config) -> None:
