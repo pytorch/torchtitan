@@ -149,7 +149,7 @@ class VLLMSessionKVHolder(Configurable):
         scheduler = self._scheduler
         if not scheduler.running and any(
             request.status != RequestStatus.WAITING_FOR_REMOTE_KVS
-            for request in (*scheduler.skipped_waiting, *scheduler.waiting)
+            for request in (*scheduler.kv_holding_waiting, *scheduler.waiting)
         ):
             free_before = self._block_pool.get_num_free_blocks()
             for session_id in list(self._held):
