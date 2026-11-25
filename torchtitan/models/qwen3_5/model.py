@@ -439,7 +439,8 @@ class Qwen35MultimodalModel(Qwen35Model, MultimodalModel):
             if pixel_values_videos is not None:
                 if special_tokens is None or "video_id" not in special_tokens:
                     raise ValueError(
-                        "pixel_values_videos require special_tokens with a 'video_id' entry."
+                        "pixel_values_videos require special_tokens with a "
+                        "'video_id' entry."
                     )
                 input_dict["video_vision_bank_indices_T"] = build_vision_bank_indices(
                     input_dict["input"],
@@ -477,7 +478,8 @@ class Qwen35MultimodalModel(Qwen35Model, MultimodalModel):
                 ),
             )
         assert rope_positions is not None, (
-            "Qwen3.5 needs RoPE positions: the batch must provide 'positions' or 'mrope_positions'."
+            "Qwen3.5 needs RoPE positions: the batch must provide "
+            "'positions' or 'mrope_positions'."
         )
         input_dict["positions"] = rope_positions
         input_shardings.update(dict.fromkeys(loss_kwargs, input_shardings["labels"]))

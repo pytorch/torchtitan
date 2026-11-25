@@ -13,10 +13,7 @@ import torch_remat as remat
 from torch.distributed._functional_collectives import all_to_all_single
 from torch.fx.experimental.symbolic_shapes import guard_or_false
 
-from torchtitan.distributed.local_compile import (
-    is_local_compile_enabled,
-    local_compile,
-)
+from torchtitan.distributed.local_compile import is_local_compile_enabled, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh, spmd_mesh_group
 from torchtitan.models.base.module import Module
