@@ -63,10 +63,9 @@ def paged_varlen_attention_out(
     Returns:
         The written ``out[:num_tokens]``, and the logsumexp with ``return_lse``.
     """
-    if query_len_in_heads > 1 and descales is None:
-        raise ValueError(
-            f"query_len_in_heads={query_len_in_heads} needs the fp8 path (descales)"
-        )
+    assert (
+        query_len_in_heads == 1 or descales is not None
+    ), "query_len_in_heads > 1 needs the fp8 path (descales)"
     if descales is not None:
         # TODO: call torch's varlen attention once it takes fp8 descales (no torch issue filed yet).
         # Until then, call FA4's private `_flash_attn_fwd` with the arguments torch's FA4 bridge
