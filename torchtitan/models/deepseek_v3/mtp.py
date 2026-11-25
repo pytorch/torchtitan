@@ -520,7 +520,7 @@ def apply_fsdp_to_mtp_decoder(
 
         apply_fsdp_to_decoder(
             model,
-            dp_mesh,
+            dp_mesh=dp_mesh,
             param_dtype=param_dtype,
             reduce_dtype=reduce_dtype,
             pp_enabled=pp_enabled,

@@ -14,7 +14,9 @@ from torchtitan.components.validator import Validator
 from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.validation import validate_model_training_config
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
@@ -23,6 +25,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
+from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 from torchtitan_recipes.tests.models.flux import flux_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
@@ -283,6 +286,42 @@ def test_microbatch_tokens_match_activation_sharding() -> None:
 
     config.training.num_tokens_per_microbatch_per_dp_rank = 16
     config.__post_init__()
+
+
+# CPU CI doesn't install flex_shard, which FlexShardBackend.validate_model requires
+# last.
+@mock.patch("torchtitan.distributed.flex_shard_backend.find_spec", mock.Mock())
+def test_flex_shard_rejects_models_it_cannot_shard_or_initialize() -> None:
+    # Overriding _apply_fsdp bypasses the FlexShard path, so it must raise rather
+    # than silently shard with FSDP2.
+    def validate(config):
+        config.parallelism.fsdp_backend = FlexShardBackend.Config()
+        config.training.disable_accelerator_graphs = True
+        validate_model_training_config(
+            config.model,
+            parallelism=config.parallelism,
+            training=config.training,
+            debug=config.debug,
+            activation_remat=config.activation_remat,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
+
+    validate(llama3_debugmodel())
+    with pytest.raises(
+        ValueError,
+        match=r"models that override Decoder._apply_fsdp \(DeepSeekV4Model\)",
+    ):
+        validate(deepseek_v4_debugmodel())
+
+    # Without param_init, a module falls back to reset_parameters(), which would
+    # give every rank the same shard.
+    config = llama3_debugmodel()
+    _, linear_config, _, _ = next(config.model.traverse(Linear.Config, recurse=True))
+    linear_config.param_init = None
+    with pytest.raises(
+        ValueError, match=r"modules initialized by reset_parameters\(\)"
+    ):
+        validate(config)
 
 
 def test_spmd_typechecking_rejects_pipeline_parallelism() -> None:
