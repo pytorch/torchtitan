@@ -470,8 +470,8 @@ class TorchTitanVarlenInnerAttentionImpl(FlashAttentionImpl):
             here, fp32, causal           keys L-3 .. L-1           token j: the first j of them
             merge                        logsumexp of the two parts
 
-        With fp8 `descales` (q, k, v): one decode call over keys 0 .. L-1, and FA4 hides key L-4+i
-        from the tokens before token i (`query_len_in_heads`).
+        With fp8 `descales` (q, k, v): one decode call over keys 0 .. L-1, and FA4 hides key L-n+i
+        from the tokens before token i (`query_len_in_heads=n`).
 
         Shape suffixes: R rows, K KV heads, J tokens of a row, G query heads per KV head,
         I tail keys (the last n - 1), D head dim, V value head dim.
