@@ -312,7 +312,7 @@ class CuspyTraceProfiler(TraceProfiler):
 
         def maybe_cuda_graph_annotation_config(self) -> dict[str, Any] | None:
             return get_cuspy_cuda_graph_annotation_config(
-                record_py_stacks=self.record_py_stacks
+                key_by="auto", record_py_stacks=self.record_py_stacks
             )
 
     _config: Config  # pyrefly: ignore [bad-override]
@@ -538,7 +538,7 @@ class Profiler(Configurable):
             if self.kernel_spans is not None:
                 # Kernel spans are named by exec-graph node id.
                 return get_cuspy_cuda_graph_annotation_config(
-                    enable_event_node_ids=True,
+                    key_by="exec",
                     record_py_stacks=isinstance(self.trace, CuspyTraceProfiler.Config)
                     and self.trace.record_py_stacks,
                 )
