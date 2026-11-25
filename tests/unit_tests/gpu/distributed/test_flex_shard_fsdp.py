@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
+"""``parallelism.fsdp_backend=FlexShardBackend.Config()`` against FSDP2, bit for bit."""
 
 import os
 from contextlib import nullcontext
@@ -33,18 +33,12 @@ from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
-from torchtitan.config.parallelism import (
-    FlexShardConfig,
-    FSDP2Config,
-    ParallelismConfig,
-)
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
-from torchtitan.distributed.flex_shard_fsdp import (
-    flex_shard_bucket,
-    flex_shard_reduce_meshes,
-)
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.sharding_backend import FullyShardBackend, ShardingBackend
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
@@ -79,7 +73,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         self,
         build_config,
         flavor: str,
-        fsdp_backend: FSDP2Config | FlexShardConfig,
+        fsdp_backend: ShardingBackend.Config,
         reshard_after_forward: str,
         parallelism_context: ParallelismContext,
     ):
@@ -168,10 +162,8 @@ class TestFlexShardDecoder(DTensorTestBase):
             loss_fn = ChunkedLossWrapper.Config().build()
             loss_fn.set_lm_head(
                 model.lm_head,
-                flex_shard_bucket=(
-                    flex_shard_bucket(model, "lm_head")
-                    if isinstance(parallelism.fsdp_backend, FlexShardConfig)
-                    else None
+                partial_backwards=parallelism.fsdp_backend.build().partial_backwards(
+                    model, "lm_head"
                 ),
             )
             model._skip_lm_head = True
@@ -213,17 +205,11 @@ class TestFlexShardDecoder(DTensorTestBase):
                     with spmd.no_typecheck():
                         loss.backward()
                 losses.append(loss.detach())
-            flex_shard_enabled = isinstance(parallelism.fsdp_backend, FlexShardConfig)
-            grad_norm = dist_utils.clip_grad_norm_(
+            grad_norm = parallelism.fsdp_backend.build().clip_grad_norm_(
                 list(model.parameters()),
-                max_norm=1.0,
+                1.0,
                 foreach=True,
-                flex_shard_enabled=flex_shard_enabled,
-                flex_shard_reduce_meshes=(
-                    flex_shard_reduce_meshes(parallelism_context)
-                    if flex_shard_enabled
-                    else None
-                ),
+                parallelism_context=parallelism_context,
             )
             grads = {
                 fqn: _local(param.grad).clone()
@@ -271,14 +257,14 @@ class TestFlexShardDecoder(DTensorTestBase):
             fsdp2, *fsdp2_setup = self._build(
                 build_config,
                 flavor,
-                FSDP2Config(),
+                FullyShardBackend.Config(),
                 reshard_after_forward,
                 parallelism_context,
             )
             flex, *flex_setup = self._build(
                 build_config,
                 flavor,
-                FlexShardConfig(),
+                FlexShardBackend.Config(),
                 reshard_after_forward,
                 parallelism_context,
             )
@@ -423,7 +409,9 @@ class TestFlexShardDecoder(DTensorTestBase):
             )
             return model, setup, optimizers, checkpointer
 
-        model, setup, optimizers, checkpointer = build(FSDP2Config(), "fsdp2")
+        model, setup, optimizers, checkpointer = build(
+            FullyShardBackend.Config(), "fsdp2"
+        )
         self._train(model, *setup, 1, False, optim=optimizers)
         checkpointer.save(3)
         checkpointer.save(3, last_step=True)
@@ -432,7 +420,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         # FlexShard's own initialization differs from FSDP2's, so only a load
         # gives it FSDP2's values.
         flex, _, flex_optimizers, checkpointer = build(
-            FlexShardConfig(),
+            FlexShardBackend.Config(),
             "flex",
             initial_load_path=os.path.join(self.temp_dir, "fsdp2", "step-3"),
             initial_load_model_only=False,
@@ -499,7 +487,11 @@ class TestFlexShardDecoder(DTensorTestBase):
 
         for (build_config, flavor), group_bytes in cases:
             fsdp2, setup, export = build(
-                build_config, flavor, FSDP2Config(), "fsdp2", last_save_in_hf=True
+                build_config,
+                flavor,
+                FullyShardBackend.Config(),
+                "fsdp2",
+                last_save_in_hf=True,
             )
             self._train(fsdp2, *setup, 1, False)
             export.save(3, last_step=True)
@@ -507,7 +499,7 @@ class TestFlexShardDecoder(DTensorTestBase):
             flex, _, checkpointer = build(
                 build_config,
                 flavor,
-                FlexShardConfig(),
+                FlexShardBackend.Config(),
                 "flex",
                 initial_load_path=os.path.join(
                     self.temp_dir, flavor, "fsdp2", "exports", "step-3"
@@ -516,7 +508,7 @@ class TestFlexShardDecoder(DTensorTestBase):
             )
             with (
                 patch(
-                    "torchtitan.distributed.flex_shard_fsdp._HF_LOAD_GROUP_BYTES",
+                    "torchtitan.distributed.flex_shard_backend._HF_LOAD_GROUP_BYTES",
                     group_bytes,
                 )
                 if group_bytes is not None
@@ -531,9 +523,7 @@ class TestFlexShardDecoder(DTensorTestBase):
                 reads, [key for call in load.call_args_list for key in call.args[0]]
             )
             read_keys = [key for keys in reads for key in keys]
-            self.assertEqual(
-                len(read_keys), len(set(read_keys)), msg=f"{flavor} reads"
-            )
+            self.assertEqual(len(read_keys), len(set(read_keys)), msg=f"{flavor} reads")
             exported = {
                 fqn: cast(DTensor, param).full_tensor()
                 for fqn, param in fsdp2.named_parameters()

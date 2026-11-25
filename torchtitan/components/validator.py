@@ -35,7 +35,6 @@ from torchtitan.distributed.accelerator_graph import (
     accelerator_graphs_supported,
     wrap_with_accelerator_graph,
 )
-from torchtitan.distributed.fsdp import post_validate_fsdp_for_accelerator_graph
 from torchtitan.distributed.pipeline_parallel import (
     prepare_pipeline_schedule_for_accelerator_graph,
 )
@@ -274,10 +273,7 @@ class Validator(BaseValidator):
                 loss_sum, metrics = self.loss_fn(predictions, labels)
                 loss_metrics = [metrics]
                 del predictions
-            post_validate_fsdp_for_accelerator_graph(
-                model_parts,
-                flex_shard_enabled=self.parallelism_context.flex_shard_enabled,
-            )
+            self.parallelism_context.sharding_backend.reshard_after_eval(model_parts)
         return loss_sum.detach(), loss_metrics
 
     @sl.log_trace_span("eval")

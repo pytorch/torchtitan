@@ -17,7 +17,6 @@ Generator engine loop (every rank, SPMD)
   SGLangEngine
     add_requests ----> Scheduler.process_input_requests   (no tokenizer/detokenizer procs)
     step ------------> one iteration of Scheduler.event_loop_overlap
-                       (event_loop_normal for GDN and KDA models)
                           ModelRunner -> SGLangModelWrapper.forward(input_ids, positions, forward_batch)
                                            TorchTitan Decoder
                                              Attention -> SGLangInnerAttention -> RadixAttention
@@ -69,7 +68,7 @@ scripts/install_rl_env.sh --sglang
 | Tensor parallelism | Supported; outside batch-invariant mode, the model's TP all-reduces run on SGLang's attention-TP all-reduce (custom all-reduce) instead of NCCL |
 | CUDA graphs (decode and prefill), overlap scheduling, chunked prefill | Supported |
 | Priority scheduling by rollout group | Supported |
-| Prompt KV reuse within a rollout group | Supported for softmax attention, not linear attention (GDN, KDA); see below |
+| Prompt KV reuse within a rollout group | Supported; linear attention (GDN, KDA) reuses the state at the prompt's last 64-token boundary; see below |
 | Model state dict loads (`cpu_prefetch`, `gpu_fetch`) | Supported |
 | Policy-version prefix cache isolation | Supported (`cache_salt`) |
 | `reset_kv_cache_on_model_state_dict_load` | Supported: running requests are retracted and recompute their KV |
@@ -163,47 +162,44 @@ SGLang keeps each request's GDN or KDA conv and recurrent state in its state
 pool, and its radix cache snapshots them, so a session's next turn resumes from
 its cached prefix as with KV. The trainer's Attention Gym kernels advance the
 states (`TorchTitanGDNAttnBackend` and `TorchTitanKDAAttnBackend`, registered
-through SGLang's linear attention model registry). The backends register without
-SGLang's `extra_buffer` mamba cache strategy, which needs the kernels to write
-state snapshots at intermediate positions. SGLang then snapshots a request's
-state only when it caches the request, and disables overlap scheduling: the
-engine steps SGLang's normal event loop for these models.
+through SGLang's linear attention model registry). They use SGLang's
+`extra_buffer` mamba cache strategy, which keeps overlap scheduling: SGLang
+gives each request two track slots, and the backends snapshot the request's
+state into one at the positions the radix cache tracks, so the next batch can
+keep advancing the request's own slot.
+
+- Prefill: at the last 64-token boundary of the new tokens. The conv history is
+  copied from the inputs, and Attention Gym writes the recurrent state
+  (`StateCheckpoints`).
+- Decode: SGLang copies the states every `mamba_track_interval` tokens (64;
+  SGLang's default is 256).
+
+A request with a cached prompt reuses the state at the prompt's last 64-token
+boundary, and a session's next turn resumes from the previous turn's last
+snapshot, at most 63 tokens before its end.
 
 In batch-invariant mode, a KDA state is the state after the last complete
 64-token chunk plus Attention Gym's replay state of the unfinished chunk, as in
 the vLLM engine. SGLang's state pool holds the replay tensors as extra conv
 state entries of each slot (`TorchTitanKDAConfig`), so its radix cache snapshots
 them with the state; at head dim 128, they take 1.25x the memory of the
-recurrent states.
+recurrent states. SGLang counts prefill snapshot positions from the start of an
+extend, which chunked prefill can leave off the 64-token grid, so a KDA prefill
+snapshot is the state at its last complete chunk (`StateCheckpoints`) plus the
+inputs after that chunk as its replay state (`copy_replay_tails`). Decode
+snapshots are at multiples of 64 tokens, where the replay state is empty;
+SGLang does not copy the replay entries, so the backend zeroes the track slot's
+replay count.
 
-### The state pool caps running requests
+### KV and states share one pool
 
-SGLang splits an engine's memory between the KV pool and a fixed state pool,
-by `mamba_full_memory_ratio` (default 0.9: the state pool gets 0.9 / 1.9 of
-it). With the radix cache, a running request needs 3 state slots, so SGLang
-runs at most `state slots // 3` requests and queues the rest, even when the KV
-pool has room. vLLM keeps KV and states in one pool and needs no split
-([sgl-project/sglang#49676](https://github.com/sgl-project/sglang/issues/49676)
-asks SGLang to do the same).
-
-Size the state pool for the requests an engine runs at once: its share of the
-rollouts in flight, `max_active_rollout_groups x num_samples_per_prompt /
-number of generators` (`max_num_seqs` is about 2x that, as headroom). Pass
-`max_mamba_cache_size` (3 x those requests) or `mamba_full_memory_ratio` in
-`extra_server_args`; the rest goes to KV. SGLang logs `max_running_requests`
-and `max_total_num_tokens` when it builds.
-
-Qwen3.5-9B at TP 1, `gpu_memory_limit=0.86`, on GB300 (~48 MiB per state slot):
-
-| Setting | State slots | Max running | KV tokens | Fits |
-|---|---|---|---|---|
-| default (ratio 0.9) | ~2,200 | ~730 | 3.77M | -- |
-| ratio 0.25 | 910 | 303 | 5.73M | Terminal-Bench: 131K-token contexts, ~70-110 running, KV-bound |
-| `max_mamba_cache_size=1536` | 1,536 | 512 | 4.75M | DAPO-Math: 8K-token answers, 512 running |
-
-Terminal-Bench at the default ratio filled the KV pool with 7% of the state
-slots in use and 29-46 requests queued per engine; DAPO-Math at ratio 0.25
-queued requests 4-8 s each with 12% of the KV pool in use.
+For GDN and KDA models, the engine turns on SGLang's unified memory: the full
+attention layers' KV cache and the GDN / KDA states share one pool, so memory
+that no state uses can hold KV, and the other way around. A running request
+takes 5 state slots (3, plus the 2 track slots of `extra_buffer`), so SGLang runs
+at most `state slots // 5` requests (about 428 for Qwen3.5-9B at TP 1,
+`gpu_memory_limit=0.86`, on GB300); for more, raise `max_mamba_cache_size` in
+`extra_server_args`. Unified memory costs about 1 ms of a ~25 ms decode step.
 
 ## Multi-turn sessions
 
@@ -239,10 +235,9 @@ For Qwen3-4B (TP 1) and 8 prompts x 16 samples admitted at once, the cached
 share of prompt tokens goes from 0% to 94% for 1K-token prompts (TTFT p50
 0.46 s -> 0.10 s) and from 59% to 94% for 4K-token prompts (0.73 s -> 0.25 s).
 The held requests keep their priority and wait queue entry times, so groups
-still run oldest first. Linear attention (GDN, KDA) models do not hold requests.
-Without SGLang's `extra_buffer` strategy, SGLang saves their states only at the
-end of a cached prefix, but a request with the same prompt needs the state one
-token earlier to compute the prompt's last token, so it could reuse nothing.
+still run oldest first. Linear attention (GDN, KDA) models hold requests too: a
+held request resumes from the leader's state snapshot at the prompt's last
+64-token boundary and recomputes the rest of the prompt (see [GDN and KDA](#gdn-and-kda)).
 
 ## CPU KV offload
 
@@ -283,9 +278,10 @@ turn 2 on generator B: GPU and host miss, Store hit -> load the history's KV,
 ```
 
 `scripts/install_rl_env.sh` already installs the Mooncake SDK (for the
-transport API). Start a `mooncake_master` as in SGLang's
-[Mooncake deployment guide](https://github.com/sgl-project/sglang/blob/435ee288edbda6d4522ff2bae2fe33f82a3fd1ea/python/sglang/srt/mem_cache/storage/mooncake_store/README.md#L131)
-and configure the generators; each generator contributes the Store memory:
+transport API). The controller starts one `mooncake_master` for the job on its
+host, on a free port, and adds its address to each generator's
+`hicache_storage_backend_extra_config`; the master exits with the controller.
+Configure the generators; each generator contributes the Store memory:
 
 ```python
 SGLangEngine.Config(
@@ -295,7 +291,6 @@ SGLangEngine.Config(
         "hicache_storage_backend": "mooncake",
         "hicache_storage_backend_extra_config": json.dumps(
             {
-                "master_server_address": "<master>:50051",
                 "metadata_server": "P2PHANDSHAKE",
                 "protocol": "rdma",
                 "device_name": "mlx5_0",
@@ -309,6 +304,11 @@ SGLangEngine.Config(
 )
 ```
 
+- Each rank serves its Store memory at `MOONCAKE_LOCAL_HOSTNAME` (default
+  `localhost`). With generators on more than one host, set it on each host to
+  an address the other hosts reach (an IP where hosts cannot resolve each
+  other's names), plus `MC_USE_IPV6=1` for an IPv6 address: without it,
+  Mooncake's handshake cannot resolve IPv6 addresses.
 - The Store sits below HiCache's host memory (a load goes Store -> host -> GPU),
   so it needs `enable_hierarchical_cache`. Keep the default `write_through`
   policy: with `write_back`, KV reaches the Store only when evicted from GPU.

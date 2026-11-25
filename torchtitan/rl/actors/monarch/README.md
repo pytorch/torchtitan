@@ -10,7 +10,7 @@ allocates its own hosts subclasses `Controller` and overrides
 hosts from a cluster scheduler, use a launch recipe (see
 [Launchers](#launchers)).
 
-Each adapter is a thin Monarch `Actor` subclass of a service with no Monarch
+Each adapter is a thin subclass of `Actor` (`actor.py`, a Monarch `Actor`) and of a service with no Monarch
 dependency of its own: it declares the service's methods as
 `@concurrent_endpoint`s and supplies Monarch-specific constructor arguments
 (rank, actor name, `Channel.open`). Domain behavior stays in the service.
@@ -18,6 +18,7 @@ dependency of its own: it declares the service's methods as
 | Module | Purpose |
 | --- | --- |
 | `system.py` | `MonarchActorSystem`: provisions the proc meshes and torch-elastic setup, spawns each service's actors on them, slices the trainer by DP rank, initializes TorchStore on the trainer mesh and every actor's client (or the `ModelStateDictTransport`), and stops the meshes. |
+| `actor.py` | `Actor`, the base of every actor here: drops a message it sends to a stopped or failed actor instead of failing (Monarch's default). |
 | `trainer.py` | `TrainerActor`, the endpoints of `rl/trainer/trainer.py`'s `Trainer`. |
 | `generator.py` | `GeneratorActor`, the endpoints of `rl/generator/generator.py`'s `Generator`; supplies `Channel.open` for the data-parallel result fan-in. |
 | `router.py` | `InterGeneratorRouterActor`, the endpoints of `rl/routing/inter_generator.py`'s `InterGeneratorRouter`; enforces that the router is a singleton. |
@@ -26,7 +27,7 @@ dependency of its own: it declares the service's methods as
 | `rollout_worker.py` | `RolloutWorkerActor`, a rollout worker in the controller-host CPU pool. |
 | `provisioning.py` | Proc meshes: the trainer and generator GPU meshes (`spawn_proc_mesh`, `PerHostProvisioner`), CPU procs on the controller host (`spawn_cpu_procs`), and the Monarch client's `shutdown`. |
 | `torch_elastic.py` | Sets the torch-elastic env vars (`RANK`, `MASTER_PORT`, ...) on a proc mesh before `init_process_group`; rank 0 keeps its rendezvous store port open so no other socket takes it. |
-| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), and the submit command (`submit.py`). |
+| `launcher/` | Scheduler launchers: `MonarchLauncher`, `MonarchControllerWithLauncher` and the shared layout planner (`base.py`), `SlurmLauncher` (`slurm.py`), `PBSLauncher` (`pbs.py`), and the submit command (`submit.py`). |
 
 ## Launchers
 
@@ -93,6 +94,32 @@ def my_rl_slurm():
     config.launcher.slurm_args += ["--account=my-account", "--partition=gpu"]
     return config
 ```
+
+### PBS
+
+`PBSLauncher` is submitted the same way. It passes the submit environment with
+`qsub -V`; site settings such as the queue, project and walltime go in
+`pbs_args`, and Cray PALS clusters set the `mpiexec` options. A launch recipe
+wraps an RL recipe with it:
+
+```python
+def my_rl_pbs():
+    return MonarchControllerWithLauncher.Config.from_controller_config(
+        rl_grpo_qwen3_0_6b_flex(),
+        launcher=PBSLauncher.Config(
+            gpus_per_node=4,
+            pbs_args=["-q debug", "-A my_project", "-l walltime=01:00:00"],
+            mpiexec_args=["--cpu-bind=none"],
+        ),
+    )
+```
+
+Every node starts `python_exe`, so on clusters that set up the environment with
+modules, point it at a script that loads them and then runs `exec python "$@"`.
+That script is also the place to set `TMPDIR` to a short path such as `/tmp`:
+PBS sets it to `/var/tmp/pbs.<job id>/...`, which makes Monarch's unix socket
+paths longer than Linux allows (meta-pytorch/monarch#5415; drop this once it is
+fixed).
 
 The launcher's `env` values are part of the config, which the controller may log
 and save (`print_config`, `save_config_file`), so don't put secrets there; set them
