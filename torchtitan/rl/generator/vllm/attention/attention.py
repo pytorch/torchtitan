@@ -45,9 +45,10 @@ from torchtitan.tools.utils import (
     set_default_dtype,
 )
 
-# Verify steps with fewer rows than this keep FA4's varlen call: `_verify_rows_as_decode`'s fp32 tail
-# adds ~60 us per layer, more than SwapAB saves unless 8+ rows share long prompts (Qwen3.5, head dim
-# 256, GB300). A FULL graph fixes the row count, so the check is graph-safe.
+# Verify steps with fewer rows than this, padded rows included, keep FA4's varlen call:
+# `_verify_rows_as_decode`'s fp32 tail adds ~60 us per layer. Per layer, the path wins only when 8+ rows
+# share long prompts (hd256, GB300); with unique contexts it loses 1.02-2.4x, yet an engine load ties.
+# A FULL graph sees only the row count, and rollout groups share a prompt.
 _MIN_VERIFY_ROWS_ON_DECODE_KERNEL = 8
 
 
