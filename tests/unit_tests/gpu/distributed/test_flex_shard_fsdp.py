@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""``parallelism.fsdp_backend=FlexShardConfig()`` against FSDP2, bit for bit."""
+"""``parallelism.fsdp_backend=FlexShardBackend.Config()`` against FSDP2, bit for bit."""
 
 import pytest
 import spmd_types as spmd
@@ -18,14 +18,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.config import PrecisionConfig
 from torchtitan.config.configs import DebugConfig
-from torchtitan.config.parallelism import (
-    FlexShardConfig,
-    FSDP2Config,
-    ParallelismConfig,
-)
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.flex_shard_backend import FlexShardBackend
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.sharding_backend import FullyShardBackend, ShardingBackend
 from torchtitan.models.common.param_init import skip_param_init
 from torchtitan.models.llama3 import build_model_config as build_llama3_config
 from torchtitan.models.qwen3 import build_model_config as build_qwen3_config
@@ -60,7 +58,7 @@ class TestFlexShardDecoder(DTensorTestBase):
         self,
         build_config,
         flavor: str,
-        fsdp_backend: FSDP2Config | FlexShardConfig,
+        fsdp_backend: ShardingBackend.Config,
         reshard_after_forward: str,
         parallelism_context: ParallelismContext,
     ):
@@ -157,13 +155,11 @@ class TestFlexShardDecoder(DTensorTestBase):
                     with spmd.no_typecheck():
                         loss.backward()
                 losses.append(loss.detach())
-            grad_norm = dist_utils.clip_grad_norm_(
+            grad_norm = parallelism.fsdp_backend.build().clip_grad_norm_(
                 list(model.parameters()),
-                max_norm=1.0,
+                1.0,
                 foreach=True,
-                flex_shard_enabled=isinstance(
-                    parallelism.fsdp_backend, FlexShardConfig
-                ),
+                parallelism_context=parallelism_context,
             )
             grads = {
                 fqn: _local(param.grad).clone()
@@ -216,14 +212,14 @@ class TestFlexShardDecoder(DTensorTestBase):
             fsdp2, *fsdp2_setup = self._build(
                 build_config,
                 flavor,
-                FSDP2Config(),
+                FullyShardBackend.Config(),
                 reshard_after_forward,
                 parallelism_context,
             )
             flex, *flex_setup = self._build(
                 build_config,
                 flavor,
-                FlexShardConfig(),
+                FlexShardBackend.Config(),
                 reshard_after_forward,
                 parallelism_context,
             )

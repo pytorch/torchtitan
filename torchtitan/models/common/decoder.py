@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.config import PrecisionConfig, TORCH_DTYPE_MAP
+from torchtitan.config import PrecisionConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
@@ -200,29 +200,11 @@ class Decoder(BaseModel):
         precision: PrecisionConfig,
         parallelism: ParallelismConfig,
     ) -> None:
-        from torchtitan.distributed.fsdp import (
-            apply_fsdp_to_decoder,
-            resolve_fsdp_mesh,
-            resolve_sparse_fsdp_mesh,
-        )
-
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
-        apply_fsdp_to_decoder(
+        parallelism.fsdp_backend.build().apply_to_decoder(
             self,
-            dp_mesh,
-            param_dtype=TORCH_DTYPE_MAP[precision.param_dtype],
-            reduce_dtype=TORCH_DTYPE_MAP[precision.reduce_dtype],
-            pp_enabled=parallelism_context.pp_enabled,
-            cpu_offload=parallelism.fsdp_enable_cpu_offloading,
-            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallelism_context.ep,
-            edp_mesh=edp_mesh,
-            dp_mesh_dims=dp_mesh_dims,
-            edp_mesh_dims=edp_mesh_dims,
-            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-            unshard_in_current_stream=parallelism.fsdp_unshard_in_current_stream,
-            fsdp_backend=parallelism.fsdp_backend,
+            parallelism_context=parallelism_context,
+            precision=precision,
+            parallelism=parallelism,
         )
 
     def __init__(self, config: Config):
