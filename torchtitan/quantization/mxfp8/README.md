@@ -139,19 +139,18 @@ these model policies.
 
 #### Usage
 
-Quantization is applied at config time in your `build_model_config()` function via the `converters` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
+Quantization is applied at config time by model config transforms (see `torchtitan/config/transform/README.md`). Each transform walks the model config tree and swaps config types so that quantized modules are built directly.
 
 To enable MXFP8 training for linear layers, configure it in your recipe function:
 
 ```python
-from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.config.transform import apply_transforms, MXFP8LinearTransform
 
-# In your build_model_config call:
-model_spec = build_model_config(
-    "flux-schnell",
-    parallelism=parallelism,
-    converters=[
-        MXFP8LinearConverter.Config(
+# In your recipe function, after setting the training options:
+config = apply_transforms(
+    config,
+    [
+        MXFP8LinearTransform(
             fqns=["double_blocks", "single_blocks"],
             # Add audited single-consumer inputs here. Flux uses BF16 by default.
             linears_saving_inputs_for_backward_in_mxfp8=[],
@@ -173,31 +172,29 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 To enable MXFP8 for MoE expert layers, configure it in your recipe function:
 
 ```python
-from torchtitan.config.transform import MXFP8GroupedLinearConverter
+from torchtitan.config.transform import (
+    apply_transforms,
+    MXFP8GroupedLinearTransform,
+)
 
-model_spec = build_model_config(
-    "debugmodel",
-    parallelism=parallelism,
-    converters=[
-        MXFP8GroupedLinearConverter.Config(
-            recipe_name="mxfp8_rceil",
-        ),
-    ],
+config = apply_transforms(
+    config,
+    [MXFP8GroupedLinearTransform(recipe_name="mxfp8_rceil")],
 )
 ```
 
-**Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both converters:
+**Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both transforms:
   ```python
   from torchtitan.config.transform import (
-      MXFP8GroupedLinearConverter,
-      MXFP8LinearConverter,
+      MXFP8GroupedLinearTransform,
+      MXFP8LinearTransform,
   )
 
-  converters=[
-      MXFP8LinearConverter.Config(
+  transforms = [
+      MXFP8LinearTransform(
           fqns=["double_blocks", "single_blocks"],
       ),
-      MXFP8GroupedLinearConverter.Config(
+      MXFP8GroupedLinearTransform(
           recipe_name="mxfp8_rceil",
       ),
   ]
@@ -209,14 +206,14 @@ model_spec = build_model_config(
 
 **Important Notes:**
 
-* **Token group alignment**: For MoE training with MXFP8, token group sizes must be multiples of 32 (the MXFP8 block size). The token dispatcher is automatically swapped to a padded variant (`TorchAOTokenDispatcher` or `DeepEPTokenDispatcher`) by `swap_token_dispatcher()` when the converter runs. Expert parallelism (EP) must be enabled.
+* **Token group alignment**: For MoE training with MXFP8, token group sizes must be multiples of 32 (the MXFP8 block size). The token dispatcher is automatically swapped to a padded variant (`TorchAOTokenDispatcher` or `DeepEPTokenDispatcher`) by `swap_token_dispatcher()` when the transform runs. Expert parallelism (EP) must be enabled.
 
 * **Grouped weight scales**: Grouped linears currently use 1x32 weight scales.
   A fused gate/up projection is stored as `[E, 2, F, D]` and flattened to
   `[E, 2F, D]` without a copy before quantization. Built-in configurations
   align `F` to the 32-element block size; otherwise a backward columnwise block
   can span the gate/up boundary. Square 32x32 grouped-weight scales are future
-  work and are not provided by this converter.
+  work and are not provided by this transform.
 
 * **torch.compile recommendation**: All benchmarks in this document were run with `torch.compile` enabled. We recommend using `torch.compile` for best performance.
 
@@ -226,19 +223,19 @@ Here's an example configuration for MXFP8 training in a recipe function:
 
 ```python
 from torchtitan.config.transform import (
-    MXFP8GroupedLinearConverter,
-    MXFP8LinearConverter,
+    apply_transforms,
+    MXFP8GroupedLinearTransform,
+    MXFP8LinearTransform,
 )
 
-# In your build_model_config call:
-model_spec = build_model_config(
-    "671B",
-    parallelism=parallelism,
-    converters=[
-        MXFP8LinearConverter.Config(
+# In your recipe function, after setting the training options:
+config = apply_transforms(
+    config,
+    [
+        MXFP8LinearTransform(
             fqns=["double_blocks", "single_blocks"],
         ),
-        MXFP8GroupedLinearConverter.Config(
+        MXFP8GroupedLinearTransform(
             recipe_name="mxfp8_rceil",
         ),
     ],

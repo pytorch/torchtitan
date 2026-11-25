@@ -16,6 +16,7 @@ from torchtitan.distributed.accelerator_graph import (
     accelerator_graph_manager,
     accelerator_graph_teardown,
 )
+from torchtitan.distributed.sharding_backend import FullyShardBackend
 from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.trainer import Trainer
@@ -86,7 +87,9 @@ def test_graph_trainer_preserves_eager_pp_validation(monkeypatch):
     runtime.is_spmd = False
     validator = object.__new__(Validator)
     validator.parallelism_context = SimpleNamespace(
-        pp_enabled=True, activate_spmd=lambda: nullcontext()
+        pp_enabled=True,
+        activate_spmd=lambda: nullcontext(),
+        sharding_backend=FullyShardBackend.Config().build(),
     )
     validator.pp_schedule = runtime
     validator.pp_has_first_stage = True

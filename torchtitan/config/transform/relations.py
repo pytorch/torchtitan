@@ -12,7 +12,13 @@ from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 from .dist_moe import DistMoeTransform
+from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
+from .quantization import (
+    MXFP8LinearTransform,
+    NVFP4LinearTransform,
+    QuantizationTransform,
+)
 from .token_dispatcher import TokenDispatcherTransform
 
 TransformType: TypeAlias = type[ModelConfigTransform]
@@ -30,15 +36,27 @@ _BUILTIN_PRECEDES: tuple[PrecedenceRelation, ...] = (
     (ContextParallelTransform, LoRATransform),
     # Dist-MoE must create DistMoeRoutedExperts.Config before LoRA can adapt it.
     (DistMoeTransform, LoRATransform),
+    # LoRA replaces each target projection config with an adapter and every
+    # other config with a frozen dynamic subclass. Quantization and the fp32
+    # lm_head convert only stock projection configs, so they run first.
+    (QuantizationTransform, LoRATransform),
+    (LMHeadFP32OutputTransform, LoRATransform),
+    # Quantization and the fp32 lm_head must target different Linears. Running
+    # quantization first lets the lm_head transform reject a quantized lm_head.
+    (QuantizationTransform, LMHeadFP32OutputTransform),
 )
 
 # Each pair is unordered.
 _BUILTIN_CONFLICTS: tuple[ConflictRelation, ...] = (
     # Async kernels invoke fused autograd functions directly instead of the
     # projection's _linear method, which would silently omit LoRA computation.
-    # TODO: Add quantization transforms when they migrate from
-    # ModelConfigConverter to ModelConfigTransform.
     (AsyncTensorParallelTransform, LoRATransform),
+    # Async TP converts only stock ColumnParallelLinear and RowParallelLinear
+    # owners, so it would silently leave quantized projections synchronous, and
+    # quantization does not support the async projection classes. Grouped
+    # quantization touches only routed experts, which async TP never converts.
+    (AsyncTensorParallelTransform, MXFP8LinearTransform),
+    (AsyncTensorParallelTransform, NVFP4LinearTransform),
     # LoRA freezes every non-target config. Applying it more than once would
     # make freezing and adapter configuration depend on transform order.
     (LoRATransform, LoRATransform),
