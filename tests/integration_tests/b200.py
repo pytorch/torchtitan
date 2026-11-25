@@ -63,23 +63,6 @@ def kimi_k3_debugmodel_mm_muon() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
-    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_mxfp8
-
-    config = llama3_debugmodel_mxfp8()
-    config.parallelism.data_parallel_shard_degree = 2
-    return config
-
-
-def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
-    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_nvfp4
-
-    config = llama3_debugmodel_nvfp4(seq_len=2048)
-    config.parallelism.data_parallel_shard_degree = 2
-    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    return config
-
-
 def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     from torchtitan.distributed.pipeline_parallel import (
         _generate_llm_fqn_per_model_part,
@@ -150,6 +133,62 @@ def kimi_k3_1_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
     )
+    return config
+
+
+def kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2() -> Trainer.Config:
+    """Exercise Kimi SiTU-GLU with MXFP8 Dist-MoE, FSDP, EP, and CP."""
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+    from torchtitan.models.common.attention.cp_mla import UlyssesMLAAttention
+    from torchtitan.models.common.attention.kda import InnerKDA
+    from torchtitan.models.common.attention.mla import MLAAttention
+    from torchtitan_recipes.tests.models.kimi_k3 import (
+        kimi_k3_debugmodel_dist_moe_mxfp8,
+    )
+
+    config = kimi_k3_debugmodel_dist_moe_mxfp8(
+        seq_len=128,
+        scratch_capacity_factor=2.0,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        ),
+    )
+    # Type checking stays off: the MXFP8 Dist-MoE kernel's autograd function is
+    # not registered with spmd_types, as for the DeepSeek Dist-MoE entries.
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.context_parallel_degree = 2
+    # Ulysses moves MLA's CP shard onto heads, so tokens stay contiguous.
+    config.parallelism.context_parallel_load_balancer = None
+    config.training.num_tokens_per_microbatch_per_dp_rank = 128
+    config.training.steps = 4
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    InnerKDA: ContextParallelInnerKDA,
+                    MLAAttention: UlyssesMLAAttention,
+                }
+            )
+        ],
+    )
+
+
+def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_mxfp8
+
+    config = llama3_debugmodel_mxfp8()
+    config.parallelism.data_parallel_shard_degree = 2
+    return config
+
+
+def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
+    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_nvfp4
+
+    config = llama3_debugmodel_nvfp4(seq_len=2048)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     return config
 
 
@@ -258,6 +297,13 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_descr="Kimi K3.1 FSDP, TP, EP and PP with 4 VPP stages",
             test_name="kimi_k3_1_fsdp2_tp2_ep2_pp2_vpp4",
             ngpu=8,
+        ),
+        IntegrationTestDefinition(
+            configs=[kimi_k3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_cp2],
+            test_descr="Kimi K3 MXFP8 Dist-MoE with FSDP, EP, and CP",
+            test_name="kimi_k3_dist_moe_fsdp_ep_cp",
+            ngpu=4,
+            use_real_pg=True,
         ),
         IntegrationTestDefinition(
             configs=[llama3_debugmodel_mxfp8_fsdp2],
