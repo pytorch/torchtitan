@@ -18,7 +18,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.config.transform import apply_transforms, MXFP8LinearTransform
 from torchtitan.distributed.activation_remat import FullActivationRematConfig
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.data import DATASETS, FluxCollator, FluxSampleProcessor
@@ -103,11 +103,11 @@ def flux_schnell() -> FluxTrainer.Config:
     return _flux_recipe("flux-schnell", max_t5_encoding_len=256)
 
 
-def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Config:
-    config.model = build_model_config(
-        flavor,
-        converters=[
-            MXFP8LinearConverter.Config(
+def _enable_mxfp8(config: FluxTrainer.Config) -> FluxTrainer.Config:
+    return apply_transforms(
+        config,
+        [
+            MXFP8LinearTransform(
                 fqns=[
                     "double_blocks",
                     "single_blocks",
@@ -119,17 +119,14 @@ def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Con
                 ],
             ),
         ],
-        parallelism=config.parallelism,
-        seq_len=config.model.max_context_length,
     )
-    return config
 
 
 def flux_schnell_mxfp8() -> FluxTrainer.Config:
     """Flux schnell with MXFP8 quantization and torch.compile on SM100+."""
-    return _enable_mxfp8(flux_schnell(), flavor="flux-schnell")
+    return _enable_mxfp8(flux_schnell())
 
 
 def flux_dev_mxfp8() -> FluxTrainer.Config:
     """Flux dev with MXFP8 quantization and torch.compile on SM100+."""
-    return _enable_mxfp8(flux_dev(), flavor="flux-dev")
+    return _enable_mxfp8(flux_dev())

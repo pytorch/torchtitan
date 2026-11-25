@@ -135,7 +135,7 @@ class TestVisionEncoderCPUOffload(DTensorTestBase):
         )
         apply_fsdp_to_decoder(
             model,
-            mesh,
+            dp_mesh=mesh,
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
             pp_enabled=False,
