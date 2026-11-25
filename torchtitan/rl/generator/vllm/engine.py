@@ -215,12 +215,11 @@ class VLLMEngine(GenerationEngine):
             many requests sharing long prompts       auto: fp8 decode can be slower
                                                      (see `paged_varlen_attention_out`)
             trainer-vs-generator logprob gap         fp8: ~2.3x auto's mean abs diff, ~3.5x k3 KL
-            a hybrid model's KV block                fp8: grows (896 -> 1,664 tokens), so
-                                                     prefix-cache hits are coarser
+            a hybrid model's KV block                fp8: ~2x the tokens per block (Qwen3.8-27B:
+                                                     896 -> 1,664), so prefix-cache hits are coarser
 
-        The gap ratios come from an offline rescoring: the trainer scored tokens the generator
-        sampled with the same weights (Qwen3.8-27B, GB300, temperature 1, 27k-78k-token
-        contexts). A run's step-1 `bit_wise/logprob_diff/mean` gives its own fp8 floor.
+        Ratios from an offline rescoring (Qwen3.8-27B, temperature 1). A run's step-1
+        `bit_wise/logprob_diff/mean` gives its own fp8 floor.
         """
 
         extra_engine_args: dict[str, Any] = field(default_factory=dict)

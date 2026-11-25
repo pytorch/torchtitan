@@ -811,9 +811,25 @@ def test_session_kv_holder_rejects_kv_cache_reset_on_model_state_dict_load(tmp_p
         )
 
 
-def test_batch_invariant_rejects_fp8_kv_cache(tmp_path):
-    with pytest.raises(ValueError, match="batch_invariant needs kv_cache_dtype='auto'"):
-        VLLMEngine.Config(kv_cache_dtype="fp8").build(
+@pytest.mark.parametrize(
+    "config_kwargs, debug, match",
+    [
+        (
+            dict(kv_cache_dtype="fp8"),
+            DebugConfig(batch_invariant=True),
+            "batch_invariant needs kv_cache_dtype='auto'",
+        ),
+        (
+            dict(kv_cache_dtype="fp8", num_speculative_tokens=3),
+            DebugConfig(),
+            "does not support num_speculative_tokens=3",
+        ),
+    ],
+    ids=["batch_invariant", "drafts"],
+)
+def test_fp8_kv_cache_refusals(tmp_path, config_kwargs, debug, match):
+    with pytest.raises(ValueError, match=match):
+        VLLMEngine.Config(**config_kwargs).build(
             model=_MODEL_CONFIG,
             parallelism=_PARALLELISM,
             model_path="unused",
@@ -823,30 +839,7 @@ def test_batch_invariant_rejects_fp8_kv_cache(tmp_path):
             max_num_batched_tokens=None,
             checkpointer=None,
             dist_moe_runtime=None,
-            debug=DebugConfig(batch_invariant=True),
-            reset_kv_cache_on_model_state_dict_load=True,
-            model_state_dict_load_mode="cpu_prefetch",
-            vision_processor=None,
-            mooncake_master_address=None,
-            rank=0,
-            generator_name="generator",
-            output_dir=str(tmp_path),
-        )
-
-
-def test_fp8_kv_cache_rejects_drafts(tmp_path):
-    with pytest.raises(ValueError, match="does not support num_speculative_tokens=3"):
-        VLLMEngine.Config(kv_cache_dtype="fp8", num_speculative_tokens=3).build(
-            model=_MODEL_CONFIG,
-            parallelism=_PARALLELISM,
-            model_path="unused",
-            max_num_seqs=8,
-            precision=PrecisionConfig(),
-            gpu_memory_limit=0.9,
-            max_num_batched_tokens=None,
-            checkpointer=None,
-            dist_moe_runtime=None,
-            debug=DebugConfig(),
+            debug=debug,
             reset_kv_cache_on_model_state_dict_load=True,
             model_state_dict_load_mode="cpu_prefetch",
             vision_processor=None,

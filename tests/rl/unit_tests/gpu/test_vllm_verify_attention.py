@@ -23,6 +23,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("max_seq_len", [131072, 262144])
 @pytest.mark.parametrize(
     "query_lens, seq_lens, is_verify_step",
@@ -37,12 +38,20 @@ pytestmark = pytest.mark.skipif(
     ids=["verify", "few_rows", "mixed"],
 )
 def test_forward_matches_causal_attention(
-    query_lens, seq_lens, is_verify_step, max_seq_len
+    query_lens, seq_lens, is_verify_step, max_seq_len, kv_cache_dtype
 ):
     """Each query token attends causally to its row's keys, through the impl's dispatch.
 
-    vLLM passes max_model_len as max_seq_len when it captures FULL graphs.
+    vLLM passes max_model_len as max_seq_len when it captures FULL graphs. An fp8 cache holds
+    K / k_scale and V / v_scale in e4m3 and the query arrives as q / q_scale in e4m3, as vLLM
+    writes them; the reference runs on the dequantized values.
     """
+    if kv_cache_dtype == "fp8" and is_verify_step:
+        # TODO: drop once `_verify_rows_as_decode` passes the fp8 descales.
+        pytest.skip(
+            "fp8 verify rows pass no descales yet; the engine refuses fp8 with drafts"
+        )
+
     torch.manual_seed(0)
     device = torch.device("cuda")
     num_heads, num_kv_heads, head_dim, page_size = 24, 4, 256, 128
@@ -56,9 +65,11 @@ def test_forward_matches_causal_attention(
             num_kv_heads=num_kv_heads,
             alibi_slopes=None,
             sliding_window=None,
-            kv_cache_dtype="auto",
+            kv_cache_dtype=kv_cache_dtype,
         )
     assert impl.verify_query_len == 4
+    is_fp8 = kv_cache_dtype == "fp8"
+    q_scale, k_scale, v_scale = (2.0, 0.5, 4.0) if is_fp8 else (1.0, 1.0, 1.0)
 
     # The engine's cache: [pages, KV heads, page, K | V], with pages in random order.
     num_pages = [-(-length // page_size) for length in seq_lens]
@@ -70,6 +81,10 @@ def test_forward_matches_causal_attention(
         dtype=torch.bfloat16,
         device=device,
     )
+    if is_fp8:
+        kv_cache[..., :head_dim] /= k_scale
+        kv_cache[..., head_dim:] /= v_scale
+        kv_cache = kv_cache.to(torch.float8_e4m3fn)
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     page_order = torch.randperm(kv_cache.shape[0])
     # As wide as vLLM sizes it (max_model_len / page_size), so FA4 runs its per-sequence splits.
@@ -85,6 +100,8 @@ def test_forward_matches_causal_attention(
     query = torch.randn(
         num_tokens, num_heads, head_dim, dtype=torch.bfloat16, device=device
     )
+    if is_fp8:
+        query = (query / q_scale).to(torch.float8_e4m3fn)
     metadata = SimpleNamespace(
         num_actual_tokens=num_tokens,
         query_start_loc=query_start_loc.to(device),
@@ -95,13 +112,25 @@ def test_forward_matches_causal_attention(
         use_cascade=False,
         causal=True,
     )
-    layer = SimpleNamespace(layer_name="attn", kv_cache=kv_cache)
+    # vLLM keeps an fp8 cache as uint8; the impl views it as e4m3.
+    stored_cache = kv_cache.view(torch.uint8) if is_fp8 else kv_cache
+    scales = {
+        name: torch.tensor(value, device=device)
+        for name, value in (
+            ("_q_scale", q_scale),
+            ("_k_scale", k_scale),
+            ("_v_scale", v_scale),
+        )
+    }
+    layer = SimpleNamespace(layer_name="attn", kv_cache=stored_cache, **scales)
     context = ForwardContext(
         no_compile_layers={"attn": layer},
         attn_metadata={"attn": metadata},
         slot_mapping={},
     )
-    output = torch.zeros_like(query)
+    output = torch.zeros(
+        num_tokens, num_heads, head_dim, dtype=torch.bfloat16, device=device
+    )
 
     with (
         override_forward_context(context),
@@ -109,20 +138,20 @@ def test_forward_matches_causal_attention(
             impl, "_verify_rows_as_decode", wraps=impl._verify_rows_as_decode
         ) as verify_rows_as_decode,
     ):
-        impl.forward(layer, query, None, None, kv_cache, metadata, output=output)
+        impl.forward(layer, query, None, None, stored_cache, metadata, output=output)
     assert verify_rows_as_decode.called == is_verify_step
 
     for row, (num_queries, num_keys) in enumerate(zip(query_lens, seq_lens)):
         if num_keys == 0:
             continue
         pages = block_table[row, : num_pages[row]].long()
-        keys = key_cache[pages].flatten(0, 1)[:num_keys].float()
-        values = value_cache[pages].flatten(0, 1)[:num_keys].float()
+        keys = key_cache[pages].flatten(0, 1)[:num_keys].float() * k_scale
+        values = value_cache[pages].flatten(0, 1)[:num_keys].float() * v_scale
         rows = slice(int(query_start_loc[row]), int(query_start_loc[row + 1]))
         # [heads, tokens, keys]; token j sees keys 0 .. num_keys - num_queries + j.
         scores = impl.scale * torch.einsum(
             "thd,khd->htk",
-            query[rows].float(),
+            query[rows].float() * q_scale,
             keys.repeat_interleave(impl.num_queries_per_kv, dim=1),
         )
         is_visible = torch.ones(
@@ -134,4 +163,12 @@ def test_forward_matches_causal_attention(
             scores.softmax(dim=-1),
             values.repeat_interleave(impl.num_queries_per_kv, dim=1),
         )
-        torch.testing.assert_close(output[rows].float(), expected, atol=2e-3, rtol=2e-2)
+        if is_fp8:
+            # FA4's fp8 kernels round the softmax probabilities to e4m3 before P @ V: rel L2
+            # ~0.02 on this flat attention.
+            rel_l2 = (output[rows].float() - expected).norm() / expected.norm()
+            assert rel_l2 < 0.05, (row, rel_l2)
+        else:
+            torch.testing.assert_close(
+                output[rows].float(), expected, atol=2e-3, rtol=2e-2
+            )
