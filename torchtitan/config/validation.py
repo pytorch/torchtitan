@@ -251,7 +251,7 @@ def validate_model_training_config(
         )
 
     parallelism.fsdp_backend.build().validate_model(
-        model, parallelism=parallelism, training=training, debug=debug
+        model, parallelism=parallelism, debug=debug
     )
 
     validate_context_parallel(model, parallelism)

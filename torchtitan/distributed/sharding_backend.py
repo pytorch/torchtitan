@@ -30,7 +30,7 @@ from torchtitan.config.configurable import Configurable
 if TYPE_CHECKING:
     from torchtitan.components.checkpointer import CheckpointManager
     from torchtitan.components.optim import Optim
-    from torchtitan.config import DebugConfig, PrecisionConfig, TrainingConfig
+    from torchtitan.config import DebugConfig, PrecisionConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.parallelism_context import ParallelismContext
     from torchtitan.models.base.model import BaseModel
@@ -59,10 +59,9 @@ class ShardingBackend(Configurable, ABC):
         model_config: BaseModel.Config,
         *,
         parallelism: ParallelismConfig,
-        training: TrainingConfig,
         debug: DebugConfig,
     ) -> None:
-        """Reject the model, parallelism and training settings this backend
+        """Reject the model, parallelism and debug settings this backend
         doesn't support. ``validate_model_training_config`` calls this."""
 
     def validate_trainer(
