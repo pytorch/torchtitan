@@ -11,7 +11,7 @@ transport."""
 
 import asyncio
 import itertools
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import torch
@@ -259,7 +259,20 @@ def test_overlapping_pieces(monkeypatch):
         )
 
 
-def test_mixed_dtypes(monkeypatch):
+@pytest.mark.parametrize("batched", [False, True])
+def test_mixed_dtypes(monkeypatch, batched):
+    batches = []
+    if batched:
+
+        async def read_batch(self, transfers, *, timeout):
+            batches.append((len(transfers), timeout))
+            for local, remote in transfers:
+                self.read(local, remote, async_op=True)
+
+        monkeypatch.setattr(
+            _FakeTransport, "read_batch_async", read_batch, raising=False
+        )
+
     # An odd-sized bf16 key, then a key kept in fp32: the second piece starts at
     # an aligned offset and keeps its dtype.
     a = torch.arange(2 * 3, dtype=torch.float32).reshape(2, 3)
@@ -284,6 +297,9 @@ def test_mixed_dtypes(monkeypatch):
     )
     torch.testing.assert_close(out["a"], a.to(torch.bfloat16), rtol=0, atol=0)
     torch.testing.assert_close(out["b"], b, rtol=0, atol=0)
+    if batched:
+        # Both trainers contribute a piece of each key to one read plan.
+        assert batches == [(4, 5.0)]
 
 
 def test_dtype_mismatch(monkeypatch):
@@ -297,14 +313,18 @@ def test_dtype_mismatch(monkeypatch):
         )
 
 
-def test_no_reads(monkeypatch):
-    # A generator rank whose shards are all empty has nothing to read.
+@pytest.mark.parametrize("rows", [0, 2])
+def test_zero_or_one_read(monkeypatch, rows):
+    read_batch = AsyncMock()
+    monkeypatch.setattr(_FakeTransport, "read_batch_async", read_batch, raising=False)
+    full = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     (out,) = _transfer(
         monkeypatch,
-        [{"w": (torch.zeros(2, 3), ((0, 0), (2, 3)))}],
-        [{"w": (((0, 0), (0, 3)), torch.float32)}],
+        [{"w": (full, ((0, 0), (2, 3)))}],
+        [{"w": (((0, 0), (rows, 3)), torch.float32)}],
     )
-    assert out["w"].shape == (0, 3)
+    torch.testing.assert_close(out["w"], full[:rows])
+    read_batch.assert_not_awaited()
 
 
 def test_shared_rank_layouts():
