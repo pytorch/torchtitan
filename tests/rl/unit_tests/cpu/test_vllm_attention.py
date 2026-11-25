@@ -10,7 +10,6 @@ import pytest
 import torch
 
 from torchtitan.rl.generator.vllm.attention import attention as vllm_attention
-from vllm.config import CacheConfig, set_current_vllm_config, VllmConfig
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -85,18 +84,3 @@ def test_fa4_page_size_with_kv_cache_spec():
         ),
     ):
         assert backend.get_supported_kernel_block_sizes(spec) == [128]
-
-
-def test_fp8_kv_cache_refuses_diffkv_layer():
-    """fp8 is untested on a layer whose V head dim differs from its K head dim."""
-    config = VllmConfig(cache_config=CacheConfig(cache_dtype="fp8"))
-    layer_config = vllm_attention.VLLMInnerAttention.Config(
-        hidden_size=512, num_heads=4, num_kv_heads=4, head_dim=192, value_head_dim=128
-    )
-    with (
-        set_current_vllm_config(config),
-        pytest.raises(
-            ValueError, match=r"V head dim \(128\) differs from its K head dim \(192\)"
-        ),
-    ):
-        vllm_attention.VLLMInnerAttention(layer_config)

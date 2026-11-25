@@ -709,16 +709,6 @@ class VLLMInnerAttention(InnerAttention):
         layer_id = next(VLLMInnerAttention._layer_counter)
         diff_kv_kwargs: dict[str, Any] = {}
         if value_head_dim != head_dim:
-            if cache_config is not None and is_quantized_kv_cache(
-                cache_config.cache_dtype
-            ):
-                # TODO: test fp8 on DiffKV layers, then lift this. Today they come only from MLA's
-                # materialized cache in batch-invariant mode, which fp8 refuses at engine start.
-                raise ValueError(
-                    f"kv_cache_dtype={cache_config.cache_dtype!r} is untested on a layer whose V "
-                    f"head dim ({value_head_dim}) differs from its K head dim ({head_dim}); "
-                    "set kv_cache_dtype='auto'"
-                )
             FlashAttentionDiffKVBackend.set_head_size_v(value_head_dim)
             diff_kv_kwargs = {
                 "head_size_v": value_head_dim,
