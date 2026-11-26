@@ -59,9 +59,10 @@ One group, top to bottom. Each column is a process, or the agent in its runtime.
    HTTP on the controller host.
 6. The GenerationServer calls TitanRL's `generate_fn`, which reserves a generator at the router
    and then calls that generator.
-7. The GenerationServer answers with the tokens and logprobs, and keeps the call's policy version
-   and generator metrics: the trace has no field for them. The agent gets its reply. Steps 4 to
-   7 repeat every turn.
+7. The GenerationServer answers with the tokens and logprobs, and keeps the call's policy version,
+   generator metrics and, with score centering, top-k rows: the trace has no field for them. It
+   drops what no trace popped when the group ends. The agent gets its reply. Steps 4 to 7 repeat
+   every turn.
 8. When the agent stops, Verifiers grades the rollout, e.g. by running the task's tests.
 9. The env server returns the rollout's traces. The worker releases each trace's routing session
    at the router.

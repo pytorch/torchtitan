@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+import numpy as np
 from aiohttp import web
 
 from torchtitan.config import Configurable
@@ -40,8 +41,8 @@ class VerifiersGenerationMetadata:
     """TorchTitan generation data aggregated over one Verifiers rollout.
 
     Verifiers sends the trace ID as the generation session ID, but does not
-    retain TorchTitan policy versions or generator metrics in the returned
-    trace. The generation server therefore records their rollout-wide span.
+    retain TorchTitan policy versions, generator metrics or top-k logprobs in the
+    returned trace. The generation server therefore records them per rollout.
     """
 
     min_policy_version: int
@@ -52,6 +53,20 @@ class VerifiersGenerationMetadata:
 
     metrics: list[m.Metric]
     """Metrics from every generation in the rollout, merged with `m.fold`."""
+
+    # TODO: glibc keeps freed top-k arrays: at k=128 a rollout worker held ~4.5 KiB per in-flight token (rows: 1 KiB).
+    # Setting M_MMAP_THRESHOLD to 256 KiB in rollout workers fixed it in a CPU repro; not yet checked in a run.
+    topk_by_generation: dict[
+        tuple[int, tuple[int, ...]], tuple[np.ndarray, np.ndarray]
+    ] = field(default_factory=dict)
+    """The generator's top-k ids and logprobs `[num_completion_tokens, k]` per generation,
+    keyed by `(len(prompt_token_ids), completion_token_ids)`; empty unless
+    `SamplingConfig.num_topk_logprobs` > 0.
+
+    Example:
+
+        {(2, (12, 13)): (array([[12, 5], [13, 6]]), array([[-0.1, -2.4], [-0.2, -1.9]]))}
+    """
 
 
 class GenerationServer(Configurable):
@@ -96,6 +111,9 @@ class GenerationServer(Configurable):
         self.bound_port: int | None = None
         self.request_counts: dict[str, int] = {}
         self.generation_metadata: dict[str, VerifiersGenerationMetadata] = {}
+        # The sessions of each open group, so `close_group` can drop the ones no trace popped:
+        # a retried attempt, or a run that raised.
+        self.session_ids_by_group: dict[int, set[str]] = {}
 
     @property
     def port(self) -> int:
@@ -146,6 +164,7 @@ class GenerationServer(Configurable):
         self.bound_port = None
         self.request_counts.clear()
         self.generation_metadata.clear()
+        self.session_ids_by_group.clear()
 
     def pop_generation_metadata(
         self, session_id: str
@@ -153,6 +172,20 @@ class GenerationServer(Configurable):
         """Detach the generation metadata accumulated for one rollout."""
         self.request_counts.pop(session_id, None)
         return self.generation_metadata.pop(session_id, None)
+
+    def open_group(self, group_id: int) -> None:
+        """Serve generation requests for this group until `close_group`."""
+        self.session_ids_by_group[group_id] = set()
+
+    def close_group(self, group_id: int) -> None:
+        """Stop serving the group, and drop the metadata, with any top-k rows, of its
+        sessions no trace popped.
+
+        A closed group's later requests answer 409: once a rollout raises, the env server
+        may keep running its cancelled siblings, and their metadata would never be popped.
+        """
+        for session_id in self.session_ids_by_group.pop(group_id):
+            self.pop_generation_metadata(session_id)
 
     async def _handle_health_request(self, request: web.Request) -> web.Response:
         del request
@@ -176,6 +209,7 @@ class GenerationServer(Configurable):
             503  `generate_fn` is not set yet
             400  a prompt with no room for an output token
             422  no X-Session-ID header, or a malformed body
+            409  the group is not open: it never opened, or already closed
             500  `generate_fn` raised, or the completion's token ids and logprobs differ in length
             502  no completion, or a finish reason other than "stop" or "length"
 
@@ -235,6 +269,13 @@ class GenerationServer(Configurable):
                 status=400,
             )
 
+        group_session_ids = self.session_ids_by_group.get(group_id)
+        if group_session_ids is None:
+            return _closed_group_response(group_id)
+        # Before generating, so closing the group drops this session's state even if this
+        # request fails or is still generating.
+        group_session_ids.add(session_id)
+
         # ======== Generate ========
         request_index = self.request_counts.get(session_id, 0)
         self.request_counts[session_id] = request_index + 1
@@ -273,7 +314,29 @@ class GenerationServer(Configurable):
                 status=502,
             )
 
+        # The group may have closed while this request was generating.
+        if group_id not in self.session_ids_by_group:
+            return _closed_group_response(group_id)
         previous = self.generation_metadata.get(session_id)
+        topk_by_generation = {} if previous is None else previous.topk_by_generation
+        if completion.topk_token_ids is not None:
+            key = (len(prompt_token_ids), tuple(completion.token_ids))
+            rows = (completion.topk_token_ids, completion.topk_logprobs)
+            # Equal rows (e.g. a seeded retry) are unambiguous: either set is correct.
+            existing = topk_by_generation.get(key)
+            if existing is not None and not all(
+                np.array_equal(a, b) for a, b in zip(existing, rows, strict=True)
+            ):
+                return web.json_response(
+                    {
+                        "error": f"session {session_id}: two generations share prompt length "
+                        f"{key[0]} and completion tokens but not top-k rows, so the rows "
+                        "can't be told apart"
+                    },
+                    status=500,
+                )
+            # The metadata object is replaced below, so updating its dict in place is safe.
+            topk_by_generation[key] = rows
         self.generation_metadata[session_id] = VerifiersGenerationMetadata(
             min_policy_version=(
                 completion.min_policy_version
@@ -292,6 +355,7 @@ class GenerationServer(Configurable):
                 if previous is None
                 else [*previous.metrics, *completion.metrics]
             ),
+            topk_by_generation=topk_by_generation,
         )
 
         # ======== Reply ========
@@ -352,6 +416,10 @@ class _DebugAccessLogger(web.AbstractAccessLogger):
         )
 
 
+def _closed_group_response(group_id: int) -> web.Response:
+    return web.json_response({"error": f"group {group_id} is not open"}, status=409)
+
+
 def _validate_token_ids(value: object, *, field_name: str) -> list[int]:
     """Validate an untyped JSON value as integer token IDs and return it."""
     if not isinstance(value, list) or not set(map(type, value)) <= {int}:
@@ -373,6 +441,7 @@ def _parse_sampling_config(value: object):
         "max_tokens",
         "seed",
         "stop_token_ids",
+        "num_topk_logprobs",
     }
     protocol_fields = {
         "logprobs",
@@ -397,8 +466,9 @@ def _parse_sampling_config(value: object):
         field_name="stop_token_ids",
     )
     # The rollouter always sends these. Without them the generator would silently use
-    # SamplingConfig's defaults (temperature 0.8, max_tokens 100).
-    missing = {"temperature", "top_p", "max_tokens"} - set(value)
+    # SamplingConfig's defaults (temperature 0.8, max_tokens 100), and return no top-k rows
+    # for a loss that needs them.
+    missing = {"temperature", "top_p", "max_tokens", "num_topk_logprobs"} - set(value)
     if missing:
         raise ValueError(f"sampling_params must include {sorted(missing)}")
     return SamplingConfig(
@@ -407,4 +477,5 @@ def _parse_sampling_config(value: object):
         max_tokens=int(value["max_tokens"]),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
+        num_topk_logprobs=int(value["num_topk_logprobs"]),
     )
