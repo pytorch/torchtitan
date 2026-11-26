@@ -14,6 +14,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from torchtitan.rl.generator.engine import KVCacheCapacity
+from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.generator.vllm.session_kv_evictor import VLLMSessionKVEvictor
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -987,3 +989,62 @@ def test_with_mtp_drafts_a_state_in_use_at_the_turns_last_sweep_goes_once_free()
     for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
         assert _cached_indices(manager, request, kv_cache_group_id) == [2]
     assert evictor._sessions_to_sweep == {}
+
+
+def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evictor):
+    # Two rollouts of one group share a 40-token prompt, prefilled in one chunk; 3 turns.
+    engine = VLLMEngine.__new__(VLLMEngine)
+    engine._engine = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(data_parallel_size=1)
+        ),
+        engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler)),
+    )
+    scheduler.kv_cache_config = manager.kv_cache_config
+    capacity = engine.kv_cache_capacity()
+    assert capacity == KVCacheCapacity(
+        num_blocks=119,
+        attention_block_sizes=(BLOCK,),
+        blocks_per_state=3,
+        num_idle_states=1,
+        num_running_states=3,
+    )
+
+    def num_held_blocks() -> int:
+        return sum(
+            block.ref_cnt > 0 or block.block_hash is not None
+            for block in manager.block_pool.blocks[1:]
+        )
+
+    histories = [list(range(40)), list(range(40))]
+    for turn in range(3):
+        requests = [
+            _admit(scheduler, evictor, f"{index}/turn={turn}", str(index), 0, history)
+            for index, history in enumerate(histories)
+        ]
+        for step in range(31):
+            for index, request in enumerate(requests):
+                if step == 0:
+                    _prefill(manager, request, sample=100 * turn)
+                else:
+                    _schedule(manager, request, 1, sample=1000 * index + step)
+                evictor.after_step()
+                assert num_held_blocks() <= sum(
+                    capacity.session_blocks(request.num_tokens, running=True)
+                    for request in requests
+                )
+        for request in requests:
+            _finish(manager, scheduler, evictor, request)
+
+        # Idle: the charge counts the shared prompt's 2 blocks per session, and each
+        # session's last block, which vLLM caches only once full.
+        charged = sum(
+            capacity.session_blocks(request.num_tokens, running=False)
+            for request in requests
+        )
+        assert charged - 2 - len(requests) <= num_held_blocks() <= charged
+        histories = [
+            list(request.all_token_ids)
+            + list(range(2000 + 50 * turn, 2010 + 50 * turn))
+            for request in requests
+        ]
