@@ -90,7 +90,8 @@ def _controller(
             max_offpolicy_steps=None,
             num_prompts_per_train_step=5,
             validation=ValidationConfig(),
-        )
+        ),
+        generator_router=SimpleNamespace(admission=None),
     )
     controller.start_step = 0
     controller._trainer_policy_version = 0

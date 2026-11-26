@@ -53,6 +53,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.rl.generator.engine import (
     GenerationEngine,
+    KVCacheCapacity,
     ModelStateDictLoadMode,
     NUM_RELEASED_GROUP_IDS_KEPT,
 )
@@ -78,6 +79,10 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
+# Linear attention models: at most this many states SGLang keeps cached on each path of its
+# prefix tree, the group prompt's state where sibling sessions branch included.
+_MAMBA_MAX_STATES_PER_PATH = 2
+
 # ServerArgs fields that SGLangEngine sets itself or does not support, so
 # extra_server_args cannot set them. Every key that names CUDA graphs is also
 # reserved for the engine (see Config.__post_init__).
@@ -88,6 +93,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         "skip_tokenizer_init",
         "dtype",
         "mamba_track_interval",
+        "mamba_max_states_per_path",
         "tp_size",
         "attn_dp_size",
         "mem_fraction_static",
@@ -400,6 +406,34 @@ class SGLangEngine(GenerationEngine):
         ] = {}
         if not self._scheduler.enable_overlap:
             raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
+        # Read while no request holds memory. A page is one token (`page_size=1`), so a block
+        # is a token.
+        allocator = self._scheduler.token_to_kv_pool_allocator
+        if allocator.state_slots is None:
+            self._kv_cache_capacity = KVCacheCapacity(
+                num_blocks=allocator.size,
+                attention_block_sizes=(1,),
+                blocks_per_state=0,
+                num_idle_states=0,
+                num_running_states=0,
+                num_state_slots=None,
+            )
+        else:
+            # The unified pool: a state takes `state_slot_cost` tokens of the shared pool, and
+            # a slot of the state pool, which has its own size.
+            kv_cache_configurator = (
+                self._scheduler.tp_worker.model_runner.kv_cache_configurator
+            )
+            self._kv_cache_capacity = KVCacheCapacity(
+                num_blocks=allocator.size,
+                attention_block_sizes=(1,),
+                blocks_per_state=allocator.admission_rules().state_slot_cost,
+                num_idle_states=_MAMBA_MAX_STATES_PER_PATH,
+                # The states per running request SGLang sized its state pool with. SGLang
+                # keeps no field with them; this reads only the build's settings.
+                num_running_states=kv_cache_configurator._calculate_mamba_ratio(),
+                num_state_slots=allocator.state_slots.size,
+            )
         self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
         # collection, as SGLang's freeze_gc does: each full collection (e.g. the engine
@@ -478,6 +512,11 @@ class SGLangEngine(GenerationEngine):
             # KV and GDN / KDA states share one pool, so memory one does not use can
             # hold the other (see the README). SGLang builds it for hybrid models only.
             server_kwargs["enable_unified_memory"] = True
+            # Bound the states an idle session keeps (unlimited by default), so the router's
+            # admission can count them (`kv_cache_capacity`). Past the cap SGLang evicts the
+            # shallowest of a path's states, but never its tail, a fork where sibling sessions
+            # branch, or one a request locks: an idle session keeps at most 2 of its own.
+            server_kwargs["mamba_max_states_per_path"] = _MAMBA_MAX_STATES_PER_PATH
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise
             # dominates small prefills. SGLang runs a prefill batch eagerly if it
@@ -538,6 +577,16 @@ class SGLangEngine(GenerationEngine):
     @property
     def data_parallel_size(self) -> int:
         return self._dp_size
+
+    def kv_cache_capacity(self) -> KVCacheCapacity:
+        """Return the token pool's size and what one session takes in it."""
+        if self._dp_size > 1:
+            raise ValueError(
+                f"Admission needs SGLang's attention DP at 1, got {self._dp_size}: "
+                "IntraGeneratorRouter spreads a group's sessions over the DP ranks without "
+                "looking at their KV."
+            )
+        return self._kv_cache_capacity
 
     @property
     def data_parallel_rank(self) -> int:

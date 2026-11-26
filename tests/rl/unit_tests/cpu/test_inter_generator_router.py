@@ -10,6 +10,10 @@ import logging
 import pytest
 
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.generator.engine import KVCacheCapacity
+from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.routing import inter_generator
+from torchtitan.rl.routing.admission import KVRoomAdmission
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
@@ -19,8 +23,9 @@ from torchtitan.rl.routing.strategies import (
 
 
 class _Endpoint:
-    def __init__(self, *, wait: bool = False, raises: bool = False):
+    def __init__(self, *, wait: bool = False, raises: bool = False, value=None):
         self.raises = raises
+        self.value = value
         self.calls = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
@@ -33,6 +38,7 @@ class _Endpoint:
         await self.release.wait()
         if self.raises:
             raise RuntimeError("endpoint failed")
+        return self.value
 
     async def call(self, *args, **kwargs):
         return await self.call_one(*args, **kwargs)
@@ -56,6 +62,19 @@ class _Actor:
         )
         self.load_model_state_dict = _Endpoint(wait=wait_pull, raises=raises_pull)
         self.release_sessions = _Endpoint()
+        self.start_engine_loop = _Endpoint()
+        self.release_groups = _Endpoint()
+        # 100 blocks of 10 tokens, no GDN states: a 900-token call fills it.
+        self.kv_cache_capacity = _Endpoint(
+            value=KVCacheCapacity(
+                num_blocks=100,
+                attention_block_sizes=(10,),
+                blocks_per_state=0,
+                num_idle_states=0,
+                num_running_states=0,
+                num_state_slots=None,
+            )
+        )
 
 
 def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
@@ -70,24 +89,41 @@ def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
 
 def _route(router, *, session_id: str | None = None) -> str:
     """Route one generate call that finishes at once; return its generator's name."""
-    name = router.reserve("probe", routing_session_id=session_id).name
-    router.release_reservation("probe")
+    name = router.reserve(
+        "probe", routing_session_id=session_id, group_id=0, num_prompt_tokens=0
+    ).name
+    router.release_reservation("probe", num_reply_tokens=0)
     return name
 
 
 def test_least_loaded_routes_to_lowest_reserved_load():
     router = _router([_Actor("gen0"), _Actor("gen1")])
-    assert router.reserve("r0", routing_session_id=None).name == "gen0"
-    assert router.reserve("r1", routing_session_id=None).name == "gen1"
+    assert (
+        router.reserve(
+            "r0", routing_session_id=None, group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen0"
+    )
+    assert (
+        router.reserve(
+            "r1", routing_session_id=None, group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen1"
+    )
 
     # Releasing r1 frees gen1, the generator it reserved.
-    router.release_reservation("r1")
+    router.release_reservation("r1", num_reply_tokens=0)
     assert [h.reserved_load for h in router._generators] == [1, 0]
     # The tie-break alone would pick gen0 (least recently chosen); load picks idle gen1.
-    assert router.reserve("r2", routing_session_id=None).name == "gen1"
+    assert (
+        router.reserve(
+            "r2", routing_session_id=None, group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen1"
+    )
 
-    router.release_reservation("r0")
-    router.release_reservation("r2")
+    router.release_reservation("r0", num_reply_tokens=0)
+    router.release_reservation("r2", num_reply_tokens=0)
     assert [h.reserved_load for h in router._generators] == [0, 0]
 
 
@@ -128,9 +164,19 @@ def test_sticky_session_reuses_generator_for_same_session():
         actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
     )
 
-    assert router.reserve("r0", routing_session_id="s0").name == "gen0"
+    assert (
+        router.reserve(
+            "r0", routing_session_id="s0", group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen0"
+    )
     # gen0 is busier than idle gen1, yet s0's next call stays on gen0.
-    assert router.reserve("r1", routing_session_id="s0").name == "gen0"
+    assert (
+        router.reserve(
+            "r1", routing_session_id="s0", group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen0"
+    )
 
 
 def test_sticky_session_spreads_new_sessions_started_on_idle_generators():
@@ -174,7 +220,10 @@ def test_new_sessions_spread_over_generators_that_all_drain():
 
     # Every generator drains, so new sessions go to them anyway, spread by load.
     chosen = [
-        router.reserve(f"r{i}", routing_session_id=f"s{i}").name for i in range(4)
+        router.reserve(
+            f"r{i}", routing_session_id=f"s{i}", group_id=0, num_prompt_tokens=0
+        ).name
+        for i in range(4)
     ]
     assert sorted(chosen) == ["gen0", "gen0", "gen1", "gen1"]
 
@@ -229,7 +278,12 @@ def test_sticky_session_respects_max_sessions():
         ),
     )
 
-    assert router.reserve("r0", routing_session_id="s0").name == "gen0"
+    assert (
+        router.reserve(
+            "r0", routing_session_id="s0", group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen0"
+    )
     # s0 is pinned to gen0 and still in flight, so the least-loaded fallback
     # assigns the new s1 session to gen1. Since max_sessions=1, s1 evicts s0.
     assert _route(router, session_id="s1") == "gen1"
@@ -243,7 +297,12 @@ def test_release_session_unpins_it_and_frees_its_kv_on_its_generator():
     router = _router(
         actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=None)
     )
-    assert router.reserve("r0", routing_session_id="s0").name == "gen0"
+    assert (
+        router.reserve(
+            "r0", routing_session_id="s0", group_id=0, num_prompt_tokens=0
+        ).name
+        == "gen0"
+    )
 
     asyncio.run(router.release_session("s0"))
 
@@ -445,3 +504,83 @@ def test_pull_logs_a_failure_while_a_slow_generator_still_loads(caplog):
 
     with caplog.at_level(logging.ERROR, logger="torchtitan.rl.routing.inter_generator"):
         asyncio.run(_run())
+
+
+def _admission_router(actors) -> InterGeneratorRouter:
+    router = InterGeneratorRouter(
+        InterGeneratorRouter.Config(admission=KVRoomAdmission.Config()),
+        generators=[ServiceHandle(all_ranks=actor, rank0=actor) for actor in actors],
+    )
+    asyncio.run(router.start_engine_loop())
+    return router
+
+
+def test_admission_holds_groups_in_order_validation_first(monkeypatch):
+    monkeypatch.setattr(inter_generator, "_ADMISSION_RETRY_S", 0.001)
+    router = _admission_router([_Actor("gen0")])
+
+    async def acquire(group_id: int, *, validation: bool) -> asyncio.Task:
+        task = asyncio.create_task(
+            router.acquire_group(group_id, num_sessions=1, validation=validation)
+        )
+        await asyncio.sleep(0.01)
+        return task
+
+    async def run() -> None:
+        # An empty generator takes a group; its 900-token call fills the generator.
+        await router.acquire_group(0, num_sessions=1, validation=False)
+        router.reserve(
+            "r0", routing_session_id="0/0", group_id=0, num_prompt_tokens=900
+        )
+        training = await acquire(1, validation=False)
+        released = await acquire(2, validation=False)
+        validation = await acquire(-1, validation=True)
+        assert not (training.done() or released.done() or validation.done())
+
+        await router.release_groups([2])
+
+        # Room frees: validation goes first, and training waits behind it.
+        await router.release_groups([0])
+        await asyncio.wait_for(validation, timeout=1)
+        assert not training.done()
+        await router.release_groups([-1])
+        await asyncio.wait_for(training, timeout=1)
+
+        # The released waiter returns once it holds the lock, unplaced: its calls raise.
+        await asyncio.wait_for(released, timeout=1)
+        with pytest.raises(ValueError, match="group 2"):
+            router.reserve(
+                "r2", routing_session_id="2/0", group_id=2, num_prompt_tokens=1
+            )
+        assert router._waiting_groups == {}
+
+    asyncio.run(run())
+
+
+def test_admission_routes_calls_to_the_placed_generator():
+    actors = [_Actor("gen0"), _Actor("gen1")]
+    router = _admission_router(actors)
+    asyncio.run(router.acquire_group(0, num_sessions=1, validation=False))
+    asyncio.run(router.acquire_group(1, num_sessions=1, validation=False))
+
+    # Every call goes to its group's generator, even while it drains.
+    router._generators[1].draining = True
+    for request_id in ("r0", "r1"):
+        handle = router.reserve(
+            request_id, routing_session_id="1/0", group_id=1, num_prompt_tokens=100
+        )
+        assert handle.name == "gen1"
+    assert [h.reserved_load for h in router._generators] == [0, 2]
+    router.release_reservation("r0", num_reply_tokens=50)
+    router.release_reservation("r1", num_reply_tokens=50)
+    assert [h.reserved_load for h in router._generators] == [0, 0]
+
+    # The strategy never pinned the session, so its release goes to the placed generator.
+    asyncio.run(router.release_session("1/0"))
+    assert actors[0].release_sessions.calls == []
+    assert actors[1].release_sessions.calls == [((["1/0"],), {})]
+
+    keys = m.MetricsProcessor._aggregate_metrics(router.admission_metrics())
+    assert keys["admission/groups_waiting"] == 0
+    # gen0's group has not called: 1 x ceil((100 + 50) / 10) = 15 of 100 blocks.
+    assert keys["admission/charged_kv_fraction/max"] == pytest.approx(0.15)

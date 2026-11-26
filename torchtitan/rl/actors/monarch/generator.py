@@ -13,6 +13,7 @@ from monarch.actor import Channel, concurrent_endpoint, context, current_rank
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import PrecisionConfig
 from torchtitan.rl.actors.monarch.actor import Actor
+from torchtitan.rl.generator.engine import KVCacheCapacity
 from torchtitan.rl.generator.generator import Generator
 
 from torchtitan.rl.generator.types import SamplingConfig
@@ -106,6 +107,10 @@ class _GeneratorActorEndpoints:
     @concurrent_endpoint
     async def release_sessions(self, session_ids: list[str]) -> None:
         await super().release_sessions(session_ids)
+
+    @concurrent_endpoint
+    async def kv_cache_capacity(self) -> KVCacheCapacity:
+        return await super().kv_cache_capacity()
 
     @concurrent_endpoint
     async def load_model_state_dict(self, version: int, *, drain: bool) -> None:

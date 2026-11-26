@@ -16,6 +16,7 @@ from monarch.actor import concurrent_endpoint, current_size
 
 from torchtitan.rl.actors.monarch.actor import Actor
 from torchtitan.rl.actors.system import ServiceHandle
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 
 
@@ -33,12 +34,40 @@ class _InterGeneratorRouterActorEndpoints:
         super().__init__(config, generators=generators)
 
     @concurrent_endpoint
-    async def reserve(self, request_id: str, *, routing_session_id: str | None) -> Any:
-        return super().reserve(request_id, routing_session_id=routing_session_id)
+    async def reserve(
+        self,
+        request_id: str,
+        *,
+        routing_session_id: str | None,
+        group_id: int,
+        num_prompt_tokens: int,
+    ) -> Any:
+        return super().reserve(
+            request_id,
+            routing_session_id=routing_session_id,
+            group_id=group_id,
+            num_prompt_tokens=num_prompt_tokens,
+        )
 
     @concurrent_endpoint
-    async def release_reservation(self, request_id: str) -> None:
-        super().release_reservation(request_id)
+    async def release_reservation(
+        self, request_id: str, *, num_reply_tokens: int
+    ) -> None:
+        super().release_reservation(request_id, num_reply_tokens=num_reply_tokens)
+
+    # Every endpoint stays a `@concurrent_endpoint`: Monarch starts those in send order, so a
+    # release can't overtake the `acquire_group` it follows.
+    @concurrent_endpoint
+    async def acquire_group(
+        self, group_id: int, *, num_sessions: int, validation: bool
+    ) -> None:
+        await super().acquire_group(
+            group_id, num_sessions=num_sessions, validation=validation
+        )
+
+    @concurrent_endpoint
+    async def admission_metrics(self) -> list[m.Metric]:
+        return super().admission_metrics()
 
     @concurrent_endpoint
     async def start_engine_loop(self) -> None:

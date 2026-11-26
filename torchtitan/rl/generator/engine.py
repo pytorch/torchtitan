@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import abc
+import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Literal
@@ -130,6 +131,59 @@ class GenerationEngine(Configurable, abc.ABC):
     def log_stats(self, step: int) -> None:
         """Log the engine's own per-step stats, if any."""
 
+    def kv_cache_capacity(self) -> KVCacheCapacity:
+        """Return the KV cache size and what one session takes in it, for the router's
+        admission (``InterGeneratorRouter.Config.admission``). It reads only what the build
+        fixed, so the actor's thread may call it."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not report its KV cache capacity, which admission needs"
+        )
+
     @abc.abstractmethod
     def shutdown(self) -> None:
         """Release engine-local resources; process teardown is the actor framework's."""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class KVCacheCapacity:
+    """A generator's KV cache size, and the blocks one session takes in it.
+
+    A session takes a block per that many tokens in each attention KV cache group, plus a fixed
+    number of GDN (linear attention) states, more while a call runs:
+
+        capacity = KVCacheCapacity(
+            num_blocks=119, attention_block_sizes=(16,), blocks_per_state=3,
+            num_idle_states=1, num_running_states=3, num_state_slots=None,
+        )
+        capacity.session_blocks(40, running=True)   # ceil(40 / 16) + 3 x 3 = 12
+        capacity.session_blocks(50, running=False)  # ceil(50 / 16) + 3 x 1 = 7
+    """
+
+    num_blocks: int
+    """KV cache blocks admission may fill."""
+
+    attention_block_sizes: tuple[int, ...]
+    """Tokens per block of each KV cache group that takes a block per that many tokens."""
+
+    blocks_per_state: int
+    """Blocks one GDN state takes, over every GDN KV cache group; 0 without GDN layers."""
+
+    num_idle_states: int
+    """GDN states a session keeps between its calls."""
+
+    num_running_states: int
+    """GDN states a session takes while a call of it runs."""
+
+    num_state_slots: int | None
+    """A cap on GDN states apart from blocks (SGLang's state pool), or None."""
+
+    def session_states(self, *, running: bool) -> int:
+        """GDN states a session takes: while a call runs, or between calls."""
+        return self.num_running_states if running else self.num_idle_states
+
+    def session_blocks(self, num_tokens: int, *, running: bool) -> int:
+        """Blocks a session of ``num_tokens`` tokens takes: while a call runs, or between calls."""
+        return self.blocks_per_state * self.session_states(running=running) + sum(
+            math.ceil(num_tokens / block_size)
+            for block_size in self.attention_block_sizes
+        )

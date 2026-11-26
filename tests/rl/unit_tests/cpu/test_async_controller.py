@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 import pytest
 import torch
+from torchtitan.rl.controller import controller as controller_module
 from torchtitan.rl.controller.controller import Controller, ValidationConfig
 from torchtitan.rl.controller.metrics import (
     compute_perf_ratio_metrics,
@@ -137,7 +138,8 @@ def test_rollout_loop_keeps_the_metrics_a_worker_sent_with_its_group() -> None:
     controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
     controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
     controller.generator_router = SimpleNamespace(
-        release_groups=SimpleNamespace(call_one=AsyncMock())
+        acquire_group=SimpleNamespace(call_one=AsyncMock()),
+        release_groups=SimpleNamespace(call_one=AsyncMock()),
     )
     group_buffer = SimpleNamespace(claim_next=claim_next, finalize_work=finalize_work)
 
@@ -1111,7 +1113,9 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
         )
 
     # The session reaches both routing layers: the router and the generator's DP routing.
-    reserve.assert_awaited_once_with("r0", routing_session_id="s0")
+    reserve.assert_awaited_once_with(
+        "r0", routing_session_id="s0", group_id=0, num_prompt_tokens=2
+    )
     generate_call.assert_awaited_once_with(
         prompt,
         request_id="r0",
@@ -1119,7 +1123,8 @@ def test_generate_fn_forwards_the_session_and_releases_on_failure() -> None:
         routing_session_id="s0",
         sampling_config=None,
     )
-    release.assert_called_once_with("r0")
+    # The call raised, so admission records no reply tokens.
+    release.assert_called_once_with("r0", num_reply_tokens=0)
 
 
 def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
@@ -1156,7 +1161,8 @@ def test_validation_renames_turn_metrics_and_uses_fresh_group_ids() -> None:
     controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
     release_groups = AsyncMock()
     controller.generator_router = SimpleNamespace(
-        release_groups=SimpleNamespace(call_one=release_groups)
+        acquire_group=SimpleNamespace(call_one=AsyncMock()),
+        release_groups=SimpleNamespace(call_one=release_groups),
     )
 
     async def run_two_validations() -> list[m.Metric]:
@@ -1223,7 +1229,8 @@ def test_validate_rolls_out_each_prompt_n_times(
     controller._sampling = SamplingConfig(temperature=0.8, seed=7, stop_token_ids=[1])
     controller._validation_group_ids = itertools.count(start=-1, step=-1)
     controller.generator_router = SimpleNamespace(
-        release_groups=SimpleNamespace(call_one=AsyncMock())
+        acquire_group=SimpleNamespace(call_one=AsyncMock()),
+        release_groups=SimpleNamespace(call_one=AsyncMock()),
     )
     controller.rollout_recorder = SimpleNamespace(record=lambda **kwargs: None)
     run_group_rollouts = AsyncMock(
@@ -1278,3 +1285,119 @@ def test_run_cancels_the_in_flight_pull_when_the_trainer_loop_fails() -> None:
         )
 
     assert events == []
+
+
+@pytest.mark.parametrize(
+    "cancel_while, release_hangs",
+    [("acquiring", False), ("running", False), ("running", True)],
+)
+def test_rollout_loop_acquires_before_the_group_and_releases_it_on_a_shutdown_cancel(
+    cancel_while: str, release_hangs: bool, monkeypatch, caplog
+) -> None:
+    """A group acquires KV room before its envs start. A shutdown cancel releases it, so the
+    validation after training doesn't wait behind it; a release that hangs ends after the
+    bound, and the loop still ends cancelled."""
+    monkeypatch.setattr(controller_module, "_SHUTDOWN_RELEASE_TIMEOUT_S", 0.05)
+    events = []
+
+    async def run() -> None:
+        cancel_point = asyncio.Event()
+
+        async def acquire_group(group_id, *, num_sessions, validation):
+            events.append(("acquire", group_id, num_sessions, validation))
+            if cancel_while == "acquiring":
+                cancel_point.set()
+                await asyncio.Event().wait()
+
+        async def run_group_rollouts(*, group_id, **kwargs):
+            events.append(("run", group_id))
+            cancel_point.set()
+            await asyncio.Event().wait()
+
+        async def release_groups(group_ids):
+            events.append(("release", group_ids))
+            if release_hangs:
+                await asyncio.Event().wait()
+
+        claims = [SimpleNamespace(sample="prompt", group_id=7)]
+
+        async def claim_next():
+            if claims:
+                return claims.pop()
+            await asyncio.Event().wait()
+
+        controller = object.__new__(Controller)
+        controller.config = SimpleNamespace(
+            async_loop=SimpleNamespace(num_samples_per_prompt=2)
+        )
+        controller._sampling = SamplingConfig()
+        controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+        controller.generator_router = SimpleNamespace(
+            acquire_group=SimpleNamespace(call_one=acquire_group),
+            release_groups=SimpleNamespace(call_one=release_groups),
+        )
+        loop = asyncio.create_task(
+            controller._rollout_loop(
+                group_buffer=SimpleNamespace(claim_next=claim_next),
+                generate_fn=None,
+                release_session_fn=None,
+            )
+        )
+        await cancel_point.wait()
+        loop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await loop
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+
+    ran = [("run", 7)] if cancel_while == "running" else []
+    assert events == [("acquire", 7, 2, False), *ran, ("release", [7])]
+    assert ("at shutdown failed" in caplog.text) == release_hangs
+
+
+def test_validation_acquires_each_group_and_releases_them_when_cancelled() -> None:
+    """Each validation group acquires KV room, ahead of training groups. A cancelled validation
+    releases its groups, so the validation after training doesn't wait behind them."""
+    acquired, released = [], []
+
+    async def run() -> None:
+        both_running = asyncio.Event()
+
+        async def acquire_group(group_id, *, num_sessions, validation):
+            acquired.append((group_id, num_sessions, validation))
+
+        async def run_group_rollouts(*, group_id, **kwargs):
+            if len(acquired) == 2:
+                both_running.set()
+            await asyncio.Event().wait()
+
+        async def release_groups(group_ids):
+            released.append(group_ids)
+
+        controller = object.__new__(Controller)
+        controller._validation_group_ids = itertools.count(start=-1, step=-1)
+        controller._make_generate_fn = lambda: None
+        controller._make_release_session_fn = lambda: None
+        controller._rollouter = SimpleNamespace(run_group_rollouts=run_group_rollouts)
+        controller.generator_router = SimpleNamespace(
+            acquire_group=SimpleNamespace(call_one=acquire_group),
+            release_groups=SimpleNamespace(call_one=release_groups),
+        )
+        validation = asyncio.create_task(
+            controller._collect_validation_rollouts(
+                samples=["a", "b"],
+                sampling=SamplingConfig(),
+                num_samples_per_prompt=2,
+                step=0,
+            )
+        )
+        await both_running.wait()
+        validation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await validation
+
+    asyncio.run(run())
+
+    assert acquired == [(-1, 2, True), (-2, 2, True)]
+    assert released == [[-1, -2]]
