@@ -33,18 +33,17 @@ from torchtitan.components.checkpointer.base import (
     BaseCheckpointManager,
     CheckpointStorage,
     DATALOADER,
+    FilesystemCheckpointStorage,
     MODEL,
     ModelWrapper,
+    ParamCheckpointType,
     purge_thread,
 )
-from torchtitan.components.checkpointer.dcp import (
-    _FilesystemCheckpointStorage,
-    AsyncMode,
-    CheckpointManager,
-)
+from torchtitan.components.checkpointer.dcp import AsyncMode, CheckpointManager
 from torchtitan.components.optim import EMA
 from torchtitan.config import CallableFunction
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import LoRATransform
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 from torchtitan.observability import structured_logger as sl
@@ -1413,9 +1412,9 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
     def _manager(self):
         # The real storage adapter, so this keeps covering the fsspec path that
-        # torchtitan.tools.filesystem provides and the backend Storage does not.
+        # torchtitan.tools.filesystem provides.
         manager = CheckpointManager.__new__(CheckpointManager)
-        manager._storage = _FilesystemCheckpointStorage()
+        manager._storage = FilesystemCheckpointStorage()
         return manager
 
     def test_returns_latest_resumable_step(self):
@@ -1449,11 +1448,11 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
 
 class TestFilesystemCheckpointStorage(unittest.TestCase):
-    """The DCP adapter must answer the CheckpointStorage protocol using
+    """The adapter must answer the CheckpointStorage protocol using
     torchtitan.tools.filesystem, including for remote fsspec URIs."""
 
     def setUp(self):
-        self.storage = _FilesystemCheckpointStorage()
+        self.storage = FilesystemCheckpointStorage()
         self.root = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
 
@@ -1515,6 +1514,8 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.initial_load_path = None
         manager.initial_load_in_hf = False
         manager.initial_load_in_hf_quantized = False
+        # spec= turns this class attribute into a Mock, which load() treats as set.
+        manager._resume_base_model_view = None
         manager.states = {}
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
@@ -1619,7 +1620,7 @@ class TestPurgeStaleCheckpoints(unittest.TestCase):
         self.manager = CheckpointManager.__new__(CheckpointManager)
         self.manager.keep_latest_k = 2
         self.manager.folder = self.root
-        self.manager._storage = _FilesystemCheckpointStorage()
+        self.manager._storage = FilesystemCheckpointStorage()
         self.manager.purge_thread = mock.sentinel.purge_thread
         self.manager.purge_queue = mock.Mock()
 
@@ -2135,6 +2136,164 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         ]
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
+
+
+class _TinyLoRA(nn.Module):
+    """A frozen projection, a trained pretrained projection, an optional
+    adapter, and a buffer."""
+
+    def __init__(self, *, lora: bool = True) -> None:
+        super().__init__()
+        self.proj = nn.Linear(2, 2)
+        self.proj.requires_grad_(False)
+        self.vision = nn.Linear(2, 2)
+        if lora:
+            self.lora_a = nn.Linear(2, 2, bias=False)
+        self.register_buffer("count", torch.rand(1))
+
+
+class TestCheckpointManagerParamCheckpointTypeMap(unittest.TestCase):
+    """Real CheckpointManager save/load with model_param_checkpoint_type_map
+    (no dcp mocking)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._owns_pg = not dist.is_initialized()
+        if cls._owns_pg:
+            os.environ.setdefault("MASTER_ADDR", "localhost")
+            os.environ.setdefault("MASTER_PORT", "29511")
+            os.environ.setdefault("RANK", "0")
+            os.environ.setdefault("WORLD_SIZE", "1")
+            dist.init_process_group(backend="gloo")
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._owns_pg:
+            dist.destroy_process_group()
+
+    def setUp(self):
+        self.base_temp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base_temp_dir, ignore_errors=True)
+
+    def _build_manager(
+        self,
+        folder,
+        model,
+        *,
+        param_checkpoint_type=None,
+        initial_load_path=None,
+        initial_load_model_only=True,
+    ):
+        config = CheckpointManager.Config(
+            folder=folder,
+            interval=1,
+            keep_latest_k=0,
+            last_save_model_only=False,
+            initial_load_path=initial_load_path,
+            initial_load_model_only=initial_load_model_only,
+        )
+        # Set after construction, as recipes do.
+        if param_checkpoint_type is not None:
+            config.model_param_checkpoint_type_map = CallableFunction.Config(
+                fn=param_checkpoint_type
+            )
+        return CheckpointManager(
+            config=config,
+            model_parts=[model],
+            optimizers=FakeOptimizersContainer(),
+            lr_schedulers=FakeLRSchedulersContainer(),
+            ema=None,
+            extra_states={DATALOADER: FakeDataLoader()},
+            sd_adapter=None,
+            base_folder=self.base_temp_dir,
+        )
+
+    def test_resume_reads_base_then_checkpoint(self):
+        # A native base without LoRA keys.
+        base_model = _TinyLoRA(lora=False)
+        manager = self._build_manager("base", base_model)
+        manager.save(curr_step=0, last_step=True)
+        manager.close()
+        base = os.path.join(self.base_temp_dir, "base", "step-0")
+
+        location = LoRATransform(trainable_modules=["vision"]).param_checkpoint_type
+        model = _TinyLoRA()
+        lora_init = model.lora_a.weight.clone()
+        manager = self._build_manager(
+            "run", model, param_checkpoint_type=location, initial_load_path=base
+        )
+        # A fresh start reads the "base" and "checkpoint" params and buffers
+        # from the base; the "new" adapter keeps its initial value.
+        self.assertTrue(manager.load())
+        self.assertTrue(torch.equal(model.proj.weight, base_model.proj.weight))
+        self.assertTrue(torch.equal(model.vision.weight, base_model.vision.weight))
+        self.assertTrue(torch.equal(model.count, base_model.count))
+        self.assertTrue(torch.equal(model.lora_a.weight, lora_init))
+        with torch.no_grad():
+            model.vision.weight.add_(1.0)
+            model.lora_a.weight.add_(1.0)
+            model.count.add_(1.0)
+        manager.save(curr_step=1)
+        manager.close()
+        step_1 = os.path.join(self.base_temp_dir, "run", "step-1")
+        reader = dist_checkpoint.FileSystemReader(step_1)
+        keys = set(reader.read_metadata().state_dict_metadata)
+        self.assertLessEqual(
+            {"vision.weight", "vision.bias", "lora_a.weight", "count"}, keys
+        )
+        self.assertFalse({"proj.weight", "proj.bias"} & keys)
+
+        resumed = _TinyLoRA()
+        manager = self._build_manager(
+            "run", resumed, param_checkpoint_type=location, initial_load_path=base
+        )
+        self.assertTrue(manager.load())
+        self.assertTrue(torch.equal(resumed.proj.weight, base_model.proj.weight))
+        self.assertTrue(torch.equal(resumed.proj.bias, base_model.proj.bias))
+        self.assertTrue(torch.equal(resumed.vision.weight, model.vision.weight))
+        self.assertTrue(torch.equal(resumed.lora_a.weight, model.lora_a.weight))
+        self.assertTrue(torch.equal(resumed.count, model.count))
+        manager.close()
+
+    def test_invalid_param_checkpoint_type_map_raises(self):
+        with self.assertRaisesRegex(ValueError, "requires initial_load_path"):
+            self._build_manager(
+                "run",
+                _TinyLoRA(),
+                param_checkpoint_type=lambda key: ParamCheckpointType.NEW,
+            )
+        with self.assertRaisesRegex(ValueError, "requires initial_load_model_only"):
+            self._build_manager(
+                "run",
+                _TinyLoRA(),
+                param_checkpoint_type=lambda key: ParamCheckpointType.NEW,
+                initial_load_path="/base",
+                initial_load_model_only=False,
+            )
+        with self.assertRaisesRegex(
+            ValueError, r"trainable parameters in BASE.*lora_a\.weight"
+        ):
+            self._build_manager(
+                "run",
+                _TinyLoRA(),
+                param_checkpoint_type=lambda key: ParamCheckpointType.BASE,
+                initial_load_path="/base",
+            )
+        # A step-0 seed in the folder holds the init, not the base, so it must
+        # not override the base.
+        for folder in ("base", "seeded"):
+            manager = self._build_manager(folder, _TinyLoRA())
+            manager.save(curr_step=0, last_step=True)
+            manager.close()
+        manager = self._build_manager(
+            "seeded",
+            _TinyLoRA(),
+            param_checkpoint_type=lambda key: ParamCheckpointType.NEW,
+            initial_load_path=os.path.join(self.base_temp_dir, "base", "step-0"),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot load a step-0 seed"):
+            manager.load()
+        manager.close()
 
 
 if __name__ == "__main__":

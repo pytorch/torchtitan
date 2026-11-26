@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import logging
 
 import pytest
 
@@ -46,10 +47,13 @@ class _Actor:
         *,
         wait_prefetch: bool = False,
         wait_pull: bool = False,
+        raises_prefetch: bool = False,
         raises_pull: bool = False,
     ):
         self.name = name
-        self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
+        self.prefetch_model_state_dict = _Endpoint(
+            wait=wait_prefetch, raises=raises_prefetch
+        )
         self.load_model_state_dict = _Endpoint(wait=wait_pull, raises=raises_pull)
         self.release_sessions = _Endpoint()
 
@@ -325,7 +329,9 @@ def test_drain_clears_draining_on_pull_failure():
         actor = _Actor("gen0", raises_pull=True)
         router = _router([actor])
 
-        with pytest.raises(RuntimeError, match="endpoint failed"):
+        with pytest.raises(
+            RuntimeError, match=r"Generators \[0\] failed to load policy version 1"
+        ):
             await router.pull_model_state_dict(1)
 
         assert not router._generators[0].draining
@@ -394,3 +400,48 @@ def test_wait_engine_loop_returns_once_every_rank_exits():
         await asyncio.wait_for(router.wait_engine_loop(), timeout=5)
 
     asyncio.run(_run())
+
+
+def test_pull_logs_and_names_every_generator_whose_pull_fails(caplog):
+    async def _run():
+        actors = [
+            _Actor("gen0", raises_pull=True),
+            _Actor("gen1", raises_prefetch=True),
+            _Actor("gen2"),
+        ]
+        router = _router(actors)
+
+        with pytest.raises(
+            RuntimeError, match=r"Generators \[0, 1\] failed to load policy version 4"
+        ) as excinfo:
+            await asyncio.wait_for(router.pull_model_state_dict(4), timeout=5.0)
+
+        assert str(excinfo.value.__cause__) == "endpoint failed"
+        assert actors[2].load_model_state_dict.calls == [((4,), {"drain": True})]
+        assert [h.draining for h in router._generators] == [False, False, False]
+
+    with caplog.at_level(logging.ERROR, logger="torchtitan.rl.routing.inter_generator"):
+        asyncio.run(_run())
+    assert sorted(record.getMessage() for record in caplog.records) == [
+        "Generator 0 failed to load policy version 4",
+        "Generator 1 failed to load policy version 4",
+    ]
+
+
+def test_pull_logs_a_failure_while_a_slow_generator_still_loads(caplog):
+    async def _run():
+        actors = [_Actor("gen0", raises_prefetch=True), _Actor("gen1", wait_pull=True)]
+        router = _router(actors)
+        pull = asyncio.create_task(router.pull_model_state_dict(4))
+        await actors[1].load_model_state_dict.started.wait()
+
+        assert [record.getMessage() for record in caplog.records] == [
+            "Generator 0 failed to load policy version 4"
+        ]
+
+        actors[1].load_model_state_dict.release.set()
+        with pytest.raises(RuntimeError, match=r"Generators \[0\]"):
+            await asyncio.wait_for(pull, timeout=5.0)
+
+    with caplog.at_level(logging.ERROR, logger="torchtitan.rl.routing.inter_generator"):
+        asyncio.run(_run())

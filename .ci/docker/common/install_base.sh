@@ -24,6 +24,7 @@ install_ubuntu() {
     gdb \
     rsync \
     libssl-dev \
+    numactl \
     zip
 
   # Cleanup package manager

@@ -75,7 +75,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         _group(4, [1.0, 0.0]),
     ]
 
-    batcher = Batcher.Config().build(**_BATCHER_KWARGS)
+    batcher = Batcher.Config(rdma_min_tensor_bytes=None).build(**_BATCHER_KWARGS)
     expected = [batcher.add_group(rollout_group=group) for group in groups]
 
     async def run() -> tuple[list, list, list]:
@@ -87,13 +87,13 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
                 enable_structured_logging=False,
             )
             actor = mesh.spawn(
-                "batcher",
-                BatcherActor,
-                Batcher.Config(rdma_min_tensor_bytes=1024),
-                **spawn_kwargs,
+                "batcher", BatcherActor, Batcher.Config(), **spawn_kwargs
             )
             by_value = mesh.spawn(
-                "batcher_by_value", BatcherActor, Batcher.Config(), **spawn_kwargs
+                "batcher_by_value",
+                BatcherActor,
+                Batcher.Config(rdma_min_tensor_bytes=None),
+                **spawn_kwargs,
             )
             results = [
                 await actor.add_group.call_one(rollout_group=group) for group in groups
@@ -112,10 +112,10 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
                 for group in results[4][0].microbatch_groups
             ]
             # A builder error surfaces at call_one.
-            no_advantage = _group(5, [0.0, 1.0])
-            no_advantage.rollouts[0].advantage = None
-            with pytest.raises(ActorError, match="has no advantage"):
-                await actor.add_group.call_one(rollout_group=no_advantage)
+            bad_prefix = _group(5, [0.0, 1.0])
+            bad_prefix.rollouts[0].turns[0].prompt_prefix_len = 99
+            with pytest.raises(ActorError, match="reuses 99 tokens"):
+                await actor.add_group.call_one(rollout_group=bad_prefix)
             return results, by_value_results, microbatch_groups_b
         finally:
             await mesh.stop()
@@ -147,7 +147,7 @@ def test_batcher_actor_returns_the_in_process_batch(tmp_path, monkeypatch) -> No
         rtol=0,
         atol=0,
     )
-    # Without the threshold, the batches come back by value and match the in-process ones.
+    # With rdma_min_tensor_bytes=None, the batches come back by value and match the in-process ones.
     assert [batch is None for batch, _ in by_value_results] == [
         batch is None for batch, _ in expected
     ]

@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import os
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -41,6 +42,26 @@ if TYPE_CHECKING:
 def get_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Return a DTensor's local shard without adding an autograd operation."""
     return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
+
+
+def as_dtensor_like(param: torch.Tensor, local: torch.Tensor) -> torch.Tensor:
+    """Wrap ``local`` as a DTensor with ``param``'s mesh, placements, and shape.
+
+    Returns ``local`` unchanged if ``param`` is not a DTensor. ``local`` must be
+    on ``param``'s device; ``DTensor.from_local`` copies it there otherwise.
+    ``run_check=False`` skips the cross-rank check of ``Replicate()`` placements,
+    so ``local`` must already match on every replica.
+    """
+    if not isinstance(param, DTensor):
+        return local
+    return DTensor.from_local(
+        local,
+        param.device_mesh,
+        param.placements,
+        run_check=False,
+        shape=param.shape,
+        stride=param.stride(),
+    )
 
 
 def _dist_reduce(
@@ -262,6 +283,36 @@ def set_determinism(
         torch.distributed.tensor._random.manual_seed(
             seed, parallelism_context.world_mesh
         )
+
+
+@contextlib.contextmanager
+def dtensor_rng_tracker_off(mesh: DeviceMesh) -> Iterator[None]:
+    """Run DTensor random ops on CPU-offloaded shards on the CPU generator.
+
+    Under FSDP CPU offload the parameters are DTensors on an accelerator mesh
+    whose local shards live on CPU. DTensor runs random ops on them inside its
+    RNG tracker's ``fork_rng``, which restores the CPU generator after each op,
+    so every draw repeats the previous one and rejection loops such as
+    ``trunc_normal_`` with +-3 std bounds never return. With the tracker off,
+    the ops advance the CPU generator, which ``set_determinism`` seeds per FSDP
+    shard because CPU offload requires ``dp_shard`` in
+    ``debug.distinct_seed_mesh_axes``.
+    """
+    # TODO: drop once DTensor's RNG supports CPU local shards:
+    # https://github.com/pytorch/pytorch/pull/196072
+    dtensor_random = torch.distributed.tensor._random
+    saved = dtensor_random._rng_tracker
+    # DTensor creates an enabled tracker on the first random op if none exists.
+    # The tracker only reads the mesh's device type.
+    tracker = saved or dtensor_random.OffsetBasedRNGTracker(mesh, run_state_sync=False)
+    enabled = tracker.distribute_region_enabled
+    dtensor_random._rng_tracker = tracker
+    tracker.distribute_region_enabled = False
+    try:
+        yield
+    finally:
+        tracker.distribute_region_enabled = enabled
+        dtensor_random._rng_tracker = saved
 
 
 def init_fake_mode(

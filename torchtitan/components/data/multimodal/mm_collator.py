@@ -19,7 +19,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
+from torchtitan.models.common.mtp import get_mtp_token_counts
 
 from .mrope import get_mrope_positions
 

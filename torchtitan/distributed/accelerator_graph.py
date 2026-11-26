@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, cast
+from typing import Any, cast, Literal
 
 import torch
 from torch.cuda._graph_annotations import get_kernel_annotations
@@ -368,7 +368,7 @@ def get_accelerator_graph_annotations() -> dict[int, list[Any]]:
 
 
 def get_cuspy_cuda_graph_annotation_config(
-    *, enable_event_node_ids: bool, record_py_stacks: bool = False
+    *, key_by: Literal["auto", "exec"], record_py_stacks: bool = False
 ) -> dict[str, Any] | None:
     """``torch.cuda.graph`` annotation options for a Cuspy-profiled run.
 
@@ -377,10 +377,12 @@ def get_cuspy_cuda_graph_annotation_config(
     misses nodes created before the stream began capturing. ``key_by="auto"``
     keeps annotations keyed to the capture graph, which Cuspy resolves through
     CUPTI's ``sourceGraphNodeId``, falling back to the exec graph where CUPTI or
-    the driver is too old. Cuspy resolves graph event-record nodes (NCCL's under
-    ``NCCL_GRAPH_MIXING_SUPPORT``) only by exec-graph id, so ``enable_event_node_ids``
-    keys by the exec graph instead. ``record_py_stacks`` records each node's Python
-    launch stack, which needs the CUPTI backend.
+    the driver is too old. Graph event-record nodes resolve the same way: Cuspy reads
+    CUPTI's native graph fields for them (pytorch/pytorch#206322). ``key_by="exec"``
+    keys annotations by exec-graph node ids, which kernel span recording uses to
+    name replayed kernels.
+    ``record_py_stacks`` records each node's Python launch stack, which needs the CUPTI
+    backend.
 
     Returns ``None`` when graph annotations are unavailable, so capture does not
     take a CUPTI subscription for nothing; the profiler warns about that once.
@@ -389,7 +391,7 @@ def get_cuspy_cuda_graph_annotation_config(
         return None
     config: dict[str, Any] = {
         "backend": "cupti",
-        "key_by": "exec" if enable_event_node_ids else "auto",
+        "key_by": key_by,
     }
     if record_py_stacks:
         config["record_py_stacks"] = True

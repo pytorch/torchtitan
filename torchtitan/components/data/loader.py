@@ -7,13 +7,17 @@
 """Grain-backed TorchTitan dataloader."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import grain.python as grain
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
+from torchtitan.components.data.balancing import (
+    MicrobatchBalancer,
+    MicrobatchBalancingIterDataset,
+)
 from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
 
@@ -87,6 +91,10 @@ class GrainDataLoader(BaseDataLoader):
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
         num_prefetch_microbatches: int = 2
         """Collated microbatches queued per rank for trainer consumption."""
+        balancer: MicrobatchBalancer.Config | None = None
+        """Reorder each window of collated microbatches so that data-parallel
+        ranks run similar-cost microbatches in the same step, e.g.
+        ``LocalBalancer.Config()``. None keeps the packed order."""
 
         def __post_init__(self) -> None:
             BaseDataLoader.Config.__post_init__(self)
@@ -114,6 +122,7 @@ class GrainDataLoader(BaseDataLoader):
         max_context_length: int,
         num_tokens_per_microbatch: int,
         vision_processor: VisionProcessor | None = None,
+        dp_ranks: Sequence[int] | None = None,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -176,6 +185,15 @@ class GrainDataLoader(BaseDataLoader):
             batch_fn=collator,
         )
 
+        self._balancer: MicrobatchBalancer | None = None
+        if config.balancer is not None:
+            # Built on every rank's main thread: balancers that communicate
+            # create their process groups here.
+            balancer = self._balancer = config.balancer.build(
+                dp_rank=dp_rank, dp_world_size=dp_world_size, dp_ranks=dp_ranks
+            )
+            dataset = MicrobatchBalancingIterDataset(dataset, balancer=balancer)
+
         # Queue completed microbatches while the trainer consumes the previous one.
         dataset = grain_experimental.ThreadPrefetchIterDataset(
             dataset, prefetch_buffer_size=config.num_prefetch_microbatches
@@ -214,4 +232,6 @@ class GrainDataLoader(BaseDataLoader):
             raise
 
     def close(self) -> None:
+        if self._balancer is not None:
+            self._balancer.close()  # unblock the prefetch thread first
         self._iterator.close()

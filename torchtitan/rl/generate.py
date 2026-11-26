@@ -6,11 +6,11 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-Example inference script using TorchTitan models with vLLM LLMEngine.
+Example inference script: generate from one prompt with an RL recipe's generator engine
+(vLLM or SGLang), outside the RL loop.
 
-This script uses an RL recipe to configure both
-the vLLM engine and sampling parameters. Recipes are selected like
-``torchtitan.rl.train``: by ``--module`` and ``--config``.
+This script uses an RL recipe to configure both the engine and sampling parameters.
+Recipes are selected like ``torchtitan.rl.train``: by ``--module`` and ``--config``.
 
 Run: torchrun --nproc_per_node=4 -m torchtitan.rl.generate \
       --module torchtitan_recipes.rl.alphabet_sort \
@@ -25,40 +25,25 @@ apply_env_defaults()
 
 import argparse
 import os
+import sys
+import tempfile
+import time
 
-# Must set spawn method before any CUDA operations or vLLM imports
-# CUDA cannot be re-initialized in forked subprocesses
-# See also https://docs.vllm.ai/en/v0.8.3/design/multiprocessing.html#python-multiprocessing
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-from vllm import EngineArgs, LLMEngine, SamplingParams
-from vllm.config import AttentionConfig
-from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
-from vllm.logger import init_logger
-from vllm.sampling_params import RequestOutputKind
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, ConfigLoader
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.rl.generator.vllm.engine import add_extra_vllm_engine_args, VLLMEngine
-from torchtitan.rl.generator.vllm.registry import (
-    register_to_vllm,
-    TORCHTITAN_CONFIG_FORMAT,
-    TORCHTITAN_WORKER_CLS,
-    vllm_attention_backend,
-)
+from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.rollout.types import Prompt
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import has_cuda_capability
-
-
-logger = init_logger(__name__)
 
 
 def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     """Parse generation flags; remaining args select the recipe via ``ConfigLoader``."""
     parser = argparse.ArgumentParser(
         description=(
-            "Run a TorchTitan RL/vLLM generator config standalone. Select the "
+            "Run a TorchTitan RL generator config standalone. Select the "
             "recipe with --module and --config (see torchtitan.rl.train)."
         )
     )
@@ -73,198 +58,111 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--raw-prompt",
         action="store_true",
-        help="Send --prompt directly to vLLM instead of rendering a chat prompt.",
+        help="Tokenize --prompt as is instead of rendering a chat prompt.",
     )
     parser.add_argument("--max-tokens", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=None)
-    parser.add_argument("--top-p", type=float, default=None)
     parser.add_argument("--max-num-seqs", type=int, default=1)
     return parser.parse_known_args()
 
 
-def _shutdown_engine(engine: LLMEngine) -> None:
-    """Release the vLLM engine and its process groups before the process exits.
-
-    In RL, Monarch's ``ProcMesh.stop()`` ends the generator processes, so
-    ``Generator`` only releases renderer-local resources. This script owns
-    its process: leaving vLLM's NCCL process group alive lets the NCCL watchdog
-    query CUDA events while the driver unloads at interpreter exit.
-    """
-    engine.renderer.shutdown()
-    engine.engine_core.shutdown()
-    cleanup_dist_env_and_memory()
-
-
+@record
 def generate() -> None:
     args, config_args = _parse_args()
     config = ConfigLoader().load(config_args)
     if config.override.imports:
         apply_overrides(config.override, config)
     gen_config = config.generator
-    engine_config = gen_config.engine
-    if not isinstance(engine_config, VLLMEngine.Config):
-        raise ValueError(
-            "generate.py runs vLLM; set generator.engine to VLLMEngine.Config, "
-            f"got {type(engine_config).__qualname__}"
-        )
-    model_config = gen_config.model
     model_path = config.hf_assets_path
     # Recipes name local assets relative to the repo root, while
     # initial_load_path must be absolute or remote.
     if not filesystem.is_remote(model_path):
         model_path = os.path.abspath(model_path)
-    max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
-    # Register TorchTitan model with vLLM before engine creation
-    register_to_vllm(
-        model_config,
+    set_batch_invariance(gen_config.debug.batch_invariant)
+    engine = gen_config.engine.build(
+        model=gen_config.model,
         parallelism=gen_config.parallelism,
+        model_path=model_path,
+        max_num_seqs=args.max_num_seqs,
         precision=config.precision,
-        checkpointer_config=CheckpointManager.Config(
-            initial_load_in_hf=True,
-            initial_load_path=model_path,
+        gpu_memory_limit=gen_config.gpu_memory_limit,
+        max_num_batched_tokens=gen_config.max_num_batched_tokens,
+        checkpointer=CheckpointManager.Config(
+            initial_load_in_hf=True, initial_load_path=model_path
         ),
         dist_moe_runtime=gen_config.dist_moe_runtime,
+        debug=gen_config.debug,
+        reset_kv_cache_on_model_state_dict_load=False,
         model_state_dict_load_mode="cpu_prefetch",
+        vision_processor=None,
+        mooncake_master_address=None,
+        rank=int(os.environ.get("RANK", "0")),
+        generator_name="generate",
+        output_dir=tempfile.gettempdir(),
     )
-    logger.info("Registered TorchTitan model with vLLM")
-
-    os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "0"
-    set_batch_invariance(gen_config.debug.batch_invariant)
-    enable_ep = gen_config.parallelism.expert_parallel_degree > 1
-
-    logger.debug("Initializing vLLM LLMEngine with TorchTitan model")
-    logger.debug(f"Model: {model_path}")
-    logger.debug(
-        f"Tensor Parallel Size: {gen_config.parallelism.tensor_parallel_degree}"
-    )
-    logger.debug(f"Expert Parallel Enabled: {enable_ep}")
-
-    # Create EngineArgs from config
-    engine_kwargs = dict(
-        # Model configuration
-        model=model_path,
-        trust_remote_code=True,
-        config_format=TORCHTITAN_CONFIG_FORMAT,
-        dtype=config.precision.param_dtype,
-        # Parallelism configuration
-        tensor_parallel_size=gen_config.parallelism.tensor_parallel_degree,
-        data_parallel_size=gen_config.parallelism.data_parallel_degree,
-        enable_expert_parallel=enable_ep,
-        worker_cls=TORCHTITAN_WORKER_CLS,
-        # Use external_launcher only when launched via torchrun (multi-GPU);
-        # for single-GPU, let vLLM pick the default executor.
-        distributed_executor_backend=("external_launcher"),
-        # Memory and performance
-        gpu_memory_utilization=gen_config.gpu_memory_limit,
-        enforce_eager=engine_config.cuda_graph.mode == "NONE",
-        attention_config=AttentionConfig(
-            backend=vllm_attention_backend(model_config),
-        ),
-        disable_log_stats=False,
-    )
-    engine_kwargs["max_model_len"] = model_config.max_context_length
-    engine_kwargs["max_num_seqs"] = max_num_seqs
-    if gen_config.max_num_batched_tokens is not None:
-        engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens
-    engine_kwargs["watermark"] = engine_config.watermark
-    if not has_cuda_capability(9, 0):
-        engine_kwargs["block_size"] = 256
-    expert_sequence_parallel_size = gen_config.parallelism.expert_sequence_parallel_size
-    vllm_compilation_config = engine_config.cuda_graph.get_vllm_compilation_config(
-        max_num_seqs=max_num_seqs,
-        max_model_len=model_config.max_context_length,
-        max_num_batched_tokens=gen_config.max_num_batched_tokens,
-        expert_sequence_parallel_size=expert_sequence_parallel_size,
-        enable_sequence_parallel=gen_config.parallelism.enable_sequence_parallel,
-    )
-    if vllm_compilation_config is not None:
-        engine_kwargs["compilation_config"] = vllm_compilation_config
-    if gen_config.debug.seed is not None:
-        engine_kwargs["seed"] = gen_config.debug.seed
-    add_extra_vllm_engine_args(engine_kwargs, engine_config.extra_engine_args)
-    engine_args = EngineArgs(**engine_kwargs)
-
-    logger.debug("Initializing LLMEngine from EngineArgs...")
-    engine = LLMEngine.from_engine_args(engine_args)
-
-    logger.debug("vLLM LLMEngine initialized successfully")
     try:
-
         tokenizer = config.tokenizer.build(tokenizer_path=model_path)
         renderer = config.renderer.build(tokenizer=tokenizer)
         stop_token_ids = list(renderer.get_stop_token_ids())
-
-        # Create sampling parameters from config
         sampling = gen_config.sampling
-        temperature = (
-            sampling.temperature if args.temperature is None else args.temperature
-        )
-        top_p = sampling.top_p if args.top_p is None else args.top_p
-        max_tokens = sampling.max_tokens if args.max_tokens is None else args.max_tokens
-        sampling_params = SamplingParams(
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            n=1,
-            stop_token_ids=stop_token_ids,
-            # Stop only on the renderer's ids, as the RL generator does.
-            ignore_eos=True,
-            seed=gen_config.debug.seed,
-            output_kind=RequestOutputKind.FINAL_ONLY,
-        )
-
-        logger.debug(
-            f"Sampling params: temperature={temperature}, "
-            f"top_p={top_p}, max_tokens={max_tokens}"
-        )
-
-        prompt = args.prompt
-        logger.debug(f"Prompt: {prompt}")
-
-        # Add request to engine
-        logger.debug("Adding request to engine...")
-        request_id = "0"
         if args.raw_prompt:
-            engine_input = prompt
+            prompt_token_ids = tokenizer.encode(args.prompt)
         else:
             prompt_token_ids = renderer.render_ids(
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": args.prompt}],
                 tools=None,
                 add_generation_prompt=True,
             )
-            engine_input = engine.renderer.render_cmpl(
-                [{"prompt_token_ids": prompt_token_ids}]
-            )[0]
-            if is_rank0:
-                print(f"Prompt token count: {len(prompt_token_ids)}", flush=True)
-                print(f"Stop token ids: {stop_token_ids}", flush=True)
-        engine.add_request(request_id, engine_input, sampling_params)
-
-        # Generate text by stepping through engine
-        logger.debug("Generating text...")
+        request = EngineRequest(
+            request_id="0",
+            prompt=Prompt(token_ids=prompt_token_ids),
+            sampling=SamplingConfig(
+                temperature=(
+                    sampling.temperature
+                    if args.temperature is None
+                    else args.temperature
+                ),
+                max_tokens=(
+                    sampling.max_tokens if args.max_tokens is None else args.max_tokens
+                ),
+                seed=gen_config.debug.seed,
+                # Stop only on the renderer's ids, as the RL generator does.
+                stop_token_ids=stop_token_ids,
+            ),
+            group_id=0,
+            routing_session_id="0",
+            arrival_time=time.time(),
+        )
+        request.min_policy_version = 0
+        if is_rank0:
+            print(f"Prompt token count: {len(prompt_token_ids)}", flush=True)
+            print(f"Stop token ids: {stop_token_ids}", flush=True)
+        for _, error in engine.add_requests([request]):
+            raise error
+        finished = []
         while engine.has_unfinished_requests():
-            request_outputs = engine.step()
-
-            # Process finished requests
-            for request_output in request_outputs:
-                if request_output.finished:
-                    generated_text = request_output.outputs[0].text
-                    output_token_ids = request_output.outputs[0].token_ids
-
-                    # Print results
-                    logger.debug("Generation complete")
-                    if is_rank0:
-                        print(f"\nConfig: {' '.join(config_args)}", flush=True)
-                        print(f"Prompt: {prompt}", flush=True)
-                        print(
-                            f"Generated token count: {len(output_token_ids)}",
-                            flush=True,
-                        )
-                        print(f"Generated text: {generated_text!r}\n", flush=True)
+            finished.extend(engine.step())
+        [output] = finished
+        if is_rank0:
+            print(f"\nConfig: {' '.join(config_args)}", flush=True)
+            print(f"Prompt: {args.prompt}", flush=True)
+            print(f"Generated token count: {len(output.token_ids)}", flush=True)
+            print(
+                f"Generated text: {tokenizer.decode(output.token_ids)!r}\n", flush=True
+            )
     finally:
-        _shutdown_engine(engine)
+        engine.shutdown()
+        # This script owns its process (in RL, Monarch's ProcMesh.stop() ends it): tear
+        # down vLLM's process groups so the NCCL watchdog doesn't query CUDA events
+        # while the driver unloads. SGLang exits cleanly without it. The vLLM engine
+        # module is imported only when the recipe uses it.
+        vllm_engine = sys.modules.get("torchtitan.rl.generator.vllm.engine")
+        if vllm_engine is not None and isinstance(engine, vllm_engine.VLLMEngine):
+            from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+            cleanup_dist_env_and_memory()
 
 
 if __name__ == "__main__":

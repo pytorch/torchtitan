@@ -13,7 +13,6 @@ from datetime import timedelta
 from typing import Any
 
 import torch
-from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import DataloaderExhaustedError
@@ -168,7 +167,6 @@ class FaultTolerantTrainer(Configurable):
 
     engine: FaultTolerantTrainingEngine
 
-    @record
     def __init__(self, config: Config):
         self.config = config
         config.model = copy.deepcopy(config.model)
@@ -507,7 +505,6 @@ class FaultTolerantTrainer(Configurable):
             num_flops=mean_num_flops,
         )
 
-    @record
     def train(self):
         config = self.config
         engine = self.engine

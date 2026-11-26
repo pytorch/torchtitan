@@ -8,6 +8,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.config import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -21,6 +22,7 @@ from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import SamplingConfig
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
+from torchtitan.tools.utils import get_visible_devices_env_var
 
 
 class _FakeController:
@@ -121,6 +123,9 @@ def _make_stub_rl_trainer(tmp_path):
     from torchtitan.rl.observability import metrics as m
 
     class _StubRollouter:
+        def __init__(self, *, max_rollouts_in_flight: int):
+            self.max_rollouts_in_flight = max_rollouts_in_flight
+
         async def close(self):
             pass
 
@@ -147,7 +152,7 @@ def _make_stub_rl_trainer(tmp_path):
             model=None, sampling=SamplingConfig(), debug=SimpleNamespace(seed=None)
         )
         override = OverrideConfig()
-        rollouter = SimpleNamespace(build=lambda: _StubRollouter())
+        rollouter = SimpleNamespace(build=_StubRollouter)
 
         def to_dict(self):
             return {}
@@ -202,6 +207,13 @@ def test_rl_trainer_shutdown_is_noop_before_meshes_spawn(tmp_path):
     assert trainer.trainer is None
     assert trainer.generator_router is None
     assert trainer.actor_system is None
+
+
+def test_controller_builds_rollouter_with_training_rollouts_in_flight(tmp_path):
+    controller = _make_stub_rl_trainer(tmp_path)
+
+    # Default AsyncLoopConfig: (3 + 1) x 8 = 32 groups in flight, x 8 rollouts per group
+    assert controller._rollouter.max_rollouts_in_flight == 256
 
 
 def test_main_reraises_cancellation_after_shutdown(monkeypatch):
@@ -402,7 +414,7 @@ def test_shutdown_continues_after_generator_close_failure(tmp_path):
 
 
 class _FakeHostMesh:
-    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it."""
+    """Records the visible devices of each proc mesh spawned on it."""
 
     def __init__(self, num_hosts=1):
         self.num_hosts = num_hosts
@@ -412,7 +424,7 @@ class _FakeHostMesh:
         return self.num_hosts
 
     def spawn_procs(self, *, per_host, bootstrap, bootstrap_command):
-        self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
+        self.visible_devices.append(bootstrap_command[get_visible_devices_env_var()])
 
 
 @pytest.fixture
@@ -444,6 +456,62 @@ def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
 
     assert mesh_a.visible_devices == ["0,1", "2", "3"]
     assert mesh_b.visible_devices == ["0", "1", "2", "3"]
+
+
+@pytest.mark.parametrize(
+    "visible, expected",
+    [
+        (None, ["0,1", "2", "3"]),
+        ("4,5,6,7", ["4,5", "6", "7"]),
+        # A reordered mask places the trainer on GPUs 0,1,4,5.
+        ("0,1,4,5,2,3,6,7", ["0,1", "4", "5"]),
+    ],
+)
+def test_spawn_proc_mesh_on_this_host_follows_the_visible_devices_mask(
+    bootstrap_cmd_returns_env, monkeypatch, visible, expected
+):
+    """Single-node mode hands out the controller's visible devices in their listed order."""
+    host = _FakeHostMesh()
+    monkeypatch.setattr(provisioning, "this_host", lambda: host)
+    if visible is None:
+        monkeypatch.delenv(get_visible_devices_env_var(), raising=False)
+        monkeypatch.setattr(torch.accelerator, "device_count", lambda: 4)
+    else:
+        monkeypatch.setenv(get_visible_devices_env_var(), visible)
+
+    provisioning.spawn_proc_mesh(
+        trainer_world_size=2, per_generator_world_size=1, num_generators=2
+    )
+
+    assert host.visible_devices == expected
+
+
+@pytest.mark.parametrize(
+    "visible, match",
+    [
+        ("4,5", r"needs 4 GPUs, but only 2 are visible \(.*='4,5'\)"),
+        # An empty mask means the controller sees no GPUs, not "use 0 .. n-1".
+        ("", r"needs 4 GPUs, but only 0 are visible \(.*=''\)"),
+        # No mask on a host that has lost a GPU: 3 exist, not 0 .. 3.
+        (None, r"needs 4 GPUs, but only 3 are visible \(.*=None\)"),
+    ],
+)
+def test_spawn_proc_mesh_on_this_host_needs_enough_visible_devices(
+    bootstrap_cmd_returns_env, monkeypatch, visible, match
+):
+    host = _FakeHostMesh()
+    monkeypatch.setattr(provisioning, "this_host", lambda: host)
+    if visible is None:
+        monkeypatch.delenv(get_visible_devices_env_var(), raising=False)
+        monkeypatch.setattr(torch.accelerator, "device_count", lambda: 3)
+    else:
+        monkeypatch.setenv(get_visible_devices_env_var(), visible)
+
+    with pytest.raises(ValueError, match=match):
+        provisioning.spawn_proc_mesh(
+            trainer_world_size=2, per_generator_world_size=1, num_generators=2
+        )
+    assert host.visible_devices == []
 
 
 @pytest.mark.parametrize(

@@ -291,10 +291,77 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be None"):
             config.__post_init__()
 
-    def test_rejects_kv_heads_indivisible_by_cp(self):
-        config = self._config(cp=4, tp=1, n_heads=8, n_kv_heads=2)
-        with self.assertRaisesRegex(ValueError, r"n_kv_heads \(2\)"):
+    def test_allows_kv_heads_dividing_tp_times_cp(self):
+        config = self._config(cp=4, tp=2, n_heads=16, n_kv_heads=4)
+        config.__post_init__()
+
+    def test_rejects_kv_heads_neither_dividing_nor_divisible_by_cp(self):
+        config = self._config(cp=4, tp=1, n_heads=12, n_kv_heads=3)
+        with self.assertRaisesRegex(ValueError, r"n_kv_heads \(3\)"):
             config.__post_init__()
+
+    def test_rejects_kv_heads_indivisible_by_tp(self):
+        # Qwen3.5 attention has no fused qkv_linear, so the generic TP check
+        # does not reject n_kv_heads and only the Ulysses check can.
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.config.validation import validate_context_parallel
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesFlexInnerAttention,
+        )
+        from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+        from torchtitan.models.common.attention.gdn import InnerGDN
+        from torchtitan.models.qwen3_5 import build_model_config
+
+        model = build_model_config(
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+        )
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: UlyssesFlexInnerAttention,
+                InnerGDN: ContextParallelInnerGDN,
+            }
+        ).transform(model)
+        for layer in model.layers:
+            if hasattr(layer.attention, "n_kv_heads"):
+                layer.attention.n_heads = 8
+        parallelism = ParallelismConfig(
+            context_parallel_degree=2,
+            tensor_parallel_degree=4,
+            context_parallel_load_balancer=None,
+        )
+        with self.assertRaisesRegex(
+            ValueError, r"is divisible by tensor_parallel_degree\."
+        ):
+            validate_context_parallel(model, parallelism)
+
+    def test_rejects_num_head_chunks_indivisible_into_local_key_heads(self):
+        from torchtitan.config.parallelism import ParallelismConfig
+        from torchtitan.config.validation import validate_context_parallel
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesFlexInnerAttention,
+        )
+        from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+        from torchtitan.models.common.attention.gdn import InnerGDN
+        from torchtitan.models.qwen3_5 import build_model_config
+
+        model = build_model_config(
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+        )
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: UlyssesFlexInnerAttention,
+                InnerGDN: ContextParallelInnerGDN,
+            }
+        ).transform(model)
+        for layer in model.layers:
+            inner = layer.attention.inner_attention
+            if isinstance(inner, ContextParallelInnerGDN.Config):
+                inner.num_head_chunks = 4
+        parallelism = ParallelismConfig(
+            context_parallel_degree=2, context_parallel_load_balancer=None
+        )
+        with self.assertRaisesRegex(ValueError, r"num_head_chunks \(4\)"):
+            validate_context_parallel(model, parallelism)
 
     def test_rejects_heads_indivisible_by_tp_times_cp(self):
         config = self._config(cp=8, tp=2, n_heads=8, n_kv_heads=8)

@@ -15,10 +15,6 @@ import spmd_types as spmd
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    ModelConfigConverter,
-    validate_converter_compatibility,
-)
 from torchtitan.models.common import (
     ComplexRoPE,
     FeedForward,
@@ -64,7 +60,7 @@ from torchtitan.models.common.rope import YaRNScalingConfig
 from .attention import DeepSeekMLAAttention
 from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
-from .mtp import MTPCrossEntropyLoss, MTPDecoder, MTPTransformerBlock
+from .mtp import DeepSeekV3MTPBlock
 from .sharding import (
     mla_attention_sharding_config,
     mtp_block_sharding_config,
@@ -74,9 +70,7 @@ from .sharding import (
 __all__ = [
     "DeepSeekV3Model",
     "DeepSeekV3Router",
-    "MTPCrossEntropyLoss",
-    "MTPDecoder",
-    "MTPTransformerBlock",
+    "DeepSeekV3MTPBlock",
     "MODEL_FLAVORS",
     "build_model_config",
 ]
@@ -423,13 +417,13 @@ def _build_mtp_layers(
     dim: int,
     num_mtp_layers: int,
     enable_sp: bool,
-) -> list[MTPTransformerBlock.Config]:
+) -> list[DeepSeekV3MTPBlock.Config]:
     """Build MTP blocks from copies of the (already sharded) ``inner_cfg``."""
     norm_sharding = norm_sharding_config(enable_sp=enable_sp)
     mtp_layers = []
     for _ in range(num_mtp_layers):
         mtp_layers.append(
-            MTPTransformerBlock.Config(
+            DeepSeekV3MTPBlock.Config(
                 attention=copy.deepcopy(inner_cfg.attention),
                 feed_forward=copy.deepcopy(inner_cfg.feed_forward),
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
@@ -798,7 +792,6 @@ def build_model_config(
     parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
-    converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
@@ -814,8 +807,4 @@ def build_model_config(
         seq_len=context_len,
         parallelism=parallelism,
     )
-    if converters is not None:
-        validate_converter_compatibility(converters)
-        for c in converters:
-            config = c.build().convert(config)
     return config

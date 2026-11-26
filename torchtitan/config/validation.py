@@ -93,6 +93,11 @@ def _validate_declared_parallel_axes(
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.moe import MoE
 
+    # Configs that build their layouts at parallelize time declare none yet.
+    layouts = _collect_model_layouts(model)
+    if not layouts:
+        return
+
     p = parallelism
     model_name = type(model).__qualname__
     # degree != 1 also covers dp_shard == -1.
@@ -125,7 +130,7 @@ def _validate_declared_parallel_axes(
         if p.data_parallel_replicate_degree > 1:
             sparse_required.append(MeshAxisName.DP_REPLICATE)
 
-    for fqn, field, axes in _collect_model_layouts(model):
+    for fqn, field, axes in layouts:
         if p.expert_parallel_degree > 1 and fqn.startswith(sparse_prefixes):
             required = sparse_required
         else:
@@ -265,7 +270,10 @@ def validate_context_parallel(
         AllGatherKVVarlen,
         CPInnerAttention,
         Ulysses,
+        UlyssesInnerAttention,
     )
+    from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+    from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.common.attention.gdn import GDN
     from torchtitan.models.common.decoder import Decoder
 
@@ -294,18 +302,50 @@ def validate_context_parallel(
             cp_inner_attention, CPInnerAttention
         )
         if issubclass(cp_inner_attention, Ulysses):
-            head_shard_degree = parallelism.tensor_parallel_degree * cp
+            tp = parallelism.tensor_parallel_degree
+            head_shard_degree = tp * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             if isinstance(attention, GDN.Config):
                 n_kv_heads = attention.n_key_heads
-            for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
-                if count % head_shard_degree != 0:
-                    raise ValueError(
-                        f"{fqn}.inner_attention {name} ({count}) must be divisible "
-                        "by tensor_parallel_degree * context_parallel_degree "
-                        f"({head_shard_degree})."
-                    )
+            if n_heads % head_shard_degree != 0:
+                raise ValueError(
+                    f"{fqn}.inner_attention n_heads ({n_heads}) must be divisible "
+                    "by tensor_parallel_degree * context_parallel_degree "
+                    f"({head_shard_degree})."
+                )
+            # UlyssesInnerAttention copies each TP-local KV head when there are
+            # fewer KV heads than CP ranks.
+            if n_kv_heads % head_shard_degree != 0 and not (
+                issubclass(cp_inner_attention, UlyssesInnerAttention)
+                and n_kv_heads % tp == 0
+                and head_shard_degree % n_kv_heads == 0
+            ):
+                raise ValueError(
+                    f"{fqn}.inner_attention n_kv_heads ({n_kv_heads}) must be "
+                    "divisible by tensor_parallel_degree * context_parallel_degree "
+                    f"({head_shard_degree}). UlyssesInnerAttention also accepts "
+                    "n_kv_heads that divides tensor_parallel_degree * "
+                    "context_parallel_degree and is divisible by "
+                    "tensor_parallel_degree."
+                )
+
+        if isinstance(
+            inner_attention,
+            (ContextParallelInnerGDN.Config, ContextParallelInnerKDA.Config),
+        ):
+            num_key_heads = (
+                attention.n_key_heads
+                if isinstance(attention, GDN.Config)
+                else attention.n_heads
+            )
+            local_key_heads = num_key_heads // parallelism.tensor_parallel_degree
+            if local_key_heads % inner_attention.num_head_chunks != 0:
+                raise ValueError(
+                    f"{fqn}.inner_attention num_head_chunks "
+                    f"({inner_attention.num_head_chunks}) must divide the "
+                    f"{local_key_heads} key heads per tensor parallel rank."
+                )
 
         load_balancer_config = parallelism.context_parallel_load_balancer
         # Linear attention either routes states or restores token order using

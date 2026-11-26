@@ -25,6 +25,7 @@ from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
 from torchtitan.config.configs import PrecisionConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     LoRATransform,
@@ -365,14 +366,42 @@ def test_transform_propagates_plain_swiglu_to_annex_config() -> None:
     assert context_config.activation == "swiglu"
 
 
-def test_transform_rejects_unsupported_source_activation() -> None:
-    """Unsupported source semantics fail instead of silently changing."""
-    source = replace(
-        _stock_config(dim=64),
-        activation_fn=SiTUGLU.Config(),
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+def test_transform_preserves_situglu_configuration(
+    expert_precision: Literal["bf16", "mxfp8"],
+) -> None:
+    """Both expert paths translate model bounds to the public SiTU-GLU API."""
+    # Not the annex defaults (4.0, 25.0), so a dropped bound fails.
+    gate_beta, up_beta = 3.5, 20.0
+    stock = _stock_config(dim=64)
+    stock.activation_fn = SiTUGLU.Config(beta=gate_beta, linear_beta=up_beta)
+
+    transformed = DistMoeTransform(expert_precision=expert_precision).transform(stock)
+    assert isinstance(transformed, DistMoeRoutedExperts.Config)
+    assert transformed.activation == "situ_glu"
+    assert transformed.situ_glu_gate_beta == gate_beta
+    assert transformed.situ_glu_up_beta == up_beta
+
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    context_config = _runtime()._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=2,
     )
-    with pytest.raises(TypeError, match="supports SwiGLU.Config or ClampedSwiGLU"):
-        DistMoeTransform().transform(source)
+    assert context_config.activation == "situ_glu"
+    assert context_config.situ_glu_gate_beta == gate_beta
+    assert context_config.situ_glu_up_beta == up_beta
+    assert (context_config.block_scaled is not None) == (expert_precision == "mxfp8")
+
+
+def test_transform_rejects_unbounded_situglu_up_projection() -> None:
+    """The annex SiTU-GLU contract requires both clipping bounds."""
+    stock = _stock_config()
+    stock.activation_fn = SiTUGLU.Config(beta=4.0, linear_beta=None)
+
+    with pytest.raises(ValueError, match="requires linear_beta"):
+        DistMoeTransform().transform(stock)
 
 
 @pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
@@ -1052,12 +1081,15 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
 
 def test_eager_dist_moe_recipe_supports_accelerator_graphs_with_pipeline_parallelism():
     """The eager recipe accepts EP and PP while retaining CUDA graphs."""
-    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
-    config.parallelism.expert_parallel_degree = 2
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-
-    config.__post_init__()
+    config = eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16(
+        seq_len=128,
+        parallelism=ParallelismConfig(
+            expert_parallel_degree=2,
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+        ),
+    )
+    assert not config.training.disable_accelerator_graphs
 
 
 @pytest.mark.parametrize(

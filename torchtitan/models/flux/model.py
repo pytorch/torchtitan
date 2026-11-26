@@ -33,7 +33,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.flops import (
     get_parameter_counts,
-    quadratic_attention_flops_per_token,
+    quadratic_attention_flops,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.autoencoder import AutoEncoder
@@ -187,27 +187,26 @@ class FluxModel(BaseModel):
             )
             num_flops_per_token -= 6 * nparams_mod_per_sample * (seq_len - 1) // seq_len
 
-            # Add non-parameterized self-attention FLOPs (QK^T and attn*V)
-            # on the same convention as the other models: the factor of 6
-            # covers forward + backward and multiply-adds, and the two
-            # contractions are carried by (qk_head_dim + v_head_dim).
+            # Add non-parameterized self-attention FLOPs (QK^T and attn*V) on
+            # the same convention as the other models. Attention is
+            # bidirectional, so each token attends to seq_len keys.
             db_heads = self.double_blocks[0].num_heads
             sb_heads = self.single_blocks[0].num_heads
             db_head_dim = db_h // db_heads
             sb_head_dim = sb_h // sb_heads
             num_flops_per_token += (
-                quadratic_attention_flops_per_token(
+                quadratic_attention_flops(
                     num_heads=sb_heads,
                     qk_head_dim=sb_head_dim,
                     v_head_dim=sb_head_dim,
-                    seq_len=seq_len,
+                    num_keys=torch.tensor(seq_len),
                 )
                 * self.depth_single_blocks
-                + quadratic_attention_flops_per_token(
+                + quadratic_attention_flops(
                     num_heads=db_heads,
                     qk_head_dim=db_head_dim,
                     v_head_dim=db_head_dim,
-                    seq_len=seq_len,
+                    num_keys=torch.tensor(seq_len),
                 )
                 * self.depth
             )
