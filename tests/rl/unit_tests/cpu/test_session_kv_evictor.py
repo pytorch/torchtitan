@@ -858,7 +858,8 @@ def test_a_gdn_block_spanning_several_hashes_keeps_its_deepest_state():
 
 def test_with_mtp_drafts_a_session_keeps_the_state_its_next_turn_hits():
     # vLLM drops the last attention block of a hit when it drafts with MTP, so a turn resumes
-    # one block before the deepest state. Keeping the deepest would hit 0 tokens here.
+    # one block before the deepest state. Keeping the deepest would hit 0 tokens here. The turn
+    # also computes that block again and caches a second copy of it, which goes at its end.
     manager = _hybrid_manager(len(MAMBA_KV_CACHE_GROUP_IDS), use_eagle=True)
     scheduler = SimpleNamespace(kv_cache_manager=manager, requests={})
     evictor = VLLMSessionKVEvictor(scheduler=scheduler)
@@ -874,6 +875,17 @@ def test_with_mtp_drafts_a_session_keeps_the_state_its_next_turn_hits():
             _schedule(manager, request, 1, sample=token)
             evictor.after_step()
         _finish(manager, scheduler, evictor, request)
+        computed_block_hashes = request.block_hashes[
+            : (request.num_tokens - 1) // BLOCK
+        ]
+        num_copies = {
+            _num_copies(
+                manager,
+                make_block_hash_with_group_id(block_hash, ATTENTION_KV_CACHE_GROUP_ID),
+            )
+            for block_hash in computed_block_hashes
+        }
+        assert num_copies == {1}, turn
         if turn == 0:
             # 70 tokens; all states: blocks 0, 2 and 3.
             for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:

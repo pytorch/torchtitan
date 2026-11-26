@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import itertools
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -68,8 +67,9 @@ class VLLMSessionKVEvictor:
         B's last sibling ends, B is idle      -> the shared prompt's state goes too
 
     - Siblings that prefill one prompt in the same step each cache their own copy of its
-      blocks (vLLM doesn't de-duplicate). Once a request leaves vLLM, each block it shares
-      with other requests keeps one cached copy; the other free copies are evicted.
+      blocks, and with MTP drafts a turn caches its hit's last block again (vLLM doesn't
+      de-duplicate). Once a request leaves vLLM, each of its blocks keeps one cached copy; the
+      other free copies are evicted.
 
     Example:
 
@@ -117,7 +117,7 @@ class VLLMSessionKVEvictor:
         # and none of their superseded GDN states is in use.
         self._sessions_to_sweep: dict[str, _TrackedRequest] = {}
         # Superseded GDN states that sweeps kept because other requests counted them (a group's
-        # prompt), by hash; `_forget` sweeps their sessions again once one request counts one.
+        # prompt), by hash; `_forget` sweeps their sessions again once at most one request counts it.
         self._sessions_by_shared_gdn_state: dict[BlockHash, set[str]] = {}
         # Each live session's newest request.
         self._sessions: dict[str, _TrackedRequest] = {}
@@ -383,26 +383,20 @@ class VLLMSessionKVEvictor:
         return has_state_in_use
 
     def _evict_duplicate_copies(self, request: _TrackedRequest) -> None:
-        """For each block `request` shares with other requests, keep one cached copy per KV cache
-        group and evict its other free copies:
+        """For each block of `request`, keep one cached copy per KV cache group and evict its
+        other free copies:
 
-            siblings A, B prefill prompt P in one step  -> P's blocks cached twice: A's, B's
-            A leaves vLLM, B still runs                 -> A's goes; B's stays (in use)
-            B leaves vLLM, a KV connector's save holds  -> B's stays, the one copy
-            B's copy
+            siblings A, B prefill prompt P in one step     -> P's blocks cached twice: A's, B's
+            A leaves vLLM, B still runs                    -> A's goes; B's stays (in use)
+            B leaves vLLM, a KV connector's save holds it  -> B's stays, the one copy
+            MTP drafts: a turn recomputes its hit's last   -> the copy lookups return stays
+            block and caches it again
 
         If two copies are still in use (two KV connector saves) when the last sharer leaves, both
         stay until a sibling's next turn leaves vLLM or the group is released.
         """
-        # Block hashes chain, so the hashes other requests also count are a prefix.
-        shared_block_hashes = list(
-            itertools.takewhile(
-                lambda block_hash: self._num_requests_by_hash[block_hash] > 1,
-                request.block_hashes,
-            )
-        )
         self._evict(
-            shared_block_hashes,
+            request.block_hashes,
             kv_cache_group_ids=self._kv_cache_group_ids,
             keep_one_copy=True,
             live_session=True,
