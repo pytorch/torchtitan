@@ -91,6 +91,20 @@ class TorchTitanGDNConfig(TorchTitanLinearAttentionConfig):
 class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
     """SGLang's linear attention backend for TorchTitan's GDN layers."""
 
+    def supports_prefill_graph_extend(self) -> bool:
+        """Whether SGLang's breakable prefill CUDA graphs capture the GDN extend.
+
+        Off, so each GDN layer breaks the graph and runs eagerly:
+        (a) on SGLang's draft runners (MTP), as with SGLang's own GDN backend;
+        (b) under attention DP > 1.
+        """
+        # TODO: capture the extend under attention DP too. The tables must first handle
+        # the two batches SGLang pads a DP rank with: an idle rank (one made-up request,
+        # no real token) and a decode batch run as 1-token extends. Needs a GDN model
+        # with MoE layers and a DP 2 test class: no test class runs a GDN model at
+        # attention DP.
+        return not self.is_draft_worker and get_parallel().attn_dp_size == 1
+
     def forward_decode(
         self,
         layer: SGLangRadixLinearAttention,
@@ -179,7 +193,7 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
         ) = self.convolve_extend(
             forward_batch, mixed_qkv, conv_weight_CW, layer_cache.conv[0]
         )
-        return paged_gdn(
+        output_THV = paged_gdn(
             conv_output_1TC[0],
             a,
             b,
@@ -194,7 +208,13 @@ class TorchTitanGDNAttnBackend(TorchTitanLinearAttnBackend):
             num_v_heads=layer.num_v_heads,
             head_v_dim=layer.head_v_dim,
             **checkpoints,
-        ).unsqueeze(0)
+        )
+        if self.prefill_graph_metadata is not None:
+            # The kernels leave the tokens past the batch unwritten.
+            output_THV.masked_fill_(
+                self.prefill_graph_metadata.padding_tokens[:, None, None], 0
+            )
+        return output_THV.unsqueeze(0)
 
 
 class SGLangInnerGDN(InnerAttention):

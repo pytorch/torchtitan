@@ -35,13 +35,14 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
 Debug models with random weights start from the trainer's weights, loaded through the
 same in-place model state dict load.
 
-TestSGLangFp8KVCacheGDNHiCache runs the GDN HiCache tests with an fp8 KV cache at TP 1
-(one process), outside batch-invariant mode: tests 1, 3 and 4 and
+TestSGLangGDNOutsideBatchInvariantMode runs the GDN tests, and
+TestSGLangFp8KVCacheGDNHiCache the GDN HiCache tests with an fp8 KV cache, at TP 1 (one
+process), outside batch-invariant mode: tests 1, 3 and 4 and
 test_trainer_vs_sglang_decode_after_host_load_back compare logprobs within a tolerance.
 
 Runs in the B200 RL CI job.
 Run each class in its own launch, with as many processes as its DP x TP degree (one
-for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
+for TestSGLangBitwiseParityKDA and the two classes above, four for TestSGLangBitwiseParityMoEDPEP,
 TestSGLangBitwiseParityKDADPEP and TestSGLangBitwiseParityDistMoEDPEP, else two),
 with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
@@ -515,6 +516,41 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
             self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
         )
 
+    def test_prefill_graphs_capture_gdn_extend(self):
+        """Prefill graph replays run the GDN extend inside the graph: no GDN layer
+        breaks the graph to run it eagerly."""
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        graph_backend = model_runner.prefill_cuda_graph_runner.backend
+        gdn_backend = model_runner.attn_backend.linear_attn_backend
+        replay, forward_extend = graph_backend.replay, gdn_backend.forward_extend
+        num_replays = num_eager_extends_in_replays = 0
+        in_replay = False
+
+        def counting_replay(*args, **kwargs):
+            nonlocal num_replays, in_replay
+            num_replays += 1
+            in_replay = True
+            try:
+                return replay(*args, **kwargs)
+            finally:
+                in_replay = False
+
+        def counting_forward_extend(*args, **kwargs):
+            nonlocal num_eager_extends_in_replays
+            num_eager_extends_in_replays += in_replay
+            return forward_extend(*args, **kwargs)
+
+        graph_backend.replay = counting_replay
+        gdn_backend.forward_extend = counting_forward_extend
+        try:
+            # Prompts no other test caches, so prefill runs over all of them.
+            self._generate([prompt[::2] for prompt in self.prompt_ids])
+        finally:
+            graph_backend.replay = replay
+            gdn_backend.forward_extend = forward_extend
+        self.assertGreater(num_replays, 0)
+        self.assertEqual(num_eager_extends_in_replays, 0)
+
 
 class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
     """``TestSGLangBitwiseParityGDN`` with HiCache backing KV and GDN states up to
@@ -581,33 +617,20 @@ def _qwen3_5_debug_tp1_config() -> Controller.Config:
     return config
 
 
-class TestSGLangFp8KVCacheGDNHiCache(TestSGLangBitwiseParityGDNHiCache):
-    """``TestSGLangBitwiseParityGDNHiCache`` with an fp8 KV cache, on one GPU: a smoke test
-    of SGLang's fp8 path (the pool dtype, the q cast, HiCache's copies of fp8 KV).
+class _OutsideBatchInvariantMode:
+    """The parity tests' overrides for a class outside batch-invariant mode: SGLang's
+    logprobs match the trainer's within MAX_MEAN_ABS_DIFF, and SGLang's own results may
+    change with the batch."""
 
-    fp8 runs outside batch-invariant mode, and attention runs FA4's fp8 forward, which the
-    trainer does not run: SGLang's logprobs match the trainer's within a tolerance, and
-    SGLang's own results may change with the batch. The bound catches garbage KV, not a
-    wrong scale: this random-weight model's attention is flat, so a k descale of 2 gives
-    about 5e-3. test_sglang_fp8_attention.py checks the kernel's numerics.
-    """
-
-    config_fn = staticmethod(_qwen3_5_debug_tp1_config)
-    kv_cache_dtype = "fp8"
-    # The bound on the mean |trainer - SGLang| logprob of a sequence's sampled tokens; fp8
-    # gives about 2e-3 on this model.
-    MAX_MEAN_ABS_DIFF = 0.01
-
-    def test_runs_on_fp8_kv_pool(self):
-        model_runner = self.engine._scheduler.tp_worker.model_runner
-        self.assertEqual(model_runner.kv_cache_dtype, torch.float8_e4m3fn)
+    # The bound on the mean |trainer - SGLang| logprob of a sequence's sampled tokens.
+    MAX_MEAN_ABS_DIFF: float
 
     def test_sglang_decode_batch_invariance(self):
-        self.skipTest("fp8 runs outside batch-invariant mode")
+        self.skipTest("runs outside batch-invariant mode")
 
     def test_sglang_decode_across_model_state_dict_load(self):
         self.skipTest(
-            "fp8 runs outside batch-invariant mode: recomputed KV may change the tokens"
+            "runs outside batch-invariant mode: recomputed KV may change the tokens"
         )
 
     def _assert_trainer_logprobs_match(self, name, trainer_logprobs, sglang_logprobs):
@@ -620,6 +643,39 @@ class TestSGLangFp8KVCacheGDNHiCache(TestSGLangBitwiseParityGDNHiCache):
             f"max {abs_diff.max().item():.2e}"
         )
         self.assertLess(abs_diff.mean().item(), self.MAX_MEAN_ABS_DIFF, name)
+
+
+class TestSGLangGDNOutsideBatchInvariantMode(
+    _OutsideBatchInvariantMode, TestSGLangBitwiseParityGDN
+):
+    """``TestSGLangBitwiseParityGDN`` on one GPU outside batch-invariant mode, where the
+    prefill graphs run the GDN extend on the default (chunk) kernels."""
+
+    config_fn = staticmethod(_qwen3_5_debug_tp1_config)
+    # bf16 gives 1e-3 to 2e-3 on this model.
+    MAX_MEAN_ABS_DIFF = 0.01
+
+
+class TestSGLangFp8KVCacheGDNHiCache(
+    _OutsideBatchInvariantMode, TestSGLangBitwiseParityGDNHiCache
+):
+    """``TestSGLangBitwiseParityGDNHiCache`` with an fp8 KV cache, on one GPU: a smoke test
+    of SGLang's fp8 path (the pool dtype, the q cast, HiCache's copies of fp8 KV).
+
+    fp8 runs outside batch-invariant mode, and attention runs FA4's fp8 forward, which the
+    trainer does not run. The bound catches garbage KV, not a wrong scale: this
+    random-weight model's attention is flat, so a k descale of 2 gives about 5e-3.
+    test_sglang_fp8_attention.py checks the kernel's numerics.
+    """
+
+    config_fn = staticmethod(_qwen3_5_debug_tp1_config)
+    kv_cache_dtype = "fp8"
+    # fp8 gives about 2e-3 on this model.
+    MAX_MEAN_ABS_DIFF = 0.01
+
+    def test_runs_on_fp8_kv_pool(self):
+        model_runner = self.engine._scheduler.tp_worker.model_runner
+        self.assertEqual(model_runner.kv_cache_dtype, torch.float8_e4m3fn)
 
 
 def _debug_model_config(
