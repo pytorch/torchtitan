@@ -39,6 +39,7 @@ from sglang.srt.managers.scheduler import (
     Scheduler,
 )
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.model_executor.runner.eager_runner import EagerRunner
 from sglang.srt.runtime_context import get_parallel, publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
@@ -363,10 +364,16 @@ class SGLangEngine(GenerationEngine):
         # TODO(https://github.com/sgl-project/sglang/issues/48473): SGLang has no
         # in-process output sink; stand in for the sockets to its detokenizer and
         # tokenizer processes, so results and aborts come here.
-        self._output_collector = _OutputCollector()
+        self._output_collector = _OutputCollector(
+            enable_hierarchical_cache=self._scheduler.enable_hierarchical_cache
+        )
         self._scheduler.output_streamer.send_to_detokenizer = self._output_collector
         self._scheduler.ipc_channels = dataclasses.replace(
             self._scheduler.ipc_channels, send_to_tokenizer=self._output_collector
+        )
+        # Built after graph capture, so it counts only real forwards.
+        self._forward_token_counts = _ForwardTokenCounts(
+            self._scheduler.tp_worker.model_runner
         )
         # Requests that finished outside `step()` (e.g. retracted during a model state
         # dict load), returned by the next `step()`.
@@ -733,6 +740,15 @@ class SGLangEngine(GenerationEngine):
             scheduler.waiting_queue.join(released)
         finished, self._finished = self._finished, []
         finished.extend(request for request, _ in self._output_collector.take())
+
+        if finished:
+            # One request carries the forward token counts since the previous carrier,
+            # so each forward is counted at most once.
+            metrics_inputs = finished[0].metrics_inputs
+            (
+                metrics_inputs.num_engine_unpadded_tokens,
+                metrics_inputs.num_engine_padded_tokens,
+            ) = self._forward_token_counts.pop()
         return finished
 
     def load_model_state_dict(
@@ -806,7 +822,9 @@ class _OutputCollector:
     timestamps of SGLang's request object.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, enable_hierarchical_cache: bool) -> None:
+        # With HiCache, report the cached prompt tokens loaded from host memory or storage.
+        self._enable_hierarchical_cache = enable_hierarchical_cache
         # Tokens and logprobs received so far, per unfinished request.
         self._partial: dict[str, tuple[list[int], list[float]]] = {}
         self._finished: list[tuple[FinishedRequest, str | None]] = []
@@ -887,6 +905,15 @@ class _OutputCollector:
                     num_generation_tokens=len(token_ids),
                     num_cached_tokens=num_cached_tokens,
                 )
+
+            if self._enable_hierarchical_cache and stats is not None:
+                # SGLang sends no breakdown when no prompt token was cached, and no
+                # "storage" entry without a storage backend.
+                cached_tokens_details = stats.cached_tokens_details or {}
+                metrics_inputs.num_external_cached_tokens = cached_tokens_details.get(
+                    "host", 0
+                ) + cached_tokens_details.get("storage", 0)
+
             finished = FinishedRequest(
                 request_id=request_id,
                 token_ids=token_ids,
@@ -932,6 +959,59 @@ def _metrics_inputs(
         num_generation_tokens=num_generation_tokens,
         num_preemptions=req.retraction_count,
     )
+
+
+class _ForwardTokenCounts:
+    """Counts the model runner's forward tokens before and after CUDA graph padding, in
+    ``fill_from`` of each runner's buffers (eager, prefill graph, decode graph).
+
+    Example: decodes of 3 and 5 requests replay the 4- and 8-row graphs -> pop() == (8, 12)
+    """
+
+    def __init__(self, model_runner: ModelRunner) -> None:
+        self._num_unpadded_tokens = 0
+        self._num_padded_tokens = 0
+        # TODO: SGLang reports no CUDA graph padding counts, so this wraps a method of
+        # each runner's buffers, private attributes included. MTP draft runners are not
+        # counted.
+        runners = {
+            id(runner): runner
+            for runner in (
+                model_runner.eager_runner,
+                model_runner.prefill_cuda_graph_runner,
+                model_runner.decode_cuda_graph_runner,
+            )
+            if runner is not None
+        }
+        for runner in runners.values():
+            registry = (
+                runner._eager_registry
+                if isinstance(runner, EagerRunner)
+                else runner.buffer_registry
+            )
+            registry.fill_from = self._counting(registry.fill_from)
+
+    def pop(self) -> tuple[int, int]:
+        """Return and reset ``(unpadded, padded)`` token counts since the last call."""
+        counts = (self._num_unpadded_tokens, self._num_padded_tokens)
+        self._num_unpadded_tokens = 0
+        self._num_padded_tokens = 0
+        return counts
+
+    def _counting(self, fill_from: Callable[..., None]) -> Callable[..., None]:
+        def counting_fill_from(
+            forward_batch, *, raw_num_tokens: int, padded_num_tokens: int, **kwargs
+        ) -> None:
+            self._num_unpadded_tokens += raw_num_tokens
+            self._num_padded_tokens += padded_num_tokens
+            fill_from(
+                forward_batch,
+                raw_num_tokens=raw_num_tokens,
+                padded_num_tokens=padded_num_tokens,
+                **kwargs,
+            )
+
+        return counting_fill_from
 
 
 def _overlap_event_loop_iteration(scheduler: Scheduler) -> None:
