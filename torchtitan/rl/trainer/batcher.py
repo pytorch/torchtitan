@@ -29,10 +29,11 @@ from torchtitan.components.data.padding import append_padded_segment
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.ragged_tensor import RaggedTensor
 from torchtitan.models.common.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import PromptImage, RolloutGroup
+from torchtitan.rl.rollout.types import KeptSets, PromptImage, RolloutGroup
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch, RegisterRDMAMicrobatch
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -70,6 +71,15 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     generator_topk_token_ids: torch.Tensor | None = None  # [num_loss_tokens, k]
     """One row per True in loss_mask; `to_input_dict` expands them to [T, k] for the loss."""
     generator_topk_logprobs: torch.Tensor | None = None  # [num_loss_tokens, k]
+    generator_kept_token_ids: torch.Tensor | None = None  # [num_kept]
+    """Each loss token's kept set (the tokens top-k/top-p let it sample from), packed loss token
+    after loss token; `to_input_dict` turns it into a `RaggedTensor` over all tokens."""
+    generator_kept_logprobs: torch.Tensor | None = None  # [num_kept]
+    generator_kept_lengths: torch.Tensor | None = None  # [num_loss_tokens]
+    kept_set_capacity_per_token: int | None = None
+    """With vocabulary filtering, the average room per token for its kept set: the kept sets of a
+    microbatch of T tokens are padded to a capacity of T * kept_set_capacity_per_token, and an
+    overflow raises."""
     vision_processor: VisionProcessor.Config | None = None
     """How `preprocess_images` turns ``model_kwargs["image_files"]`` into
     ``pixel_values``. None without images."""
@@ -127,6 +137,10 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
         if self.generator_topk_token_ids is not None:
             loss_kwargs["generator_topk_token_ids"] = self.generator_topk_token_ids
             loss_kwargs["generator_topk_logprobs"] = self.generator_topk_logprobs
+        if self.generator_kept_lengths is not None:
+            loss_kwargs["generator_kept_token_ids"] = self.generator_kept_token_ids
+            loss_kwargs["generator_kept_logprobs"] = self.generator_kept_logprobs
+            loss_kwargs["generator_kept_lengths"] = self.generator_kept_lengths
         # Explicit base call: zero-argument super() fails in slots=True dataclasses.
         return {
             **TokenizedTrainingMicrobatch.as_input_dict(self),
@@ -157,7 +171,49 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
                 rows = loss_rows.new_zeros(loss_mask.shape[0], loss_rows.shape[1])
                 # masked_scatter_, unlike indexing with the mask, needs no host sync on CUDA.
                 loss_kwargs[key] = rows.masked_scatter_(loss_mask, loss_rows)
+        if self.generator_kept_lengths is not None:
+            assert self.kept_set_capacity_per_token is not None
+            loss_kwargs = input_dict["loss_kwargs"]
+            loss_mask = loss_kwargs["loss_mask"]
+            # One kept set per token: empty off the loss mask. The fixed capacity keeps the
+            # shapes static across microbatches, as accelerator graphs need.
+            lengths = loss_mask.new_zeros(loss_mask.shape, dtype=torch.int64)
+            lengths.masked_scatter_(
+                loss_mask, loss_kwargs.pop("generator_kept_lengths").long()
+            )
+            capacity = loss_mask.shape[0] * self.kept_set_capacity_per_token
+            for key in ("generator_kept_token_ids", "generator_kept_logprobs"):
+                loss_kwargs[key] = RaggedTensor.from_rows(
+                    loss_kwargs[key], lengths, capacity=capacity
+                )
         return input_dict
+
+
+def _pack_kept_sets(training_samples: list[TrainingSample]) -> dict[str, torch.Tensor]:
+    """A microbatch's kept sets, one per loss token, packed loss token after loss token."""
+    parts = []
+    for training_sample in training_samples:
+        # As for the top-k: one kept set per True in loss_mask[1:].
+        num_loss_tokens = int(training_sample.loss_mask[1:].sum())
+        name = training_sample.rollout_id.to_string()
+        if training_sample.kept_sets is None:
+            raise ValueError(
+                f"{name} has no kept sets for {num_loss_tokens} loss tokens"
+            )
+        training_sample.kept_sets.validate(num_loss_tokens, name=name)
+        parts.append(training_sample.kept_sets)
+    # The empty part keeps np.concatenate working for a microbatch without samples.
+    empty = KeptSets(
+        token_ids=np.zeros(0, dtype=np.int32),
+        logprobs=np.zeros(0, dtype=np.float32),
+        lengths=np.zeros(0, dtype=np.int32),
+    )
+    kept_sets = KeptSets.concatenate([empty, *parts])
+    return {
+        "generator_kept_token_ids": torch.from_numpy(kept_sets.token_ids),
+        "generator_kept_logprobs": torch.from_numpy(kept_sets.logprobs),
+        "generator_kept_lengths": torch.from_numpy(kept_sets.lengths),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +330,7 @@ class Batcher(Configurable):
             pad_id=0,
             temperature=1.0,
             num_topk_logprobs=0,
+            kept_set_capacity_per_token=None,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
         pending, _ = batcher.add_training_samples(training_sample_group=group0)
@@ -352,6 +409,7 @@ class Batcher(Configurable):
         pad_id: int,
         temperature: float,
         num_topk_logprobs: int,
+        kept_set_capacity_per_token: int | None,
         register_rdma_microbatch: RegisterRDMAMicrobatch | None = None,
         vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
@@ -376,6 +434,7 @@ class Batcher(Configurable):
         self.pad_id = pad_id
         self._temperature = temperature
         self._num_topk_logprobs = num_topk_logprobs
+        self._kept_set_capacity_per_token = kept_set_capacity_per_token
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
@@ -1036,6 +1095,11 @@ class Batcher(Configurable):
                     dtype=np.float32,
                 )
             )
+        kept = (
+            {}
+            if self._kept_set_capacity_per_token is None
+            else _pack_kept_sets(training_samples)
+        )
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
         positions_tensor = torch.from_numpy(np.concatenate(packed_fields["positions"]))
         padding_mask_tensor = torch.from_numpy(
@@ -1076,6 +1140,8 @@ class Batcher(Configurable):
             vision_processor=vision_processor,
             generator_topk_token_ids=topk_token_ids,
             generator_topk_logprobs=topk_logprobs,
+            kept_set_capacity_per_token=self._kept_set_capacity_per_token,
+            **kept,
         )
 
     def _pack_image_inputs(

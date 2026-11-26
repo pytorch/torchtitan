@@ -121,6 +121,56 @@ class RolloutTurnID:
         return f"{base}/turn={self.turn_id}" if include_turn else base
 
 
+@dataclass(frozen=True, slots=True)
+class KeptSets:
+    """Each token's kept set: the tokens top-k/top-p let the generator sample it from, with the
+    generator's logprobs renormalized over them, packed token after token.
+
+    Example: kept sets [[5, 7], [2]] -> token_ids [5, 7, 2], lengths [2, 1].
+    """
+
+    token_ids: np.ndarray  # [num_kept] int32
+    logprobs: np.ndarray  # [num_kept] float32
+    lengths: np.ndarray  # [num_tokens] int32
+
+    def validate(self, num_tokens: int, *, name: str) -> None:
+        """Raise unless these are ``num_tokens`` kept sets whose sizes add up to the packed
+        ids and logprobs: a wrong count would shift every later kept set."""
+        num_kept = int(self.lengths.sum())
+        if (
+            len(self.lengths) != num_tokens
+            or len(self.token_ids) != num_kept
+            or len(self.logprobs) != num_kept
+        ):
+            raise ValueError(
+                f"{name}: {len(self.lengths)} kept sets of {num_kept} tokens for "
+                f"{num_tokens} tokens, with {len(self.token_ids)} ids and "
+                f"{len(self.logprobs)} logprobs"
+            )
+
+    @staticmethod
+    def concatenate(parts: list[KeptSets]) -> KeptSets:
+        """The kept sets of consecutive tokens, part after part."""
+        return KeptSets(
+            token_ids=np.concatenate([p.token_ids for p in parts]).astype(np.int32),
+            logprobs=np.concatenate([p.logprobs for p in parts]).astype(np.float32),
+            lengths=np.concatenate([p.lengths for p in parts]).astype(np.int32),
+        )
+
+    def sampled_logprobs(self, token_ids: list[int], *, name: str) -> list[float]:
+        """Each sampled token's logprob in its own kept set.
+
+        Example: tokens [7, 2], kept sets [[5, 7], [2]] with logprobs [[-0.4, -1.1], [0.0]]
+        -> [-1.1, 0.0].
+        """
+        self.validate(len(token_ids), name=name)
+        row = np.repeat(np.arange(len(token_ids)), self.lengths)
+        is_sampled = self.token_ids == np.asarray(token_ids, dtype=np.int32)[row]
+        if (np.bincount(row[is_sampled], minlength=len(token_ids)) != 1).any():
+            raise ValueError(f"{name}: a sampled token is not once in its kept set")
+        return self.logprobs[is_sampled].tolist()
+
+
 @dataclass(kw_only=True, slots=True)
 class Completion:
     """A single generated sequence from the generator.
@@ -149,6 +199,8 @@ class Completion:
     None unless `SamplingConfig.num_topk_logprobs` > 0."""
     topk_logprobs: np.ndarray | None = None
     """[num_tokens, k] float32 generator logprobs of `topk_token_ids`."""
+    kept_sets: KeptSets | None = None
+    """Each token's kept set; None unless `SamplingConfig.filters_vocab`."""
     finish_reason: str | None = None
     """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort" | "error")"""
 
@@ -332,6 +384,9 @@ class RolloutTurn:
 
     completion_topk_logprobs: np.ndarray | None = None  # [num_completion_tokens, k]
     """The generator's float32 logprobs of `completion_topk_token_ids`."""
+
+    completion_kept_sets: KeptSets | None = None
+    """Each completion token's kept set (`Completion.kept_sets`)."""
 
     # Filtering
     min_policy_version: int | None = None

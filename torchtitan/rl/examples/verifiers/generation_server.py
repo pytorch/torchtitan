@@ -451,8 +451,10 @@ def _parse_sampling_config(value: object):
     unsupported = set(value) - supported - protocol_fields
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
-    # Verifiers sends top_k=-1 and min_p=0.0 on every call. Refuse values that filter: the trainer
-    # computes logprobs over the full vocabulary. TODO(mask-replay): allow them, as for top_p < 1.
+    # Verifiers sends top_k=-1 and min_p=0.0 on every call. Refuse values that filter.
+    # TODO: allow top_k / top_p < 1: return each completion's kept sets
+    # (`Completion.kept_sets`) with the top-k rows, and slice them per trainable span in
+    # the rollouter, so the trainer can replay them.
     top_k, min_p = value.get("top_k", -1), value.get("min_p", 0.0)
     if top_k not in (-1, 0) or min_p != 0.0:
         raise ValueError(

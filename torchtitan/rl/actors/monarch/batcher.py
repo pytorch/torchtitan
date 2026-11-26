@@ -32,6 +32,7 @@ class _BatcherActorEndpoints:
         pad_id: int,
         temperature: float,
         num_topk_logprobs: int,
+        kept_set_capacity_per_token: int | None,
         output_dir: str,
         enable_structured_logging: bool,
         vision_processor: VisionProcessor.Config | None = None,
@@ -53,6 +54,7 @@ class _BatcherActorEndpoints:
             pad_id=pad_id,
             temperature=temperature,
             num_topk_logprobs=num_topk_logprobs,
+            kept_set_capacity_per_token=kept_set_capacity_per_token,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
             vision_processor=vision_processor,
         )

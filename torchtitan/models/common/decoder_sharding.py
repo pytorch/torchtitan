@@ -125,8 +125,9 @@ def loss_kwarg_sharding(
 ) -> dict[str, SpmdType]:
     """Shard each loss kwarg like the labels along tokens, and replicate any trailing dims.
 
-    Non-tensor kwargs keep the labels' layout (SPMD annotation and CP skip them), as does every
-    kwarg when the labels have no partition spec.
+    Non-tensor kwargs keep the labels' layout, as does every kwarg when the labels have no
+    partition spec. SPMD annotation and CP skip non-tensor kwargs, except a ``RaggedTensor``,
+    whose values and lengths both run along tokens.
 
     Example:
 

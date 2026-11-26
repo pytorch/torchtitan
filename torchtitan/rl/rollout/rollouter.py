@@ -123,6 +123,12 @@ class Rollouter(Configurable):
         rollouts_per_thread, rounded up: 128 / 4 -> 32, 7 / 4 -> 2, 2 / 4 -> 1. Lower it when rollouts
         block threads, e.g. 1 for one blocking call per rollout."""
 
+        @property
+        def returns_kept_sets(self) -> bool:
+            """Whether the rollouter passes the generator's kept sets on to its training
+            samples (see `GenerationEngine.Config.returns_kept_sets`)."""
+            return True
+
         def __post_init__(self) -> None:
             if self.rollouts_per_thread < 1:
                 raise ValueError(
@@ -679,6 +685,7 @@ class MessageEnvRolloutWorker(BaseRolloutWorker):
                         ),
                         completion_topk_token_ids=completion.topk_token_ids,
                         completion_topk_logprobs=completion.topk_logprobs,
+                        completion_kept_sets=completion.kept_sets,
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,

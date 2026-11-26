@@ -20,6 +20,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torchtitan.config import Function
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
+from torchtitan.distributed.ragged_tensor import RaggedTensor
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 
 # PyTorch's default ignore index for cross-entropy loss
@@ -647,20 +648,123 @@ def compute_topk_logprobs(
     # Ignored labels (loss-masked positions) gather a placeholder column; callers mask
     # those rows.
     token_ids = torch.cat([labels.clamp_min(0).unsqueeze(-1), token_ids], dim=-1).long()
-    if vocab_parallel_group is not None:
-        gathered = _VocabParallelGather.apply(
-            logits, token_ids, vocab_parallel_group, global_vocab_size
-        )
-    else:
-        gathered = logits.gather(-1, token_ids)
+    gathered = _gather_logits(
+        logits,
+        torch.arange(token_ids.shape[0], device=token_ids.device)
+        .unsqueeze(-1)
+        .expand_as(token_ids),
+        token_ids,
+        vocab_parallel_group=vocab_parallel_group,
+        global_vocab_size=global_vocab_size,
+    )
     # compute_logprobs' division, after the gather: elementwise, so the values are the same.
     scaled = (gathered / temperature.unsqueeze(-1)).float()
     return label_logprobs.unsqueeze(-1) + (scaled[:, 1:] - scaled[:, :1])
 
 
+def _gather_logits(
+    logits: torch.Tensor,
+    rows: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    vocab_parallel_group: dist.ProcessGroup | None,
+    global_vocab_size: int | None,
+) -> torch.Tensor:
+    """``logits[rows, token_ids]``, from a vocab shard under TP: a selection, exact in any
+    reduction order."""
+    if vocab_parallel_group is None:
+        return logits[rows, token_ids]
+    return _VocabParallelGather.apply(
+        logits, rows, token_ids, vocab_parallel_group, global_vocab_size
+    )
+
+
+def compute_kept_set_logprobs(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    kept_token_ids: torch.Tensor,
+    kept_rows: torch.Tensor,
+    *,
+    vocab_parallel_group: dist.ProcessGroup | None,
+    global_vocab_size: int | None,
+    temperature: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Logprobs renormalized over each token's kept set S, the tokens top-k/top-p let the
+    generator sample from: ``log p_S(v) = logits_v / T - logsumexp_{u in S}(logits_u / T)``.
+
+    Gathers only the label's and the kept tokens' logits (one TP all-reduce under TP), so no
+    ``[T, V]`` softmax is computed or saved for backward.
+
+    Args:
+        logits: [T, V] logits (a vocab shard under TP).
+        labels: [T] sampled tokens; each must be in its kept set where the loss uses it.
+        kept_token_ids: [C] the kept tokens, packed token after token.
+        kept_rows: [C] the token of each kept token; T (one past the last) marks padding,
+            e.g. ``RaggedTensor.row_indices()``.
+        vocab_parallel_group: TP group when ``logits`` hold a vocab shard, else None.
+        global_vocab_size: full vocabulary size; required under TP.
+        temperature: [T] temperature each token was sampled at.
+
+    Returns:
+        ([T] label logprobs, meaningless for a token without a kept set, which callers mask;
+        [C] logprobs of the kept tokens, -inf for padding).
+
+    Example (T = 1):
+
+        logits = log([[0.5, 0.3, 0.2]]);  temperature = [1.0];  labels = [1]
+        kept_token_ids = [0, 1];  kept_rows = [0, 0]  (token 0 keeps {0, 1})
+        ->  (log([0.375]), log([0.625, 0.375]))
+    """
+    if vocab_parallel_group is not None and global_vocab_size is None:
+        raise ValueError("global_vocab_size is required for vocab-parallel logprobs")
+    num_tokens = labels.shape[0]
+    is_kept = kept_rows < num_tokens
+    entry_rows = kept_rows.clamp_max(num_tokens - 1)
+    token_rows = torch.arange(num_tokens, device=labels.device)
+    # One gather for the labels and the kept tokens.
+    gathered = _gather_logits(
+        logits,
+        torch.cat([token_rows, entry_rows]),
+        # Padding values are 0 (RaggedTensor pads with zeros), a valid id; masked below.
+        torch.cat([labels.clamp_min(0), kept_token_ids]).long(),
+        vocab_parallel_group=vocab_parallel_group,
+        global_vocab_size=global_vocab_size,
+    ).float()
+    # compute_logprobs' division, after the gather: elementwise, so the values are the same.
+    label_scaled = gathered[:num_tokens] / temperature
+    entry_scaled = torch.where(
+        is_kept,
+        gathered[num_tokens:] / temperature.index_select(0, entry_rows),
+        -torch.inf,
+    )
+    # Per-token logsumexp over the kept set; the max only stabilizes it, so no gradient.
+    row_max = torch.full_like(label_scaled, -torch.inf).scatter_reduce(
+        0, entry_rows, entry_scaled.detach(), reduce="amax"
+    )
+    row_sum_exp = torch.zeros_like(label_scaled).index_add(
+        0,
+        entry_rows,
+        torch.where(
+            is_kept, torch.exp(entry_scaled - row_max.index_select(0, entry_rows)), 0.0
+        ),
+    )
+    # A token without a kept set (off the loss mask) gets a normalizer of 0, not -inf, so
+    # neither its value nor its gradient is inf or NaN.
+    log_normalizer = torch.where(
+        row_sum_exp > 0,
+        row_max + torch.log(row_sum_exp.clamp_min(torch.finfo(row_sum_exp.dtype).tiny)),
+        0.0,
+    )
+    return (
+        label_scaled - log_normalizer,
+        entry_scaled - log_normalizer.index_select(0, entry_rows),
+    )
+
+
 class _VocabParallelGather(torch.autograd.Function):
-    """``logits.gather(-1, token_ids)`` of global ``token_ids`` from local ``[T, V_local]``
-    logits shards, with one TP all-reduce.
+    """``logits[rows, token_ids]`` of global ``token_ids`` from local ``[T, V_local]`` logits
+    shards, with one TP all-reduce. ``rows`` and ``token_ids`` have the same shape: e.g.
+    ``rows = arange(T)`` broadcast against ``[T, K]`` ids gathers K logits per token.
 
     Each id lives on exactly one shard, which contributes its logit; the others contribute
     0, so ``x + 0`` is exact in any order and accumulation dtype (up to the sign of a zero
@@ -673,10 +777,16 @@ class _VocabParallelGather(torch.autograd.Function):
         result: torch.Tensor,
         *,
         logits: torch.Tensor,
+        rows: torch.Tensor,
         token_ids: torch.Tensor,
         tp_group: dist.ProcessGroup,
     ) -> None:
-        """SPMD type: logits S(-1)@TP, token_ids I@TP -> gathered logits I@TP."""
+        """SPMD type: logits S(-1)@TP, token_ids I@TP -> gathered logits I@TP.
+
+        ``rows`` index the token dimension, which TP doesn't shard: R (an ``arange``) or I
+        (derived from loss inputs), with the same values on every rank either way.
+        """
+        spmd.rules.ignore(rows)
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(token_ids, {tp_group: spmd.I})
         spmd.assert_local_type_like(
@@ -690,6 +800,7 @@ class _VocabParallelGather(torch.autograd.Function):
     def forward(
         ctx,
         logits: torch.Tensor,
+        rows: torch.Tensor,
         token_ids: torch.Tensor,
         tp_group: dist.ProcessGroup,
         global_vocab_size: int,
@@ -699,17 +810,17 @@ class _VocabParallelGather(torch.autograd.Function):
         )
         torch._assert_async(
             torch.all((token_ids >= 0) & (token_ids < global_vocab_size)),
-            f"top-k token ids must be in [0, {global_vocab_size})",
+            f"gathered token ids must be in [0, {global_vocab_size})",
         )
         local_token_ids = token_ids - vocab_start
         in_shard = (local_token_ids >= 0) & (local_token_ids < local_vocab_size)
         local_token_ids = local_token_ids.clamp(0, local_vocab_size - 1)
         gathered = funcol.all_reduce(
-            torch.where(in_shard, logits.gather(-1, local_token_ids), 0.0),
+            torch.where(in_shard, logits[rows, local_token_ids], 0.0),
             reduceOp=dist.ReduceOp.SUM.name,
             group=tp_group,
         )
-        ctx.save_for_backward(local_token_ids, in_shard)
+        ctx.save_for_backward(rows, local_token_ids, in_shard)
         ctx.logits_shape, ctx.logits_dtype = logits.shape, logits.dtype
         return gathered
 
@@ -717,15 +828,17 @@ class _VocabParallelGather(torch.autograd.Function):
     # pyrefly: ignore [bad-override]
     def backward(
         ctx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor, None, None, None]:
-        local_token_ids, in_shard = ctx.saved_tensors
+    ) -> tuple[torch.Tensor, None, None, None, None]:
+        rows, local_token_ids, in_shard = ctx.saved_tensors
         grad_logits = torch.zeros(
             ctx.logits_shape, dtype=grad_output.dtype, device=grad_output.device
         )
-        grad_logits.scatter_add_(
-            -1, local_token_ids, torch.where(in_shard, grad_output, 0.0)
+        grad_logits.index_put_(
+            (rows, local_token_ids),
+            torch.where(in_shard, grad_output, 0.0),
+            accumulate=True,
         )
-        return grad_logits.to(ctx.logits_dtype), None, None, None
+        return grad_logits.to(ctx.logits_dtype), None, None, None, None
 
 
 class _DecoderOutputGradientBackProp(torch.autograd.Function):
@@ -1042,7 +1155,13 @@ class ChunkedLossWrapper(Loss[LossInput]):
             )
             label_chunks_per_output = tuple(_chunk_local(label) for label in labels)
             input_chunks = {
-                key: _chunk_local(value) if isinstance(value, torch.Tensor) else value
+                key: (
+                    _chunk_local(value)
+                    if isinstance(value, torch.Tensor)
+                    else value.split(num_chunks)
+                    if isinstance(value, RaggedTensor)
+                    else value
+                )
                 for key, value in loss_inputs.items()
             }
             grad_accumulators = (

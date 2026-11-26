@@ -33,6 +33,7 @@ _BATCHER_KWARGS = dict(
     pad_id=0,
     temperature=1.0,
     num_topk_logprobs=0,
+    kept_set_capacity_per_token=None,
 )
 
 

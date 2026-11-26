@@ -554,6 +554,18 @@ class Controller(Configurable):
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
 
+            if self.generator.sampling.filters_vocab and not (
+                self.generator.engine.returns_kept_sets
+                and self.rollouter.returns_kept_sets
+            ):
+                raise ValueError(
+                    "top-k/top-p sampling (generator.sampling.top_k or top_p < 1) needs a "
+                    "generator engine and a rollouter that return each token's kept set, which "
+                    "the trainer replays: SGLangEngine and a rollouter other than Verifiers'. "
+                    f"Got {type(self.generator.engine).__qualname__} and "
+                    f"{type(self.rollouter).__qualname__}."
+                )
+
             if self.generator.sampling.num_topk_logprobs != 0:
                 raise ValueError(
                     "generator.sampling.num_topk_logprobs is filled by the controller from "
@@ -570,6 +582,14 @@ class Controller(Configurable):
                     )
                 if not self.trainer.debug.deterministic:
                     raise ValueError("batch_invariant requires deterministic=True")
+                # TODO: route SGLang's kept-set logprobs (computed from probabilities) through
+                # the trainer's compute_kept_set_logprobs in its batch-invariant hook.
+                if self.generator.sampling.filters_vocab:
+                    raise ValueError(
+                        "batch_invariant does not support top-k/top-p sampling yet: the "
+                        "generator's kept-set logprobs are not computed with the trainer's "
+                        "function."
+                    )
                 # Batch-invariant mode computes in bf16. The generator computes in
                 # precision.param_dtype, and so does the trainer forward: the trainer
                 # always wraps the model in FSDP (even at data_parallel_shard_degree=1,
@@ -592,7 +612,10 @@ class Controller(Configurable):
         @property
         def num_topk_logprobs(self) -> int:
             """Generator top-k logprobs per generated training token: what the policy loss's
-            score centering needs, else 0."""
+            score centering needs, else 0. With vocabulary filtering, score centering takes the
+            kept sets instead (see `kept_set_capacity_per_token`)."""
+            if self.generator.sampling.filters_vocab:
+                return 0
             loss = self.trainer.loss
             if isinstance(loss, ChunkedLossWrapper.Config):
                 loss = loss.loss_fn
@@ -602,6 +625,19 @@ class Controller(Configurable):
             ):
                 return loss.score_centering.num_topk_logprobs
             return 0
+
+        @property
+        def kept_set_capacity_per_token(self) -> int | None:
+            """With vocabulary filtering, the room each token gets for its kept set in a
+            microbatch's fixed capacity, on average: twice ``top_k``. ``top_k`` bounds a kept set
+            up to ties at the cutoff, which both engines keep; with ``top_k`` alone every kept
+            set has at least ``top_k`` tokens, so the headroom is for the ties (an overflow
+            raises). None without filtering: the trainer receives no kept sets."""
+            sampling = self.generator.sampling
+            if not sampling.filters_vocab:
+                return None
+            assert sampling.top_k is not None
+            return 2 * sampling.top_k
 
         @property
         def max_num_seqs_per_generator_dp_rank(self) -> int:
@@ -877,6 +913,7 @@ class Controller(Configurable):
                 pad_id=self.tokenizer.eos_id,
                 temperature=self._sampling.temperature,
                 num_topk_logprobs=config.num_topk_logprobs,
+                kept_set_capacity_per_token=config.kept_set_capacity_per_token,
                 output_dir=config.dump_folder,
                 enable_structured_logging=config.trainer.debug.enable_structured_logging,
                 vision_processor=config.vision_processor,
