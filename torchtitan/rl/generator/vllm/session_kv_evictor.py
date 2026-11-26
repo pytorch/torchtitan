@@ -44,6 +44,8 @@ class VLLMSessionKVEvictor:
       the prefix cache.
     - Every TP rank makes the same calls in the same order and evicts in block id order, so
       the ranks' schedulers stay identical.
+    - With CPU offload, the evicted hashes also go to the connector, once the saves pending
+      at their eviction finish, so their CPU blocks are evicted first too.
 
     Example:
 
@@ -56,9 +58,11 @@ class VLLMSessionKVEvictor:
 
     Args:
         scheduler: The vLLM v1 scheduler of this rank's in-process engine.
+        offload_connector: The CPU offload connector, with ``get_pending_save_ids()`` and
+            ``release_session_cache(released_hashes, active_hashes)``; None without one.
     """
 
-    def __init__(self, *, scheduler: Any) -> None:
+    def __init__(self, *, scheduler: Any, offload_connector: Any | None = None) -> None:
         # TODO: vLLM's session eviction hint (vllm-project/vllm#51428) would replace this
         #   class's reads and edits of BlockPool internals.
         kv_cache_manager = scheduler.kv_cache_manager
@@ -80,6 +84,12 @@ class VLLMSessionKVEvictor:
         # Replaced or released requests still in vLLM, by internal request id.
         self._ended_requests: dict[str, _TrackedRequest] = {}
         self._num_requests_by_hash: dict[BlockHash, int] = {}
+        # CPU release hints: hashes evicted since the last hint, and the batch whose hint
+        # waits for the saves that were pending when it formed.
+        self._offload_connector = offload_connector
+        self._cpu_hashes_to_release: set[BlockHash] = set()
+        self._cpu_releasing_hashes: set[BlockHash] = set()
+        self._cpu_releasing_save_ids: set[int] = set()
         # A plain int, so other threads (e.g. a logging endpoint) can read it safely.
         self.num_evicted_blocks = 0
 
@@ -87,6 +97,11 @@ class VLLMSessionKVEvictor:
     def num_sessions(self) -> int:
         """Live sessions on this engine."""
         return len(self._sessions)
+
+    @property
+    def has_pending_work(self) -> bool:
+        """Whether a CPU release hint still waits for engine steps (its saves to finish)."""
+        return bool(self._cpu_hashes_to_release or self._cpu_releasing_hashes)
 
     def track(self, internal_request_id: str, session_id: str, group_id: int) -> None:
         """Make this request its session's history; evict what its prompt dropped from the
@@ -120,6 +135,7 @@ class VLLMSessionKVEvictor:
             del self._ended_requests[request.internal_request_id]
         if finished:
             self._forget(finished)
+        self._release_cpu_cache()
 
     def release(self, *, session_ids: list[str], group_ids: list[int]) -> None:
         """Evict the KV of sessions that make no more calls, and of every session of finished
@@ -136,6 +152,7 @@ class VLLMSessionKVEvictor:
                 if session_id in self._sessions
             ]
         )
+        self._release_cpu_cache()
 
     def _forget(self, requests: list[_TrackedRequest]) -> None:
         """Uncount `requests` that left vLLM and evict their hashes that nothing counts; keep
@@ -158,17 +175,43 @@ class VLLMSessionKVEvictor:
         ]
         if not uncounted:
             return
-        # Count the other requests' new output first: a preempted request's blocks are free
-        # and cached until it resumes, and an ended request may share them.
+        self._count_all_new_block_hashes()
+        released = [
+            block_hash
+            for block_hash in uncounted
+            if block_hash not in self._num_requests_by_hash
+        ]
+        self._evict(released)
+        if self._offload_connector is not None:
+            self._cpu_hashes_to_release.update(released)
+
+    def _release_cpu_cache(self) -> None:
+        """Send the evicted hashes to the CPU offload connector once the saves pending when
+        they were batched finish; a hash a request counts again by then stays."""
+        if not self.has_pending_work:
+            return
+        connector = self._offload_connector
+        if not self._cpu_releasing_hashes:
+            self._cpu_releasing_hashes = self._cpu_hashes_to_release
+            self._cpu_hashes_to_release = set()
+            # Freeze this batch's saves (finish-time saves included), so later saves can't
+            # postpone its hint forever.
+            self._cpu_releasing_save_ids = connector.get_pending_save_ids()
+        if self._cpu_releasing_save_ids & connector.get_pending_save_ids():
+            return
+        self._count_all_new_block_hashes()
+        active_hashes = set(self._num_requests_by_hash)
+        released = self._cpu_releasing_hashes - active_hashes
+        self._cpu_releasing_hashes = set()
+        self._cpu_releasing_save_ids = set()
+        if released:
+            connector.release_session_cache(released, active_hashes)
+
+    def _count_all_new_block_hashes(self) -> None:
+        """Count every tracked request's new output: a preempted request's blocks are free and
+        cached until it resumes, and an ended request may share them."""
         for request in (*self._sessions.values(), *self._ended_requests.values()):
             self._count_new_block_hashes(request)
-        self._evict(
-            [
-                block_hash
-                for block_hash in uncounted
-                if block_hash not in self._num_requests_by_hash
-            ]
-        )
 
     def _count_new_block_hashes(self, request: _TrackedRequest) -> None:
         for block_hash in request.block_hashes[request.num_counted :]:

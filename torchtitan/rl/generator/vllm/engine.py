@@ -324,9 +324,13 @@ class VLLMEngine(GenerationEngine):
             engine_args, stat_loggers=stat_loggers
         )
         # Every rank evicts the same blocks from its own scheduler; only the engine loop
-        # thread touches them.
+        # thread touches them. With SimpleCPU offload it also sends CPU release hints.
+        scheduler = self._engine.engine_core.engine_core.scheduler
         self._session_kv_evictor = VLLMSessionKVEvictor(
-            scheduler=self._engine.engine_core.engine_core.scheduler
+            scheduler=scheduler,
+            offload_connector=scheduler.connector
+            if isinstance(config.kv_offload, SimpleCPUKVOffloadConfig)
+            else None,
         )
 
     @staticmethod
@@ -639,11 +643,13 @@ class VLLMEngine(GenerationEngine):
           requests waiting on a CPU load.
         - ``batch_queue``: with async scheduling, a dispatched batch whose output is
           not consumed yet.
+        - ``session_kv_evictor.has_pending_work``: CPU release hints waiting on those
+          saves.
 
         Upstream's multiprocess ``EngineCoreProc`` keeps stepping on the same
         conditions (``has_work()``); the in-process ``LLMEngine`` that
         ``external_launcher`` uses does not, so the engine loop would otherwise sleep
-        with pinned blocks until the next request.
+        with pinned blocks and unsent hints until the next request.
         """
         # TODO(acisseJZhong): LLMEngine exposes neither pending KV work nor DP dummy
         # forwards, so this and step() use the private engine_core.engine_core
@@ -655,6 +661,7 @@ class VLLMEngine(GenerationEngine):
             self._engine.output_processor.has_unfinished_requests()
             or core.scheduler.has_requests()
             or bool(core.batch_queue)
+            or self._session_kv_evictor.has_pending_work
         )
 
     def step(self) -> list[FinishedRequest]:

@@ -156,6 +156,27 @@ def _generator_worker(
             ("ready", (block_size, str(torch.cuda.get_device_properties(rank).uuid)))
         )
         while (command := commands.get()) is not None:
+            if command == "release":
+                pool = scheduler.connector.scheduler_manager.cpu_block_pool
+                cached = {
+                    b.block_id
+                    for b in pool.free_block_queue.get_all_free_blocks()
+                    if b.block_hash is not None
+                }
+                before = len(cached)
+                engine.release_sessions(["session-0"], [])
+                deadline = time.monotonic() + 60
+                while engine.has_unfinished_requests():
+                    assert (
+                        time.monotonic() < deadline
+                    ), "session eviction failed to drain"
+                    engine.step()
+                assert not engine._session_kv_evictor.has_pending_work
+                first_blocks = pool.free_block_queue.get_all_free_blocks()[:before]
+                assert {b.block_id for b in first_blocks} == cached
+                after = len(first_blocks)
+                results.put(("released", (before, after)))
+                continue
             (
                 version,
                 prompt,
@@ -481,6 +502,19 @@ def test_cpu_kv_and_weight_version_isolation(
             # Both DP replicas work concurrently, then DP0 drains outputs and
             # saves while DP1 is still decoding through EP collectives.
             generate(0, 1, [51] + prompt, background_prompt=[52] + prompt)
+        for rank_queues in queues:
+            for commands, _ in rank_queues:
+                commands.put("release")
+        released = []
+        for rank_queues in queues:
+            for _, results in rank_queues:
+                kind, payload = results.get(timeout=90)
+                assert kind == "released", payload
+                released.append(payload)
+        before = sum(item[0] for item in released)
+        after = sum(item[1] for item in released)
+        assert before > 0
+        print(f"Session release: SimpleCPU, cached before={before}, after={after}")
         for rank_queues in queues:
             for commands, _ in rank_queues:
                 commands.put(None)

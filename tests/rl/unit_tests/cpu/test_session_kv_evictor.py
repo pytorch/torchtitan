@@ -9,6 +9,7 @@ groups with dense retention (as `VLLMEngine` sets it), 16-token blocks standing 
 Qwen3.5's 1,152."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -504,3 +505,73 @@ def test_a_copy_a_kv_connector_holds_keeps_its_hash_and_the_free_copy_goes(
     assert held.block_hash == key and held.ref_cnt == 1
     assert free.block_hash is None
     assert get(key) is held
+
+
+def test_cpu_release_hints_wait_for_decode_and_saves_and_skip_a_shared_prefix(
+    manager, scheduler
+):
+    connector = Mock()
+    connector.get_pending_save_ids.return_value = {0}
+    evictor = VLLMSessionKVEvictor(scheduler=scheduler, offload_connector=connector)
+    first = _admit(scheduler, evictor, "first", "session-0", 0, list(range(50)))
+    _prefill(manager, first)
+    evictor.after_step()
+    shared_hashes = set(first.block_hashes)
+    evictor.release(session_ids=["session-0"], group_ids=[])
+    connector.release_session_cache.assert_not_called()
+
+    # The released request decodes one more block, then leaves vLLM while save 0 runs.
+    for token in range(BLOCK):
+        _schedule(manager, first, 1, sample=100 + token)
+    decode_hashes = set(first.block_hashes) - shared_hashes
+    assert decode_hashes
+    _finish(manager, scheduler, evictor, first)
+    assert evictor.has_pending_work
+    connector.release_session_cache.assert_not_called()
+
+    # Another session reuses the prefix before the hint; a newer save doesn't delay it.
+    second = _admit(scheduler, evictor, "second", "session-1", 1, list(range(50)))
+    _prefill(manager, second)
+    connector.get_pending_save_ids.return_value = {1}
+    evictor.after_step()
+    connector.release_session_cache.assert_called_once_with(
+        decode_hashes, shared_hashes
+    )
+    assert not evictor.has_pending_work
+
+    # The group's release sends the prefix once no live session counts it.
+    _finish(manager, scheduler, evictor, second)
+    connector.get_pending_save_ids.return_value = set()
+    evictor.release(session_ids=[], group_ids=[1])
+    assert connector.release_session_cache.call_args.args == (shared_hashes, set())
+    assert not evictor.has_pending_work
+    evictor.release(session_ids=["session-0", "unknown"], group_ids=[0, 1])
+    assert connector.release_session_cache.call_count == 2
+
+
+def test_a_hash_a_later_prompt_drops_gets_its_cpu_release_hint(manager, scheduler):
+    connector = Mock()
+    connector.get_pending_save_ids.return_value = set()
+    evictor = VLLMSessionKVEvictor(scheduler=scheduler, offload_connector=connector)
+    first = _turn(
+        manager,
+        scheduler,
+        evictor,
+        "a/turn=0",
+        session_id="a",
+        group_id=0,
+        tokens=list(range(40)),
+        output_tokens=list(range(100, 140)),
+    )
+
+    # The next prompt keeps the first prompt and rewrites the reply (e.g. stripped reasoning).
+    second = _admit(
+        scheduler, evictor, "a/turn=1", "a", 0, list(range(40)) + list(range(200, 216))
+    )
+    kept_hashes = set(second.block_hashes)
+    dropped_hashes = set(first.block_hashes) - kept_hashes
+    assert dropped_hashes
+    connector.release_session_cache.assert_not_called()
+
+    evictor.after_step()
+    connector.release_session_cache.assert_called_once_with(dropped_hashes, kept_hashes)

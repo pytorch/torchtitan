@@ -904,7 +904,10 @@ def test_mooncake_engine_args(monkeypatch, tmp_path):
     scheduler = (
         vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
     )
-    vllm_engine_module.VLLMSessionKVEvictor.assert_called_once_with(scheduler=scheduler)
+    # Mooncake has no CPU release hints: the evictor gets no connector.
+    vllm_engine_module.VLLMSessionKVEvictor.assert_called_once_with(
+        scheduler=scheduler, offload_connector=None
+    )
     second = _build_engine_kwargs(
         monkeypatch, tmp_path, config, generator_name="second"
     )
@@ -949,7 +952,9 @@ def test_simple_cpu_offload_uses_shared_coordination_without_store_settings(
     scheduler = (
         vllm_engine_module.LLMEngine.from_engine_args.return_value.engine_core.engine_core.scheduler
     )
-    vllm_engine_module.VLLMSessionKVEvictor.assert_called_once_with(scheduler=scheduler)
+    vllm_engine_module.VLLMSessionKVEvictor.assert_called_once_with(
+        scheduler=scheduler, offload_connector=scheduler.connector
+    )
 
 
 def test_mooncake_store_requires_cache_prefix():

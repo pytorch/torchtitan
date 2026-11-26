@@ -134,6 +134,7 @@ def _coordinate_worker(rank, rendezvous):
             # One shared work flag covers requests, pending KV and queued outputs.
             # A locally idle rank must keep stepping until every rank has drained.
             engine = VLLMEngine.__new__(VLLMEngine)
+            engine._session_kv_evictor = SimpleNamespace(has_pending_work=False)
             engine._coordinate_kv_offload = True
             engine._uses_kv_offload = True
             state = SimpleNamespace(requests=False, scheduled=False)
