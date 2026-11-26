@@ -29,7 +29,9 @@ class DeepSeekV3MTPBlock(TransformerBlock):
 
     ``eh_proj(cat(enorm(shifted_embedding), hnorm(previous_hidden)))``
 
-    followed by one regular transformer block.
+    followed by one regular transformer block. ``forward`` returns the
+    pre-norm hidden state for the next MTP depth and the ``mtp_norm`` output
+    for the LM head.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -61,7 +63,7 @@ class DeepSeekV3MTPBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         mtp_padding_mask_T = ~mtp_input_valid_mask
         if padding_mask is not None:
             mtp_padding_mask_T = mtp_padding_mask_T | padding_mask
@@ -95,7 +97,7 @@ class DeepSeekV3MTPBlock(TransformerBlock):
         # The residual add reads the feed-forward output with a bare op.
         remat.recompute_needs_tensor(ffn_out)
         h = h + ffn_out
-        return maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h))
+        return h, maybe_gather_tp_input(self.mtp_norm, self.mtp_norm(h))
 
     def _maybe_shard_mtp_valid_mask_across_tp(
         self, mtp_input_valid_mask_T: torch.Tensor
