@@ -814,3 +814,34 @@ def test_with_mtp_drafts_a_session_keeps_the_state_its_next_turn_hits():
         )
 
     assert num_hit_tokens == [0, 48, 96]
+
+
+def test_with_mtp_drafts_a_state_in_use_at_the_turns_last_sweep_goes_once_free():
+    # The deepest state is still in use when the request leaves vLLM (a CPU offload save, or a
+    # free that async scheduling defers): the next after_step once it is free evicts it.
+    manager = _hybrid_manager(len(MAMBA_KV_CACHE_GROUP_IDS), use_eagle=True)
+    scheduler = SimpleNamespace(kv_cache_manager=manager, requests={})
+    evictor = VLLMSessionKVEvictor(scheduler=scheduler)
+    request = _admit(scheduler, evictor, "s/turn=0", "s", 0, list(range(1000, 1040)))
+    _prefill(manager, request, sample=5000, use_eagle=True)
+    evictor.after_step()
+    for token in range(5001, 5030):
+        _schedule(manager, request, 1, sample=token)
+        evictor.after_step()
+    get = manager.block_pool.cached_block_hash_to_block.get_one_block
+    deepest_states = [
+        get(make_block_hash_with_group_id(request.block_hashes[3], kv_cache_group_id))
+        for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS
+    ]
+    manager.block_pool.touch(deepest_states)
+
+    # 70 tokens: the next turn resumes from block 2's state; block 3's is in use.
+    _finish(manager, scheduler, evictor, request)
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, request, kv_cache_group_id) == [2, 3]
+
+    manager.block_pool.free_blocks(deepest_states)
+    evictor.after_step()
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, request, kv_cache_group_id) == [2]
+    assert evictor._sessions_to_sweep == {}

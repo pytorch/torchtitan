@@ -112,7 +112,8 @@ class VLLMSessionKVEvictor:
         ]
         self._gdn_kv_cache_group_ids = [group_id for group_id, _ in gdn_groups]
         self._gdn_block_size = min((size for _, size in gdn_groups), default=0)
-        # Live sessions' newest requests, until `after_step` sweeps them after they leave vLLM.
+        # Live sessions' newest requests, until `after_step` sweeps them after they leave vLLM
+        # and none of their superseded GDN states is in use.
         self._sessions_to_sweep: dict[str, _TrackedRequest] = {}
         # Each live session's newest request.
         self._sessions: dict[str, _TrackedRequest] = {}
@@ -184,9 +185,9 @@ class VLLMSessionKVEvictor:
 
         # Sweep a request when its computed tokens cross a GDN block, and once after it
         # leaves vLLM. A request still waiting has computed nothing, so its history's state stays.
-        to_sweep: list[tuple[_TrackedRequest, bool]] = []
+        to_sweep: list[tuple[str, _TrackedRequest, bool]] = []
         block_size = self._gdn_block_size
-        for session_id, request in list(self._sessions_to_sweep.items()):
+        for session_id, request in self._sessions_to_sweep.items():
             num_computed_tokens = request.vllm_request.num_computed_tokens
             left_vllm = request.internal_request_id not in self._scheduler.requests
             crossed_gdn_block = bool(self._gdn_kv_cache_group_ids) and (
@@ -197,9 +198,7 @@ class VLLMSessionKVEvictor:
                 request.num_swept_tokens = max(
                     request.num_swept_tokens, num_computed_tokens
                 )
-                to_sweep.append((request, left_vllm))
-            if left_vllm:
-                del self._sessions_to_sweep[session_id]
+                to_sweep.append((session_id, request, left_vllm))
 
         finished = [
             request
@@ -208,11 +207,17 @@ class VLLMSessionKVEvictor:
         ]
         if to_sweep or finished:
             self._count_all_new_block_hashes()
-        for request, left_vllm in to_sweep:
+        for session_id, request, left_vllm in to_sweep:
+            has_state_in_use = False
             if self._gdn_kv_cache_group_ids:
-                self._evict_superseded_gdn_states(request, left_vllm=left_vllm)
+                has_state_in_use = self._evict_superseded_gdn_states(
+                    request, left_vllm=left_vllm
+                )
             if left_vllm:
                 self._evict_duplicate_copies(request)
+                # Swept again at the next step while a superseded state is in use.
+                if not has_state_in_use:
+                    del self._sessions_to_sweep[session_id]
 
         # Ended requests share their blocks with their session's next request or a sibling:
         # de-duplicate before uncounting them.
@@ -278,10 +283,10 @@ class VLLMSessionKVEvictor:
 
     def _evict_superseded_gdn_states(
         self, request: _TrackedRequest, *, left_vllm: bool
-    ) -> None:
+    ) -> bool:
         """Per GDN group, keep the state vLLM's prefix lookup picks for `request`'s tokens, which
         its next turn resumes from. Evict the older ones that no other request counts, and once
-        it left vLLM, the newer ones too.
+        it left vLLM, the newer ones too. Return whether a state to evict was in use.
 
             no drafts:            states at blocks 1, 2, 3 -> keeps 3
             MTP's block drop on:  states at blocks 0, 2, 3 -> keeps 2; 3 only while it runs
@@ -292,6 +297,7 @@ class VLLMSessionKVEvictor:
         )
         get_one_block = self._block_pool.cached_block_hash_to_block.get_one_block
         block_hashes = request.block_hashes
+        has_state_in_use = False
         for position, kv_cache_group_id in enumerate(self._gdn_kv_cache_group_ids):
             kept_keys = {
                 block.block_hash
@@ -322,15 +328,15 @@ class VLLMSessionKVEvictor:
                 kv_cache_group_ids=(kv_cache_group_id,),
             )
             # A copy still in use (the request's previous state, freed next step) is looked
-            # up again in the next sweep.
-            request.gdn_scan_starts[position] = min(
-                (
-                    index
-                    for index in superseded_indices
-                    if block_hashes[index] in held_block_hashes
-                ),
-                default=kept_index,
-            )
+            # up again in the next sweep, which starts at or before the kept state.
+            held_indices = [
+                index
+                for index in superseded_indices
+                if block_hashes[index] in held_block_hashes
+            ]
+            request.gdn_scan_starts[position] = min([kept_index, *held_indices])
+            has_state_in_use = has_state_in_use or bool(held_indices)
+        return has_state_in_use
 
     def _evict_duplicate_copies(self, request: _TrackedRequest) -> None:
         """For each block `request` shares with other requests, keep one cached copy per KV cache
