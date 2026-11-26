@@ -55,6 +55,24 @@ describe the released model.
 | Expert parallelism | Supported |
 | Pipeline parallelism | Supported |
 
+## Full-Scale Recipe
+
+`torchtitan_recipes.models.kimi_k3` provides a text-only throughput recipe for
+the full 93-layer model at 4K sequence length. It runs the routed experts
+through Dist-MoE in MXFP8, keeps parameters, gradients and optimizer state in
+FP32, and uses DistMuon. Expert routing is forced round-robin, so the recipe
+measures throughput, not learned-router training.
+
+| Recipe | GPUs | PP / VPP / EP / FSDP | Routing | Tokens / update | Tokens/s/GPU | Model TFLOP/s/GPU |
+| --- | --- | --- | --- | ---: | ---: | ---: |
+| `kimi_k3_dist_moe_mxfp8_gb200_512` | 512 GB200 | 8 / 1 / 64 / 64 | Forced round-robin | 16.8M | 1,010 | 651 |
+| `kimi_k3_dist_moe_mxfp8_gb200_512` | 512 GB200 | 8 / 1 / 64 / 64 | Learned | 16.8M | 971 | 627 |
+
+Throughput is the median of steady-state updates in a 12-update run. The first
+row was measured with this recipe. The learned-routing row keeps Kimi K3's
+default quantile-balanced router and raises the Dist-MoE scratch capacity
+factor from 1.0 to 2.0.
+
 ## Numerical Parity
 
 The parity script reduces the released Hugging Face configuration to match

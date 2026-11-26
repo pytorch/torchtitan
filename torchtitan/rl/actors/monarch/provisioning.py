@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+import torch
 from monarch.actor import (
     default_bootstrap_cmd,
     HostMesh,
@@ -281,16 +282,19 @@ def spawn_proc_mesh(
         host_mesh = this_host()
         env_var = get_visible_devices_env_var()
         visible_devices = os.environ.get(env_var)
-        # An empty mask means this process sees no GPUs, so the check below rejects it.
-        device_ids = (
-            [str(index) for index in range(total_gpus)]
-            if visible_devices is None
-            else [device for device in visible_devices.split(",") if device]
-        )
+        if visible_devices is None:
+            # Hand out only GPUs that exist: CUDA drops a missing id and every later
+            # id from a child's mask, so a role would fail inside its engine instead.
+            device_ids = [
+                str(index) for index in range(torch.accelerator.device_count())
+            ]
+        else:
+            # An empty mask means this process sees no GPUs; the check below rejects it.
+            device_ids = [device for device in visible_devices.split(",") if device]
         if len(device_ids) < total_gpus:
             raise ValueError(
-                f"The run needs {total_gpus} GPUs, but {env_var} lists "
-                f"{len(device_ids)}: {visible_devices!r}"
+                f"The run needs {total_gpus} GPUs, but only {len(device_ids)} are "
+                f"visible ({env_var}={visible_devices!r})"
             )
         provisioner = PerHostProvisioner(device_ids)
         trainer_mesh = host_mesh.spawn_procs(

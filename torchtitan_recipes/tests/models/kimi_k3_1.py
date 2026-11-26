@@ -30,8 +30,8 @@ from torchtitan.models.kimi_k3_1 import build_model_config
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.models.kimi_k3 import dist_muon_optimizer
 from torchtitan_recipes.tests.models.kimi_k3 import (
-    _dist_muon_optimizer,
     _kimi_k3_multimodal_dataloader,
     _KimiK3TrainerConfig,
 )
@@ -66,7 +66,7 @@ def kimi_k3_1_debugmodel(
         ),
         dataloader=_kimi_k3_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
         optim=Optim.Config(
-            optimizer=_dist_muon_optimizer(
+            optimizer=dist_muon_optimizer(
                 model_config,
                 muon_lr=8e-4,
                 adamw_lr=8e-4,
