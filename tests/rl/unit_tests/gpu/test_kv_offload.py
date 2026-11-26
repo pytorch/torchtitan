@@ -115,6 +115,7 @@ def _generator_worker(
             precision=PrecisionConfig(dtype="bfloat16"),
             gpu_memory_limit=0.15,
             max_num_batched_tokens=1024,
+            max_num_topk_logprobs=0,
             checkpointer=None,
             dist_moe_runtime=None,
             debug=DebugConfig(seed=42),

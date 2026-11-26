@@ -32,6 +32,7 @@ class GRPOLoss(DAPOLoss):
                 ratio_clip_low=config.clip_eps,
                 ratio_clip_high=config.clip_eps,
                 global_vocab_size=config.global_vocab_size,
+                score_centering=config.score_centering,
             ),
             **kwargs,
         )

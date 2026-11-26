@@ -8,11 +8,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 
 from torchtitan.rl.trainer.losses.policy_gradient import (
+    MAX_LOG_RATIO,
     PolicyGradientLoss,
     ScoredTokens,
 )
@@ -51,6 +53,13 @@ class CISPOLoss(PolicyGradientLoss):
     def token_loss(self, tokens: ScoredTokens) -> torch.Tensor:
         weight = torch.clamp(tokens.ratio, max=self.max_ratio).detach()
         return -tokens.advantages * weight * tokens.trainer_logprobs
+
+    def log_token_weight(
+        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+    ) -> torch.Tensor:
+        # The weight reads PolicyGradientLoss's ratio, whose |log r| is clamped.
+        clamped = torch.clamp(log_ratio, -MAX_LOG_RATIO, MAX_LOG_RATIO)
+        return torch.clamp(clamped, max=math.log(self.max_ratio))
 
     def token_metrics(self, tokens: ScoredTokens) -> dict[str, torch.Tensor]:
         return {"loss/ratio_truncated_frac": (tokens.ratio > self.max_ratio).float()}
@@ -96,6 +105,15 @@ class IcePopLoss(PolicyGradientLoss):
     def token_loss(self, tokens: ScoredTokens) -> torch.Tensor:
         weight = (tokens.ratio * self._in_band(tokens.ratio)).detach()
         return -tokens.advantages * weight * tokens.trainer_logprobs
+
+    def log_token_weight(
+        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+    ) -> torch.Tensor:
+        # The band lies inside PolicyGradientLoss's |log r| <= MAX_LOG_RATIO clamp.
+        in_band = (log_ratio >= math.log(self.ratio_mask_low)) & (
+            log_ratio <= math.log(self.ratio_mask_high)
+        )
+        return torch.where(in_band, log_ratio, -torch.inf)
 
     def token_metrics(self, tokens: ScoredTokens) -> dict[str, torch.Tensor]:
         return {"loss/ratio_masked_frac": (~self._in_band(tokens.ratio)).float()}

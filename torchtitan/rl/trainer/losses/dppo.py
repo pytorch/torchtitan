@@ -61,6 +61,14 @@ class DPPOLoss(PolicyGradientLoss):
                     "DPPOLoss needs divergence_threshold > 0 and max_ratio >= 1, got "
                     f"{self.divergence_threshold} and {self.max_ratio}"
                 )
+            # Score centering's top-k needs one weight for all tail tokens; DPPO's weight
+            # depends on each token's p - p_gen, not on the ratio alone.
+            # TODO: score centering with a full-vocabulary tail term for DPPO.
+            if self.score_centering is not None:
+                raise ValueError(
+                    "DPPOLoss does not support score_centering: its trust region depends "
+                    "on p - p_gen, so the generator's tail can't be folded into its top-k."
+                )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
@@ -71,6 +79,13 @@ class DPPOLoss(PolicyGradientLoss):
         # TODO: add the binary-KL variant (paper Eq. 14); the paper finds it on par.
         weight = torch.clamp(tokens.ratio, max=self.max_ratio) * ~self._dropped(tokens)
         return -tokens.advantages * weight.detach() * tokens.trainer_logprobs
+
+    def log_token_weight(
+        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+    ) -> torch.Tensor:
+        raise NotImplementedError(
+            "DPPOLoss's weight depends on p - p_gen, not on the ratio alone"
+        )
 
     def token_metrics(self, tokens: ScoredTokens) -> dict[str, torch.Tensor]:
         dropped = self._dropped(tokens)

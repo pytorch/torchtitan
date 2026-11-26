@@ -57,7 +57,13 @@ from torchtitan.rl.generator.vllm.config import VLLMCudaGraphConfig
 from torchtitan.rl.generator.vllm.engine import VLLMEngine
 from torchtitan.rl.observability.metrics import MetricsProcessor
 from torchtitan.rl.trainer.batcher import Batcher
-from torchtitan.rl.trainer.losses import CISPOLoss, DPPOLoss, GRPOLoss, IcePopLoss
+from torchtitan.rl.trainer.losses import (
+    CISPOLoss,
+    DPPOLoss,
+    GRPOLoss,
+    IcePopLoss,
+    ScoreCentering,
+)
 from torchtitan.rl.trainer.trainer import Trainer
 from torchtitan.rl.trainer.training_sample_builder import TrainingSampleBuilder
 
@@ -108,6 +114,30 @@ def rl_icepop_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     config.trainer.loss.loss_fn = IcePopLoss.Config(
         global_vocab_size=config.trainer.loss.loss_fn.global_vocab_size
+    )
+    return config
+
+
+def rl_cispo_score_centering_qwen3_0_6b_varlen(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    """``rl_cispo_qwen3_0_6b_varlen`` with score centering: arXiv 2609.20807's TIS + SC
+    (6 GPUs: 4 gen + 2 train)."""
+    config = rl_cispo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = dataclasses.replace(
+        config.trainer.loss.loss_fn, score_centering=ScoreCentering.Config()
+    )
+    return config
+
+
+def rl_icepop_score_centering_qwen3_0_6b_varlen(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    """``rl_icepop_qwen3_0_6b_varlen`` with score centering: arXiv 2609.20807's masked IS + SC
+    (6 GPUs: 4 gen + 2 train)."""
+    config = rl_icepop_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = dataclasses.replace(
+        config.trainer.loss.loss_fn, score_centering=ScoreCentering.Config()
     )
     return config
 

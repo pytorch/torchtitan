@@ -32,6 +32,8 @@ _BATCH_INVARIANT_CONFIGS = [
         (_ALPHABET_TEST, "rl_dppo_qwen3_0_6b_varlen"),
         (_ALPHABET_TEST, "rl_cispo_qwen3_0_6b_varlen"),
         (_ALPHABET_TEST, "rl_icepop_qwen3_0_6b_varlen"),
+        (_ALPHABET_TEST, "rl_cispo_score_centering_qwen3_0_6b_varlen"),
+        (_ALPHABET_TEST, "rl_icepop_score_centering_qwen3_0_6b_varlen"),
         (_ALPHABET_TEST, "rl_grpo_gpt_oss_debug_varlen"),
         (_ALPHABET_TEST, "rl_grpo_qwen3_5_debug_varlen"),
         (_ALPHABET, "rl_grpo_qwen3_6_27b_varlen_perf"),

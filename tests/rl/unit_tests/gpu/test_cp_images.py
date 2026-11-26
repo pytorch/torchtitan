@@ -254,6 +254,7 @@ def _batcher() -> Batcher:
         dp_degree=1,
         pad_id=EOS,
         temperature=1.0,
+        num_topk_logprobs=0,
         vision_processor=VISION_PROCESSOR,
     )
 

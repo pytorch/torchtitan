@@ -89,6 +89,7 @@ def generate() -> None:
         precision=config.precision,
         gpu_memory_limit=gen_config.gpu_memory_limit,
         max_num_batched_tokens=gen_config.max_num_batched_tokens,
+        max_num_topk_logprobs=0,
         checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model_path
         ),

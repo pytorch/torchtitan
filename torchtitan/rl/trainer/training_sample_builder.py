@@ -69,6 +69,11 @@ class TrainingSample:
     prompts, and that prompt is a prefix of `token_ids`)."""
     image_placeholders: tuple[PlaceholderRange, ...] = ()
     """Where each of `images` sits in `token_ids` (see `Prompt.image_placeholders`)."""
+    topk_token_ids: np.ndarray | None = None  # int32
+    """[num_loss_tokens, k] generator top-k token ids, one row per True in loss_mask. None
+    unless `SamplingConfig.num_topk_logprobs` > 0."""
+    topk_logprobs: np.ndarray | None = None  # float32
+    """[num_loss_tokens, k] generator logprobs of `topk_token_ids`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +163,8 @@ class _SampleInProgress:
     advantage: list[np.ndarray] = field(default_factory=list)
     images: tuple[PromptImage, ...] = ()
     image_placeholders: tuple[PlaceholderRange, ...] = ()
+    topk_token_ids: list[np.ndarray] = field(default_factory=list)
+    topk_logprobs: list[np.ndarray] = field(default_factory=list)
 
     def to_training_sample(self) -> TrainingSample:
         return TrainingSample(
@@ -170,6 +177,12 @@ class _SampleInProgress:
             advantage=np.concatenate(self.advantage),
             images=self.images,
             image_placeholders=self.image_placeholders,
+            topk_token_ids=(
+                np.concatenate(self.topk_token_ids) if self.topk_token_ids else None
+            ),
+            topk_logprobs=(
+                np.concatenate(self.topk_logprobs) if self.topk_logprobs else None
+            ),
         )
 
 
@@ -481,6 +494,14 @@ class TrainingSampleBuilder(Configurable):
             sample_in_progress.max_policy_version = max(
                 sample_in_progress.max_policy_version, rollout_turn.max_policy_version
             )
+            if rollout_turn.completion_topk_token_ids is not None:
+                # One row per completion (loss) token; prompt and env-reply tokens get no rows.
+                sample_in_progress.topk_token_ids.append(
+                    rollout_turn.completion_topk_token_ids
+                )
+                sample_in_progress.topk_logprobs.append(
+                    rollout_turn.completion_topk_logprobs
+                )
 
             prev_len = rollout_turn.num_prompt_tokens + num_completion
             prev_images, prev_image_placeholders = images, image_placeholders

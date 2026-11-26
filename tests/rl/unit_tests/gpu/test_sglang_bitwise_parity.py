@@ -164,6 +164,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             # Leave room for the trainer model in this process.
             gpu_memory_limit=0.5,
             max_num_batched_tokens=cls.max_num_batched_tokens,
+            max_num_topk_logprobs=0,
             checkpointer=(
                 None
                 if cls.sync_weights_from_trainer

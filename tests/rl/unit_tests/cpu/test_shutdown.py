@@ -153,6 +153,7 @@ def _make_stub_rl_trainer(tmp_path):
         )
         override = OverrideConfig()
         rollouter = SimpleNamespace(build=_StubRollouter)
+        num_topk_logprobs = 0
 
         def to_dict(self):
             return {}
