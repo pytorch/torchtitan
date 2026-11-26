@@ -779,6 +779,33 @@ def test_a_session_keeps_one_gdn_state_of_its_own_and_its_groups_shared_prompt(
     assert _prefill(manager, turn_2, sample=600) == 32
 
 
+def test_an_idle_session_drops_its_groups_prompt_state_once_no_sibling_counts_it(
+    manager, scheduler, evictor
+):
+    # Rollouts a and b of one group share a 40-token prompt; its state is at block 1.
+    prompt = list(range(40))
+    a = _admit(scheduler, evictor, "a/turn=0", "a", 0, prompt)
+    _prefill(manager, a, sample=100)
+    evictor.after_step()
+    b = _admit(scheduler, evictor, "b/turn=0", "b", 0, prompt)
+    _prefill(manager, b, sample=200)
+    evictor.after_step()
+    for request, first_token in ((a, 101), (b, 201)):
+        for token in range(first_token, first_token + 39):
+            _schedule(manager, request, 1, sample=token)
+            evictor.after_step()
+        _finish(manager, scheduler, evictor, request)
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, a, kv_cache_group_id) == [1, 3]
+
+    # b ends while a waits on a tool: only a counts the prompt's state now, so it goes, even
+    # before the engine steps again.
+    evictor.release(session_ids=["b"], group_ids=[])
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, a, kv_cache_group_id) == [3]
+    assert _cached_indices(manager, a, ATTENTION_KV_CACHE_GROUP_ID) == [0, 1, 2, 3]
+
+
 def test_a_gdn_block_spanning_several_hashes_keeps_its_deepest_state():
     # 32-token blocks, hashed every 16 tokens: each GDN state sits under every other hash.
     init_none_hash(sha256)
