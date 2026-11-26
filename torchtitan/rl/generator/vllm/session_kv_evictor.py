@@ -90,7 +90,8 @@ class VLLMSessionKVEvictor:
 
     def __init__(self, *, scheduler: Any, offload_connector: Any | None = None) -> None:
         # TODO: vLLM's session eviction hint (vllm-project/vllm#51428) would replace this
-        #   class's reads and edits of KV cache manager internals.
+        #   class's reads and edits of KV cache manager internals (`BlockHashToBlockMap._cache`
+        #   among them).
         kv_cache_manager = scheduler.kv_cache_manager
         # A group block larger than the hash block is cached under its last hash, which
         # `Request.block_hashes` holds, so eviction reaches it. Partial hits only over-evict:
@@ -470,16 +471,20 @@ class VLLMSessionKVEvictor:
     ) -> set[BlockHash]:
         """Move the free blocks of `block_hashes` in `kv_cache_group_ids` to the free queue's
         front, without their hash; return the hashes that kept a copy in use. With
-        `keep_one_copy`, one copy stays cached: a copy in use if there is one, else the copy
-        prefix lookups return first. `live_session` counts them in
+        `keep_one_copy`, a hash with several copies keeps one cached: a copy in use if there is
+        one, else the copy prefix lookups return first. `live_session` counts them in
         `num_evicted_live_session_blocks`, not `num_evicted_blocks`."""
         cached_blocks = self._block_pool.cached_block_hash_to_block
+        # vLLM stores one cached copy as the block itself, several as a dict by block id.
+        cached_copies = cached_blocks._cache
         free_block_queue = self._block_pool.free_block_queue
         evicted = []
         held_block_hashes = set()
         for block_hash in block_hashes:
             for kv_cache_group_id in kv_cache_group_ids:
                 key = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
+                if keep_one_copy and not isinstance(cached_copies.get(key), dict):
+                    continue
                 # vLLM may cache one hash in several blocks (siblings that prefilled one
                 # prompt in the same step). Each lookup returns one, so set each aside to
                 # reach the next, then put them back in order.
