@@ -559,6 +559,19 @@ class VarlenInnerAttention(InnerAttention, Generic[_VarlenMetadataT]):
             return result.to(q_THK.dtype)
 
         out_THV, lse_HT = result
+        # TODO: Remove once every torch torchtitan installs includes
+        # pytorch/pytorch#206398; RL still pins an older one
+        # (scripts/install_rl_env.sh). Before it, varlen_attn returned a
+        # non-differentiable lse, so q and k would silently miss the gradient
+        # through out_transform.
+        if q_THK.requires_grad and not lse_HT.requires_grad:
+            raise ValueError(
+                "This torch returns a non-differentiable lse from varlen_attn, so "
+                "backpropagating through out_transform would drop part of the q/k "
+                "gradient. Use a torch that includes pytorch/pytorch#206398 "
+                "(nightly 2.16.0.dev20261125 or later), or FlexInnerAttention "
+                "(attn_backend='flex')."
+            )
         out_THV = out_THV.to(q_THK.dtype)
         lse_TH = lse_HT.transpose(0, 1)
         return out_transform(out_THV, lse_TH)
