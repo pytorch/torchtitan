@@ -68,7 +68,10 @@ fi
 # TODO: by 2026-11-22, install a vLLM PyPI release on the newest torch nightly,
 # so RL CI tests the same torch as core CI. Blocked until the generator runs on
 # vLLM 0.33 (https://github.com/pytorch/torchtitan/pull/5498). Hard limit
-# ~2027-01: the nightly index lists only the newest ~60 days of wheels.
+# ~2027-01: the nightly index lists only the newest ~60 days of wheels. Until
+# then RL can't train GPT-OSS with varlen attention: this torch returns a
+# non-differentiable lse (fixed by pytorch/pytorch#206398), so the trainer
+# raises instead of dropping part of the gradient.
 nightly=(torch torchvision "vllm==1.0.0.dev20261107+${cuda}")
 if [[ "$(uname -m)" == "x86_64" ]]; then
   nightly+=(xformers)
