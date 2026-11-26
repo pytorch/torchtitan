@@ -991,8 +991,10 @@ def test_with_mtp_drafts_a_state_in_use_at_the_turns_last_sweep_goes_once_free()
     assert evictor._sessions_to_sweep == {}
 
 
-def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evictor):
-    # Two rollouts of one group share a 40-token prompt, prefilled in one chunk; 3 turns.
+def _vllm_engine(kv_cache_config: KVCacheConfig, scheduler=None) -> VLLMEngine:
+    """A `VLLMEngine` with only what `kv_cache_capacity` reads: DP size and the KV cache config."""
+    scheduler = scheduler or SimpleNamespace()
+    scheduler.kv_cache_config = kv_cache_config
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._engine = SimpleNamespace(
         vllm_config=SimpleNamespace(
@@ -1000,8 +1002,12 @@ def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evict
         ),
         engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler)),
     )
-    scheduler.kv_cache_config = manager.kv_cache_config
-    capacity = engine.kv_cache_capacity()
+    return engine
+
+
+def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evictor):
+    # Two rollouts of one group share a 40-token prompt, prefilled in one chunk; 3 turns.
+    capacity = _vllm_engine(manager.kv_cache_config, scheduler).kv_cache_capacity()
     assert capacity == KVCacheCapacity(
         num_blocks=119,
         attention_block_sizes=(BLOCK,),
@@ -1022,9 +1028,17 @@ def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evict
             _admit(scheduler, evictor, f"{index}/turn={turn}", str(index), 0, history)
             for index, history in enumerate(histories)
         ]
-        for step in range(31):
+        for step in range(32):
             for index, request in enumerate(requests):
-                if step == 0:
+                if turn == 0 and step == 0:
+                    # vLLM schedules a group's first calls together, before either's prompt
+                    # is cached: each computes and caches its own copy.
+                    _schedule(manager, request, 2 * BLOCK)
+                elif turn == 0 and step == 1:
+                    _schedule(
+                        manager, request, 8, sample=0
+                    )  # the prompt's last 8 tokens
+                elif step == 0:
                     _prefill(manager, request, sample=100 * turn)
                 else:
                     _schedule(manager, request, 1, sample=1000 * index + step)
@@ -1048,3 +1062,27 @@ def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evict
             + list(range(2000 + 50 * turn, 2010 + 50 * turn))
             for request in requests
         ]
+
+
+def test_vllm_kv_cache_capacity_raises_for_a_sliding_window_kv_cache_group():
+    # Admission counts full attention and align-mode Mamba groups; any other raises at start.
+    attention = FullAttentionSpec(
+        block_size=BLOCK, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    sliding_window = SlidingWindowSpec(
+        block_size=BLOCK,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        sliding_window=64,
+    )
+    config = KVCacheConfig(
+        num_blocks=120,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], attention),
+            KVCacheGroupSpec(["swa"], sliding_window),
+        ],
+    )
+    with pytest.raises(ValueError, match="SlidingWindowSpec KV cache group"):
+        _vllm_engine(config).kv_cache_capacity()

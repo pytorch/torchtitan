@@ -659,7 +659,8 @@ class VLLMEngine(GenerationEngine):
         # TODO(acisseJZhong): LLMEngine exposes neither pending KV work nor DP dummy
         # forwards, so this and step() use the private engine_core.engine_core
         # (scheduler, batch_queue), has_unfinished_requests_dp,
-        # should_execute_dummy_batch and execute_dummy_batch:
+        # should_execute_dummy_batch and execute_dummy_batch, and kv_cache_capacity()
+        # reads its scheduler's kv_cache_config:
         # https://github.com/vllm-project/vllm/issues/69786
         core = self._engine.engine_core.engine_core
         return (
