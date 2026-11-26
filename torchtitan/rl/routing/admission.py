@@ -222,6 +222,7 @@ class _PlacedGroup:
     """Started sessions not released, by routing session id."""
 
     released_session_ids: set[str] = field(default_factory=set)
+    """Sessions `release_session` released; `reserve` raises for their later calls."""
 
 
 @dataclass(kw_only=True, slots=True)
