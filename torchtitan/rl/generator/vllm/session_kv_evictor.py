@@ -27,6 +27,7 @@ class _TrackedRequest:
     """One request's block hashes, counted while they may still be reused."""
 
     internal_request_id: str
+    session_id: str
     vllm_request: Request
     """vLLM's request, read for its computed tokens."""
     block_hashes: list[BlockHash]
@@ -116,9 +117,6 @@ class VLLMSessionKVEvictor:
         # Live sessions' newest requests, until `after_step` sweeps them after they leave vLLM
         # and none of their superseded GDN states is in use.
         self._sessions_to_sweep: dict[str, _TrackedRequest] = {}
-        # Superseded GDN states that sweeps kept because other requests counted them (a group's
-        # prompt), by hash; `_forget` sweeps their sessions again once at most one request counts it.
-        self._sessions_by_shared_gdn_state: dict[BlockHash, set[str]] = {}
         # Each live session's newest request.
         self._sessions: dict[str, _TrackedRequest] = {}
         self._group_sessions: dict[int, set[str]] = {}
@@ -162,6 +160,7 @@ class VLLMSessionKVEvictor:
         vllm_request = self._scheduler.requests[internal_request_id]
         request = _TrackedRequest(
             internal_request_id=internal_request_id,
+            session_id=session_id,
             vllm_request=vllm_request,
             block_hashes=vllm_request.block_hashes,
             gdn_scan_starts=[0] * len(self._gdn_kv_cache_group_ids),
@@ -218,7 +217,7 @@ class VLLMSessionKVEvictor:
             has_state_in_use = False
             if self._gdn_kv_cache_group_ids:
                 has_state_in_use = self._evict_superseded_gdn_states(
-                    session_id, request, left_vllm=left_vllm
+                    request, left_vllm=left_vllm
                 )
             if left_vllm:
                 self._evict_duplicate_copies(request)
@@ -251,49 +250,77 @@ class VLLMSessionKVEvictor:
         ]
         for session_id in released_session_ids:
             self._sessions_to_sweep.pop(session_id, None)
-        for swept_session_ids in self._sessions_by_shared_gdn_state.values():
-            swept_session_ids.difference_update(released_session_ids)
         self._forget(
             [self._sessions.pop(session_id) for session_id in released_session_ids]
         )
         self._release_cpu_cache()
 
     def _forget(self, requests: list[_TrackedRequest]) -> None:
-        """Uncount `requests` that left vLLM and evict their hashes that nothing counts; keep
-        counting the others until `after_step` sees them leave."""
+        """Uncount `requests` that left vLLM, evict their hashes that nothing counts, and sweep
+        again the session that alone counts the rest; keep counting the others until `after_step`
+        sees them leave."""
         ended_block_hashes: list[BlockHash] = []
-        sessions_to_sweep_again: set[str] = set()
+        # Per request, the first index of its hashes that one other request counts now.
+        first_single_counted: list[tuple[_TrackedRequest, int]] = []
         for request in requests:
             if request.internal_request_id in self._scheduler.requests:
                 self._ended_requests[request.internal_request_id] = request
                 continue
             self._count_new_block_hashes(request)
-            for block_hash in request.block_hashes:
+            first_index = None
+            for index, block_hash in enumerate(request.block_hashes):
                 num_requests = self._num_requests_by_hash.pop(block_hash) - 1
                 if num_requests:
                     self._num_requests_by_hash[block_hash] = num_requests
-                if (
-                    num_requests <= 1
-                    and block_hash in self._sessions_by_shared_gdn_state
-                ):
-                    sessions_to_sweep_again |= self._sessions_by_shared_gdn_state.pop(
-                        block_hash
-                    )
+                if num_requests == 1 and first_index is None:
+                    first_index = index
+            if first_index is not None and self._gdn_kv_cache_group_ids:
+                first_single_counted.append((request, first_index))
             ended_block_hashes += request.block_hashes
 
-        # Sessions that kept a shared superseded GDN state, which at most one request counts now.
-        # An idle one sweeps now: the engine may not step again before its next turn. A running
-        # one sweeps when it leaves vLLM.
-        if sessions_to_sweep_again:
-            self._count_all_new_block_hashes()
-        for session_id in sorted(sessions_to_sweep_again):
-            session = self._sessions.get(session_id)
-            if (
-                session is None
-                or session.internal_request_id in self._scheduler.requests
-            ):
+        # The one request that counts a hash from `index` on counts all of them (hashes chain).
+        # If it is a live session's, its sweeps may have passed GDN states there while others
+        # counted them (a late sibling caches the group prompt's state again): it sweeps again
+        # from `index`, now if idle (the engine may not step before its next turn), else later.
+        rescan_starts: dict[str, int] = {}
+        for request, index in first_single_counted:
+            block_hash = request.block_hashes[index]
+            # Another request of this call may have uncounted it since.
+            if self._num_requests_by_hash.get(block_hash) != 1:
                 continue
-            if self._evict_superseded_gdn_states(session_id, session, left_vllm=True):
+            own_session = self._sessions.get(request.session_id)
+            if own_session is not None and own_session.block_hashes[
+                index : index + 1
+            ] == [block_hash]:
+                session_id = request.session_id
+            else:
+                # Another session (a sibling, or another group's for a system prompt), or a
+                # request still in vLLM.
+                session_id = next(
+                    (
+                        candidate_id
+                        for candidate_id, candidate in self._sessions.items()
+                        if candidate.block_hashes[index : index + 1] == [block_hash]
+                    ),
+                    None,
+                )
+                if session_id is None:
+                    continue
+            rescan_starts[session_id] = min(index, rescan_starts.get(session_id, index))
+        idle_session_ids = []
+        for session_id in sorted(rescan_starts):
+            session = self._sessions[session_id]
+            session.gdn_scan_starts = [
+                min(start, rescan_starts[session_id])
+                for start in session.gdn_scan_starts
+            ]
+            if session.internal_request_id not in self._scheduler.requests:
+                idle_session_ids.append(session_id)
+        if idle_session_ids:
+            self._count_all_new_block_hashes()
+        for session_id in idle_session_ids:
+            session = self._sessions[session_id]
+            if self._evict_superseded_gdn_states(session, left_vllm=True):
                 self._sessions_to_sweep[session_id] = session
 
         uncounted = [
@@ -316,7 +343,7 @@ class VLLMSessionKVEvictor:
             self._cpu_hashes_to_release.update(released)
 
     def _evict_superseded_gdn_states(
-        self, session_id: str, request: _TrackedRequest, *, left_vllm: bool
+        self, request: _TrackedRequest, *, left_vllm: bool
     ) -> bool:
         """Per GDN group, keep the state vLLM's prefix lookup picks for `request`'s tokens, which
         its next turn resumes from. Evict the older ones that no other request counts, and once
@@ -351,34 +378,27 @@ class VLLMSessionKVEvictor:
             if kept_index is None:
                 continue
 
-            # A superseded state that other requests count stays, recorded for `_forget`.
-            superseded_indices, shared_indices = [], []
-            for index in cached_indices:
-                if index == kept_index or (index > kept_index and not left_vllm):
-                    continue
-                block_hash = block_hashes[index]
-                if self._num_requests_by_hash[block_hash] == 1:
-                    superseded_indices.append(index)
-                else:
-                    shared_indices.append(index)
-                    self._sessions_by_shared_gdn_state.setdefault(
-                        block_hash, set()
-                    ).add(session_id)
+            # A superseded state that other requests count stays; `_forget` sweeps again once
+            # one request counts it.
+            superseded_indices = [
+                index
+                for index in cached_indices
+                if (index < kept_index or (left_vllm and index > kept_index))
+                and self._num_requests_by_hash[block_hashes[index]] == 1
+            ]
             held_block_hashes = self._evict(
                 [block_hashes[index] for index in superseded_indices],
                 kv_cache_group_ids=(kv_cache_group_id,),
                 live_session=True,
             )
-            # A copy still in use (the request's previous state, freed next step) and a shared
-            # state are looked up again in a later sweep, which starts at or before them.
+            # A copy still in use (the request's previous state, freed next step) is looked
+            # up again in the next sweep, which starts at or before the kept state.
             held_indices = [
                 index
                 for index in superseded_indices
                 if block_hashes[index] in held_block_hashes
             ]
-            request.gdn_scan_starts[position] = min(
-                [kept_index, *held_indices, *shared_indices]
-            )
+            request.gdn_scan_starts[position] = min([kept_index, *held_indices])
             has_state_in_use = has_state_in_use or bool(held_indices)
         return has_state_in_use
 

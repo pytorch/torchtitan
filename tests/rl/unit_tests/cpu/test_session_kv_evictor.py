@@ -806,6 +806,36 @@ def test_an_idle_session_drops_its_groups_prompt_state_once_no_sibling_counts_it
     assert _cached_indices(manager, a, ATTENTION_KV_CACHE_GROUP_ID) == [0, 1, 2, 3]
 
 
+def test_an_idle_session_drops_a_state_its_late_sibling_cached_again(
+    manager, scheduler, evictor
+):
+    # a's sweep drops the 70-token group prompt's state (block 3) while only a counts it. b starts
+    # later, prefills the prompt again and caches that state again, below the blocks a's sweeps
+    # look at.
+    prompt = list(range(70))
+    a = _admit(scheduler, evictor, "a/turn=0", "a", 0, prompt)
+    _prefill(manager, a, sample=100)
+    evictor.after_step()
+    for token in range(101, 113):
+        _schedule(manager, a, 1, sample=token)
+        evictor.after_step()
+    b = _admit(scheduler, evictor, "b/turn=0", "b", 0, prompt)
+    assert _prefill(manager, b, sample=200) == 0
+    evictor.after_step()
+    for request, first_token in ((a, 113), (b, 201)):
+        for token in range(first_token, first_token + 20):
+            _schedule(manager, request, 1, sample=token)
+            evictor.after_step()
+        _finish(manager, scheduler, evictor, request)
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, a, kv_cache_group_id) == [3, 5]
+
+    # b's release leaves a as the one session counting block 3's state, so it goes.
+    evictor.release(session_ids=["b"], group_ids=[])
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, a, kv_cache_group_id) == [5]
+
+
 def test_a_gdn_block_spanning_several_hashes_keeps_its_deepest_state():
     # 32-token blocks, hashed every 16 tokens: each GDN state sits under every other hash.
     init_none_hash(sha256)
