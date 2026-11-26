@@ -26,7 +26,15 @@ globs: torchtitan/**, torchtitan_recipes/**
   a subpackage of it. No catch-all `utils.py` / `types.py`; a type lives in the
   module that creates it.
 - Service cores are plain, framework-free classes; actor/engine wrappers are thin
-  adapters around them. Prefer composition where users may subclass the core.
+  adapters around them: they forward, and any sequencing (setup, metrics,
+  shutdown) that every actor system would need lives in the core. Prefer
+  composition where users may subclass the core.
+- Shared wrappers are general: at most one wrapper per functionality, no
+  per-model or per-backend subclasses of it, and no branches on a specific
+  model's type in shared code.
+- The component that consumes a value owns it: it issues the collective it
+  needs and derives its settings from its own config. Don't infer facts about
+  our own components by probing their behavior; have them state the fact.
 - Heavy or optional dependencies are imported only inside their subpackage (and
   lazily for default configs). Importing a package has no side effects: no heavy
   re-exports, no environment mutation.

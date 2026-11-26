@@ -97,7 +97,7 @@ uv pip install --no-deps \
   "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
 # Mooncake and NIXL backends of torch.distributed._transport, for
-# ModelStateDictTransport (torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md). The
+# ModelStateDictTransport (torchtitan/rl/transport/MODEL_STATE_DICT_TRANSPORT.md). The
 # CUDA 13 builds match cu132. --no-deps: nixl-cu13 requires torch, and the nixl
 # package also requires nixl-cu12; mooncake's deps (aiohttp, requests, msgpack)
 # come with vllm.
