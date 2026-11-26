@@ -222,7 +222,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
         use_triton: bool = False
-        """Use Triton local updates while keeping redistribution unchanged."""
+        """Use CUDA FP32/BF16 local kernels; adds first-step Triton JIT time."""
         max_nccl_ctas_for_comms: int = -1  # Cap NCCL CTAs to save memory; <=0 disables.
         """Limit NCCL CTAs for DistMuon redistribution only; ``<= 0`` disables.
 

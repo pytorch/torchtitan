@@ -257,16 +257,19 @@ class DistMuon(Optimizer):
             bucket_configs=bucket_configs,
         )
         if use_triton:
-            from .kernels.cuda.triton.muon import local_updates
+            from .kernels.cuda.triton import muon
 
-            (
-                self._prepare_input,
-                self._compute_direction,
-                self._apply_parameter_update,
-            ) = local_updates(
-                self.param_groups,
-                adjust_learning_rate=_adjust_muon_learning_rate,
-                coefficients_by_step=_ns_coefficients_by_step,
+            muon.check_supported(
+                p for group in self.param_groups for p in group["params"]
+            )
+            self._prepare_input = partial(_prepare_muon_input, kernel=muon.momentum_)
+            self._compute_direction = partial(
+                _compute_muon_direction,
+                normalizer=muon.normalize_,
+                copy_scaled=muon.copy_scaled_,
+            )
+            self._apply_parameter_update = partial(
+                _apply_muon_update, kernel=muon.decay_and_update_
             )
 
     @staticmethod
@@ -1839,8 +1842,19 @@ def _prepare_muon_input(
     momentum: float,
     nesterov: bool,
     out: Tensor,
+    kernel: Callable[..., None] | None = None,
 ) -> Tensor:
     """Update momentum and prepare the Tensor passed to Muon computation."""
+    if kernel is not None:
+        kernel(
+            gradient,
+            momentum_buffer,
+            out,
+            weight=1 - momentum,
+            momentum=momentum,
+            nesterov=nesterov,
+        )
+        return out
     momentum_buffer.lerp_(gradient, 1 - momentum)
     if nesterov:
         torch.lerp(
@@ -1863,6 +1877,8 @@ def _compute_muon_direction(
     ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
+    normalizer: Callable[[Tensor, Tensor, float], None] | None = None,
+    copy_scaled: Callable[..., None] | None = None,
 ) -> Tensor:
     """Compute independent matrix directions with relative shape scaling."""
     reference_ratio = (
@@ -1872,14 +1888,25 @@ def _compute_muon_direction(
     )
     for view in matrix_views:
         matrices = view.view_as_matrix_batch(prepared)
-        matrices.copy_(
-            _zeropower_via_newtonschulz(
-                matrices,
-                ns_coefficients=ns_coefficients,
-                ns_steps=ns_steps,
-                eps=eps,
-            )
+        direction = _zeropower_via_newtonschulz(
+            matrices,
+            ns_coefficients=ns_coefficients,
+            ns_steps=ns_steps,
+            eps=eps,
+            normalizer=normalizer,
         )
+        if copy_scaled is not None:
+            ratio = (
+                1.0
+                if reference_ratio is None
+                else _adjust_muon_learning_rate(1.0, adjust_lr_fn, matrices.shape[-2:])
+                / reference_ratio
+            )
+            copy_scaled(direction, matrices, scale=ratio)
+            del direction
+            continue
+        matrices.copy_(direction)
+        del direction
         if reference_ratio is None:
             continue
         ratio = _adjust_muon_learning_rate(1.0, adjust_lr_fn, matrices.shape[-2:])
@@ -1954,6 +1981,7 @@ def _apply_muon_update(
     weight_decay: float,
     adjust_lr_fn: str | None,
     compute_matrix_shape: torch.Size | tuple[int, ...],
+    kernel: Callable[..., None] | None = None,
 ) -> Tensor:
     """Apply decoupled weight decay and a computed Muon direction."""
     adjusted_lr = _adjust_muon_learning_rate(
@@ -1961,6 +1989,9 @@ def _apply_muon_update(
         adjust_lr_fn,
         compute_matrix_shape,
     )
+    if kernel is not None:
+        kernel(parameter, direction, decay=1 - lr * weight_decay, alpha=-adjusted_lr)
+        return parameter
     parameter.mul_(1 - lr * weight_decay)
     parameter.add_(direction, alpha=-adjusted_lr)
     return parameter
@@ -1972,6 +2003,7 @@ def _zeropower_via_newtonschulz(
     ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
+    normalizer: Callable[[Tensor, Tensor, float], None] | None = None,
 ) -> Tensor:
     """Compute Muon's approximate polar factor without optimizer state."""
     coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
@@ -1979,7 +2011,12 @@ def _zeropower_via_newtonschulz(
     transposed = result.shape[-2] > result.shape[-1]
     if transposed:
         result = result.transpose(-2, -1)
-    result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
+    norm = result.norm(dim=(-2, -1), keepdim=True)
+    if normalizer is None:
+        result.div_(norm.clamp_min(eps))
+    else:
+        normalizer(result, norm, eps)
+    del norm
 
     if result.ndim == 2:
         for a, b, c in coefficients_by_step:

@@ -98,7 +98,8 @@ DistMuon.Config(..., use_triton=True)
 
 The standalone FlexShard `DistMuon` constructor also accepts `use_triton=True`.
 The default is PyTorch updates. The Triton path requires CUDA FP32 or BF16 storage.
-NS matrix multiplications and redistribution retain their PyTorch implementations.
+Norm reduction, NS matrix multiplications and redistribution retain their
+PyTorch implementations.
 
 ## Package boundary
 
