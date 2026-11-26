@@ -709,6 +709,7 @@ class VLLMEngine(GenerationEngine):
                 "over the DP replicas without looking at their KV."
             )
 
+        # Private: see the vllm#69786 TODO in `_has_unfinished_local_requests`.
         kv_cache_config = self._engine.engine_core.engine_core.scheduler.kv_cache_config
         attention_block_sizes, blocks_per_state, num_running_states = [], 0, 0
         for kv_cache_group in kv_cache_config.kv_cache_groups:

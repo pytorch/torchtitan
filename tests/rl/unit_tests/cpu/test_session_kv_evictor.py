@@ -1035,9 +1035,8 @@ def test_vllm_kv_cache_capacity_bounds_what_vllm_keeps(manager, scheduler, evict
                     # is cached: each computes and caches its own copy.
                     _schedule(manager, request, 2 * BLOCK)
                 elif turn == 0 and step == 1:
-                    _schedule(
-                        manager, request, 8, sample=0
-                    )  # the prompt's last 8 tokens
+                    # the prompt's last 8 tokens
+                    _schedule(manager, request, 8, sample=0)
                 elif step == 0:
                     _prefill(manager, request, sample=100 * turn)
                 else:
