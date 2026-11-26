@@ -41,7 +41,8 @@ class VLLMSessionKVEvictor:
         a system prompt A and B share -> count 1 (B)            -> stays cached
 
     - Blocks in use (a running request, a KV connector's save) keep their hash and stay in
-      the prefix cache.
+      the prefix cache. A block in use when its hash is evicted goes in the first
+      `after_step` after it is free, unless a request counts its hash again.
     - Every TP rank makes the same calls in the same order and evicts in block id order, so
       the ranks' schedulers stay identical.
     - With CPU offload, the evicted hashes also go to the connector, once the saves pending
@@ -84,6 +85,8 @@ class VLLMSessionKVEvictor:
         # Replaced or released requests still in vLLM, by internal request id.
         self._ended_requests: dict[str, _TrackedRequest] = {}
         self._num_requests_by_hash: dict[BlockHash, int] = {}
+        # Hashes whose eviction skipped a block in use; `after_step` retries them.
+        self._held_block_hashes: set[BlockHash] = set()
         # CPU release hints: hashes evicted since the last hint, and the batch whose hint
         # waits for the saves that were pending when it formed.
         self._offload_connector = offload_connector
@@ -125,7 +128,21 @@ class VLLMSessionKVEvictor:
             self._forget([previous])
 
     def after_step(self) -> None:
-        """Evict the blocks of replaced or released requests that left vLLM in this step."""
+        """Evict the blocks of replaced or released requests that left vLLM in this step, and
+        the blocks that were in use at their eviction and are free now."""
+        if self._held_block_hashes:
+            # A hash a request counts again stays: that request's end evicts it.
+            self._count_all_new_block_hashes()
+            held_block_hashes = self._held_block_hashes
+            self._held_block_hashes = set()
+            self._evict(
+                [
+                    block_hash
+                    for block_hash in held_block_hashes
+                    if block_hash not in self._num_requests_by_hash
+                ]
+            )
+
         finished = [
             request
             for internal_id, request in self._ended_requests.items()
@@ -235,14 +252,11 @@ class VLLMSessionKVEvictor:
                 in_use = []
                 while (block := cached_blocks.get_one_block(key)) is not None:
                     if block.ref_cnt > 0:
-                        # TODO: a block still in use (a KV connector's save or lazy copy, or a
-                        #   free vLLM defers under async scheduling with a KV connector) keeps
-                        #   its hash and returns cached to the free queue's tail. Retry its
-                        #   hash in each `after_step` until no copy is held, rechecking the
-                        #   counts. Not needed yet: without a KV connector, nothing but a
-                        #   running request holds a block.
+                        # In use, e.g. by a KV connector's save or lazy copy, or a free that
+                        # async scheduling defers: it keeps its hash until `after_step` retries.
                         cached_blocks.pop(key, block.block_id)
                         in_use.append(block)
+                        self._held_block_hashes.add(block_hash)
                         continue
                     free_block_queue.remove(block)
                     # Drops the block's hashes, as vLLM does when it reuses a cached block.

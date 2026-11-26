@@ -477,8 +477,9 @@ def test_a_kv_cache_group_with_blocks_larger_than_the_hash_block_is_evicted_too(
     assert _cached_indices(manager, b, 1) == list(range(8))
 
 
-def test_a_copy_a_kv_connector_holds_keeps_its_hash_and_the_free_copy_goes(
-    manager, scheduler, evictor
+@pytest.mark.parametrize("counted_again", [False, True])
+def test_a_copy_a_kv_connector_holds_keeps_its_hash_until_the_connector_frees_it(
+    manager, scheduler, evictor, counted_again
 ):
     # Rollouts a and b prefilled one prompt in the same step, so vLLM cached 2 copies of it.
     # vLLM's CPU offload holds a block while it copies it, and asserts the block still has
@@ -505,6 +506,20 @@ def test_a_copy_a_kv_connector_holds_keeps_its_hash_and_the_free_copy_goes(
     assert held.block_hash == key and held.ref_cnt == 1
     assert free.block_hash is None
     assert get(key) is held
+
+    if counted_again:
+        # A new rollout's prompt counts the hash before the copy completes.
+        _admit(scheduler, evictor, "c/turn=0", "c", 3, prompt)
+    manager.block_pool.free_blocks([held])
+    evictor.after_step()
+
+    if counted_again:
+        assert held.block_hash == key
+    else:
+        free_block_queue = manager.block_pool.free_block_queue
+        assert held.block_hash is None and get(key) is None
+        assert next(free_block_queue.iter_blocks_after(None)) is held
+    assert evictor._held_block_hashes == set()
 
 
 def test_cpu_release_hints_wait_for_decode_and_saves_and_skip_a_shared_prefix(
