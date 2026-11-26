@@ -87,7 +87,7 @@ class VLLMSessionKVEvictor:
 
     def __init__(self, *, scheduler: Any, offload_connector: Any | None = None) -> None:
         # TODO: vLLM's session eviction hint (vllm-project/vllm#51428) would replace this
-        #   class's reads and edits of BlockPool internals.
+        #   class's reads and edits of KV cache manager internals.
         kv_cache_manager = scheduler.kv_cache_manager
         # A group block larger than the hash block is cached under its last hash, which
         # `Request.block_hashes` holds, so eviction reaches it. Partial hits only over-evict:
@@ -129,8 +129,11 @@ class VLLMSessionKVEvictor:
         self._cpu_hashes_to_release: set[BlockHash] = set()
         self._cpu_releasing_hashes: set[BlockHash] = set()
         self._cpu_releasing_save_ids: set[int] = set()
-        # A plain int, so other threads (e.g. a logging endpoint) can read it safely.
+        # Plain ints, so other threads (e.g. a logging endpoint) can read them safely. Blocks
+        # of ended sessions and requests; and blocks live sessions no longer need: superseded
+        # GDN states and extra copies of shared blocks.
         self.num_evicted_blocks = 0
+        self.num_evicted_live_session_blocks = 0
 
     @property
     def num_sessions(self) -> int:
@@ -226,6 +229,7 @@ class VLLMSessionKVEvictor:
             del self._ended_requests[request.internal_request_id]
         if finished:
             self._forget(finished)
+
         self._release_cpu_cache()
 
     def release(self, *, session_ids: list[str], group_ids: list[int]) -> None:
@@ -326,6 +330,7 @@ class VLLMSessionKVEvictor:
             held_block_hashes = self._evict(
                 [block_hashes[index] for index in superseded_indices],
                 kv_cache_group_ids=(kv_cache_group_id,),
+                live_session=True,
             )
             # A copy still in use (the request's previous state, freed next step) is looked
             # up again in the next sweep, which starts at or before the kept state.
@@ -358,6 +363,7 @@ class VLLMSessionKVEvictor:
             shared_block_hashes,
             kv_cache_group_ids=self._kv_cache_group_ids,
             keep_one_copy=True,
+            live_session=True,
         )
 
     def _release_cpu_cache(self) -> None:
@@ -401,10 +407,12 @@ class VLLMSessionKVEvictor:
         *,
         kv_cache_group_ids: Sequence[int],
         keep_one_copy: bool = False,
+        live_session: bool = False,
     ) -> set[BlockHash]:
         """Move the free blocks of `block_hashes` in `kv_cache_group_ids` to the free queue's
         front, without their hash; return the hashes that kept a copy in use. With
-        `keep_one_copy`, the copy prefix lookups return first stays cached too."""
+        `keep_one_copy`, the copy prefix lookups return first stays cached too. `live_session`
+        counts them in `num_evicted_live_session_blocks`, not `num_evicted_blocks`."""
         cached_blocks = self._block_pool.cached_block_hash_to_block
         free_block_queue = self._block_pool.free_block_queue
         evicted = []
@@ -433,5 +441,8 @@ class VLLMSessionKVEvictor:
                     cached_blocks.insert(key, block)
         # Block id order, so every TP rank leaves the same free queue.
         free_block_queue.prepend_n(sorted(evicted, key=lambda block: block.block_id))
-        self.num_evicted_blocks += len(evicted)
+        if live_session:
+            self.num_evicted_live_session_blocks += len(evicted)
+        else:
+            self.num_evicted_blocks += len(evicted)
         return held_block_hashes

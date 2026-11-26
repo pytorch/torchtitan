@@ -235,13 +235,12 @@ def test_an_ended_rollouts_blocks_are_reused_before_a_live_rollouts(
     )
     num_ended_blocks = _num_cached_blocks(manager, ended)
     num_free_uncached = _num_free_uncached_blocks(manager)
-    num_evicted_blocks = evictor.num_evicted_blocks
 
     # The rollout ended, and with it its group of one.
     evictor.release(session_ids=["ended"], group_ids=[1])
 
     assert _num_cached_blocks(manager, ended) == 0
-    assert evictor.num_evicted_blocks - num_evicted_blocks == num_ended_blocks
+    assert evictor.num_evicted_blocks == num_ended_blocks
     # They head the free queue in block id order, so every TP rank leaves the same queue.
     queue = manager.block_pool.free_block_queue.iter_blocks_after(None)
     front = [next(queue).block_id for _ in range(num_ended_blocks)]
