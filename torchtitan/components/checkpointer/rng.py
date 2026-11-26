@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 import pickle
 from dataclasses import dataclass
 from typing import Any
@@ -13,7 +12,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed.checkpoint.stateful import Stateful
 
-logger = logging.getLogger(__name__)
 RNG_STATE = "rng_state"
 
 
@@ -70,21 +68,19 @@ class RngState(Stateful):
 
     def state_dict(self) -> dict[str, Any]:
         # Serialize on the calling thread, before asynchronous staging starts.
-        return {f"rank_{self.rank}": pickle.dumps(RngSnapshot.capture())}
+        return {
+            "world_size": self.world_size,
+            f"rank_{self.rank}": pickle.dumps(RngSnapshot.capture()),
+        }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.pending = pickle.loads(state_dict[f"rank_{self.rank}"])
-
-    def can_load(self, keys: set[str]) -> bool:
-        expected = {f"{RNG_STATE}.rank_{rank}" for rank in range(self.world_size)}
-        actual = {key for key in keys if key.startswith(f"{RNG_STATE}.")}
-        if actual != expected:
-            logger.warning(
-                "Checkpoint RNG rank set is absent or incompatible; restoring other "
-                "training state without RNG continuity."
+        if state_dict["world_size"] != self.world_size:
+            raise ValueError(
+                f"Checkpoint RNG world size {state_dict['world_size']} differs from "
+                f"the current world size {self.world_size}. To resume without RNG "
+                'restoration, set exclude_from_loading=["rng_state"].'
             )
-            return False
-        return True
+        self.pending = pickle.loads(state_dict[f"rank_{self.rank}"])
 
     def restore(self) -> None:
         snapshot, self.pending = self.pending, None
@@ -95,10 +91,9 @@ class RngState(Stateful):
             dist.all_gather_object(layouts, compatible)
             compatible = all(layouts)
         if not compatible:
-            logger.warning(
-                "Checkpoint RNG device layout differs; restoring other training "
-                "state without RNG continuity on every rank."
+            raise ValueError(
+                "Checkpoint RNG accelerator backend differs on at least one rank. "
+                'To resume without RNG restoration, set exclude_from_loading=["rng_state"].'
             )
-            return
         assert snapshot is not None
         snapshot.restore()

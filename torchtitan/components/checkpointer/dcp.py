@@ -19,15 +19,10 @@ from typing import Any, cast, TYPE_CHECKING
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import (
-    FileSystemReader,
-    HuggingFaceStorageWriter,
-    Metadata,
-)
+from torch.distributed.checkpoint import HuggingFaceStorageWriter, Metadata
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
 )
-from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
@@ -388,24 +383,11 @@ class CheckpointManager(BaseCheckpointManager):
         Raises:
             AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
-        states = dict(states)
         rng = self._rng_state if RNG_STATE in states else None
-        reader = None
-        if rng is not None:
-            # Weights-only/evaluation loads do not restore training streams.
-            if from_hf or OPTIMIZER not in states:
-                states.pop(RNG_STATE)
-                rng = None
-            else:
-                reader_cls = (
-                    FsspecReader
-                    if filesystem.is_remote(checkpoint_id)
-                    else FileSystemReader
-                )
-                reader = reader_cls(checkpoint_id)
-                if not rng.can_load(set(reader.read_metadata().state_dict_metadata)):
-                    states.pop(RNG_STATE)
-                    rng = None
+        if rng is not None and OPTIMIZER not in states:
+            raise ValueError(
+                'Add "rng_state" to exclude_from_loading when excluding the optimizer.'
+            )
         state_dict = self._flattened_model_states_sd(states)
 
         if from_hf:
@@ -428,10 +410,7 @@ class CheckpointManager(BaseCheckpointManager):
             )
             states[MODEL].load_state_dict(state_dict)
         else:
-            if reader is None:
-                dcp.load(state_dict, checkpoint_id=checkpoint_id)
-            else:
-                dcp.load(state_dict, checkpoint_id=checkpoint_id, storage_reader=reader)
+            dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.

@@ -158,14 +158,12 @@ generation and autoencoder sampling. It intentionally changes Flux validation
 noise and the training trajectory after validation compared with older versions.
 Other custom validators must likewise avoid consuming training RNG.
 
-Old checkpoints without RNG records still restore other training state, with a
-warning that RNG continuity is unavailable. A different rank set or initialized
-accelerator backend also warns and skips RNG restoration on every rank. This does
-not override the loader's or model's own compatibility checks. To deliberately
-skip RNG restoration, include `"rng_state"` in `exclude_from_loading` while RNG
-checkpointing is enabled, or disable `enable_rng_state`. Model-only exports and
-loads omit RNG. Loads excluding the optimizer also omit RNG so evaluation can
-retain the saved training step without inheriting training streams.
+With RNG checkpointing enabled, a full resume requires RNG records for every
+rank, the same world size and the same initialized accelerator backend on each
+rank. A missing record or incompatible layout fails the load. To load the
+remaining training state from such a checkpoint, set
+`exclude_from_loading=["rng_state"]`. Include `"rng_state"` in the exclusions
+when excluding the optimizer as well. Model-only exports and loads omit RNG.
 
 Exact continuation additionally requires unchanged parallel layout, rank mapping,
 software, data and deterministic operations. Equal world size and accelerator backend

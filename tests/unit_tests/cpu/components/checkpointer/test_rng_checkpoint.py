@@ -103,34 +103,58 @@ def test_capture_is_immutable_and_restore_is_explicit():
     torch.testing.assert_close(draw(), expected, rtol=0, atol=0)
 
 
-def test_legacy_and_evaluation_loads(tmp_path, caplog):
-    checkpoint, *objects = manager(tmp_path, enabled=False)
-    checkpoint.save(1)
-    checkpoint.close()
-    checkpoint, model, optimizer, scheduler, loader = manager(tmp_path)
+@pytest.mark.parametrize("case", ["legacy", "world_size", "backend"])
+def test_strict_resume_and_explicit_rng_exclusion(tmp_path, case):
+    source, model, _, _, loader = manager(tmp_path, enabled=case != "legacy")
+    loader.position = 7
+    weights = model[0].weight.detach().clone()
     try:
-        assert checkpoint.load(1)
-        assert "without RNG continuity" in caplog.text
-        checkpoint.save(2)
-        # Removing optimizer means evaluation can load without rank-RNG validation.
-        checkpoint.exclude_from_loading = [OPTIMIZER, "lr_scheduler"]
-        with mock.patch.object(RngState, "can_load", side_effect=AssertionError):
-            assert checkpoint.load(2)
+        snapshot = RngSnapshot.capture()
+        if case == "world_size":
+            source._rng_state.world_size = 2
+        elif case == "backend":
+            snapshot.accelerator = "different_backend"
+        with mock.patch.object(RngSnapshot, "capture", return_value=snapshot):
+            source.save(1)
+    finally:
+        source.close()
+
+    checkpoint, model, _, _, loader = manager(tmp_path)
+    try:
+        if case == "legacy":
+            with pytest.raises(dcp.CheckpointException, match="Missing key.*rng_state"):
+                checkpoint.load(1)
+        else:
+            with pytest.raises(ValueError, match="world size|accelerator backend"):
+                checkpoint.load(1)
+
         checkpoint.exclude_from_loading = [RNG_STATE]
-        with mock.patch.object(RngState, "can_load", side_effect=AssertionError):
-            assert checkpoint.load(2)
+        loader.position = 0
+        with torch.no_grad():
+            model[0].weight.zero_()
+        torch.manual_seed(42)
+        draw()  # Loader restoration consumes one draw.
+        expected = draw()
+        torch.manual_seed(42)
+        assert checkpoint.load(1)
+        assert loader.position == 7
+        torch.testing.assert_close(model[0].weight, weights, rtol=0, atol=0)
+        torch.testing.assert_close(draw(), expected, rtol=0, atol=0)
     finally:
         checkpoint.close()
 
 
-def test_incompatible_rank_or_device_layout_skips_rng(tmp_path, caplog):
-    rng = RngState()
-    assert not rng.can_load({f"{RNG_STATE}.rank_0", f"{RNG_STATE}.rank_1"})
-    rng.load_state_dict(rng.state_dict())
-    with mock.patch.object(RngSnapshot, "compatible", return_value=False):
-        rng.restore()
-    assert rng.pending is None
-    assert "without RNG continuity" in caplog.text
+def test_partial_load_excluding_optimizer_requires_rng_exclusion(tmp_path):
+    checkpoint, *_ = manager(tmp_path)
+    try:
+        checkpoint.save(1)
+        checkpoint.exclude_from_loading = [OPTIMIZER, "lr_scheduler"]
+        with pytest.raises(ValueError, match="rng_state"):
+            checkpoint.load(1)
+        checkpoint.exclude_from_loading.append(RNG_STATE)
+        assert checkpoint.load(1)
+    finally:
+        checkpoint.close()
 
 
 def test_weights_only_export_omits_rng(tmp_path):
@@ -230,13 +254,14 @@ def incompatible_worker(rank, rendezvous):
         expected = draw()
         snapshot.restore()
         with mock.patch.object(RngSnapshot, "compatible", return_value=rank == 0):
-            rng.restore()
+            with pytest.raises(ValueError, match="accelerator backend"):
+                rng.restore()
         torch.testing.assert_close(draw(), expected, rtol=0, atol=0)
     finally:
         dist.destroy_process_group()
 
 
-def test_one_incompatible_rank_skips_rng_on_all_ranks(tmp_path):
+def test_one_incompatible_rank_fails_before_restoring_any_rank(tmp_path):
     mp.spawn(incompatible_worker, args=(str(tmp_path / "rdzv"),), nprocs=2)
 
 
