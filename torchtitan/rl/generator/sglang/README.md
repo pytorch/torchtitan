@@ -359,10 +359,11 @@ logprobs bitwise at matched TP (see `torchtitan/rl/BITWISE_PARITY.md`):
 - attention runs the trainer's varlen FlashAttention with `num_splits=1`
   (`torchtitan/rl/generator/attention/attention.py`, shared with the vLLM engine);
 - the sampled tokens' logprobs come from the trainer's `compute_logprobs` on
-  `logits / temperature` (`batch_invariance.py`);
+  `logits / temperature`, and score centering's top-k logprobs from its
+  `compute_topk_logprobs` at SGLang's top-k ids (`batch_invariance.py`);
 - SGLang's custom all-reduce is off, and the model's TP all-reduces run on NCCL.
 
 `tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py` checks, for each
 supported model family, trainer vs. SGLang decode parity (also for a session's
 next turn, which resumes its cached prefix, and after an in-place model state
-dict load) and SGLang decode batch invariance.
+dict load), trainer vs. SGLang top-k logprobs, and SGLang decode batch invariance.

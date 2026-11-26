@@ -61,10 +61,12 @@ import torch.distributed as dist
 from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.loss import compute_topk_logprobs
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
@@ -127,6 +129,8 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
     reset_kv_cache_on_model_state_dict_load = False
     # SGLang's chunked prefill budget (Engine max_num_batched_tokens); None: its default.
     max_num_batched_tokens = None
+    # Top-k logprobs per generated token, as score centering requests them.
+    NUM_TOPK_LOGPROBS = 4
 
     @classmethod
     def setUpClass(cls):
@@ -164,7 +168,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             # Leave room for the trainer model in this process.
             gpu_memory_limit=0.5,
             max_num_batched_tokens=cls.max_num_batched_tokens,
-            max_num_topk_logprobs=0,
+            max_num_topk_logprobs=cls.NUM_TOPK_LOGPROBS,
             checkpointer=(
                 None
                 if cls.sync_weights_from_trainer
@@ -199,7 +203,11 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             dist.barrier()
 
     def _generate(
-        self, prompt_ids: list[list[int]], *, load_at_step: int = -1
+        self,
+        prompt_ids: list[list[int]],
+        *,
+        load_at_step: int = -1,
+        num_topk_logprobs: int = 0,
     ) -> list[FinishedRequest]:
         """Sample a completion of each prompt at temperature 1, each with its own seed
         and session, and return the results in prompt order. Equal prompts form one
@@ -217,6 +225,7 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                     max_tokens=self.MAX_GEN_TOKENS,
                     seed=1000 + i,
                     stop_token_ids=[],
+                    num_topk_logprobs=num_topk_logprobs,
                 ),
                 group_id=prompt_ids.index(ids),
                 routing_session_id=str(i),
@@ -246,8 +255,14 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
             torch.equal(a, b), f"{name}: NOT bitwise identical ({max_delta=:.2e})"
         )
 
+    def _before_trainer_forward(self, sequences: list[list[int]]) -> None:
+        """Hook run before each trainer forward of ``sequences``."""
+
     def _trainer_logprobs(self, token_ids):
         """``compute_trainer_prefill_logprobs`` of the trainer model."""
+        self._before_trainer_forward(
+            token_ids if isinstance(token_ids[0], list) else [token_ids]
+        )
         with self.parallelism_context.activate_spmd(), torch.no_grad():
             return compute_trainer_prefill_logprobs(self.model, token_ids, self.device)
 
@@ -279,6 +294,71 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
         results = self._check_trainer_vs_sglang_decode(prompt_ids)
         if dist.get_rank() == 0:
             self.assertGreater(results[-1].metrics_inputs.num_cached_tokens, 0)
+
+    def test_trainer_vs_sglang_topk_logprobs(self):
+        """Score centering's top-k logprobs: SGLang's at decode equal the trainer's
+        ``compute_topk_logprobs`` at the same ids, so its coefficients are 0."""
+        results = self._generate(
+            self.prompt_ids, num_topk_logprobs=self.NUM_TOPK_LOGPROBS
+        )
+        sequences = [
+            prompt + result.token_ids
+            for prompt, result in zip(self.prompt_ids, results, strict=True)
+        ]
+        trainer_topk = self._trainer_topk_logprobs(
+            sequences,
+            prompt_lengths=[len(prompt) for prompt in self.prompt_ids],
+            topk_token_ids=[result.topk_token_ids for result in results],
+        )
+        if dist.get_rank() == 0:
+            for i, (result, expected) in enumerate(zip(results, trainer_topk)):
+                self.assertEqual(
+                    result.topk_token_ids.shape,
+                    (len(result.token_ids), self.NUM_TOPK_LOGPROBS),
+                )
+                self._assert_bitwise_equal(
+                    f"seq {i}: trainer prefill vs SGLang decode top-k",
+                    expected,
+                    result.topk_logprobs,
+                )
+
+    def _trainer_topk_logprobs(self, sequences, *, prompt_lengths, topk_token_ids):
+        """The trainer's ``compute_topk_logprobs`` of ``topk_token_ids`` at each
+        completion position, from one packed prefill of ``sequences``."""
+        self._before_trainer_forward(sequences)
+        with self.parallelism_context.activate_spmd(), torch.no_grad():
+            packed = torch.cat(
+                [torch.tensor(ids, device=self.device) for ids in sequences]
+            )
+            positions = torch.cat(
+                [torch.arange(len(ids), device=self.device) for ids in sequences]
+            )
+            logits = self.model(
+                packed,
+                attention_metadata=self.model._get_attention_metadata(positions),
+                positions=positions,
+            )
+            # Position p predicts token p + 1: a completion's rows start at prompt - 1.
+            packed_token_ids = torch.zeros(
+                packed.shape[0], self.NUM_TOPK_LOGPROBS, dtype=torch.int64
+            )
+            starts = []
+            offset = 0
+            for ids, prompt_length, rows in zip(
+                sequences, prompt_lengths, topk_token_ids, strict=True
+            ):
+                start = offset + prompt_length - 1
+                packed_token_ids[start : start + len(rows)] = torch.from_numpy(rows)
+                starts.append((start, len(rows)))
+                offset += len(ids)
+            logprobs = compute_topk_logprobs(
+                logits,
+                packed_token_ids.to(self.device),
+                vocab_parallel_group=spmd_mesh_group("tp"),
+                global_vocab_size=self.model.config.lm_head.out_features,
+                temperature=torch.ones(packed.shape[0], device=self.device),
+            )
+            return [logprobs[start : start + length] for start, length in starts]
 
     def test_sglang_decode_batch_invariance(self):
         (single,) = self._generate(self.prompt_ids[:1])
@@ -746,8 +826,7 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
             pp_schedule=None,
         )
 
-    def _trainer_logprobs(self, token_ids):
-        sequences = token_ids if isinstance(token_ids[0], list) else [token_ids]
+    def _before_trainer_forward(self, sequences: list[list[int]]) -> None:
         num_tokens = sum(len(sequence) for sequence in sequences)
         # Every EP rank passes the same count. With DP, the EP group spans the DP
         # ranks, whose batches can differ in size: take the largest.
@@ -758,7 +837,6 @@ class TestSGLangBitwiseParityDistMoE(SGLangBitwiseParityTestBase):
         self.trainer_dist_moe_runtime.set_num_local_input_tokens_per_call(
             int(num_local_tokens.item())
         )
-        return super()._trainer_logprobs(token_ids)
 
 
 class TestSGLangBitwiseParityDistMoEDPEP(

@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import triton
@@ -230,17 +231,12 @@ class SGLangEngine(GenerationEngine):
         generator_name: str,
         output_dir: str,
     ):
-        del generator_name, output_dir
+        # SGLang takes any top_logprobs_num per request: no engine-wide bound to set.
+        del generator_name, output_dir, max_num_topk_logprobs
         if vision_processor is not None:
             raise ValueError(
                 "SGLangEngine serves text prompts only; image prompts "
                 "(Controller.Config.vision_processor) need VLLMEngine."
-            )
-        # TODO: return SGLang's top-k logprobs for score centering.
-        if max_num_topk_logprobs > 0:
-            raise ValueError(
-                "SGLangEngine returns no top-k logprobs yet: score centering "
-                "(ScoreCentering.Config) needs VLLMEngine."
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
@@ -611,7 +607,7 @@ class SGLangEngine(GenerationEngine):
                 return_logprob=True,
                 # Only the sampled tokens' logprobs, none of the prompt's.
                 logprob_start_len=-1,
-                top_logprobs_num=0,
+                top_logprobs_num=request.sampling.num_topk_logprobs,
                 token_ids_logprob=None,
                 stream=False,
                 priority=max(request.group_id, -1),
@@ -815,7 +811,7 @@ class _OutputCollector:
 
     def __init__(self) -> None:
         # Tokens and logprobs received so far, per unfinished request.
-        self._partial: dict[str, tuple[list[int], list[float]]] = {}
+        self._partial: dict[str, _PartialRequest] = {}
         self._finished: list[tuple[FinishedRequest, str | None]] = []
         # SGLang's request object, the arrival time and the first wait queue entry
         # time of each admitted request. SGLang restamps its wait queue entry time
@@ -835,15 +831,15 @@ class _OutputCollector:
         if isinstance(output, BatchTokenIDOutput):
             self._receive_tokens(output)
         elif isinstance(output, AbortReq):
-            token_ids, token_logprobs = self._partial.pop(output.rid, ([], []))
+            partial = self._partial.pop(output.rid, _PartialRequest())
             self._admitted.pop(output.rid, None)
             reason = output.finished_reason or {}
             self._finished.append(
                 (
                     FinishedRequest(
                         request_id=output.rid,
-                        token_ids=token_ids,
-                        token_logprobs=token_logprobs,
+                        token_ids=partial.token_ids,
+                        token_logprobs=partial.token_logprobs,
                         finish_reason="abort",
                         metrics_inputs=RequestMetricsInputs(
                             num_cached_tokens=None, has_stats=False
@@ -866,17 +862,25 @@ class _OutputCollector:
         for i, (request_id, reason) in enumerate(
             zip(output.rids, output.finished_reasons, strict=True)
         ):
-            token_ids, token_logprobs = self._partial.setdefault(request_id, ([], []))
-            token_ids.extend(output.output_ids_flat[offsets[i] : offsets[i + 1]])
-            token_logprobs.extend(output.output_token_logprobs_val[i])
+            partial = self._partial.setdefault(request_id, _PartialRequest())
+            partial.token_ids.extend(
+                output.output_ids_flat[offsets[i] : offsets[i + 1]]
+            )
+            partial.token_logprobs.extend(output.output_token_logprobs_val[i])
+            # Requests that ask for no top-k logprobs (top_logprobs_num=0) get no rows.
+            if output.output_top_logprobs_val is not None:
+                partial.topk_logprobs.extend(output.output_top_logprobs_val[i])
+                partial.topk_token_ids.extend(output.output_top_logprobs_idx[i])
             if reason is None:
                 continue
             del self._partial[request_id]
+            token_ids, token_logprobs = partial.token_ids, partial.token_logprobs
             if len(token_logprobs) != len(token_ids):
                 raise ValueError(
                     f"{request_id}: {len(token_ids)} tokens but "
                     f"{len(token_logprobs)} logprobs"
                 )
+            topk_token_ids, topk_logprobs = partial.topk_arrays(request_id)
             stats = output.request_stats[i] if output.request_stats else None
             num_cached_tokens = None if stats is None else stats.cached_tokens
             if reason["type"] == "abort":
@@ -900,6 +904,8 @@ class _OutputCollector:
                 token_logprobs=token_logprobs,
                 finish_reason=reason["type"],
                 metrics_inputs=metrics_inputs,
+                topk_token_ids=topk_token_ids,
+                topk_logprobs=topk_logprobs,
             )
             abort_message = (
                 reason.get("message", "aborted by SGLang")
@@ -907,6 +913,41 @@ class _OutputCollector:
                 else None
             )
             self._finished.append((finished, abort_message))
+
+
+@dataclass(slots=True)
+class _PartialRequest:
+    """One unfinished request's tokens and logprobs received so far."""
+
+    token_ids: list[int] = field(default_factory=list)
+    token_logprobs: list[float] = field(default_factory=list)
+    # One row of SGLang's top-k per token, when the request asked for them.
+    topk_token_ids: list[Any] = field(default_factory=list)
+    topk_logprobs: list[Any] = field(default_factory=list)
+
+    def topk_arrays(
+        self, request_id: str
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """The ``[num_tokens, k]`` int32 ids and float32 logprobs; None without top-k."""
+        if not self.topk_logprobs:
+            return None, None
+        topk_token_ids = np.asarray(
+            [np.asarray(row) for row in self.topk_token_ids], dtype=np.int32
+        )
+        topk_logprobs = np.asarray(
+            [np.asarray(row) for row in self.topk_logprobs], dtype=np.float32
+        )
+        num_tokens = len(self.token_ids)
+        if (
+            topk_logprobs.ndim != 2
+            or topk_logprobs.shape[0] != num_tokens
+            or topk_token_ids.shape != topk_logprobs.shape
+        ):
+            raise ValueError(
+                f"{request_id}: top-k rows of shape {topk_logprobs.shape} for "
+                f"{num_tokens} tokens"
+            )
+        return topk_token_ids, topk_logprobs
 
 
 def _metrics_inputs(

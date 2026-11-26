@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @functools.cache
 def force_trainer_logprobs_for_batch_invariance() -> None:
-    """Return the sampled tokens' logprobs from the trainer's ``compute_logprobs``.
+    """Return the sampled and top-k tokens' logprobs from the trainer's functions.
 
     SGLang's sampler returns ``log(probs)`` from its fused temperature-softmax kernel
     or, in its deterministic mode (on with ``DebugConfig.seed``), ``log_softmax`` of
@@ -29,7 +29,7 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
     from sglang.srt.arg_groups.choices import BUILT_IN_SAMPLING_BACKENDS
     from sglang.srt.layers.sampler import register_sampler_backend, Sampler
 
-    from torchtitan.components.loss import compute_logprobs
+    from torchtitan.components.loss import compute_logprobs, compute_topk_logprobs
 
     class TrainerLogprobsSampler(Sampler):
         def forward(
@@ -58,6 +58,29 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
             logits_output.next_token_logprobs = compute_logprobs(
                 logits, next_token_ids.long(), vocab_parallel_group=None
             )
+            # Score centering's top-k (top_logprobs_num > 0): the trainer's
+            # compute_topk_logprobs of the ids SGLang chose.
+            topk_token_ids = logits_output.next_token_top_logprobs_idx
+            if topk_token_ids is not None:
+                rows = [i for i, ids in enumerate(topk_token_ids) if len(ids)]
+                if rows:
+                    topk_logprobs = compute_topk_logprobs(
+                        logits[rows],
+                        torch.stack(
+                            [
+                                torch.as_tensor(topk_token_ids[i], device=logits.device)
+                                for i in rows
+                            ]
+                        ),
+                        vocab_parallel_group=None,
+                        global_vocab_size=None,
+                        # The logits are already divided by the temperature.
+                        temperature=torch.ones(len(rows), device=logits.device),
+                    )
+                    topk_values = list(logits_output.next_token_top_logprobs_val)
+                    for row, i in enumerate(rows):
+                        topk_values[i] = topk_logprobs[row]
+                    logits_output.next_token_top_logprobs_val = topk_values
             return next_token_ids
 
     for backend in BUILT_IN_SAMPLING_BACKENDS:
