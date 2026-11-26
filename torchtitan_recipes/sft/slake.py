@@ -418,6 +418,7 @@ def _muse_glimmer_30b_slake_sft(variant: _SlakeVariant) -> Trainer.Config:
         variant, decoder_targets=_MUSE_GLIMMER_LORA_DECODER_TARGETS
     )
     config = apply_transforms(config, [transform])
+    assert config.checkpointer is not None
     config.checkpointer.model_param_checkpoint_type_map = CallableFunction.Config(
         fn=transform.param_checkpoint_type
     )
