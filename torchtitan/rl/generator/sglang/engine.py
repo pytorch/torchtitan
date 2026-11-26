@@ -38,6 +38,7 @@ from sglang.srt.managers.scheduler import (
     is_war_barrier_enabled,
     Scheduler,
 )
+from sglang.srt.mem_cache.kv.alloc.chain import ChainAllocator
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.runtime_context import get_parallel, publish, SpawnRanks
 from sglang.srt.sampling.sampling_params import SamplingParams
@@ -406,33 +407,9 @@ class SGLangEngine(GenerationEngine):
         ] = {}
         if not self._scheduler.enable_overlap:
             raise ValueError("SGLangEngine needs SGLang's overlap scheduler")
-        # Read while no request holds memory. A page is one token (`page_size=1`), so a block
-        # is a token.
-        allocator = self._scheduler.token_to_kv_pool_allocator
-        if allocator.state_slots is None:
-            self._kv_cache_capacity = KVCacheCapacity(
-                num_blocks=allocator.size,
-                attention_block_sizes=(1,),
-                blocks_per_state=0,
-                num_idle_states=0,
-                num_running_states=0,
-            )
-        else:
-            # The unified pool: a state takes `state_slot_cost` tokens of the shared pool. Its
-            # state slots split the same bytes, so counting tokens also bounds them.
-            kv_cache_configurator = (
-                self._scheduler.tp_worker.model_runner.kv_cache_configurator
-            )
-            self._kv_cache_capacity = KVCacheCapacity(
-                num_blocks=allocator.size,
-                attention_block_sizes=(1,),
-                blocks_per_state=allocator.admission_rules().state_slot_cost,
-                num_idle_states=_MAMBA_MAX_STATES_PER_PATH,
-                # TODO: SGLang has no public field with the states per running request it sized
-                #   its state pool with, so this calls its private sizing method, which reads
-                #   only the build's settings.
-                num_running_states=kv_cache_configurator._calculate_mamba_ratio(),
-            )
+        # Read while no request holds memory: the unified pool's size drops while states are
+        # allocated. A page is one token (`page_size=1`), so a block is a token.
+        self._num_kv_cache_tokens = self._scheduler.token_to_kv_pool_allocator.size
         self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
         # collection, as SGLang's freeze_gc does: each full collection (e.g. the engine
@@ -576,14 +553,47 @@ class SGLangEngine(GenerationEngine):
         return self._dp_size
 
     def kv_cache_capacity(self) -> KVCacheCapacity:
-        """Return the token pool's size and what one session takes in it."""
+        """Return the token pool's size and what one session takes in it; it reads only
+        sizes the build fixed."""
         if self._dp_size > 1:
             raise ValueError(
                 f"Admission needs SGLang's attention DP at 1, got {self._dp_size}: "
                 "IntraGeneratorRouter spreads a group's sessions over the DP ranks without "
                 "looking at their KV."
             )
-        return self._kv_cache_capacity
+
+        allocator = self._scheduler.token_to_kv_pool_allocator
+        if isinstance(allocator, ChainAllocator):
+            # The unified pool: a state takes `state_slot_cost` tokens of the shared pool. Its
+            # state slots split the same bytes, so counting tokens also bounds them.
+            kv_cache_configurator = (
+                self._scheduler.tp_worker.model_runner.kv_cache_configurator
+            )
+            return KVCacheCapacity(
+                num_blocks=self._num_kv_cache_tokens,
+                attention_block_sizes=(1,),
+                blocks_per_state=allocator.admission_rules().state_slot_cost,
+                num_idle_states=_MAMBA_MAX_STATES_PER_PATH,
+                # TODO: SGLang has no public field with the states per running request it sized
+                #   its state pool with, so this calls its private sizing method, which reads
+                #   only the build's settings.
+                num_running_states=kv_cache_configurator._calculate_mamba_ratio(),
+            )
+
+        if allocator.state_slots is not None:
+            raise ValueError(
+                "Admission counts linear attention (GDN, KDA) states only on SGLang's unified "
+                f"pool. This engine keeps them in SGLang's classic pool: "
+                f"{allocator.state_slots.size} state slots apart from its "
+                f"{self._num_kv_cache_tokens} tokens."
+            )
+        return KVCacheCapacity(
+            num_blocks=self._num_kv_cache_tokens,
+            attention_block_sizes=(1,),
+            blocks_per_state=0,
+            num_idle_states=0,
+            num_running_states=0,
+        )
 
     @property
     def data_parallel_rank(self) -> int:

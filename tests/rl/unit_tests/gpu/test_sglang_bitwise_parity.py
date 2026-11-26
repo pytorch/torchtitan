@@ -37,7 +37,7 @@ same in-place model state dict load.
 
 Runs in the B200 RL CI job.
 Run each class in its own launch, with as many processes as its DP x TP degree (one
-for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
+for TestSGLangBitwiseParityKDA and TestSGLangBitwiseParityGDNClassicPool, four for TestSGLangBitwiseParityMoEDPEP,
 TestSGLangBitwiseParityKDADPEP and TestSGLangBitwiseParityDistMoEDPEP, else two),
 with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
@@ -54,6 +54,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import pytest
 import torch
@@ -62,6 +63,7 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
@@ -73,6 +75,7 @@ from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
+from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest, SamplingConfig
@@ -675,6 +678,59 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
                 histories[0] = prompts[0] + last_reply[: len(last_reply) // 2]
             prompts = [history + suffix for history in histories]
         self.engine.release_sessions([], [group_id])
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(
+    dist.is_initialized() or "RANK" in os.environ,
+    "requires torchrun launcher",
+)
+class TestSGLangBitwiseParityGDNClassicPool(unittest.TestCase):
+    """The Qwen3.5 debug model at TP 1 on SGLang's classic pool (`enable_unified_memory` off,
+    as SGLang's MTP path builds it). Its GDN states sit in a separate pool of fixed slots,
+    which admission doesn't count: `kv_cache_capacity` raises. One GPU."""
+
+    def test_kv_cache_capacity_raises(self):
+        from torchtitan.rl.generator.sglang import engine as engine_module
+
+        config = qwen3_5_debug_bitwise_config()
+        _, generator_model = build_rl_model_configs(
+            build_qwen3_5_model_config,
+            "debugmodel",
+            seq_len=config.trainer.model.max_context_length,
+            attn_backend="varlen",
+            trainer_parallelism=ParallelismConfig(),
+            generator_parallelism=InferenceParallelismConfig(),
+        )
+        activate_cuda_flash_attention_impl()
+        server_args_class = engine_module.ServerArgs
+
+        def classic_pool_server_args(**kwargs):
+            return server_args_class(**{**kwargs, "enable_unified_memory": False})
+
+        # TorchTitan sets the unified pool for linear attention models; this build turns it off.
+        with mock.patch.object(engine_module, "ServerArgs", classic_pool_server_args):
+            engine = engine_module.SGLangEngine.Config(cuda_graph="breakable").build(
+                model=generator_model,
+                parallelism=InferenceParallelismConfig(),
+                model_path=config.hf_assets_path,
+                max_num_seqs=5,
+                precision=config.precision,
+                gpu_memory_limit=0.5,
+                max_num_batched_tokens=None,
+                checkpointer=None,
+                dist_moe_runtime=None,
+                debug=dataclasses.replace(config.generator.debug, seed=0),
+                reset_kv_cache_on_model_state_dict_load=False,
+                model_state_dict_load_mode="gpu_fetch",
+                vision_processor=None,
+                mooncake_master_address=None,
+                rank=0,
+                generator_name="generator",
+                output_dir=tempfile.gettempdir(),
+            )
+        with self.assertRaisesRegex(ValueError, "classic pool: [0-9]+ state slots"):
+            engine.kv_cache_capacity()
 
 
 class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
