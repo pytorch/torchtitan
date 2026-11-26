@@ -72,7 +72,6 @@ class _Actor:
                 blocks_per_state=0,
                 num_idle_states=0,
                 num_running_states=0,
-                num_state_slots=None,
             )
         )
 
@@ -520,6 +519,7 @@ def test_admission_holds_groups_in_order_validation_first(monkeypatch):
     router = _admission_router([_Actor("gen0")])
 
     async def acquire(group_id: int, *, validation: bool) -> asyncio.Task:
+        # Waiters retry on a timer, not an event, so each gets a moment to reach its wait.
         task = asyncio.create_task(
             router.acquire_group(group_id, num_sessions=1, validation=validation)
         )

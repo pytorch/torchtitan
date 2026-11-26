@@ -210,6 +210,11 @@ releases the session or its group. Eviction takes unreferenced KV first and
 referenced KV only when nothing else is left, so the next turn usually reuses
 the whole history; no request ever waits for a held session.
 
+Linear attention models keep at most 2 GDN or KDA states of each session cached
+(`mamba_max_states_per_path`): its newest prompt's checkpoint and its reply's
+end. A turn that extends the history hits all of it; a turn that rewrites
+older replies (for example, stripped thinking) prefills them again.
+
 ## Rollout groups
 
 The samples of a rollout group share a prompt. SGLang inserts a request's KV

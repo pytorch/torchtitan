@@ -16,10 +16,10 @@ from torchtitan.config import Configurable
 from torchtitan.rl.generator.engine import KVCacheCapacity
 
 # A group is placed while its generator's charged KV, the group's included, stays under this
-# share of the generator's blocks and state slots. The rest absorbs placed sessions' growth.
+# share of the generator's blocks. The rest absorbs placed sessions' growth.
 _ADMIT_FRACTION = 0.95
-# The charge of a session that has not called, or whose call runs, uses the means of the last
-# this many first prompts and replies.
+# A session that has not called, or whose call runs, is charged the mean first prompt and the
+# mean reply over this many recent ones.
 _NUM_RECENT_CALLS = 64
 
 
@@ -46,7 +46,6 @@ class KVRoomAdmission(Configurable):
     generator that has no placed group, or, once a first prompt was seen, one where
 
         charged blocks + the group's  <= 95% x num_blocks
-        charged states + the group's  <= 95% x num_state_slots   (when the engine caps states)
 
     Args:
         capacities: Each generator's KV cache capacity, by generator index.
@@ -80,19 +79,8 @@ class KVRoomAdmission(Configurable):
                 - num_sessions
                 * capacity.session_blocks(num_new_session_tokens, running=True)
             )
-            state_room = (
-                None
-                if capacity.num_state_slots is None
-                else _ADMIT_FRACTION * capacity.num_state_slots
-                - charge.num_states
-                - num_sessions * capacity.num_running_states
-            )
             # Before any first prompt, the charge of a group that has not called is 0.
-            fits = charge.num_groups == 0 or (
-                bool(self._first_prompts)
-                and room >= 0
-                and (state_room is None or state_room >= 0)
-            )
+            fits = charge.num_groups == 0 or (bool(self._first_prompts) and room >= 0)
             if fits and (best_room is None or room > best_room):
                 best, best_room = index, room
 
@@ -112,11 +100,15 @@ class KVRoomAdmission(Configurable):
     ) -> int:
         """Charge a starting call to its session; return its group's generator."""
         group = self._groups.get(group_id)
-        if group is None or session_id is None:
+        if (
+            group is None
+            or session_id is None
+            or session_id in group.released_session_ids
+        ):
             raise ValueError(
                 f"call {request_id!r} of group {group_id}, session {session_id!r}: admission "
-                "needs a routing session id and a group that acquire_group placed and "
-                "release_groups did not release"
+                "needs a routing session id that release_session did not release, of a group "
+                "that acquire_group placed and release_groups did not release"
             )
 
         session = group.sessions.get(session_id)
@@ -142,7 +134,9 @@ class KVRoomAdmission(Configurable):
         if session is None:
             return
 
-        self._replies.append(num_reply_tokens)
+        # A call that raised reports 0 tokens: it would pull the mean reply down.
+        if num_reply_tokens:
+            self._replies.append(num_reply_tokens)
         session.running_request_ids.discard(request_id)
         # An older call that ends late leaves the newest call's prompt as the history.
         if request_id == session.latest_request_id:
@@ -150,12 +144,14 @@ class KVRoomAdmission(Configurable):
 
     def release_session(self, session_id: str) -> int | None:
         """Stop charging a session whose rollout ended; return the generator that holds its KV,
-        or None if no placed group has it. It still counts as started."""
+        or None if no placed group has it. It still counts as started, and a later call of it
+        raises."""
         group_id = self._session_groups.pop(session_id, None)
         if group_id is None:
             return None
         group = self._groups[group_id]
         del group.sessions[session_id]
+        group.released_session_ids.add(session_id)
         return group.generator
 
     def release_groups(self, group_ids: Sequence[int]) -> None:
@@ -168,18 +164,14 @@ class KVRoomAdmission(Configurable):
                 del self._session_groups[session_id]
 
     def charged_fractions(self) -> list[float]:
-        """Per generator, the larger of charged blocks over its blocks and charged states over
-        its state slots."""
-        fractions = []
-        for capacity, charge in zip(self._capacities, self._charges(), strict=True):
-            fraction = charge.num_blocks / capacity.num_blocks
-            if capacity.num_state_slots is not None:
-                fraction = max(fraction, charge.num_states / capacity.num_state_slots)
-            fractions.append(fraction)
-        return fractions
+        """Per generator, its charged blocks over its blocks."""
+        return [
+            charge.num_blocks / capacity.num_blocks
+            for capacity, charge in zip(self._capacities, self._charges(), strict=True)
+        ]
 
     def _charges(self) -> list[_Charge]:
-        """Each generator's placed groups, and the blocks and states they charge."""
+        """Each generator's placed groups, and the blocks they charge."""
         mean_reply = _mean(self._replies)
         num_new_session_tokens = _mean(self._first_prompts) + mean_reply
         charges = [_Charge() for _ in self._capacities]
@@ -193,14 +185,12 @@ class KVRoomAdmission(Configurable):
                 charge.num_blocks += capacity.session_blocks(
                     num_tokens, running=running
                 )
-                charge.num_states += capacity.session_states(running=running)
 
             # Sessions that have not called yet; retried attempts can open more than the group.
-            num_waiting = max(0, group.num_sessions - group.num_started)
-            charge.num_blocks += num_waiting * capacity.session_blocks(
+            num_not_called = max(0, group.num_sessions - group.num_started)
+            charge.num_blocks += num_not_called * capacity.session_blocks(
                 num_new_session_tokens, running=True
             )
-            charge.num_states += num_waiting * capacity.num_running_states
         return charges
 
 
@@ -231,6 +221,8 @@ class _PlacedGroup:
     sessions: dict[str, _Session] = field(default_factory=dict)
     """Started sessions not released, by routing session id."""
 
+    released_session_ids: set[str] = field(default_factory=set)
+
 
 @dataclass(kw_only=True, slots=True)
 class _Charge:
@@ -238,7 +230,6 @@ class _Charge:
 
     num_groups: int = 0
     num_blocks: int = 0
-    num_states: int = 0
 
 
 def _mean(values: deque[int]) -> int:

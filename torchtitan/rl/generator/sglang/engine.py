@@ -79,8 +79,8 @@ from torchtitan.rl.generator.types import (
 
 logger = logging.getLogger(__name__)
 
-# Linear attention models: at most this many states SGLang keeps cached on each path of its
-# prefix tree, the group prompt's state where sibling sessions branch included.
+# Linear attention models: SGLang's soft cap on the cached states per prefix-tree path. At 2, an
+# idle session keeps 2 of its own (see `_build_server_args`).
 _MAMBA_MAX_STATES_PER_PATH = 2
 
 # ServerArgs fields that SGLangEngine sets itself or does not support, so
@@ -416,11 +416,10 @@ class SGLangEngine(GenerationEngine):
                 blocks_per_state=0,
                 num_idle_states=0,
                 num_running_states=0,
-                num_state_slots=None,
             )
         else:
-            # The unified pool: a state takes `state_slot_cost` tokens of the shared pool, and
-            # a slot of the state pool, which has its own size.
+            # The unified pool: a state takes `state_slot_cost` tokens of the shared pool. Its
+            # state slots split the same bytes, so counting tokens also bounds them.
             kv_cache_configurator = (
                 self._scheduler.tp_worker.model_runner.kv_cache_configurator
             )
@@ -429,10 +428,10 @@ class SGLangEngine(GenerationEngine):
                 attention_block_sizes=(1,),
                 blocks_per_state=allocator.admission_rules().state_slot_cost,
                 num_idle_states=_MAMBA_MAX_STATES_PER_PATH,
-                # The states per running request SGLang sized its state pool with. SGLang
-                # keeps no field with them; this reads only the build's settings.
+                # TODO: SGLang has no public field with the states per running request it sized
+                #   its state pool with, so this calls its private sizing method, which reads
+                #   only the build's settings.
                 num_running_states=kv_cache_configurator._calculate_mamba_ratio(),
-                num_state_slots=allocator.state_slots.size,
             )
         self._init_event_loop()
         # Exclude the ~1.5M objects SGLang's modules and the build created from garbage
@@ -512,10 +511,8 @@ class SGLangEngine(GenerationEngine):
             # KV and GDN / KDA states share one pool, so memory one does not use can
             # hold the other (see the README). SGLang builds it for hybrid models only.
             server_kwargs["enable_unified_memory"] = True
-            # Bound the states an idle session keeps (unlimited by default), so the router's
-            # admission can count them (`kv_cache_capacity`). Past the cap SGLang evicts the
-            # shallowest of a path's states, but never its tail, a fork where sibling sessions
-            # branch, or one a request locks: an idle session keeps at most 2 of its own.
+            # Bound the states an idle session keeps, so admission can count them. The cap never
+            # evicts a path's tail, a fork or a locked state: a session keeps 2 of its own.
             server_kwargs["mamba_max_states_per_path"] = _MAMBA_MAX_STATES_PER_PATH
         if self.config.cuda_graph == "full":
             # Full graphs also capture attention, whose eager CPU cost otherwise

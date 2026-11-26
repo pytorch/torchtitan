@@ -188,9 +188,9 @@ class InterGeneratorRouter(Configurable):
             # together at the start of a load, so then use any.
             candidates = [g for g in self._generators if not g.draining]
             h = self._strategy.choose(routing_ctx, candidates or self._generators)
-        # TODO: without `admission`, one load unit per call ignores the request's size and
-        #   the KV that sessions keep cached between turns, so a generator can fill up while
-        #   others have room. Set `admission` to place groups by KV room.
+        # Without `admission`, one load unit per call ignores the request's size and the KV
+        # that sessions keep cached between turns, so a generator can fill up while others
+        # have room. `admission` places groups by KV room.
         h.reserved_load += 1
         self._reservations[request_id] = h
         # Returning the handle keeps callers simple. If router CPU becomes a bottleneck,
@@ -240,8 +240,8 @@ class InterGeneratorRouter(Configurable):
             self._waiting_groups.pop(group_id, None)
 
     def admission_metrics(self) -> list[m.Metric]:
-        """Groups waiting for KV room, and the fullest generator's charged KV fraction (blocks
-        or state slots, whichever is fuller); empty without ``admission``."""
+        """Groups waiting for KV room, and the fullest generator's charged fraction of its KV
+        blocks; empty without ``admission``."""
         if self._admission is None:
             return []
         return [

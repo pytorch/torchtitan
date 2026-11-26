@@ -10,15 +10,14 @@ from torchtitan.rl.generator.engine import KVCacheCapacity
 from torchtitan.rl.routing.admission import KVRoomAdmission
 
 
-def _capacity(*, num_blocks: int = 100, num_state_slots: int | None = None):
-    """10-token blocks; a GDN state is 2 blocks, 1 per idle session, 3 per running one."""
+def _capacity():
+    """100 blocks of 10 tokens; a GDN state is 2 blocks, 1 per idle session, 3 per running one."""
     return KVCacheCapacity(
-        num_blocks=num_blocks,
+        num_blocks=100,
         attention_block_sizes=(10,),
         blocks_per_state=2,
         num_idle_states=1,
         num_running_states=3,
-        num_state_slots=num_state_slots,
     )
 
 
@@ -45,7 +44,7 @@ def test_before_any_first_prompt_each_generator_takes_one_group():
     assert admission.place(2, num_sessions=1) == 0
 
 
-def test_places_a_group_where_blocks_and_states_fit():
+def test_places_a_group_where_its_blocks_fit():
     admission = _admission(_capacity(), _capacity())
     admission.place(0, num_sessions=1)
     admission.place(1, num_sessions=1)
@@ -61,15 +60,8 @@ def test_places_a_group_where_blocks_and_states_fit():
     # A release frees room.
     admission.release_groups([0])
     assert admission.place(3, num_sessions=2) == 0
-
-    # With 10 state slots, 3 running states per session: 3 + 3 x 3 = 12 > 9.5 slots.
-    admission = _admission(_capacity(num_blocks=1000, num_state_slots=10))
-    admission.place(0, num_sessions=1)
-    admission.start_call("r0", session_id="0/0", group_id=0, num_prompt_tokens=10)
-    assert admission.place(1, num_sessions=3) is None
-    assert admission.place(1, num_sessions=2) == 0
-    # The gauge reports the fuller of blocks and slots: 9 of 10 slots.
-    assert admission.charged_fractions() == [pytest.approx(0.9)]
+    # The gauge: charged blocks over blocks, 2 x 31 on 0 and 16 + 31 on 1.
+    assert admission.charged_fractions() == [pytest.approx(0.62), pytest.approx(0.47)]
 
 
 def test_charges_prompt_and_reply_and_counts_overlapping_calls():
@@ -94,6 +86,10 @@ def test_charges_prompt_and_reply_and_counts_overlapping_calls():
     admission.end_call("r2", num_reply_tokens=5)
     # s0 idle at 75 + 5 = 80 -> 10; the mean reply (20 + 30 + 5) // 3 = 18 -> s1 at 58, 12.
     assert _charged_blocks(admission) == 10 + 12
+    # A call that raised ends with 0 tokens; the mean reply skips it.
+    admission.start_call("r5", session_id="s0", group_id=0, num_prompt_tokens=80)
+    admission.end_call("r5", num_reply_tokens=0)
+    assert list(admission._replies) == [20, 30, 5]
 
     # A retried rollout opens a third session in a group of 2: nothing waits any more.
     admission.start_call("r3", session_id="s1", group_id=0, num_prompt_tokens=40)
@@ -104,7 +100,7 @@ def test_charges_prompt_and_reply_and_counts_overlapping_calls():
     assert _charged_blocks(admission) == 12 + 12
 
 
-def test_late_releases_are_no_ops():
+def test_late_releases_are_no_ops_and_late_calls_raise():
     admission = _admission(_capacity())
     admission.place(0, num_sessions=1)
     admission.start_call("r0", session_id="s0", group_id=0, num_prompt_tokens=40)
@@ -120,3 +116,11 @@ def test_late_releases_are_no_ops():
     # A call of a released group raises to its caller.
     with pytest.raises(ValueError, match="group 0"):
         admission.start_call("r1", session_id="s0", group_id=0, num_prompt_tokens=40)
+
+    # So does a call of a released session: its history is not a new first prompt.
+    admission.place(1, num_sessions=2)
+    admission.start_call("r2", session_id="s1", group_id=1, num_prompt_tokens=60)
+    assert admission.release_session("s1") == 0
+    with pytest.raises(ValueError, match="session 's1'"):
+        admission.start_call("r3", session_id="s1", group_id=1, num_prompt_tokens=4000)
+    assert list(admission._first_prompts) == [40, 60]

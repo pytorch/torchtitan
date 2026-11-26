@@ -153,7 +153,7 @@ class KVCacheCapacity:
 
         capacity = KVCacheCapacity(
             num_blocks=119, attention_block_sizes=(16,), blocks_per_state=3,
-            num_idle_states=1, num_running_states=3, num_state_slots=None,
+            num_idle_states=1, num_running_states=3,
         )
         capacity.session_blocks(40, running=True)   # ceil(40 / 16) + 3 x 3 = 12
         capacity.session_blocks(50, running=False)  # ceil(50 / 16) + 3 x 1 = 7
@@ -174,16 +174,10 @@ class KVCacheCapacity:
     num_running_states: int
     """GDN states a session takes while a call of it runs."""
 
-    num_state_slots: int | None
-    """A cap on GDN states apart from blocks (SGLang's state pool), or None."""
-
-    def session_states(self, *, running: bool) -> int:
-        """GDN states a session takes: while a call runs, or between calls."""
-        return self.num_running_states if running else self.num_idle_states
-
     def session_blocks(self, num_tokens: int, *, running: bool) -> int:
         """Blocks a session of ``num_tokens`` tokens takes: while a call runs, or between calls."""
-        return self.blocks_per_state * self.session_states(running=running) + sum(
+        num_states = self.num_running_states if running else self.num_idle_states
+        return self.blocks_per_state * num_states + sum(
             math.ceil(num_tokens / block_size)
             for block_size in self.attention_block_sizes
         )
