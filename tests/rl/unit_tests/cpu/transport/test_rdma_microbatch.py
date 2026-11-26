@@ -29,14 +29,14 @@ from torchtitan.rl.actors.monarch.rdma_microbatch import (
 )
 from torchtitan.rl.rollout.types import RolloutTurnID
 from torchtitan.rl.trainer.batcher import Batcher, TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import (
-    _NUM_MICROBATCHES_READ_AHEAD,
-    RDMAMicrobatch,
-    RDMAMicrobatchPrefetcher,
-)
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleGroup,
+)
+from torchtitan.rl.transport.rdma_microbatch import (
+    _NUM_MICROBATCHES_READ_AHEAD,
+    RDMAMicrobatch,
+    RDMAMicrobatchPrefetcher,
 )
 
 

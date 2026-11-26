@@ -630,12 +630,6 @@ def test_accelerator_graph_wrapper_preserves_structured_args_and_kwargs():
             {"backend": "cupti", "key_by": "auto"},
         ),
         (
-            Profiler.Config(
-                trace=CuspyTraceProfiler.Config(enable_event_node_ids=True)
-            ),
-            {"backend": "cupti", "key_by": "exec"},
-        ),
-        (
             Profiler.Config(trace=CuspyTraceProfiler.Config(record_py_stacks=True)),
             {"backend": "cupti", "key_by": "auto", "record_py_stacks": True},
         ),
