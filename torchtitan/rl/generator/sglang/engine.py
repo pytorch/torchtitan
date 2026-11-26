@@ -47,6 +47,7 @@ from sglang.srt.utils.common import next_power_of_2
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
 from torchtitan.config import DebugConfig, PrecisionConfig
+from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
@@ -109,6 +110,7 @@ _TORCHTITAN_SERVER_ARGS = frozenset(
         # SGLangEngine._awaiting_prefill).
         "max_queued_requests",
         "enable_unified_memory",
+        "kv_cache_dtype",
     }
 )
 
@@ -145,6 +147,25 @@ class SGLangEngine(GenerationEngine):
           attention models, whose full prefill graphs SGLang fails to capture.
 
         Without prefill graphs, prefill is bound by the eager model's CPU overhead.
+        """
+
+        kv_cache_dtype: Literal["auto", "fp8"] = "auto"
+        """KV cache element type:
+
+            "auto"   the model dtype (bf16); attention runs the trainer's kernel
+            "fp8"    e4m3 with scale 1; the query is cast to e4m3 too, and attention
+                     runs FA4's fp8 forward (SM100 family only)
+
+        fp8 vs auto:
+
+            KV cache full, or long unique contexts   fp8: 2x the KV tokens, decode reads half the
+                                                     KV bytes; GDN / KDA states keep their size, so a
+                                                     hybrid model fits fewer than 2x the sessions
+            trainer-vs-generator logprob gap         fp8: ~2.3x auto's mean abs diff, ~5.6x the
+                                                     per-token KL estimate (k3)
+
+        Ratios from Qwen3.5-0.8B at temperature 1, 1k-12k-token prompts. A run's
+        step-1 `bit_wise/logprob_diff/mean` gives its own fp8 floor.
         """
 
         extra_server_args: dict[str, Any] = field(default_factory=dict)
@@ -237,6 +258,54 @@ class SGLangEngine(GenerationEngine):
             )
         if parallelism.enable_sequence_parallel:
             raise ValueError("SGLangEngine does not support sequence parallelism")
+        if config.kv_cache_dtype == "fp8":
+            if debug.batch_invariant:
+                raise ValueError(
+                    "debug.batch_invariant needs kv_cache_dtype='auto', got 'fp8': fp8 "
+                    "attention runs FA4's fp8 forward, which the trainer does not run, so "
+                    "generator logprobs can't match the trainer's bitwise"
+                )
+            # Setups no fp8 run has covered.
+            untested = []
+            if parallelism.tensor_parallel_degree > 1:
+                untested.append(
+                    f"tensor_parallel_degree={parallelism.tensor_parallel_degree}"
+                )
+
+            if parallelism.data_parallel_degree > 1:
+                untested.append(
+                    f"data_parallel_degree={parallelism.data_parallel_degree}"
+                )
+
+            windowed_layers = [
+                (layer_id, layer.attention.sliding_window_size)
+                for layer_id, layer in enumerate(model.layers)
+                if getattr(layer.attention, "sliding_window_size", None) is not None
+            ]
+            if windowed_layers:
+                untested.append(
+                    f"sliding-window layers, (layer, window) {windowed_layers[:2]}"
+                )
+
+            mla_layers = [
+                layer_id
+                for layer_id, layer in enumerate(model.layers)
+                if isinstance(
+                    getattr(layer.attention, "inner_attention", None),
+                    MLAAttention.Config,
+                )
+            ]
+            if mla_layers:
+                untested.append(f"MLA layers {mla_layers[:2]}")
+
+            if config.uses_mooncake_store:
+                untested.append("the Mooncake HiCache storage backend")
+
+            if untested:
+                raise ValueError(
+                    f"kv_cache_dtype='fp8' is untested with {'; '.join(untested)}; "
+                    "set kv_cache_dtype='auto'"
+                )
         if SGLANG_RETURN_ORIGINAL_LOGPROB:
             raise ValueError(
                 "SGLANG_RETURN_ORIGINAL_LOGPROB makes SGLang return logprobs before "
@@ -438,6 +507,9 @@ class SGLangEngine(GenerationEngine):
             max_running_requests=max_num_seqs * parallelism.data_parallel_degree,
             context_length=model.max_context_length + CONTEXT_LENGTH_MARGIN,
             attention_backend=TORCHTITAN_VARLEN_ATTENTION_BACKEND,
+            kv_cache_dtype=(
+                "fp8_e4m3" if self.config.kv_cache_dtype == "fp8" else "auto"
+            ),
             # SGLang's default for this backend (its 128-token pages are for its own
             # FA4 backend). 128-token pages would put batch-invariant decode on FA4's
             # SwapAB kernel, which does not match prefill bitwise (see vLLM's

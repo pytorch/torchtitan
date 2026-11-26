@@ -126,6 +126,11 @@ jobs:
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \
               || failed_classes+=("$test_class")
           done
+          python -m pytest tests/rl/unit_tests/gpu/test_sglang_fp8_attention.py -v \
+            || failed_classes+=(Fp8Attention)
+          torchrun --nproc-per-node=1 -m pytest \
+            tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangFp8KVCacheGDNHiCache -v \
+            || failed_classes+=(Fp8KVCacheGDNHiCache)
           for test_class in KDA; do
             torchrun --nproc-per-node=1 -m pytest \
               "tests/rl/unit_tests/gpu/test_sglang_bitwise_parity.py::TestSGLangBitwiseParity${test_class}" -v \

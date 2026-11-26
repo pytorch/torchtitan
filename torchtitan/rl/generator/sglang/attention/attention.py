@@ -40,8 +40,9 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
     graph buffers) and writes the KV cache; every kernel call goes through the two
     functions ``_init_flash_attention_functions`` sets, which this subclass points at
     PyTorch's varlen FlashAttention, the kernel the trainer's ``VarlenInnerAttention``
-    runs. It supports causal attention over the paged KV cache only; any other call
-    (no-cache prefill, cascade, soft-capping, FP8 KV) raises.
+    runs. An fp8 KV cache runs FA4's fp8 forward instead (see
+    ``paged_varlen_attention_out``). It supports causal attention over the paged KV
+    cache only; any other call (no-cache prefill, cascade, soft-capping) raises.
 
     Args:
         model_runner: SGLang's model runner.
@@ -54,6 +55,14 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
             raise ValueError(
                 f"{TORCHTITAN_VARLEN_ATTENTION_BACKEND} needs FA3 or FA4 (SM90+), "
                 f"got {fa_impl}"
+            )
+        if (
+            model_runner.kv_cache_dtype == torch.float8_e4m3fn
+            and torch.cuda.get_device_capability()[0] != 10
+        ):
+            raise ValueError(
+                "An fp8 KV cache runs FA4's fp8 forward, which needs an SM100-family "
+                f"GPU; got capability {torch.cuda.get_device_capability()}"
             )
         # The FA version selects SGLang's metadata layout for that kernel.
         super().__init__(model_runner, fa_impl_ver=4 if fa_impl == "FA4" else 3)
@@ -88,7 +97,8 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
         max_seqlen_k: int | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """SGLang's ``flash_attn_with_kvcache`` call, run as the trainer's varlen kernel.
+        """SGLang's ``flash_attn_with_kvcache`` call, run as the trainer's varlen kernel
+        (FA4's fp8 forward with an fp8 KV cache).
 
         ``q`` is ``(T, H, K)``, ``k_cache`` / ``v_cache`` are ``(P, S, G, K)`` /
         ``(P, S, G, V)``. ``cu_seqlens_k_new`` and ``num_splits`` are ignored: SGLang
@@ -109,9 +119,26 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
             raise NotImplementedError(
                 f"{TORCHTITAN_VARLEN_ATTENTION_BACKEND} does not support soft-capping"
             )
+        is_fp8 = self.kv_cache_dtype == torch.float8_e4m3fn
         num_tokens, num_heads, _ = q.shape
         if out is None:
-            out = q.new_empty(num_tokens, num_heads, v_cache.shape[-1])
+            # FA4's fp8 forward writes bf16.
+            out = q.new_empty(
+                num_tokens,
+                num_heads,
+                v_cache.shape[-1],
+                dtype=torch.bfloat16 if is_fp8 else q.dtype,
+            )
+
+        descales = None
+        if is_fp8:
+            # FA4's fp8 forward takes q in the cache's dtype. SGLang casts q for decode
+            # batches only; its FA4 prefill leaves q in bf16.
+            q = q.to(self.kv_cache_dtype)
+            # Scale 1: SGLang stores K and V unscaled without a quantization config, and
+            # TorchTitan's attention layers have none. FA4 reads a None descale as 1.
+            descales = (None, None, None)
+
         # Causal attention is the window (left, 0) in the varlen API; SGLang passes a
         # right edge of -1 for unbounded, which causal=True caps at the diagonal.
         left, _ = window_size
@@ -131,6 +158,7 @@ class TorchTitanVarlenAttnBackend(FlashAttentionBackend):
             window_size=(left, 0),
             enable_gqa=num_heads != k_cache.shape[2],
             return_lse=return_softmax_lse,
+            descales=descales,
         )
 
 
