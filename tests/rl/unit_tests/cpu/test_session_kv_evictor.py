@@ -40,7 +40,14 @@ MAMBA_KV_CACHE_GROUP_IDS = (1, 2, 3)
 @pytest.fixture
 def manager(request) -> KVCacheManager:
     """Indirect param: the number of Mamba groups (default 3; 0 is a dense model)."""
-    num_mamba_groups = getattr(request, "param", len(MAMBA_KV_CACHE_GROUP_IDS))
+    return _hybrid_manager(
+        getattr(request, "param", len(MAMBA_KV_CACHE_GROUP_IDS)), use_eagle=False
+    )
+
+
+def _hybrid_manager(num_mamba_groups: int, *, use_eagle: bool) -> KVCacheManager:
+    """1 attention group and `num_mamba_groups` align-mode Mamba groups, 16-token blocks;
+    `use_eagle` drops the last block of each attention hit, as vLLM does with MTP drafts."""
     init_none_hash(sha256)
     attention = FullAttentionSpec(
         block_size=BLOCK, num_kv_heads=1, head_size=8, dtype=torch.float16
@@ -67,6 +74,7 @@ def manager(request) -> KVCacheManager:
         scheduler_block_size=BLOCK,
         hash_block_size=BLOCK,
         enable_caching=True,
+        use_eagle=use_eagle,
     )
 
 
@@ -102,12 +110,15 @@ def _schedule(manager, request, num_tokens, blocks=None, hit=0, sample=None) -> 
         request.append_output_token_ids(sample)
 
 
-def _prefill(manager, request, sample: int = 7) -> int:
-    """Block-aligned chunk, then the tail (like vLLM's Mamba-aligned split); returns the hit."""
+def _prefill(manager, request, sample: int = 7, *, use_eagle: bool = False) -> int:
+    """Block-aligned chunk, then the tail (like vLLM's Mamba-aligned split, one block earlier
+    with MTP drafts); returns the hit."""
     manager.new_step_starts()
     blocks, hit, _ = manager.get_computed_blocks(request)
     num_prompt = request.num_prompt_tokens
     aligned = num_prompt - num_prompt % BLOCK
+    if use_eagle:
+        aligned = max(aligned - BLOCK, 0)
     first_hit = hit
     if aligned > hit:
         _schedule(manager, request, aligned - hit, blocks, hit)
@@ -219,12 +230,13 @@ def test_an_ended_rollouts_blocks_are_reused_before_a_live_rollouts(
     )
     num_ended_blocks = _num_cached_blocks(manager, ended)
     num_free_uncached = _num_free_uncached_blocks(manager)
+    num_evicted_blocks = evictor.num_evicted_blocks
 
     # The rollout ended, and with it its group of one.
     evictor.release(session_ids=["ended"], group_ids=[1])
 
     assert _num_cached_blocks(manager, ended) == 0
-    assert evictor.num_evicted_blocks == num_ended_blocks
+    assert evictor.num_evicted_blocks - num_evicted_blocks == num_ended_blocks
     # They head the free queue in block id order, so every TP rank leaves the same queue.
     queue = manager.block_pool.free_block_queue.iter_blocks_after(None)
     front = [next(queue).block_id for _ in range(num_ended_blocks)]
@@ -590,3 +602,166 @@ def test_a_hash_a_later_prompt_drops_gets_its_cpu_release_hint(manager, schedule
 
     evictor.after_step()
     connector.release_session_cache.assert_called_once_with(dropped_hashes, kept_hashes)
+
+
+def test_an_idle_sessions_history_outlasts_another_sessions_superseded_gdn_states(
+    manager, scheduler, evictor
+):
+    # vLLM caches a GDN state at each block boundary of d's decode, behind a's needed
+    # blocks in the free queue; without the sweep, a's hit is 0 once d holds 466 tokens.
+    a = _turn(
+        manager,
+        scheduler,
+        evictor,
+        "a/turn=0",
+        session_id="a",
+        group_id=0,
+        tokens=list(range(1000, 1040)),
+        output_tokens=list(range(5000, 5010)),
+    )
+    a_next_turn = list(a.all_token_ids) + [9, 9, 9, 9]
+    d = _admit(scheduler, evictor, "d/turn=0", "d", 1, list(range(4000, 4040)))
+    _prefill(manager, d)
+    evictor.after_step()
+
+    for token in range(6000, 6700):
+        _schedule(manager, d, 1, sample=token)
+        evictor.after_step()
+
+    assert d.num_tokens == 741
+    _, num_hit_tokens, _ = manager.get_computed_blocks(
+        _request("a/turn=1", a_next_turn)
+    )
+    assert num_hit_tokens == 48
+
+
+def test_a_session_keeps_one_gdn_state_of_its_own_and_its_groups_shared_prompt(
+    manager, scheduler, evictor
+):
+    # Rollouts a and b of one group share a 40-token prompt; its state is at block 1.
+    prompt = list(range(40))
+    a = _admit(scheduler, evictor, "a/turn=0", "a", 0, prompt)
+    _prefill(manager, a, sample=100)
+    evictor.after_step()
+    b = _admit(scheduler, evictor, "b/turn=0", "b", 0, prompt)
+    assert _prefill(manager, b, sample=200) == 32
+    evictor.after_step()
+    for request, first_token in ((a, 101), (b, 201)):
+        for token in range(first_token, first_token + 39):
+            _schedule(manager, request, 1, sample=token)
+            evictor.after_step()
+        _finish(manager, scheduler, evictor, request)
+
+    # Idle: every attention block, the shared prompt's state, and the deepest own state.
+    assert _cached_indices(manager, a, ATTENTION_KV_CACHE_GROUP_ID) == [0, 1, 2, 3]
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, a, kv_cache_group_id) == [1, 3]
+
+    # A turn that extends the history hits all of it, even after a step spent waiting.
+    turn_1 = _admit(
+        scheduler,
+        evictor,
+        "a/turn=1",
+        "a",
+        0,
+        list(a.all_token_ids) + list(range(300, 310)),
+    )
+    evictor.after_step()
+    assert _prefill(manager, turn_1, sample=400) == 64
+    evictor.after_step()
+    for token in range(401, 420):
+        _schedule(manager, turn_1, 1, sample=token)
+        evictor.after_step()
+    _finish(manager, scheduler, evictor, turn_1)
+    for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+        assert _cached_indices(manager, turn_1, kv_cache_group_id) == [1, 5]
+
+    # A turn that rewrites the last reply resumes from the shared prompt (all states: 80).
+    turn_2 = _admit(
+        scheduler,
+        evictor,
+        "a/turn=2",
+        "a",
+        0,
+        turn_1.prompt_token_ids + list(range(500, 530)),
+    )
+    assert _prefill(manager, turn_2, sample=600) == 32
+
+
+def test_a_gdn_block_spanning_several_hashes_keeps_its_deepest_state():
+    # 32-token blocks, hashed every 16 tokens: each GDN state sits under every other hash.
+    init_none_hash(sha256)
+    attention = FullAttentionSpec(
+        block_size=2 * BLOCK, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    mamba = MambaSpec(
+        block_size=2 * BLOCK,
+        shapes=((4, 8),),
+        dtypes=(torch.float16,),
+        page_size_padded=attention.page_size_bytes,
+        mamba_cache_mode="align",
+    )
+    config = KVCacheConfig(
+        num_blocks=120,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attn"], attention),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+        prefix_cache_retention_interval=None,
+    )
+    manager = KVCacheManager(
+        config,
+        max_model_len=4096,
+        scheduler_block_size=2 * BLOCK,
+        hash_block_size=BLOCK,
+        enable_caching=True,
+    )
+    scheduler = SimpleNamespace(kv_cache_manager=manager, requests={})
+    evictor = VLLMSessionKVEvictor(scheduler=scheduler)
+    request = _admit(scheduler, evictor, "s/turn=0", "s", 0, list(range(100)))
+    blocks, hit, _ = manager.get_computed_blocks(request)
+    _schedule(manager, request, 96, blocks, hit)
+    evictor.after_step()
+    _schedule(manager, request, 4, sample=7)
+    evictor.after_step()
+    for token in range(500, 580):
+        _schedule(manager, request, 1, sample=token)
+        evictor.after_step()
+    _finish(manager, scheduler, evictor, request)
+
+    # All states: hash indices 5 (the prompt's), 7 and 9.
+    assert _cached_indices(manager, request, 0) == [1, 3, 5, 7, 9]
+    assert _cached_indices(manager, request, 1) == [9]
+    next_turn = _request("s/turn=1", list(request.all_token_ids) + [1, 2, 3])
+    _, num_hit_tokens, _ = manager.get_computed_blocks(next_turn)
+    assert num_hit_tokens == 160
+
+
+def test_with_mtp_drafts_a_session_keeps_the_state_its_next_turn_hits():
+    # vLLM drops the last attention block of a hit when it drafts with MTP, so a turn resumes
+    # one block before the deepest state. Keeping the deepest would hit 0 tokens here.
+    manager = _hybrid_manager(len(MAMBA_KV_CACHE_GROUP_IDS), use_eagle=True)
+    scheduler = SimpleNamespace(kv_cache_manager=manager, requests={})
+    evictor = VLLMSessionKVEvictor(scheduler=scheduler)
+    prompt = list(range(1000, 1040))
+    num_hit_tokens = []
+    for turn in range(3):
+        request = _admit(scheduler, evictor, f"s/turn={turn}", "s", 0, prompt)
+        num_hit_tokens.append(
+            _prefill(manager, request, sample=5000 + 100 * turn, use_eagle=True)
+        )
+        evictor.after_step()
+        for token in range(5001 + 100 * turn, 5030 + 100 * turn):
+            _schedule(manager, request, 1, sample=token)
+            evictor.after_step()
+        _finish(manager, scheduler, evictor, request)
+        if turn == 0:
+            # 70 tokens; all states: blocks 0, 2 and 3.
+            for kv_cache_group_id in MAMBA_KV_CACHE_GROUP_IDS:
+                assert _cached_indices(manager, request, kv_cache_group_id) == [2]
+        prompt = list(request.all_token_ids) + list(
+            range(1100 + 100 * turn, 1120 + 100 * turn)
+        )
+
+    assert num_hit_tokens == [0, 48, 96]

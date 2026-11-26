@@ -9,10 +9,15 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING
 
 from vllm.v1.core.kv_cache_utils import BlockHash, make_block_hash_with_group_id
+from vllm.v1.kv_cache_interface import MambaSpec
+
+if TYPE_CHECKING:
+    from vllm.v1.request import Request
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +27,16 @@ class _TrackedRequest:
     """One request's block hashes, counted while they may still be reused."""
 
     internal_request_id: str
+    vllm_request: Request
+    """vLLM's request, read for its computed tokens."""
     block_hashes: list[BlockHash]
     """vLLM's `Request.block_hashes`, which vLLM extends in place as the reply fills blocks."""
     num_counted: int = 0
     """How many of `block_hashes` are counted in `_num_requests_by_hash`."""
+    num_swept_tokens: int = 0
+    """Computed tokens at the last sweep of this request's superseded GDN states."""
+    gdn_scan_starts: list[int] = field(default_factory=list)
+    """Per GDN group, the first index of `block_hashes` the next sweep looks up."""
 
 
 class VLLMSessionKVEvictor:
@@ -47,6 +58,12 @@ class VLLMSessionKVEvictor:
       the ranks' schedulers stay identical.
     - With CPU offload, the evicted hashes also go to the connector, once the saves pending
       at their eviction finish, so their CPU blocks are evicted first too.
+    - GDN (align-mode Mamba) groups cache a state at each block boundary. A live session keeps
+      one state per group, the one a next turn that extends the history hits; its other states
+      are evicted unless another request counts their hash (a group's shared prompt):
+
+        session B's states at blocks 3, 4, 5  -> 5 stays; 3 and 4 evicted
+        B's next prompt rewrites block 4      -> resumes from the shared prompt's state
 
     Example:
 
@@ -78,7 +95,20 @@ class VLLMSessionKVEvictor:
             )
         self._scheduler = scheduler
         self._block_pool = kv_cache_manager.block_pool
+        self._coordinator = kv_cache_manager.coordinator
         self._kv_cache_group_ids = range(kv_cache_manager.num_kv_cache_groups)
+        gdn_groups = [
+            (kv_cache_group_id, group.kv_cache_spec.block_size)
+            for kv_cache_group_id, group in enumerate(
+                kv_cache_manager.kv_cache_config.kv_cache_groups
+            )
+            if isinstance(group.kv_cache_spec, MambaSpec)
+            and group.kv_cache_spec.mamba_cache_mode == "align"
+        ]
+        self._gdn_kv_cache_group_ids = [group_id for group_id, _ in gdn_groups]
+        self._gdn_block_size = min((size for _, size in gdn_groups), default=0)
+        # Live sessions whose newest request may still cache GDN states.
+        self._sessions_to_sweep: dict[str, _TrackedRequest] = {}
         # Each live session's newest request.
         self._sessions: dict[str, _TrackedRequest] = {}
         self._group_sessions: dict[int, set[str]] = {}
@@ -116,32 +146,58 @@ class VLLMSessionKVEvictor:
         # TODO: counting the whole prompt costs ~0.17 ms per turn at 16-token blocks and
         #   32K-token histories (CPU bench). The previous request's hashes are a prefix of
         #   this list (chained hashes), so counting only the new part would cost O(new tokens).
+        vllm_request = self._scheduler.requests[internal_request_id]
         request = _TrackedRequest(
             internal_request_id=internal_request_id,
-            block_hashes=self._scheduler.requests[internal_request_id].block_hashes,
+            vllm_request=vllm_request,
+            block_hashes=vllm_request.block_hashes,
+            gdn_scan_starts=[0] * len(self._gdn_kv_cache_group_ids),
         )
         self._count_new_block_hashes(request)
         previous = self._sessions.get(session_id)
         self._sessions[session_id] = request
         self._group_sessions.setdefault(group_id, set()).add(session_id)
+        if self._gdn_kv_cache_group_ids:
+            self._sessions_to_sweep[session_id] = request
         if previous is not None:
             self._forget([previous])
 
     def after_step(self) -> None:
-        """Evict the blocks of replaced or released requests that left vLLM in this step, and
-        the blocks that were in use at their eviction and are free now."""
+        """Evict the blocks of replaced or released requests that left vLLM in this step, the
+        blocks that were in use at their eviction and are free now, and live sessions'
+        superseded GDN states."""
         if self._held_block_hashes:
             # A hash a request counts again stays: that request's end evicts it.
             self._count_all_new_block_hashes()
-            held_block_hashes = self._held_block_hashes
-            self._held_block_hashes = set()
-            self._evict(
+            self._held_block_hashes = self._evict(
                 [
                     block_hash
-                    for block_hash in held_block_hashes
+                    for block_hash in self._held_block_hashes
                     if block_hash not in self._num_requests_by_hash
-                ]
+                ],
+                kv_cache_group_ids=self._kv_cache_group_ids,
             )
+
+        # Sweep a request when its computed tokens cross a GDN block, and once after it
+        # leaves vLLM. A request still waiting has computed nothing, so its history's state stays.
+        to_sweep: list[tuple[_TrackedRequest, bool]] = []
+        block_size = self._gdn_block_size
+        for session_id, request in list(self._sessions_to_sweep.items()):
+            num_computed_tokens = request.vllm_request.num_computed_tokens
+            left_vllm = request.internal_request_id not in self._scheduler.requests
+            if left_vllm or num_computed_tokens // block_size > (
+                request.num_swept_tokens // block_size
+            ):
+                request.num_swept_tokens = max(
+                    request.num_swept_tokens, num_computed_tokens
+                )
+                to_sweep.append((request, left_vllm))
+            if left_vllm:
+                del self._sessions_to_sweep[session_id]
+        if to_sweep:
+            self._count_all_new_block_hashes()
+            for request, left_vllm in to_sweep:
+                self._evict_superseded_gdn_states(request, left_vllm=left_vllm)
 
         finished = [
             request
@@ -162,12 +218,15 @@ class VLLMSessionKVEvictor:
             released |= self._group_sessions.pop(group_id, set())
         # Sorted, not set order: string hashes differ per process, and every TP rank must
         # evict in the same order.
+        released_session_ids = [
+            session_id
+            for session_id in sorted(released)
+            if session_id in self._sessions
+        ]
+        for session_id in released_session_ids:
+            self._sessions_to_sweep.pop(session_id, None)
         self._forget(
-            [
-                self._sessions.pop(session_id)
-                for session_id in sorted(released)
-                if session_id in self._sessions
-            ]
+            [self._sessions.pop(session_id) for session_id in released_session_ids]
         )
         self._release_cpu_cache()
 
@@ -198,9 +257,67 @@ class VLLMSessionKVEvictor:
             for block_hash in uncounted
             if block_hash not in self._num_requests_by_hash
         ]
-        self._evict(released)
+        self._held_block_hashes |= self._evict(
+            released, kv_cache_group_ids=self._kv_cache_group_ids
+        )
         if self._offload_connector is not None:
             self._cpu_hashes_to_release.update(released)
+
+    def _evict_superseded_gdn_states(
+        self, request: _TrackedRequest, *, left_vllm: bool
+    ) -> None:
+        """Per GDN group, keep the state vLLM's prefix lookup picks for `request`'s tokens, which
+        its next turn resumes from. Evict the older ones that no other request counts, and once
+        it left vLLM, the newer ones too.
+
+            no drafts:            states at blocks 1, 2, 3 -> keeps 3
+            MTP's block drop on:  states at blocks 0, 2, 3 -> keeps 2; 3 only while it runs
+        """
+        # The lookup applies MTP's block drop, `prefix_match_unit` and vLLM's alignment.
+        hit_blocks, _, _ = self._coordinator.find_longest_cache_hit(
+            request.block_hashes, request.vllm_request.num_tokens
+        )
+        get_one_block = self._block_pool.cached_block_hash_to_block.get_one_block
+        block_hashes = request.block_hashes
+        for position, kv_cache_group_id in enumerate(self._gdn_kv_cache_group_ids):
+            kept_keys = {
+                block.block_hash
+                for block in hit_blocks[kv_cache_group_id]
+                if not block.is_null
+            }
+            cached_indices, kept_index = [], None
+            for index in range(request.gdn_scan_starts[position], len(block_hashes)):
+                key = make_block_hash_with_group_id(
+                    block_hashes[index], kv_cache_group_id
+                )
+                if get_one_block(key) is None:
+                    continue
+                cached_indices.append(index)
+                if key in kept_keys:
+                    kept_index = index
+            if kept_index is None:
+                continue
+
+            superseded_indices = [
+                index
+                for index in cached_indices
+                if (index < kept_index or (left_vllm and index > kept_index))
+                and self._num_requests_by_hash[block_hashes[index]] == 1
+            ]
+            held_block_hashes = self._evict(
+                [block_hashes[index] for index in superseded_indices],
+                kv_cache_group_ids=(kv_cache_group_id,),
+            )
+            # A copy still in use (the request's previous state, freed next step) is looked
+            # up again in the next sweep.
+            request.gdn_scan_starts[position] = min(
+                (
+                    index
+                    for index in superseded_indices
+                    if block_hashes[index] in held_block_hashes
+                ),
+                default=kept_index,
+            )
 
     def _release_cpu_cache(self) -> None:
         """Send the evicted hashes to the CPU offload connector once the saves pending when
@@ -237,14 +354,17 @@ class VLLMSessionKVEvictor:
             )
         request.num_counted = len(request.block_hashes)
 
-    def _evict(self, block_hashes: list[BlockHash]) -> None:
-        """Move the free blocks of `block_hashes` that nothing counts to the free queue's front,
-        without their hash."""
+    def _evict(
+        self, block_hashes: list[BlockHash], *, kv_cache_group_ids: Sequence[int]
+    ) -> set[BlockHash]:
+        """Move the free blocks of `block_hashes` in `kv_cache_group_ids` to the free queue's
+        front, without their hash; return the hashes that kept a copy in use."""
         cached_blocks = self._block_pool.cached_block_hash_to_block
         free_block_queue = self._block_pool.free_block_queue
         evicted = []
+        held_block_hashes = set()
         for block_hash in block_hashes:
-            for kv_cache_group_id in self._kv_cache_group_ids:
+            for kv_cache_group_id in kv_cache_group_ids:
                 key = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
                 # vLLM may cache one hash in several blocks (siblings that prefilled one
                 # prompt in the same step). Each lookup returns one; blocks in use are set
@@ -253,10 +373,10 @@ class VLLMSessionKVEvictor:
                 while (block := cached_blocks.get_one_block(key)) is not None:
                     if block.ref_cnt > 0:
                         # In use, e.g. by a KV connector's save or lazy copy, or a free that
-                        # async scheduling defers: it keeps its hash until `after_step` retries.
+                        # async scheduling defers: it keeps its hash; the caller retries it.
                         cached_blocks.pop(key, block.block_id)
                         in_use.append(block)
-                        self._held_block_hashes.add(block_hash)
+                        held_block_hashes.add(block_hash)
                         continue
                     free_block_queue.remove(block)
                     # Drops the block's hashes, as vLLM does when it reuses a cached block.
@@ -267,3 +387,4 @@ class VLLMSessionKVEvictor:
         # Block id order, so every TP rank leaves the same free queue.
         free_block_queue.prepend_n(sorted(evicted, key=lambda block: block.block_id))
         self.num_evicted_blocks += len(evicted)
+        return held_block_hashes
