@@ -188,6 +188,11 @@ def _num_cached_blocks(manager, request) -> int:
     )
 
 
+def _num_copies(manager, key) -> int:
+    """Blocks cached under ``key``, a block hash with its KV cache group id."""
+    return sum(block.block_hash == key for block in manager.block_pool.blocks)
+
+
 def _num_free_uncached_blocks(manager) -> int:
     queue = manager.block_pool.free_block_queue
     return sum(block.block_hash is None for block in queue.iter_blocks_after(None))
@@ -406,32 +411,76 @@ def test_an_edited_history_releases_the_dropped_reply(manager, scheduler, evicto
     assert _cached_indices(manager, sibling, ATTENTION_KV_CACHE_GROUP_ID) == [0, 1, 2]
 
 
-def test_both_copies_go_once_the_released_running_request_finishes(
+def test_a_duplicate_copy_goes_when_its_request_finishes_and_the_last_once_released(
     manager, scheduler, evictor
 ):
     prompt = list(range(40))  # 2 full blocks
     running = _admit(scheduler, evictor, "b/turn=0", "b", 2, prompt)
     _prefill(manager, running)
+    # Scheduled without a prefix lookup, as in one step with b: a caches a second copy.
     copy = _admit(scheduler, evictor, "a/turn=0", "a", 1, prompt)
     _schedule(manager, copy, len(prompt), sample=7)
-    _finish(manager, scheduler, evictor, copy)
     key = make_block_hash_with_group_id(
         running.block_hashes[0], ATTENTION_KV_CACHE_GROUP_ID
     )
+    assert _num_copies(manager, key) == 2
 
-    def num_copies() -> int:
-        return sum(block.block_hash == key for block in manager.block_pool.blocks)
-
-    assert num_copies() == 2
+    # a's copy goes when a's request finishes: b's request uses the other one.
+    _finish(manager, scheduler, evictor, copy)
+    assert _num_copies(manager, key) == 1
     evictor.release(session_ids=["a", "b"], group_ids=[])
-    # b's request still runs and counts the shared prompt, so both copies stay for now.
-    assert num_copies() == 2
+    # b's request still runs and counts the shared prompt, so its copy stays for now.
+    assert _num_copies(manager, key) == 1
     for token in range(100, 120):
         _schedule(manager, running, 1, sample=token)
     _finish(manager, scheduler, evictor, running)
-    assert num_copies() == 0
+    assert _num_copies(manager, key) == 0
     assert all(block.block_hash is None for block in manager.block_pool.blocks)
     assert evictor._num_requests_by_hash == {} and evictor._ended_requests == {}
+
+
+@pytest.mark.parametrize("manager", [0, 3], ids=["dense", "hybrid"], indirect=True)
+def test_siblings_prefilled_in_one_step_keep_one_copy_of_their_shared_prompt(
+    manager, scheduler, evictor
+):
+    # vLLM schedules a group's first calls in one step, before either's prompt is cached:
+    # each sibling computes and caches its own copy of the 40-token prompt (2 full blocks).
+    prompt = list(range(40))
+    siblings = [
+        _admit(scheduler, evictor, f"g/{i}/turn=0", f"g/{i}", 0, prompt)
+        for i in range(2)
+    ]
+    for request in siblings:
+        _schedule(manager, request, 32)
+    for i, request in enumerate(siblings):
+        _schedule(manager, request, 8, sample=100 * (i + 1))
+    cached_keys = [
+        key
+        for block_hash in siblings[0].block_hashes[:2]
+        for kv_cache_group_id in range(manager.num_kv_cache_groups)
+        if _num_copies(
+            manager,
+            key := make_block_hash_with_group_id(block_hash, kv_cache_group_id),
+        )
+    ]
+    assert [_num_copies(manager, key) for key in cached_keys] == [2] * len(cached_keys)
+
+    # Sibling 0 ends its turn while sibling 1 still decodes; replies of 20 and 30 tokens.
+    for token in range(101, 120):
+        _schedule(manager, siblings[0], 1, sample=token)
+    _finish(manager, scheduler, evictor, siblings[0])
+    for token in range(201, 230):
+        _schedule(manager, siblings[1], 1, sample=token)
+    _finish(manager, scheduler, evictor, siblings[1])
+
+    # One copy of each shared block stays, and both next turns resume after their full blocks.
+    assert [_num_copies(manager, key) for key in cached_keys] == [1] * len(cached_keys)
+    hits = []
+    for i, request in enumerate(siblings):
+        next_turn = _request(f"g/{i}/turn=1", list(request.all_token_ids) + [5, 6, 7])
+        _, num_hit_tokens, _ = manager.get_computed_blocks(next_turn)
+        hits.append(num_hit_tokens)
+    assert hits == [48, 64]
 
 
 def test_a_kv_cache_group_with_blocks_larger_than_the_hash_block_is_evicted_too():
@@ -501,8 +550,6 @@ def test_a_copy_a_kv_connector_holds_keeps_its_hash_until_the_connector_frees_it
     b = _admit(scheduler, evictor, "b/turn=0", "b", 2, prompt)
     _schedule(manager, a, len(prompt), sample=7)
     _schedule(manager, b, len(prompt), sample=7)
-    _finish(manager, scheduler, evictor, a)
-    _finish(manager, scheduler, evictor, b)
     key = make_block_hash_with_group_id(a.block_hashes[0], ATTENTION_KV_CACHE_GROUP_ID)
     get = manager.block_pool.cached_block_hash_to_block.get_one_block
     held = get(key)  # the copy vLLM's lookup returns first
@@ -512,6 +559,8 @@ def test_a_copy_a_kv_connector_holds_keeps_its_hash_until_the_connector_frees_it
         if block.block_hash == key and block is not held
     ]
     manager.block_pool.touch([held])
+    _finish(manager, scheduler, evictor, a)
+    _finish(manager, scheduler, evictor, b)
 
     evictor.release(session_ids=["a", "b"], group_ids=[])
 
