@@ -689,7 +689,7 @@ class VLLMEngine(GenerationEngine):
     def log_stats(self, step: int) -> None:
         logger.info(
             "Session KV at step %d: %d live sessions; evicted so far: %d blocks of ended "
-            "sessions, %d blocks live sessions no longer need",
+            "sessions and replaced requests, %d blocks live sessions no longer need",
             step,
             self._session_kv_evictor.num_sessions,
             self._session_kv_evictor.num_evicted_blocks,
