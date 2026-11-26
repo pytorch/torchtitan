@@ -153,6 +153,23 @@ def rl_dppo_score_centering_qwen3_0_6b_varlen(
     return config
 
 
+def rl_cispo_score_centering_qwen3_0_6b_varlen_sglang_top_p(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    """``rl_cispo_score_centering_qwen3_0_6b_varlen`` sampling with top-k 64 and top-p 0.95 on
+    the SGLang engine: the loss replays each token's kept set, and score centering centers
+    over it (6 GPUs: 4 gen + 2 train)."""
+    # Imported here so the other recipes do not depend on SGLang.
+    from torchtitan.rl.generator.sglang.engine import SGLangEngine
+
+    config = rl_cispo_score_centering_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.generator.engine = SGLangEngine.Config()
+    config.generator.sampling = dataclasses.replace(
+        config.generator.sampling, top_k=64, top_p=0.95
+    )
+    return config
+
+
 def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     num_samples_per_prompt = 8

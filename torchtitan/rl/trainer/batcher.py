@@ -32,7 +32,7 @@ from torchtitan.config import Configurable
 from torchtitan.models.common.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.rollout.types import PromptImage, RolloutGroup
+from torchtitan.rl.rollout.types import KeptSets, PromptImage, RolloutGroup
 from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch, RegisterRDMAMicrobatch
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
@@ -70,6 +70,12 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     generator_topk_token_ids: torch.Tensor | None = None  # [num_loss_tokens, k]
     """One row per True in loss_mask; `to_input_dict` expands them to [T, k] for the loss."""
     generator_topk_logprobs: torch.Tensor | None = None  # [num_loss_tokens, k]
+    generator_kept_token_ids: torch.Tensor | None = None  # [num_loss_tokens, top_k]
+    """Each loss token's kept set (the tokens top-k/top-p let it sample from), padded with 0 to
+    ``top_k``; `to_input_dict` expands them to [T, top_k] like the top-k rows."""
+    generator_kept_logprobs: torch.Tensor | None = None  # [num_loss_tokens, top_k]
+    """The generator's logprobs of the kept tokens, renormalized over each kept set; -inf on
+    padding, which marks it."""
     vision_processor: VisionProcessor.Config | None = None
     """How `preprocess_images` turns ``model_kwargs["image_files"]`` into
     ``pixel_values``. None without images."""
@@ -127,6 +133,9 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
         if self.generator_topk_token_ids is not None:
             loss_kwargs["generator_topk_token_ids"] = self.generator_topk_token_ids
             loss_kwargs["generator_topk_logprobs"] = self.generator_topk_logprobs
+        if self.generator_kept_token_ids is not None:
+            loss_kwargs["generator_kept_token_ids"] = self.generator_kept_token_ids
+            loss_kwargs["generator_kept_logprobs"] = self.generator_kept_logprobs
         # Explicit base call: zero-argument super() fails in slots=True dataclasses.
         return {
             **TokenizedTrainingMicrobatch.as_input_dict(self),
@@ -136,7 +145,8 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     def to_input_dict(
         self, device: torch.device | str, *, non_blocking: bool = False
     ) -> dict[str, Any]:
-        """Move the inputs to ``device``, then expand the top-k to one row per token.
+        """Move the inputs to ``device``, then expand the top-k and kept-set rows to one row per
+        token: zeros off the loss mask, -inf for kept-set logprobs (no kept tokens).
 
         Expanding after the move copies only the loss-token rows to ``device``.
 
@@ -149,15 +159,71 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
         input_dict = TokenizedTrainingMicrobatch.to_input_dict(
             self, device, non_blocking=non_blocking
         )
-        if self.generator_topk_token_ids is not None:
-            loss_kwargs = input_dict["loss_kwargs"]
-            loss_mask = loss_kwargs["loss_mask"].unsqueeze(-1)
-            for key in ("generator_topk_token_ids", "generator_topk_logprobs"):
-                loss_rows = loss_kwargs[key]
-                rows = loss_rows.new_zeros(loss_mask.shape[0], loss_rows.shape[1])
-                # masked_scatter_, unlike indexing with the mask, needs no host sync on CUDA.
-                loss_kwargs[key] = rows.masked_scatter_(loss_mask, loss_rows)
+        loss_kwargs = input_dict["loss_kwargs"]
+        loss_mask = loss_kwargs["loss_mask"].unsqueeze(-1)
+        for key, fill_value in (
+            ("generator_topk_token_ids", 0),
+            ("generator_topk_logprobs", 0.0),
+            ("generator_kept_token_ids", 0),
+            ("generator_kept_logprobs", -torch.inf),
+        ):
+            if key not in loss_kwargs:
+                continue
+            loss_rows = loss_kwargs[key]
+            rows = loss_rows.new_full(
+                (loss_mask.shape[0], loss_rows.shape[1]), fill_value
+            )
+            # masked_scatter_, unlike indexing with the mask, needs no host sync on CUDA.
+            loss_kwargs[key] = rows.masked_scatter_(loss_mask, loss_rows)
         return input_dict
+
+
+def _pack_kept_sets(
+    training_samples: list[TrainingSample], *, max_kept_set_size: int
+) -> dict[str, torch.Tensor]:
+    """A microbatch's kept sets, one row per loss token, padded to ``max_kept_set_size``.
+
+    Example (max_kept_set_size 3): kept sets [[5, 7], [2]] ->
+        ids [[5, 7, 0], [2, 0, 0]], logprobs [[-0.4, -1.1, -inf], [0.0, -inf, -inf]]
+    """
+    parts = []
+    for training_sample in training_samples:
+        # As for the top-k: one kept set per True in loss_mask[1:].
+        num_loss_tokens = int(training_sample.loss_mask[1:].sum())
+        name = training_sample.rollout_id.to_string()
+        if training_sample.kept_sets is None:
+            raise ValueError(
+                f"{name} has no kept sets for {num_loss_tokens} loss tokens"
+            )
+        training_sample.kept_sets.validate(num_loss_tokens, name=name)
+        if (
+            num_loss_tokens
+            and training_sample.kept_sets.lengths.max() > max_kept_set_size
+        ):
+            raise ValueError(
+                f"{name} has a kept set of {training_sample.kept_sets.lengths.max()} tokens, "
+                f"more than top_k = {max_kept_set_size}"
+            )
+        parts.append(training_sample.kept_sets)
+    # The empty part keeps np.concatenate working for a microbatch without samples.
+    empty = KeptSets(
+        token_ids=np.zeros(0, dtype=np.int32),
+        logprobs=np.zeros(0, dtype=np.float32),
+        lengths=np.zeros(0, dtype=np.int32),
+    )
+    kept_sets = KeptSets.concatenate([empty, *parts])
+    lengths = kept_sets.lengths
+    num_rows = len(lengths)
+    rows = np.repeat(np.arange(num_rows), lengths)
+    columns = np.arange(len(rows)) - np.repeat(np.cumsum(lengths) - lengths, lengths)
+    token_ids = np.zeros((num_rows, max_kept_set_size), dtype=np.int32)
+    token_ids[rows, columns] = kept_sets.token_ids
+    logprobs = np.full((num_rows, max_kept_set_size), -np.inf, dtype=np.float32)
+    logprobs[rows, columns] = kept_sets.logprobs
+    return {
+        "generator_kept_token_ids": torch.from_numpy(token_ids),
+        "generator_kept_logprobs": torch.from_numpy(logprobs),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,6 +340,7 @@ class Batcher(Configurable):
             pad_id=0,
             temperature=1.0,
             num_topk_logprobs=0,
+            max_kept_set_size=None,
             register_rdma_microbatch=MonarchRDMAMicrobatch.register,
         )
         pending, _ = batcher.add_training_samples(training_sample_group=group0)
@@ -352,6 +419,7 @@ class Batcher(Configurable):
         pad_id: int,
         temperature: float,
         num_topk_logprobs: int,
+        max_kept_set_size: int | None,
         register_rdma_microbatch: RegisterRDMAMicrobatch | None = None,
         vision_processor: VisionProcessor.Config | None = None,
     ) -> None:
@@ -376,6 +444,7 @@ class Batcher(Configurable):
         self.pad_id = pad_id
         self._temperature = temperature
         self._num_topk_logprobs = num_topk_logprobs
+        self._max_kept_set_size = max_kept_set_size
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_mtp_layers = config.num_mtp_layers
@@ -1036,6 +1105,13 @@ class Batcher(Configurable):
                     dtype=np.float32,
                 )
             )
+        kept = (
+            {}
+            if self._max_kept_set_size is None
+            else _pack_kept_sets(
+                training_samples, max_kept_set_size=self._max_kept_set_size
+            )
+        )
         target_mask = loss_mask & torch.isfinite(generator_logprobs)
         positions_tensor = torch.from_numpy(np.concatenate(packed_fields["positions"]))
         padding_mask_tensor = torch.from_numpy(
@@ -1076,6 +1152,7 @@ class Batcher(Configurable):
             vision_processor=vision_processor,
             generator_topk_token_ids=topk_token_ids,
             generator_topk_logprobs=topk_logprobs,
+            **kept,
         )
 
     def _pack_image_inputs(

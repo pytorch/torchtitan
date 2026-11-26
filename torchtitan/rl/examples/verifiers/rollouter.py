@@ -106,6 +106,12 @@ class VerifiersRollouter(Rollouter):
         verifiers_env_server: VerifiersEnvServer.Config
         """Environment server spawned and owned by this rollouter."""
 
+        @property
+        def returns_kept_sets(self) -> bool:
+            # TODO: return kept sets from the generation server (see
+            # `generation_server._parse_sampling_config`).
+            return False
+
         def __post_init__(self) -> None:
             Rollouter.Config.__post_init__(self)
             # The user sets the taskset once, in the training dataset; the env server's comes from it.

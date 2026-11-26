@@ -283,6 +283,7 @@ class RequestDispatcher:
                     token_logprobs=finished.token_logprobs,
                     topk_token_ids=finished.topk_token_ids,
                     topk_logprobs=finished.topk_logprobs,
+                    kept_sets=finished.kept_sets,
                     finish_reason=finished.finish_reason,
                     metrics=metrics,
                 )

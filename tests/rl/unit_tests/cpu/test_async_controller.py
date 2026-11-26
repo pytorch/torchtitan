@@ -222,6 +222,7 @@ def _build_batcher(
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
 
 
@@ -340,6 +341,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
@@ -368,6 +370,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_variable_length_group(
@@ -397,6 +400,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, _ = batcher.add_training_samples(
         training_sample_group=_variable_length_group(0, token_lengths=[4])
@@ -427,6 +431,7 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_variable_length_group(
@@ -452,6 +457,7 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     samples = _variable_length_group(
         0,
@@ -474,6 +480,7 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     samples = _variable_length_group(0, token_lengths=[6, 6]).training_samples
     bins = [[samples[0]], [samples[1]]]
@@ -492,6 +499,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     samples = _variable_length_group(
         0,
@@ -520,6 +528,7 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     samples = _variable_length_group(
         0,
@@ -547,6 +556,7 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, _ = batcher.add_training_samples(
         training_sample_group=_variable_length_group(
@@ -575,6 +585,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
@@ -600,6 +611,7 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     batch, _ = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=2)
@@ -621,6 +633,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        max_kept_set_size=None,
     )
     sample = _training_sample(group_id=0, rollout_id=0)
     sample.token_ids = np.arange(6)
@@ -734,6 +747,7 @@ def test_untrainable_group_releases_before_training() -> None:
             pad_id=0,
             temperature=1.0,
             num_topk_logprobs=0,
+            max_kept_set_size=None,
         )
 
         if not await buffer.wait_for_slot():

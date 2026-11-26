@@ -27,6 +27,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.components.loss import (
     _LossParallelCrossEntropy,
     ChunkedLossWrapper,
+    compute_kept_set_logprobs,
     compute_logprobs,
     compute_topk_logprobs,
     cross_entropy_and_logsumexp,
@@ -1057,6 +1058,155 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     # term and the gathered logits' sparse term, each rounded to the logits'
                     # dtype before they add up; the reference rounds once. In bf16 an element
                     # where the parts cancel is off by up to one bf16 step of either part.
+                    tolerance = (
+                        {"atol": 2e-2, "rtol": 0} if dtype == torch.bfloat16 else {}
+                    )
+                    torch.testing.assert_close(
+                        local_logits.grad, expected_grad, **tolerance
+                    )
+
+    @with_comms
+    def test_vocab_parallel_kept_set_logprobs_parity(self):
+        """Logprobs renormalized over padded kept sets, vocab-sharded under TP with SPMD types,
+        match a per-token renormalization: values and gradients, finite for a token without a
+        kept set."""
+        num_tokens, width = 16, 4
+        mesh_configs = (
+            ((4,), ("tp",), (Shard(1),), 1),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), 2),
+        )
+        for mesh_shape, axis_names, logits_placements, dp_size in mesh_configs:
+            mesh = init_device_mesh(
+                self.device_type, mesh_shape, mesh_dim_names=axis_names
+            )
+            tp_group = mesh.get_group("tp")
+            dp_rank = mesh.get_local_rank("dp") if dp_size > 1 else 0
+            for vocab_size, dtype in ((128, torch.float32), (131, torch.bfloat16)):
+                with self.subTest(
+                    mesh_shape=mesh_shape, vocab_size=vocab_size, dtype=dtype
+                ):
+                    generator = torch.Generator().manual_seed(vocab_size)
+                    global_logits = torch.randn(
+                        num_tokens, vocab_size, dtype=dtype, generator=generator
+                    ).to(self.device_type)
+                    temperature = torch.linspace(
+                        0.5, 1.5, num_tokens, device=self.device_type
+                    )
+                    # Token t keeps t % 4 + 1 distinct ids, its label first; ids spread
+                    # over every shard, including the last (uneven) one.
+                    kept_rows = [
+                        torch.randperm(vocab_size, generator=generator)[: t % 4 + 1]
+                        for t in range(num_tokens)
+                    ]
+                    labels = torch.stack([row[0] for row in kept_rows])
+                    kept_token_ids = torch.zeros(num_tokens, width, dtype=torch.long)
+                    kept_mask = torch.zeros(num_tokens, width, dtype=torch.bool)
+                    for t, row in enumerate(kept_rows):
+                        kept_token_ids[t, : len(row)] = row
+                        kept_mask[t, : len(row)] = True
+                    # The last token of each DP rank has no kept set (off the loss mask).
+                    no_kept_set = torch.arange(num_tokens) % (
+                        num_tokens // dp_size
+                    ) == (num_tokens // dp_size - 1)
+                    kept_mask[no_kept_set] = False
+
+                    reference_logits = global_logits.clone().requires_grad_(True)
+                    reference_label, reference_kept = [], []
+                    for t, row in enumerate(kept_rows):
+                        if no_kept_set[t]:
+                            reference_label.append(
+                                reference_logits.new_zeros((), dtype=torch.float32)
+                            )
+                            continue
+                        scaled = reference_logits[t, row.to(self.device_type)].float()
+                        logprobs = torch.log_softmax(scaled / temperature[t], dim=-1)
+                        reference_label.append(logprobs[0])
+                        reference_kept.append(logprobs)
+                    reference_label = torch.stack(reference_label)
+                    reference_kept_flat = torch.cat(reference_kept)
+                    kept_weights = torch.randn(
+                        len(reference_kept_flat), generator=generator
+                    ).to(self.device_type)
+                    (
+                        reference_label.sum()
+                        + (reference_kept_flat * kept_weights).sum()
+                    ).backward()
+
+                    # This DP rank's tokens.
+                    local_num_tokens = num_tokens // dp_size
+                    begin = dp_rank * local_num_tokens
+                    tokens = range(begin, begin + local_num_tokens)
+                    local_logits = (
+                        distribute_tensor(global_logits, mesh, logits_placements)
+                        .to_local()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    local_slice = slice(begin, begin + local_num_tokens)
+                    local_kept_token_ids = kept_token_ids[local_slice].to(
+                        self.device_type
+                    )
+                    local_kept_mask = kept_mask[local_slice].to(self.device_type)
+                    local_labels = labels[local_slice].to(self.device_type)
+                    local_temperature = temperature[local_slice]
+
+                    row_type = {tp_group: spmd.I}
+                    logits_type = {tp_group: spmd.S(1)}
+                    if dp_size > 1:
+                        logits_type[mesh.get_group("dp")] = spmd.S(0)
+                        row_type[mesh.get_group("dp")] = spmd.S(0)
+                    spmd.assert_type(local_logits, logits_type)
+                    for tensor in (
+                        local_kept_token_ids,
+                        local_kept_mask,
+                        local_labels,
+                        local_temperature,
+                    ):
+                        spmd.assert_type(tensor, row_type)
+
+                    with set_current_spmd_mesh(mesh):
+                        with typecheck(strict_mode="strict"):
+                            label_logprobs, kept_logprobs = compute_kept_set_logprobs(
+                                local_logits,
+                                local_kept_token_ids,
+                                local_kept_mask,
+                                labels=local_labels,
+                                vocab_parallel_group=tp_group,
+                                global_vocab_size=vocab_size,
+                                temperature=local_temperature,
+                            )
+                    self.assertIs(
+                        spmd.get_axis_local_type(label_logprobs, tp_group), spmd.I
+                    )
+                    has_kept = local_kept_mask.any(-1)
+                    kept_begin = sum(
+                        len(kept_rows[t]) for t in range(begin) if not no_kept_set[t]
+                    )
+                    num_kept = int(local_kept_mask.sum())
+                    torch.testing.assert_close(
+                        label_logprobs[has_kept],
+                        reference_label[local_slice][has_kept].detach(),
+                    )
+                    torch.testing.assert_close(
+                        kept_logprobs[local_kept_mask],
+                        reference_kept_flat[
+                            kept_begin : kept_begin + num_kept
+                        ].detach(),
+                    )
+                    self.assertTrue(
+                        torch.isneginf(kept_logprobs[~local_kept_mask]).all()
+                    )
+
+                    # Weight only the kept tokens and the labels that have a kept set, as
+                    # the loss does; the token without one must not make the gradient NaN.
+                    weights = kept_weights[kept_begin : kept_begin + num_kept]
+                    (
+                        torch.where(has_kept, label_logprobs, 0.0).sum()
+                        + (kept_logprobs[local_kept_mask] * weights).sum()
+                    ).backward()
+                    expected_grad = distribute_tensor(
+                        reference_logits.grad, mesh, logits_placements
+                    ).to_local()
                     tolerance = (
                         {"atol": 2e-2, "rtol": 0} if dtype == torch.bfloat16 else {}
                     )

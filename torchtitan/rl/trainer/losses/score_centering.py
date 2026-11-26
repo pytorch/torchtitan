@@ -12,9 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
-import torch.distributed as dist
 
-from torchtitan.components.loss import compute_topk_logprobs
 from torchtitan.config import Configurable
 
 # Floor of each tail mass (the probability outside the top-k): it can round to <= 0 in fp32.
@@ -35,7 +33,10 @@ class ScoreCentering(Configurable):
     ``q_v w_v = p_v`` and the term is 0; it comes from the tokens whose weight a loss clips,
     truncates or masks.
 
-    The generator sends only its top-k (the head ``H``). On the tail the generator is assumed
+    The generator sends only part of its distribution, the head ``H``: its top-k when it samples
+    from the full vocabulary, or each token's kept set under top-k/top-p sampling. A kept set
+    holds all of the generator's probability, so its tail is empty and the centering exact.
+    For the top-k, on the tail the generator is assumed
     to be the trainer scaled to the right mass, ``q_v = rho * p_v``, so every tail token has the
     ratio ``1 / rho`` and the weight ``w(1 / rho)``; ``sum_v p_v grad(log p_v) = 0`` then folds
     the tail into the head:
@@ -63,7 +64,9 @@ class ScoreCentering(Configurable):
         num_topk_logprobs: int = 32
         """Generator logprobs per generated token: its top-k tokens. Costs 8 * k bytes per
         generated token in transport. k = 32 and k = 128 matched full-vocabulary centering in
-        every setting of arXiv 2609.20807 (App. A.4)."""
+        every setting of arXiv 2609.20807 (App. A.4). Unused when top-k/top-p filters the
+        vocabulary: the head is then each token's kept set, which holds all of the generator's
+        probability."""
 
         def __post_init__(self) -> None:
             if self.num_topk_logprobs < 1:
@@ -77,60 +80,47 @@ class ScoreCentering(Configurable):
 
     def __call__(
         self,
-        logits: torch.Tensor,
         *,
-        labels: torch.Tensor,
-        label_logprobs: torch.Tensor,
-        temperature: torch.Tensor,
+        trainer_head_logprobs: torch.Tensor,
+        generator_head_logprobs: torch.Tensor,
+        head_mask: torch.Tensor | None,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
-        generator_topk_token_ids: torch.Tensor,
-        generator_topk_logprobs: torch.Tensor,
         log_token_weight: Callable[
             [torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor
         ],
-        vocab_parallel_group: dist.ProcessGroup | None,
-        global_vocab_size: int | None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Per-token correction with the gradient of ``sum_H sg(c_v) * log p_v`` (its value is
         0) and per-token metric values.
 
+        With kept sets as the head, the tail is empty (``rho`` -> 0 / 0, floored to 1), and
+        ``alpha * p`` only adds a multiple of ``sum_H p_v * grad(log p_v) = 0``.
+
         Args:
-            logits: [T, V] current-policy logits (a vocab shard under TP).
-            labels: [T] the sampled tokens.
-            label_logprobs: [T] their trainer logprobs (with autograd), from which the top-k
-                logprobs are scored.
-            temperature: [T] temperature each token was sampled at.
+            trainer_head_logprobs: [T, k] the trainer's logprobs of the head tokens (with
+                autograd).
+            generator_head_logprobs: [T, k] the generator's logprobs of the head tokens.
+            head_mask: [T, k] True on head tokens, for kept sets padded to ``k``; None when
+                every column is a head token (the top-k).
             advantages: [T] per-token advantages.
             loss_mask: [T] loss tokens with a finite generator logprob.
-            generator_topk_token_ids: [T, k] the generator's top-k token ids (0 off the mask).
-            generator_topk_logprobs: [T, k] the generator's logprobs of those ids.
             log_token_weight: the loss's ``log w(log_ratio, advantages, trainer_logprobs)``;
                 -inf where w = 0.
-            vocab_parallel_group: TP group when ``logits`` hold a vocab shard, else None.
-            global_vocab_size: full vocabulary size; required under TP.
 
         Returns:
             ([T] correction, the caller adds ``advantages * correction`` to the token loss;
             metrics, each a [T] value the caller averages over loss tokens).
         """
-        trainer_topk_logprobs = compute_topk_logprobs(
-            logits,
-            generator_topk_token_ids,
-            labels=labels,
-            label_logprobs=label_logprobs,
-            vocab_parallel_group=vocab_parallel_group,
-            global_vocab_size=global_vocab_size,
-            temperature=temperature,
-        )
-        # Off the loss mask the generator rows are zero placeholders or NaN, and NaN * 0 is
-        # NaN, so mask the inputs, not only the coefficients.
+        # Off the loss mask the generator rows are zero placeholders or NaN, and padding is
+        # -inf; NaN * 0 is NaN, so mask the inputs, not only the coefficients.
         row_mask = loss_mask.unsqueeze(-1)
+        if head_mask is not None:
+            row_mask = row_mask & head_mask
         with torch.no_grad():
-            trainer_logprobs = torch.where(row_mask, trainer_topk_logprobs, 0.0)
-            generator_logprobs = torch.where(row_mask, generator_topk_logprobs, 0.0)
-            trainer_probs = torch.exp(trainer_logprobs)
-            generator_probs = torch.exp(generator_logprobs)
+            trainer_logprobs = torch.where(row_mask, trainer_head_logprobs, 0.0)
+            generator_logprobs = torch.where(row_mask, generator_head_logprobs, 0.0)
+            trainer_probs = torch.where(row_mask, torch.exp(trainer_logprobs), 0.0)
+            generator_probs = torch.where(row_mask, torch.exp(generator_logprobs), 0.0)
             trainer_topk_mass = trainer_probs.sum(-1)
             generator_topk_mass = generator_probs.sum(-1)
             log_trainer_tail_mass = torch.log(
@@ -153,6 +143,7 @@ class ScoreCentering(Configurable):
             # A weight that reads p (DPPO) is evaluated at the largest p a tail token can
             # have under the tail model: at most the whole tail's trainer mass, and, since a
             # tail token is outside the generator's top-k, q_v = rho * p_v <= min_H q.
+            # (Masked entries hold 0, the largest logprob, so they don't lower the min.)
             log_max_tail_trainer_prob = torch.minimum(
                 log_trainer_tail_mass, generator_logprobs.amin(-1) - log_rho
             )
@@ -174,7 +165,9 @@ class ScoreCentering(Configurable):
             }
         # log p - sg(log p): the gradient of sum_H c_v * log p_v with a forward value of 0, so
         # loss/mean stays comparable with runs without score centering.
+        # Padding holds -inf, so take the difference only on head entries.
+        trainer_head_logprobs = torch.where(row_mask, trainer_head_logprobs, 0.0)
         correction = (
-            coefficients * (trainer_topk_logprobs - trainer_topk_logprobs.detach())
+            coefficients * (trainer_head_logprobs - trainer_head_logprobs.detach())
         ).sum(-1)
         return correction, metrics

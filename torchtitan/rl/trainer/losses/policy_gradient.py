@@ -13,7 +13,12 @@ from dataclasses import dataclass
 
 import torch
 
-from torchtitan.components.loss import compute_logprobs, Loss
+from torchtitan.components.loss import (
+    compute_kept_set_logprobs,
+    compute_logprobs,
+    compute_topk_logprobs,
+    Loss,
+)
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.rl.trainer.losses.score_centering import ScoreCentering
@@ -136,6 +141,8 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
         loss_mask: torch.Tensor,
         generator_topk_token_ids: torch.Tensor | None = None,
         generator_topk_logprobs: torch.Tensor | None = None,
+        generator_kept_token_ids: torch.Tensor | None = None,
+        generator_kept_logprobs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the policy-gradient loss.
 
@@ -151,21 +158,49 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
             generator_topk_token_ids: [T, k] the generator's top-k token ids, with
                 ``score_centering`` only.
             generator_topk_logprobs: [T, k] the generator's logprobs of those ids.
+            generator_kept_token_ids: [T, top_k] each token's kept set, padded, when
+                top-k/top-p filtered the vocabulary. The loss then replays it: trainer logprobs
+                are renormalized over it, and it is score centering's head.
+            generator_kept_logprobs: [T, top_k] the generator's logprobs of those ids,
+                renormalized over each kept set; -inf on padding.
 
         Returns:
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
         vocab_parallel_group = spmd_mesh_group("tp")
-        # Score tokens under the distribution vLLM sampled from.
-        trainer_logprobs, token_entropy = compute_logprobs(
-            logits,
-            labels,
-            vocab_parallel_group=vocab_parallel_group,
-            return_entropy=True,
-            global_vocab_size=self.global_vocab_size,
-            temperature=temperature,
-        )
+        kept_trainer_logprobs = kept_mask = None
+        if generator_kept_token_ids is not None:
+            assert generator_kept_logprobs is not None
+            kept_mask = torch.isfinite(generator_kept_logprobs)
+            # Score tokens under the distribution the generator sampled from: renormalized
+            # over each token's kept set.
+            # TODO: the gradient reaches only the kept tokens' logits, so the LM-head backward
+            # could gather/scatter over them instead of a dense matmul over the vocabulary.
+            trainer_logprobs, kept_trainer_logprobs = compute_kept_set_logprobs(
+                logits,
+                generator_kept_token_ids,
+                kept_mask,
+                labels=labels,
+                vocab_parallel_group=vocab_parallel_group,
+                global_vocab_size=self.global_vocab_size,
+                temperature=temperature,
+            )
+            with torch.no_grad():
+                # The entropy of p_S, the policy the loss trains; padding holds -inf.
+                token_entropy = -torch.where(
+                    kept_mask, kept_trainer_logprobs.exp() * kept_trainer_logprobs, 0.0
+                ).sum(-1)
+        else:
+            # Score tokens under the distribution the generator sampled from.
+            trainer_logprobs, token_entropy = compute_logprobs(
+                logits,
+                labels,
+                vocab_parallel_group=vocab_parallel_group,
+                return_entropy=True,
+                global_vocab_size=self.global_vocab_size,
+                temperature=temperature,
+            )
         # A non-finite generator logprob (notably under CUDA graph) has no valid
         # old-policy reference, so DROP that token from the loss + denominator (cleaner
         # than nan->0, which trains it as if it were on-policy).
@@ -188,22 +223,32 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
         token_loss = self.token_loss(tokens)
         score_centering_metrics = {}
         if self.score_centering is not None:
-            assert (
-                generator_topk_token_ids is not None
-                and generator_topk_logprobs is not None
-            ), "score centering needs the generator's top-k logprobs"
+            if kept_trainer_logprobs is not None:
+                # The head is the kept set.
+                head_trainer_logprobs = kept_trainer_logprobs
+                head_generator_logprobs = generator_kept_logprobs
+            else:
+                assert (
+                    generator_topk_token_ids is not None
+                    and generator_topk_logprobs is not None
+                ), "score centering needs the generator's top-k logprobs"
+                head_trainer_logprobs = compute_topk_logprobs(
+                    logits,
+                    generator_topk_token_ids,
+                    labels=labels,
+                    label_logprobs=trainer_logprobs,
+                    vocab_parallel_group=vocab_parallel_group,
+                    global_vocab_size=self.global_vocab_size,
+                    temperature=temperature,
+                )
+                head_generator_logprobs = generator_topk_logprobs
             correction, score_centering_metrics = self.score_centering(
-                logits,
-                labels=labels,
-                label_logprobs=trainer_logprobs,
-                temperature=temperature,
+                trainer_head_logprobs=head_trainer_logprobs,
+                generator_head_logprobs=head_generator_logprobs,
+                head_mask=kept_mask,
                 advantages=advantages,
                 loss_mask=effective_loss_mask,
-                generator_topk_token_ids=generator_topk_token_ids,
-                generator_topk_logprobs=generator_topk_logprobs,
                 log_token_weight=self.log_token_weight,
-                vocab_parallel_group=vocab_parallel_group,
-                global_vocab_size=self.global_vocab_size,
             )
             token_loss = token_loss + advantages * correction
 
@@ -242,7 +287,8 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
                     global_loss_token_counts,
                 ),
                 "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
-                # Mean entropy of softmax(logits / temperature) over tokens used by the loss.
+                # Mean entropy of softmax(logits / temperature) over tokens used by the loss,
+                # renormalized over each kept set when the loss replays kept sets.
                 "trainer/entropy/mean": _normalize(
                     (token_entropy * effective_loss_mask).sum(),
                     global_loss_token_counts,

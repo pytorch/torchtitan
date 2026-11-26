@@ -55,7 +55,8 @@ enables score centering, and the RL loss golden checks that it stays a no-op the
 
 Requirements and limits:
 
-- `VLLMEngine` and `SGLangEngine`, with the message-env and Verifiers rollouters.
+- `VLLMEngine` and `SGLangEngine`, with the message-env and Verifiers rollouters, when sampling
+  from the full vocabulary; with top-k/top-p sampling, see the next section.
 - Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs). A
   Verifiers rollout worker can hold more: glibc keeps the freed rows, ~4.5 KiB per in-flight
   token at k = 128 in a CPU repro (TODO in `verifiers/generation_server.py`).
@@ -77,3 +78,56 @@ Requirements and limits:
 Metrics: `score_centering/generator_topk_mass/mean` and `score_centering/trainer_topk_mass/mean`
 (the probability mass the top-k covers; the tail model approximates the rest) and
 `score_centering/coefficient_l1/mean` (the correction's size before the advantage).
+
+## Top-k / top-p sampling: kept-set replay
+
+With `SamplingConfig.top_k` (and optionally `top_p < 1`), the generator samples each token
+from its kept set `S`, the tokens the filters keep, with probabilities renormalized over `S`:
+`q_S`. The loss replays `S`: the trainer's logprob is renormalized over the same tokens,
+`log p_S(y) = logits_y / T - logsumexp_{v in S}(logits_v / T)`, so the importance ratio
+`p_S(y) / q_S(y)` compares the two distributions over the tokens the generator could sample,
+and is 1 when the trainer and the generator agree. Without replay, a full-vocabulary `p(y)`
+against `q_S(y)` would put every ratio below 1 by the mass the filters drop.
+
+Example (one position, top-p 0.8, trainer equal to the generator):
+
+```
+p           = [A 0.50, B 0.30, C 0.15, D 0.05]      S = {A, B}
+q_S         = [0.625, 0.375, 0, 0]                  sampled: B
+p_S(B)      = 0.30 / 0.80 = 0.375                   ratio p_S(B) / q_S(B) = 1
+gradient    : B up, A down; C and D get none
+```
+
+The generator returns each token's kept set and `q_S` over it (SGLang's sampling mask, in
+"support" mode). They travel packed, and the batcher pads each loss token's kept set to a row of
+`top_k` (ids padded with 0, logprobs with -inf, which marks the padding; a larger kept set
+raises). The trainer receives `[T, top_k]` tensors, which CP, SPMD typing and the chunked loss
+treat like the top-k rows:
+
+```
+generator (SGLang)          batcher                         PolicyGradientLoss
+  kept ids, q_S, sizes -->    one row per loss token   -->    log p_S over each kept set
+  [num_kept], [num_gen]       [T, top_k], -inf padding        score centering over S
+```
+
+With score centering, the head is the kept set: it holds all of the generator's probability,
+so no tail model is needed and the centering is exact. `score_centering/generator_topk_mass`
+and `trainer_topk_mass` then read 1 by construction; `coefficient_l1` is the informative
+metric.
+
+Requirements and limits:
+
+- `SGLangEngine`. The controller rejects top-k/top-p sampling with `VLLMEngine` until its V2
+  model runner (#5956), whose sampler returns kept sets, and with the Verifiers rollouter (TODO).
+- `top_p < 1` needs `top_k`, which bounds each kept set: top-p alone can keep most of the
+  vocabulary on a flat distribution. The model's recommended `top_k` is a good default; it only
+  binds where top-p would keep more.
+- Batch-invariant mode raises: SGLang computes `q_S` from probabilities, not with the trainer's
+  `compute_kept_set_logprobs` (TODO).
+- `trainer/entropy/mean` is the entropy of `p_S`, the policy the loss trains.
+- Costs: from the generator, 8 bytes per kept token (int32 id, fp32 logprob) and 4 per
+  generated token (its kept-set size); to the trainer, 8 * top_k bytes per loss token, as for a
+  top-k of the same k. The trainer gathers `top_k + 1` logits per token (one TP all-reduce)
+  instead of a log-softmax over the vocabulary.
+- The gradient reaches only the kept tokens' logits; the LM-head backward is still a dense
+  matmul over the vocabulary (TODO in `PolicyGradientLoss`).

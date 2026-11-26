@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from torchtitan.rl.rollout.types import Prompt
+from torchtitan.rl.rollout.types import KeptSets, Prompt
 
 
 @dataclass(kw_only=True, slots=True)
@@ -24,8 +24,16 @@ class SamplingConfig:
     """Sampling temperature. 0.0 = greedy, higher = more random."""
 
     top_p: float = 1.0
-    """Nucleus sampling threshold. Must be 1.0: the trainer scores tokens over the full vocabulary,
-    so sampling from a truncated nucleus would bias the gradient."""
+    """Nucleus sampling threshold: sample from the most likely tokens that hold ``top_p`` of the
+    probability. Below 1.0 it needs ``top_k``, which bounds the kept set."""
+
+    top_k: int | None = None
+    """Sample from the ``top_k`` most likely tokens (with ``top_p``, from those of them that hold
+    ``top_p`` of their probability); None keeps every token.
+
+    When ``top_k`` or ``top_p`` filters the vocabulary, the generator returns each sampled token's
+    kept set (``FinishedRequest.kept_sets``) and the trainer replays it: it renormalizes its
+    logprobs over the same tokens, so it trains the policy the generator sampled from."""
 
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
@@ -45,14 +53,21 @@ class SamplingConfig:
     are off)."""
 
     def __post_init__(self) -> None:
-        # TODO(mask-replay): to allow top_p < 1, turn on vLLM's `return_sampling_mask` (needs a vLLM
-        # upgrade, the V2 model runner, top_k > 0 and processed logprobs), carry each token's kept
-        # ids next to generator_logprobs, and take the trainer's logsumexp of logits / T over them.
-        if self.top_p < 1.0:
+        if self.top_k is not None and self.top_k < 1:
+            raise ValueError(f"top_k must be None or >= 1, got {self.top_k}")
+        if not 0.0 < self.top_p <= 1.0:
+            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}")
+        if self.top_p < 1.0 and self.top_k is None:
             raise ValueError(
-                f"top_p must be 1.0, got {self.top_p}: the trainer computes logprobs "
-                "over the full vocabulary."
+                f"top_p < 1 (got {self.top_p}) needs top_k, e.g. the model's recommended "
+                "value: the trainer replays each sampled token's kept set, and top_k bounds its "
+                "size (top-p alone can keep most of the vocabulary)."
             )
+
+    @property
+    def filters_vocab(self) -> bool:
+        """Whether ``top_k`` or ``top_p`` samples from fewer tokens than the full vocabulary."""
+        return self.top_k is not None or self.top_p < 1.0
 
 
 @dataclass(kw_only=True, slots=True)
@@ -107,9 +122,13 @@ class FinishedRequest:
     request_id: str
     token_ids: list[int]  # [generated_tokens]
     token_logprobs: list[float]  # [generated_tokens], of each sampled token
+    """With vocabulary filtering, renormalized over the token's kept set: the distribution it was
+    sampled from."""
     finish_reason: str | None
     metrics_inputs: RequestMetricsInputs
     topk_token_ids: np.ndarray | None = None
     """[generated_tokens, k] int32; None unless `SamplingConfig.num_topk_logprobs` > 0."""
     topk_logprobs: np.ndarray | None = None
     """[generated_tokens, k] float32 logprobs of `topk_token_ids`."""
+    kept_sets: KeptSets | None = None
+    """Each generated token's kept set; None unless `SamplingConfig.filters_vocab`."""

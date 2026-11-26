@@ -118,7 +118,8 @@ class RolloutSampleRecorder(Configurable):
         `RolloutTurn` shows how to rebuild the full prompt."""
         log_logprobs: bool = False
         """Also record the raw per-token completion logprob arrays per turn, plus the
-        generator's top-k when `SamplingConfig.num_topk_logprobs` > 0."""
+        generator's top-k when `SamplingConfig.num_topk_logprobs` > 0 and its kept sets when
+        `SamplingConfig.filters_vocab`."""
 
     def __init__(self, config: Config, *, dump_dir: str) -> None:
         self._filter = config.filter.build()
@@ -224,5 +225,16 @@ class RolloutSampleRecorder(Configurable):
             )
             encoded["completion_topk_logprobs"] = (
                 None if topk_logprobs is None else topk_logprobs.tolist()
+            )
+            # Null without vocabulary filtering, so every dump keeps one schema.
+            kept_sets = turn.completion_kept_sets
+            encoded["completion_kept_sets"] = (
+                None
+                if kept_sets is None
+                else {
+                    "token_ids": kept_sets.token_ids.tolist(),
+                    "logprobs": kept_sets.logprobs.tolist(),
+                    "lengths": kept_sets.lengths.tolist(),
+                }
             )
         return encoded

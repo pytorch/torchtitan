@@ -708,9 +708,12 @@ def test_reset_kv_cache_on_model_state_dict_load_controls_cache_reset(
     assert fake.reset_encoder_cache_calls == int(reset_kv_cache and serves_images)
 
 
-def test_sampling_config_rejects_top_p_below_one():
-    with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
+def test_sampling_config_needs_top_k_with_top_p_below_one():
+    # The trainer replays each token's kept set, which top_k bounds.
+    with pytest.raises(ValueError, match="needs top_k"):
         SamplingConfig(top_p=0.95)
+    assert SamplingConfig(top_p=0.95, top_k=64).filters_vocab
+    assert not SamplingConfig().filters_vocab
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---

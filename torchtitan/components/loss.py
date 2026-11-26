@@ -644,6 +644,28 @@ def compute_topk_logprobs(
                 logits, vocab_parallel_group, src=spmd.S(-1), dst=spmd.I
             )
         return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids.long())
+    scaled = _gather_scaled_logits(
+        logits,
+        token_ids,
+        labels=labels,
+        vocab_parallel_group=vocab_parallel_group,
+        global_vocab_size=global_vocab_size,
+        temperature=temperature,
+    )
+    return label_logprobs.unsqueeze(-1) + (scaled[:, 1:] - scaled[:, :1])
+
+
+def _gather_scaled_logits(
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    *,
+    labels: torch.Tensor,
+    vocab_parallel_group: dist.ProcessGroup | None,
+    global_vocab_size: int | None,
+    temperature: torch.Tensor,
+) -> torch.Tensor:
+    """``[T, 1 + k]`` fp32 ``logits / temperature`` of each label (column 0) and its
+    ``token_ids[T, k]``, gathered from a vocab shard under TP (`_VocabParallelGather`)."""
     # Ignored labels (loss-masked positions) gather a placeholder column; callers mask
     # those rows.
     token_ids = torch.cat([labels.clamp_min(0).unsqueeze(-1), token_ids], dim=-1).long()
@@ -654,8 +676,62 @@ def compute_topk_logprobs(
     else:
         gathered = logits.gather(-1, token_ids)
     # compute_logprobs' division, after the gather: elementwise, so the values are the same.
-    scaled = (gathered / temperature.unsqueeze(-1)).float()
-    return label_logprobs.unsqueeze(-1) + (scaled[:, 1:] - scaled[:, :1])
+    return (gathered / temperature.unsqueeze(-1)).float()
+
+
+def compute_kept_set_logprobs(
+    logits: torch.Tensor,
+    kept_token_ids: torch.Tensor,
+    kept_mask: torch.Tensor,
+    *,
+    labels: torch.Tensor,
+    vocab_parallel_group: dist.ProcessGroup | None,
+    global_vocab_size: int | None,
+    temperature: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Logprobs renormalized over each token's kept set S, the tokens top-k/top-p let the
+    generator sample from: ``log p_S(v) = logits_v / T - logsumexp_{u in S}(logits_u / T)``.
+
+    Gathers only the label's and the kept tokens' logits, as `compute_topk_logprobs` does (one
+    TP all-reduce under TP), so no ``[T, V]`` softmax is computed or saved for backward.
+
+    Args:
+        logits: [T, V] logits (a vocab shard under TP).
+        kept_token_ids: [T, k] each token's kept set, padded to ``k`` (padding ids must be valid
+            ids, e.g. 0).
+        kept_mask: [T, k] True on the kept tokens; a row without any (off the loss mask) gets
+            meaningless values, which callers mask.
+        labels: [T] sampled tokens; each must be in its kept set where the loss uses it.
+        vocab_parallel_group: TP group when ``logits`` hold a vocab shard, else None.
+        global_vocab_size: full vocabulary size; required under TP.
+        temperature: [T] temperature each token was sampled at.
+
+    Returns:
+        ([T] label logprobs, [T, k] kept-token logprobs, -inf on padding).
+
+    Example:
+
+        logits = log([[0.5, 0.3, 0.2]]);  temperature = [1.0];  labels = [1]
+        kept_token_ids = [[0, 1, 0]];  kept_mask = [[True, True, False]]
+        ->  (log([0.375]), log([[0.625, 0.375, 0]]))
+    """
+    if vocab_parallel_group is not None and global_vocab_size is None:
+        raise ValueError("global_vocab_size is required for vocab-parallel logprobs")
+    scaled = _gather_scaled_logits(
+        logits,
+        kept_token_ids,
+        labels=labels,
+        vocab_parallel_group=vocab_parallel_group,
+        global_vocab_size=global_vocab_size,
+        temperature=temperature,
+    )
+    # A row without kept tokens normalizes over its (finite) placeholders instead of
+    # logsumexp([-inf, ...]) = -inf, whose gradient is NaN.
+    has_kept = kept_mask.any(-1, keepdim=True)
+    kept_scaled = torch.where(kept_mask | ~has_kept, scaled[:, 1:], -torch.inf)
+    log_normalizer = torch.logsumexp(kept_scaled, dim=-1, keepdim=True)
+    kept_logprobs = torch.where(kept_mask, kept_scaled - log_normalizer, -torch.inf)
+    return (scaled[:, :1] - log_normalizer).squeeze(-1), kept_logprobs
 
 
 class _VocabParallelGather(torch.autograd.Function):

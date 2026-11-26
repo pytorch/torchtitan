@@ -121,6 +121,70 @@ def test_score_centering_cancels_drift_with_the_full_vocab(name, advantage) -> N
     torch.testing.assert_close(centered, torch.zeros_like(centered), atol=1e-6, rtol=0)
 
 
+def _expected_kept_set_gradient(
+    loss, logits_row, kept_ids, generator_kept_logprobs, advantage
+):
+    """``sum_{y in S} q_S(y) * d loss(y) / d logits`` at one position whose kept set is S,
+    padded with two columns as the batcher pads it."""
+    num_kept = kept_ids.shape[0]
+    logits = logits_row.expand(num_kept, -1).clone().requires_grad_(True)
+
+    def padded_rows(values, fill_value):
+        row = torch.cat([values, values.new_full((2,), fill_value)])
+        return row.expand(num_kept, -1)
+
+    total, _ = loss(
+        logits,
+        kept_ids,
+        None,
+        generator_logprobs=generator_kept_logprobs,
+        temperature=torch.full((num_kept,), 0.7),
+        advantages=torch.full((num_kept,), advantage),
+        loss_mask=torch.ones(num_kept, dtype=torch.bool),
+        generator_kept_token_ids=padded_rows(kept_ids, 0),
+        generator_kept_logprobs=padded_rows(generator_kept_logprobs, -torch.inf),
+    )
+    total.backward()
+    return (generator_kept_logprobs.exp()[:, None] * logits.grad).sum(0)
+
+
+@pytest.mark.parametrize("name", list(_LOSS_CONFIGS))
+@pytest.mark.parametrize("advantage", [1.0, -1.0])
+def test_score_centering_cancels_drift_over_the_kept_set(name, advantage) -> None:
+    """With top-k/top-p sampling the loss replays the kept set S: the trainer renormalizes over
+    S, and S is score centering's head with no tail. At a constant advantage the expected
+    update over y ~ q_S must then be zero; the mismatch makes it nonzero without centering."""
+    torch.manual_seed(3)
+    vocab_size, num_kept = 16, 6
+    logits_row = torch.randn(vocab_size)
+    kept_ids = torch.randperm(vocab_size)[:num_kept]
+    # Small and large mismatches over the kept set, so some ratios stay inside each loss's
+    # band and both bounds bind somewhere (IcePop masks every token outside its band).
+    mismatch = torch.randn(num_kept) * torch.tensor([0.05, 0.1, 0.15, 1.0, 2.0, 3.0])
+    generator_kept_logprobs = torch.log_softmax(
+        (logits_row[kept_ids] + mismatch) / 0.7, dim=-1
+    )
+    base = _LOSS_CONFIGS[name]
+
+    drift = _expected_kept_set_gradient(
+        base.build(), logits_row, kept_ids, generator_kept_logprobs, advantage
+    )
+    centered = _expected_kept_set_gradient(
+        _with_score_centering(base, num_kept).build(),
+        logits_row,
+        kept_ids,
+        generator_kept_logprobs,
+        advantage,
+    )
+
+    assert drift.abs().max() > 1e-2
+    # Replay trains only the kept tokens' logits.
+    outside = torch.ones(vocab_size, dtype=torch.bool)
+    outside[kept_ids] = False
+    assert (drift[outside] == 0).all()
+    torch.testing.assert_close(centered, torch.zeros_like(centered), atol=1e-6, rtol=0)
+
+
 @pytest.mark.parametrize("name", list(_LOSS_CONFIGS))
 @pytest.mark.parametrize("tail_scale", [0.5, 0.95, 1.6])
 def test_score_centering_tail_model_is_exact_for_a_proportional_tail(
