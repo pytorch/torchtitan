@@ -364,8 +364,9 @@ override`.
 
 ## Code owner override
 
-A code owner can overrule the bot. Code owners are the users listed in
-`.github/CODEOWNERS` for at least one file the PR changes. Use the base
+A code owner can overrule the bot. A code owner here is a user listed in
+`.github/CODEOWNERS` for every file the PR changes, as branch protection
+requires. Use the base
 branch's `CODEOWNERS`: if the PR edits that file, read the old side of its
 hunk in `gh pr diff`.
 
@@ -380,8 +381,9 @@ A teammate may approve to avoid blocking the merge while still expecting the
 author to satisfy you, so keep your verdict.
 
 When triggered by an override comment from a code owner:
-1. Don't re-review. List the open must-fix items from your latest review and
-   mark the overridden ones.
+1. List the open must-fix items from your latest full review and mark the
+   overridden ones. If commits landed after that review, review them first (as
+   in "review again"); a new must-fix there isn't covered by the override.
 2. If no must-fix item remains open, submit `APPROVE`; otherwise use the
    verdict rules for what remains. The body is short: "Overridden by @user:
    <items, one line each>. Reason: <their reason>." plus any items still open.
@@ -420,9 +422,9 @@ grouped together. Use the pending-review tools (`mcp__github__*`):
 With no inline comments, `create_and_submit_pull_request_review(owner="pytorch",
 repo="torchtitan", pullNumber=N, event, body)` posts the review in one call.
 
-**The event always matches the verdict line**, in every mode (full review,
-review again, review my review, a question): `APPROVE` for Approve,
-`REQUEST_CHANGES` for Request changes, `COMMENT` for Needs discussion. Use
+**The event always matches the verdict line** whenever you post one: `APPROVE`
+for Approve, `REQUEST_CHANGES` for Request changes, `COMMENT` for Needs
+discussion. Use
 `COMMENT` without a verdict only for an answer that takes no position on whether
 the PR can merge, which is the default for a scoped request (see "What was
 asked"). A `REQUEST_CHANGES` from this bot keeps blocking the PR until
