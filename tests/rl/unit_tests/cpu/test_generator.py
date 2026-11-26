@@ -41,7 +41,11 @@ from torchtitan.rl.generator.dispatcher import (
 )
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
+from torchtitan.rl.generator.types import (
+    EngineRequest,
+    RequestMetricsInputs,
+    SamplingConfig,
+)
 from torchtitan.rl.generator.vllm.config import (
     MooncakeStoreKVOffloadConfig,
     SimpleCPUKVOffloadConfig,
@@ -700,6 +704,24 @@ def test_decode_metrics_absent_for_single_generated_token():
     assert "generator/prefill_time_ms" in keys
     assert "generator/decode_time_ms" not in keys
     assert "generator/inter_token_latency_ms" not in keys
+
+
+@pytest.mark.parametrize("num_verify_steps", [0, 4])
+def test_tokens_per_verify_step(num_verify_steps):
+    # 9 tokens: the first from prefill, then 8 from verify steps.
+    metrics = _prepare_generation_request_metrics(
+        RequestMetricsInputs(
+            num_cached_tokens=None,
+            has_stats=True,
+            num_generation_tokens=9,
+            num_verify_steps=num_verify_steps,
+        )
+    )
+    aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
+    if num_verify_steps == 0:
+        assert "generator/tokens_per_verify_step/mean" not in aggregate
+    else:
+        assert aggregate["generator/tokens_per_verify_step/mean"] == 2
 
 
 # --- config guards (model state dict load invariants) ---

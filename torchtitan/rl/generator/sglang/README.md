@@ -81,6 +81,7 @@ scripts/install_rl_env.sh --sglang
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |
 | GDN linear attention (Qwen3.5) | Supported; see below |
 | KDA linear attention (Kimi K3) | Supported; see below |
+| MTP speculative decoding (Qwen3.5) | Supported at TP 1 and DP 1 for GDN models without MoE; see below |
 | MLA (DeepSeek V3) | Supported with per-head K/V in the KV cache, as the vLLM engine runs MLA in batch-invariant mode; SGLang's compressed-latent MLA cache is not used |
 | Flex attention, attention sinks (GPT-OSS) | Not supported |
 | MoE with expert parallelism over the DP and TP ranks, Dist-MoE | Supported; see below |
@@ -193,7 +194,8 @@ replay count.
 
 ### KV and states share one pool
 
-For GDN and KDA models, the engine turns on SGLang's unified memory: the full
+For GDN and KDA models, the engine turns on SGLang's unified memory (not with
+MTP drafts, see below): the full
 attention layers' KV cache and the GDN / KDA states share one pool, so memory
 that no state uses can hold KV, and the other way around. A running request
 takes 5 state slots (3, plus the 2 track slots of `extra_buffer`), so SGLang runs
@@ -343,6 +345,52 @@ Checked on H100, TP 2:
 | --- | ---: | ---: | --- |
 | Qwen3-8B | 1.38 | 1.93 | 1.4x slower |
 | Qwen3-32B | 5.24 | 2.45 | 2.1x faster |
+
+## MTP speculative decoding
+
+`SGLangEngine.Config(num_speculative_tokens=3, cuda_graph="breakable")` turns on
+the checkpoint's MTP head (its `mtp.*` weights) as a draft model. Each decode
+step, the draft proposes 3 tokens and the model checks them in one verify step,
+which emits 1 to 4 tokens.
+
+- Sampling: the draft samples each token x from its distribution q, and the
+  model keeps it with probability min(1, p(x) / q(x)); on a reject it samples
+  from max(p - q, 0). So the output follows the model's distribution p, and the
+  logprobs are the model's (SGLang's `speculative_use_rejection_sampling`).
+- The draft is SGLang's Qwen3.5 MTP model, with FlashInfer attention. It uses the
+  model's embedding and LM head tensors, so model state dict loads reach it. Its
+  own layers keep the checkpoint's weights while the policy trains, so the share
+  of accepted drafts can fall: `generator/tokens_per_verify_step` tracks it.
+- FlashInfer compiles the draft's kernels at engine build, so drafts need `nvcc`
+  (`scripts/install_rl_env.sh --nvcc` installs it where no CUDA toolkit is).
+- GDN layers verify with SGLang's kernels (the conv update and the ReplaySSM
+  recurrence), not the trainer's Attention Gym kernels. So logprobs are not
+  bitwise equal to the trainer's or to those without drafts;
+  `tests/rl/unit_tests/gpu/test_sglang_mtp.py` bounds the gap.
+- Memory: for each running request, ReplaySSM keeps a ring of up to 16 accepted
+  tokens' records on top of the request's state slot, and folds it in when
+  full. On Qwen3.5-27B at 3 drafts, that is 12 MiB per request, plus 11 MiB
+  of conv windows (SGLang's default verify would keep 4 full states: 576 MiB).
+  At the pinned SGLang the unified pool has no rings, so with drafts the engine
+  leaves unified memory off, and SGLang splits memory between KV and states by a
+  fixed ratio (`mamba_full_memory_ratio`). Qwen3.5-27B, one GB300,
+  `gpu_memory_limit=0.8`: 1.40M KV tokens. Without drafts, KV and states share
+  one pool, so KV can also use the memory that no state uses.
+- Running requests: SGLang keeps at most (state slots) / 5 of them, with or
+  without drafts (Qwen3.5-27B as above, 256 asked: 98 kept with drafts, 110
+  without). Without drafts it only warns. With drafts the engine raises, so ask
+  for fewer, with headroom: the cap moves with free GPU memory.
+- With `DebugConfig(seed=...)`, the same seed gives the same tokens; they differ
+  from the tokens without drafts.
+- Speed: Qwen3.5-27B on one GB300, 54 multi-turn agent sessions of 27K-60K
+  tokens, 3 drafts: 1.45x the output tokens/s of no drafts (one run).
+- Raises when the `Config` is made: more than 5 drafts, `enable_mixed_chunk`
+  (its mixed steps would decode running requests from stale GDN states), and
+  `speculative_*` keys in `extra_server_args`.
+- Raises at engine build: TP > 1, DP > 1, SGLang's hierarchical cache, MoE or
+  KDA layers, a model without GDN layers, batch-invariant mode, and a checkpoint
+  without `mtp.*` weights or of another architecture than SGLang's Qwen3.5 MTP
+  draft takes.
 
 ## Seeds
 

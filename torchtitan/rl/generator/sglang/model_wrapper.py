@@ -430,6 +430,12 @@ class SGLangModelWrapper(Module):
             input_ids, hidden_states, self.model.decoder.lm_head, forward_batch
         )
 
+    def get_embed_and_head(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """SGLang's model API: the token embedding and LM head weights that an MTP draft
+        shares. Model state dict loads write them in place, so the draft sees updates."""
+        decoder = self.model.decoder
+        return decoder.tok_embeddings.weight, decoder.lm_head.weight
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         """SGLang's model API. A no-op: the wrapper loaded its weights when built, and
         never reads SGLang's checkpoint iterator."""
