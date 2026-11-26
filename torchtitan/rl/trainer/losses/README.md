@@ -6,8 +6,9 @@ ratio is `r = p / q`, trainer over generator. A subclass defines
 
 - `token_loss(tokens)`: the per-token loss from the token's `ScoredTokens` (trainer and
   generator logprobs, their ratio, the advantage), and
-- `log_token_weight(log_ratio, advantages)`: `log w`, where `-A * w(r) * grad(log p)` is the
-  gradient of `token_loss` (`-inf` where the loss has no gradient).
+- `log_token_weight(log_ratio, advantages, trainer_logprobs)`: `log w`, where
+  `-A * w * grad(log p)` is the gradient of `token_loss` (`-inf` where the loss has no
+  gradient). Every loss but DPPO ignores `trainer_logprobs`.
 
 | Loss | Weight `w` on a token's score | Score centering |
 | --- | --- | --- |
@@ -15,7 +16,7 @@ ratio is `r = p / q`, trainer over generator. A subclass defines
 | `GRPOLoss` | `DAPOLoss` with one symmetric bound | yes |
 | `CISPOLoss` | `min(r, max_ratio)`: truncated IS | yes |
 | `IcePopLoss` | `r` inside `[ratio_mask_low, ratio_mask_high]`, 0 outside: masked IS | yes |
-| `DPPOLoss` | `min(r, max_ratio)`, 0 once `sign(A) * (p - q)` passes a threshold | no: its weight depends on `p - q`, not on `r` alone (below) |
+| `DPPOLoss` | `min(r, max_ratio)`, 0 once `sign(A) * (p - q)` passes a threshold | yes (tail caveat below) |
 
 ## Score centering
 
@@ -67,9 +68,9 @@ Requirements and limits:
   IS (`IcePopLoss`), not PPO clipping; its composition with `DAPOLoss`/`GRPOLoss` follows the
   same formula. With stale rollouts, the paper finds it best combined with truncated or
   masked IS.
-- `DPPOLoss` raises: the top-k tail model needs one weight for every tail token (the tail's
-  ratio is `1 / rho` for all of them), but DPPO's trust region makes a tail token's weight
-  depend on its own `p_v`. Supporting it needs a full-vocabulary tail term.
+- `DPPOLoss`: its trust region reads each tail token's own `p_v`, so the tail fold is exact
+  only while no tail token can move past `divergence_threshold` (see `ScoreCentering`'s
+  docstring). With k = 32 that needs `rho < 0.14` with `A > 0`.
 
 Metrics: `score_centering/generator_topk_mass/mean` and `score_centering/trainer_topk_mass/mean`
 (the probability mass the top-k covers; the tail model approximates the rest) and

@@ -142,6 +142,17 @@ def rl_icepop_score_centering_qwen3_0_6b_varlen(
     return config
 
 
+def rl_dppo_score_centering_qwen3_0_6b_varlen(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    """``rl_dppo_qwen3_0_6b_varlen`` with score centering (6 GPUs: 4 gen + 2 train)."""
+    config = rl_dppo_qwen3_0_6b_varlen(seq_len=seq_len)
+    config.trainer.loss.loss_fn = dataclasses.replace(
+        config.trainer.loss.loss_fn, score_centering=ScoreCentering.Config()
+    )
+    return config
+
+
 def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     num_samples_per_prompt = 8

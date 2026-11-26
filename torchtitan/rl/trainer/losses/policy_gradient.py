@@ -61,7 +61,7 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
     Subclasses define ``token_loss``: each loss token's loss from its ``ScoredTokens``
     (trainer and generator logprobs, their ratio ``p / q``, the advantage), and
     ``log_token_weight``: the weight ``w`` that loss puts on the token's score, so that the
-    gradient of ``token_loss`` is ``-A * w(p / q) * grad(log p)``. ``score_centering`` uses
+    gradient of ``token_loss`` is ``-A * w * grad(log p)``. ``score_centering`` uses
     ``w`` to cancel the drift a trainer/generator mismatch adds to the gradient. This class scores
     the tokens under the distribution the generator sampled from (``softmax(logits / T)``),
     drops tokens whose generator logprob is non-finite (vLLM under CUDA graph) rather than
@@ -98,13 +98,18 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
 
     @abstractmethod
     def log_token_weight(
-        self, log_ratio: torch.Tensor, advantages: torch.Tensor
+        self,
+        log_ratio: torch.Tensor,
+        advantages: torch.Tensor,
+        trainer_logprobs: torch.Tensor,
     ) -> torch.Tensor:
         """``log w``: the log of the weight ``token_loss`` puts on a token's score.
 
         Args:
             log_ratio: ``log(p / q)`` of any tokens, not clamped.
             advantages: per-token advantages, broadcastable to ``log_ratio``.
+            trainer_logprobs: ``log p`` of the same tokens, for a weight that reads ``p``
+                as well as ``p / q`` (DPPO's trust region).
 
         Returns:
             ``log w``, -inf where ``token_loss`` has no gradient (``w = 0``).
