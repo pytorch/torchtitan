@@ -67,10 +67,11 @@ class VLLMSessionKVEvictor:
         B's next prompt rewrites block 4      -> resumes from the shared prompt's state
         B's last sibling ends, B is idle      -> the shared prompt's state goes too
 
-    - Siblings that prefill one prompt in the same step each cache their own copy of its
-      blocks, and with MTP drafts a turn caches its hit's last block again (vLLM doesn't
-      de-duplicate). Once a request leaves vLLM, each of its blocks keeps one cached copy; the
-      other free copies are evicted.
+    - vLLM doesn't de-duplicate: siblings that prefill one prompt in the same step each cache
+      their own copy of its blocks, and a turn that computes cached blocks again caches second
+      copies (MTP's block drop, a prompt that ends on a block boundary, a GDN turn that resumes
+      from an older state). Once a request leaves vLLM, each of its blocks keeps one cached
+      copy; the other free copies are evicted.
 
     Example:
 
@@ -133,7 +134,7 @@ class VLLMSessionKVEvictor:
         self._cpu_releasing_save_ids: set[int] = set()
         # Plain ints, so other threads (e.g. a logging endpoint) can read them safely. Blocks
         # of ended sessions and requests; and blocks live sessions no longer need: superseded
-        # GDN states and extra copies of shared blocks.
+        # GDN states and extra block copies.
         self.num_evicted_blocks = 0
         self.num_evicted_live_session_blocks = 0
 
@@ -176,7 +177,7 @@ class VLLMSessionKVEvictor:
     def after_step(self) -> None:
         """Evict the blocks of replaced or released requests that left vLLM in this step, the
         blocks that were in use at their eviction and are free now, live sessions'
-        superseded GDN states, and the extra copies of blocks that requests leaving vLLM share."""
+        superseded GDN states, and the extra copies of the blocks of requests leaving vLLM."""
         if self._held_block_hashes:
             # A hash a request counts again stays: that request's end evicts it.
             self._count_all_new_block_hashes()
@@ -257,8 +258,8 @@ class VLLMSessionKVEvictor:
 
     def _forget(self, requests: list[_TrackedRequest]) -> None:
         """Uncount `requests` that left vLLM, evict their hashes that nothing counts, and sweep
-        again the session that alone counts the rest; keep counting the others until `after_step`
-        sees them leave."""
+        again a live session left as the only one counting some of them; keep counting the others
+        until `after_step` sees them leave."""
         ended_block_hashes: list[BlockHash] = []
         # Per request, the first index of its hashes that one other request counts now.
         first_single_counted: list[tuple[_TrackedRequest, int]] = []
@@ -307,6 +308,7 @@ class VLLMSessionKVEvictor:
                 if session_id is None:
                     continue
             rescan_starts[session_id] = min(index, rescan_starts.get(session_id, index))
+
         idle_session_ids = []
         for session_id in sorted(rescan_starts):
             session = self._sessions[session_id]
@@ -316,6 +318,7 @@ class VLLMSessionKVEvictor:
             ]
             if session.internal_request_id not in self._scheduler.requests:
                 idle_session_ids.append(session_id)
+
         if idle_session_ids:
             self._count_all_new_block_hashes()
         for session_id in idle_session_ids:
@@ -409,10 +412,11 @@ class VLLMSessionKVEvictor:
             siblings A, B prefill prompt P in one step     -> P's blocks cached twice: A's, B's
             A leaves vLLM, B still runs                    -> A's goes; B's stays (in use)
             B leaves vLLM, a KV connector's save holds it  -> B's stays, the one copy
-            MTP: a turn caches its hit's last block again  -> the copy lookups return stays
+            a turn computes a cached block again           -> the copy lookups return stays
 
-        If two copies are still in use (two KV connector saves) when the last sharer leaves, both
-        stay until a sibling's next turn leaves vLLM or the group is released.
+        If two copies are still in use (two KV connector saves) when the last request holding the
+        block leaves, both stay until a later turn holding the block leaves vLLM or the group is
+        released.
         """
         self._evict(
             request.block_hashes,
