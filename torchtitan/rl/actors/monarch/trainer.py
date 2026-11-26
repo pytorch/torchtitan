@@ -14,15 +14,15 @@ import torch
 from monarch.actor import concurrent_endpoint
 
 from torchtitan.rl.actors.monarch.actor import Actor
-from torchtitan.rl.model_state_dict_transport import (
+from torchtitan.rl.trainer.batcher import TrainingMicrobatch
+
+from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
+from torchtitan.rl.transport.model_state_dict import (
     ModelStateDictTransport,
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch
-
-from torchtitan.rl.trainer.trainer import OptimizerStepOutput, Trainer
+from torchtitan.rl.transport.rdma_microbatch import RDMAMicrobatch
 
 
 class _TrainerActorEndpoints:

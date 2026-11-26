@@ -19,11 +19,11 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.rl.trainer.batcher import TrainingMicrobatch
-from torchtitan.rl.trainer.rdma_microbatch import (
+from torchtitan.rl.trainer.trainer import MirroredState, Trainer
+from torchtitan.rl.transport.rdma_microbatch import (
     RDMAMicrobatch,
     RDMAMicrobatchPrefetcher,
 )
-from torchtitan.rl.trainer.trainer import MirroredState, Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 

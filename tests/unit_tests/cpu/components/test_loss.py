@@ -1008,7 +1008,8 @@ class _AddMTPBlock(nn.Module):
         aux_loss_denominator=None,
     ):
         del attention_metadata, positions, padding_mask, aux_loss_denominator
-        return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
+        h = mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
+        return h, h
 
 
 class _FakeMTPDecoder(DeepSeekV3Model):

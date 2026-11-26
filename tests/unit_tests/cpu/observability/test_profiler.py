@@ -108,7 +108,7 @@ class TestProfilerEnabled(unittest.TestCase):
             tempfile.TemporaryDirectory() as tmpdir,
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch(
-                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                "torchtitan.observability.profiler.cuspy_unavailable_reasons",
                 return_value=["reason one", "reason two"],
             ),
         ):
@@ -152,14 +152,14 @@ class TestProfilerEnabled(unittest.TestCase):
     def test_cuspy_activity_config(self):
         """Builds real torch Cuspy configs, so torch API changes fail here."""
         config = CuspyTraceProfiler.Config(
-            enable_event_node_ids=True,
+            enable_graph_dependencies=True,
             performance_metrics=["sm__cycles_active.avg"],
             pm_sampling_interval_ms=0.5,
         )
         with (
             mock.patch("torch.cuda.is_available", return_value=True),
             mock.patch(
-                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                "torchtitan.observability.profiler.cuspy_unavailable_reasons",
                 return_value=[],
             ),
             mock.patch("torch.cuda.graph_annotations.is_available", return_value=True),
@@ -170,7 +170,7 @@ class TestProfilerEnabled(unittest.TestCase):
         cuspy_config, pm_config = activity[
             torch.profiler.ProfilerActivity.CUDA
         ].profiler_configs
-        self.assertTrue(cuspy_config.enable_event_node_ids)
+        self.assertTrue(cuspy_config.enable_graph_dependencies)
         self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
         self.assertEqual(pm_config.sampling_interval_ms, 0.5)
 

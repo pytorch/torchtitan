@@ -8,6 +8,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 from torchtitan.config import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -474,6 +475,7 @@ def test_spawn_proc_mesh_on_this_host_follows_the_visible_devices_mask(
     monkeypatch.setattr(provisioning, "this_host", lambda: host)
     if visible is None:
         monkeypatch.delenv(get_visible_devices_env_var(), raising=False)
+        monkeypatch.setattr(torch.accelerator, "device_count", lambda: 4)
     else:
         monkeypatch.setenv(get_visible_devices_env_var(), visible)
 
@@ -487,9 +489,11 @@ def test_spawn_proc_mesh_on_this_host_follows_the_visible_devices_mask(
 @pytest.mark.parametrize(
     "visible, match",
     [
-        ("4,5", "needs 4 GPUs, but .* lists 2: '4,5'"),
+        ("4,5", r"needs 4 GPUs, but only 2 are visible \(.*='4,5'\)"),
         # An empty mask means the controller sees no GPUs, not "use 0 .. n-1".
-        ("", "needs 4 GPUs, but .* lists 0: ''"),
+        ("", r"needs 4 GPUs, but only 0 are visible \(.*=''\)"),
+        # No mask on a host that has lost a GPU: 3 exist, not 0 .. 3.
+        (None, r"needs 4 GPUs, but only 3 are visible \(.*=None\)"),
     ],
 )
 def test_spawn_proc_mesh_on_this_host_needs_enough_visible_devices(
@@ -497,7 +501,11 @@ def test_spawn_proc_mesh_on_this_host_needs_enough_visible_devices(
 ):
     host = _FakeHostMesh()
     monkeypatch.setattr(provisioning, "this_host", lambda: host)
-    monkeypatch.setenv(get_visible_devices_env_var(), visible)
+    if visible is None:
+        monkeypatch.delenv(get_visible_devices_env_var(), raising=False)
+        monkeypatch.setattr(torch.accelerator, "device_count", lambda: 3)
+    else:
+        monkeypatch.setenv(get_visible_devices_env_var(), visible)
 
     with pytest.raises(ValueError, match=match):
         provisioning.spawn_proc_mesh(
