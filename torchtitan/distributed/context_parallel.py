@@ -27,6 +27,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config.configurable import Configurable
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.ragged_tensor import RaggedTensor
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
     current_spmd_mesh,
@@ -343,14 +344,68 @@ def _permute_tensor(
     return tensor
 
 
+def _shard_ragged_tensor(
+    ragged: RaggedTensor,
+    *,
+    name: str,
+    permutation: torch.Tensor | None,
+) -> RaggedTensor:
+    """This CP rank's rows of ``ragged``: the rows of its tokens, in its token order, packed
+    and padded to ``capacity // cp`` (raises on the device if they don't fit).
+
+    Example (cp = 2, no permutation, capacity 6 -> 3 per rank):
+
+        rows        [[5, 7], [], [2], [4, 4]]
+        rank 0      values [5, 7, 0]   lengths [2, 0]
+        rank 1      values [2, 4, 4]   lengths [1, 2]
+    """
+    cp_group = spmd_mesh_group(MeshAxisName.CP)
+    if cp_group is None:
+        raise RuntimeError("CP sharding requires an active multi-rank CP mesh axis.")
+    cp_size = cp_group.size()
+    num_tokens, capacity = ragged.lengths.shape[0], ragged.values.shape[0]
+    if num_tokens % cp_size or capacity % cp_size:
+        raise ValueError(
+            f"CP-sharded RaggedTensor input '{name}' needs its token count "
+            f"({num_tokens}) and capacity ({capacity}) divisible by the CP degree "
+            f"({cp_size})."
+        )
+    rows = (
+        torch.arange(num_tokens, device=ragged.lengths.device)
+        if permutation is None
+        else permutation[0]
+    )
+    num_local_tokens = num_tokens // cp_size
+    begin = cp_group.rank() * num_local_tokens
+    return ragged.take_rows(
+        rows[begin : begin + num_local_tokens], capacity=capacity // cp_size
+    )
+
+
 def shard_tensors(
     input_dict: dict[str, Any],
     *,
     input_shardings: dict[str, SpmdType],
     permutation: torch.Tensor | None,
 ) -> dict[str, Any]:
-    """Permute and shard declared tensor inputs over the active CP mesh axis."""
+    """Permute and shard declared tensor inputs over the active CP mesh axis.
+
+    A ``RaggedTensor`` input is sharded along tokens like a ``[T]`` tensor: each rank keeps
+    its tokens' rows (`_shard_ragged_tensor`).
+    """
     shard_dims = _cp_shard_dims(input_shardings)
+    ragged_names = tuple(
+        name for name in shard_dims if isinstance(input_dict.get(name), RaggedTensor)
+    )
+    for name in ragged_names:
+        if shard_dims[name] != _TOKEN_DIM:
+            raise ValueError(
+                f"RaggedTensor input '{name}' must be CP-sharded along tokens (dim "
+                f"{_TOKEN_DIM}), got dim {shard_dims[name]}."
+            )
+        input_dict[name] = _shard_ragged_tensor(
+            input_dict[name], name=name, permutation=permutation
+        )
     shard_names = tuple(
         name for name in shard_dims if isinstance(input_dict.get(name), torch.Tensor)
     )

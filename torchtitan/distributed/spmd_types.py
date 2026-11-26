@@ -18,6 +18,7 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.ragged_tensor import RaggedTensor
 
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
@@ -216,13 +217,23 @@ def annotate_input_spmd_types(
     must have a layout entry: a tensor with no entry raises rather than being
     silently left untyped. A non-tensor kwarg, or a value of a mapping kwarg
     (e.g. ``attention_metadata``), that is a ``SpmdAnnotatedInput`` annotates
-    its own nested tensors; other non-tensor kwargs (e.g. ``special_tokens``)
-    are left untouched.
+    its own nested tensors; a ``RaggedTensor`` takes its entry for both its values
+    and its lengths; other non-tensor kwargs (e.g. ``special_tokens``) are left
+    untouched.
     """
     mesh = parallelism_context.spmd_dense_mesh()
     untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
         for name, value in input_dict.items():
+            if isinstance(value, RaggedTensor):
+                # Values and lengths both run along tokens, laid out like a [T] tensor.
+                layout = input_sharding.get(name)
+                if layout is None:
+                    untyped.append(name)
+                    continue
+                spmd.assert_type(value.values, layout)
+                spmd.assert_type(value.lengths, layout)
+                continue
             if not isinstance(value, torch.Tensor):
                 nested = value.values() if isinstance(value, Mapping) else (value,)
                 for item in nested:

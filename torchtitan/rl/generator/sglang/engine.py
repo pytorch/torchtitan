@@ -41,6 +41,7 @@ from sglang.srt.managers.scheduler import (
 )
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.runtime_context import get_parallel, publish, SpawnRanks
+from sglang.srt.sampling.sampling_mask import SamplingMaskChunk
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.utils.common import next_power_of_2
@@ -72,6 +73,7 @@ from torchtitan.rl.generator.types import (
     RequestMetricsInputs,
     SamplingConfig,
 )
+from torchtitan.rl.rollout.types import KeptSets
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +209,10 @@ class SGLangEngine(GenerationEngine):
         @property
         def uses_mooncake_store(self) -> bool:
             return self.extra_server_args.get("hicache_storage_backend") == "mooncake"
+
+        @property
+        def returns_kept_sets(self) -> bool:
+            return True
 
     def __init__(
         self,
@@ -609,6 +615,12 @@ class SGLangEngine(GenerationEngine):
                 logprob_start_len=-1,
                 top_logprobs_num=request.sampling.num_topk_logprobs,
                 token_ids_logprob=None,
+                # TODO: move to return_sampling_logprobs once sgl-project/sglang#51439 lands.
+                # Each kept token's logprob, renormalized over the kept set.
+                return_sampling_mask=request.sampling.filters_vocab,
+                sampling_logprobs_mode=(
+                    "support" if request.sampling.filters_vocab else "selected"
+                ),
                 stream=False,
                 priority=max(request.group_id, -1),
                 cache_salt=cache_salt,
@@ -678,6 +690,7 @@ class SGLangEngine(GenerationEngine):
         params = SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
+            top_k=-1 if sampling.top_k is None else sampling.top_k,
             max_new_tokens=min(
                 sampling.max_tokens, max(self._max_context_length - prompt_length, 0)
             ),
@@ -871,6 +884,10 @@ class _OutputCollector:
             if output.output_top_logprobs_val is not None:
                 partial.topk_logprobs.extend(output.output_top_logprobs_val[i])
                 partial.topk_token_ids.extend(output.output_top_logprobs_idx[i])
+            # Requests that sample from the full vocabulary get no kept sets.
+            masks = output.output_token_sampling_mask
+            if masks is not None and masks[i] is not None:
+                partial.kept_chunks.append(masks[i])
             if reason is None:
                 continue
             del self._partial[request_id]
@@ -881,6 +898,11 @@ class _OutputCollector:
                     f"{len(token_logprobs)} logprobs"
                 )
             topk_token_ids, topk_logprobs = partial.topk_arrays(request_id)
+            kept_sets = partial.kept_sets()
+            if kept_sets is not None and reason["type"] != "abort":
+                # The loss's generator logprob is the sampled token's, renormalized over its
+                # kept set: the distribution it was sampled from.
+                token_logprobs = kept_sets.sampled_logprobs(token_ids, name=request_id)
             stats = output.request_stats[i] if output.request_stats else None
             num_cached_tokens = None if stats is None else stats.cached_tokens
             if reason["type"] == "abort":
@@ -906,6 +928,7 @@ class _OutputCollector:
                 metrics_inputs=metrics_inputs,
                 topk_token_ids=topk_token_ids,
                 topk_logprobs=topk_logprobs,
+                kept_sets=kept_sets,
             )
             abort_message = (
                 reason.get("message", "aborted by SGLang")
@@ -924,6 +947,24 @@ class _PartialRequest:
     # One row of SGLang's top-k per token, when the request asked for them.
     topk_token_ids: list[Any] = field(default_factory=list)
     topk_logprobs: list[Any] = field(default_factory=list)
+    # SGLang's kept sets, one chunk per output increment, when sampling filters the vocabulary.
+    kept_chunks: list[SamplingMaskChunk] = field(default_factory=list)
+
+    def kept_sets(self) -> KeptSets | None:
+        """The kept sets received so far; None without them."""
+        if not self.kept_chunks:
+            return None
+        return KeptSets(
+            token_ids=np.concatenate([c.token_ids for c in self.kept_chunks]).astype(
+                np.int32
+            ),
+            logprobs=np.concatenate([c.logprobs for c in self.kept_chunks]).astype(
+                np.float32
+            ),
+            lengths=np.concatenate([c.lengths for c in self.kept_chunks]).astype(
+                np.int32
+            ),
+        )
 
     def topk_arrays(
         self, request_id: str

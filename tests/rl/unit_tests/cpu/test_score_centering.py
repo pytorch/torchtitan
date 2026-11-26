@@ -9,7 +9,12 @@ from dataclasses import replace
 import pytest
 import torch
 
-from torchtitan.components.loss import compute_logprobs, compute_topk_logprobs
+from torchtitan.components.loss import (
+    ChunkedLossWrapper,
+    compute_logprobs,
+    compute_topk_logprobs,
+)
+from torchtitan.distributed.ragged_tensor import RaggedTensor
 from torchtitan.rl.trainer.losses import (
     CISPOLoss,
     DAPOLoss,
@@ -121,6 +126,71 @@ def test_score_centering_cancels_drift_with_the_full_vocab(name, advantage) -> N
     torch.testing.assert_close(centered, torch.zeros_like(centered), atol=1e-6, rtol=0)
 
 
+def _expected_kept_set_gradient(
+    loss, logits_row, kept_ids, generator_kept_logprobs, advantage
+):
+    """``sum_{y in S} q_S(y) * d loss(y) / d logits`` at one position whose kept set is S."""
+    num_kept = kept_ids.shape[0]
+    logits = logits_row.expand(num_kept, -1).clone().requires_grad_(True)
+    lengths = torch.full((num_kept,), num_kept)
+
+    def ragged(values):
+        return RaggedTensor.from_rows(
+            values.repeat(num_kept), lengths, capacity=num_kept * num_kept
+        )
+
+    total, _ = loss(
+        logits,
+        kept_ids,
+        None,
+        generator_logprobs=generator_kept_logprobs,
+        temperature=torch.full((num_kept,), 0.7),
+        advantages=torch.full((num_kept,), advantage),
+        loss_mask=torch.ones(num_kept, dtype=torch.bool),
+        generator_kept_token_ids=ragged(kept_ids),
+        generator_kept_logprobs=ragged(generator_kept_logprobs),
+    )
+    total.backward()
+    return (generator_kept_logprobs.exp()[:, None] * logits.grad).sum(0)
+
+
+@pytest.mark.parametrize("name", list(_LOSS_CONFIGS))
+@pytest.mark.parametrize("advantage", [1.0, -1.0])
+def test_score_centering_cancels_drift_over_the_kept_set(name, advantage) -> None:
+    """With top-k/top-p sampling the loss replays the kept set S: the trainer renormalizes over
+    S, and S is score centering's head with no tail. At a constant advantage the expected
+    update over y ~ q_S must then be zero; the mismatch makes it nonzero without centering."""
+    torch.manual_seed(3)
+    vocab_size, num_kept = 16, 6
+    logits_row = torch.randn(vocab_size)
+    kept_ids = torch.randperm(vocab_size)[:num_kept]
+    # Small and large mismatches over the kept set, so some ratios stay inside each loss's
+    # band and both bounds bind somewhere (IcePop masks every token outside its band).
+    mismatch = torch.randn(num_kept) * torch.tensor([0.05, 0.1, 0.15, 1.0, 2.0, 3.0])
+    generator_kept_logprobs = torch.log_softmax(
+        (logits_row[kept_ids] + mismatch) / 0.7, dim=-1
+    )
+    base = _LOSS_CONFIGS[name]
+
+    drift = _expected_kept_set_gradient(
+        base.build(), logits_row, kept_ids, generator_kept_logprobs, advantage
+    )
+    centered = _expected_kept_set_gradient(
+        _with_score_centering(base, num_kept).build(),
+        logits_row,
+        kept_ids,
+        generator_kept_logprobs,
+        advantage,
+    )
+
+    assert drift.abs().max() > 1e-2
+    # Replay trains only the kept tokens' logits.
+    outside = torch.ones(vocab_size, dtype=torch.bool)
+    outside[kept_ids] = False
+    assert (drift[outside] == 0).all()
+    torch.testing.assert_close(centered, torch.zeros_like(centered), atol=1e-6, rtol=0)
+
+
 @pytest.mark.parametrize("name", list(_LOSS_CONFIGS))
 @pytest.mark.parametrize("tail_scale", [0.5, 0.95, 1.6])
 def test_score_centering_tail_model_is_exact_for_a_proportional_tail(
@@ -203,3 +273,58 @@ def test_score_centering_is_a_bitwise_noop_when_the_generator_matches(name) -> N
     assert torch.equal(loss_off, loss_on)
     assert torch.equal(grad_off, grad_on)
     assert metrics_on["score_centering/coefficient_l1/mean"] == 0
+
+
+def test_chunked_loss_with_kept_sets_matches_the_unchunked_loss() -> None:
+    """The recipes compute the loss in token chunks (ChunkedLossWrapper), which splits each
+    kept-set RaggedTensor along tokens: loss and gradients must equal the unchunked loss."""
+    torch.manual_seed(4)
+    num_tokens, dim, vocab_size, num_chunks = 24, 5, 17, 3
+    head = torch.nn.Linear(dim, vocab_size, bias=False)
+    hidden = torch.randn(num_tokens, dim)
+    temperature = torch.full((num_tokens,), 0.7)
+    loss_mask = torch.rand(num_tokens) > 0.25
+    # Each token keeps 1-4 distinct tokens, its label first.
+    rows = [torch.randperm(vocab_size)[: t % 4 + 1] for t in range(num_tokens)]
+    labels = torch.stack([row[0] for row in rows])
+    with torch.no_grad():
+        generator_logits = head(hidden) + 0.3 * torch.randn(num_tokens, vocab_size)
+        generator_kept = [
+            torch.log_softmax(generator_logits[t, row] / 0.7, dim=-1)
+            for t, row in enumerate(rows)
+        ]
+    lengths = torch.tensor([len(row) for row in rows])
+    loss_kwargs = dict(
+        generator_logprobs=torch.stack([logprobs[0] for logprobs in generator_kept]),
+        temperature=temperature,
+        advantages=torch.randn(num_tokens),
+        loss_mask=loss_mask,
+        generator_kept_token_ids=RaggedTensor.from_rows(
+            torch.cat(rows), lengths, capacity=num_tokens * 8
+        ),
+        generator_kept_logprobs=RaggedTensor.from_rows(
+            torch.cat(generator_kept), lengths, capacity=num_tokens * 8
+        ),
+    )
+    loss_config = _with_score_centering(_LOSS_CONFIGS["cispo"], 4)
+    num_loss_tokens = loss_mask.sum()
+
+    reference_head = torch.nn.Linear(dim, vocab_size, bias=False)
+    reference_head.load_state_dict(head.state_dict())
+    reference_hidden = hidden.clone().requires_grad_(True)
+    reference_loss, _ = loss_config.build()(
+        reference_head(reference_hidden), labels, num_loss_tokens, **loss_kwargs
+    )
+    reference_loss.backward()
+
+    chunked = ChunkedLossWrapper(
+        ChunkedLossWrapper.Config(num_chunks=num_chunks, loss_fn=loss_config)
+    )
+    chunked.lm_head = head
+    chunked_hidden = hidden.clone().requires_grad_(True)
+    loss, _ = chunked(chunked_hidden, labels, num_loss_tokens, **loss_kwargs)
+    loss.backward()
+
+    torch.testing.assert_close(loss, reference_loss)
+    torch.testing.assert_close(chunked_hidden.grad, reference_hidden.grad)
+    torch.testing.assert_close(head.weight.grad, reference_head.weight.grad)

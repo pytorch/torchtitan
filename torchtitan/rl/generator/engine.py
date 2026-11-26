@@ -74,6 +74,13 @@ class GenerationEngine(Configurable, abc.ABC):
             starts its master and builds the engines with its address."""
             return False
 
+        @property
+        def returns_kept_sets(self) -> bool:
+            """Whether the engine returns each sampled token's kept set
+            (`FinishedRequest.kept_sets`) when top-k/top-p filters the vocabulary. The
+            controller rejects top-k/top-p sampling with an engine that doesn't."""
+            return False
+
     @property
     @abc.abstractmethod
     def data_parallel_size(self) -> int:

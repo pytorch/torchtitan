@@ -152,6 +152,7 @@ def _build_batcher(rdma_min_tensor_bytes: int | None) -> Batcher:
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        kept_set_capacity_per_token=None,
         register_rdma_microbatch=MonarchRDMAMicrobatch.register,
     )
 
@@ -166,6 +167,7 @@ def test_batcher_rejects_rdma_without_a_registration() -> None:
             pad_id=0,
             temperature=1.0,
             num_topk_logprobs=0,
+            kept_set_capacity_per_token=None,
         )
 
 
@@ -349,6 +351,7 @@ def test_four_ranks_read_their_columns_exactly_across_released_batches(
         pad_id=0,
         temperature=1.0,
         num_topk_logprobs=0,
+        kept_set_capacity_per_token=None,
     )
     rdma_batcher = Batcher.Config(rdma_min_tensor_bytes=256).build(
         **batcher_kwargs, register_rdma_microbatch=MonarchRDMAMicrobatch.register

@@ -76,6 +76,7 @@ scripts/install_rl_env.sh --sglang
 | CPU KV offload (SGLang HiCache) | Supported through `extra_server_args`; see below |
 | KV shared across generators (Mooncake Store) | Supported through `extra_server_args`; see below |
 | Batch-invariant mode | Supported; see below |
+| Top-k / top-p sampling | Supported: each token's kept set returns with SGLang's sampling mask (`return_sampling_mask`, "support" logprobs), and the loss replays it (`trainer/losses/README.md`); not in batch-invariant mode |
 | Per-request metrics (queue time, TTFT, prefill, decode, preemptions, cached tokens) | Supported |
 | Data parallelism within a generator | Supported with expert parallelism, as SGLang's attention DP; see below |
 | Sliding-window attention (e.g. Muse Glimmer) | Supported; KV of every token stays cached (no sliding-window KV pool) |

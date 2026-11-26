@@ -223,6 +223,10 @@ class VLLMEngine(GenerationEngine):
         def uses_mooncake_store(self) -> bool:
             return isinstance(self.kv_offload, MooncakeStoreKVOffloadConfig)
 
+        # TODO: return top-k/top-p kept sets (`returns_kept_sets`) on vLLM's V2 model runner
+        # (#5956): its sampler returns them (return_sampling_mask), and processed logprobs
+        # renormalize over them. The V1 runner can't.
+
         def __post_init__(self):
             if (
                 isinstance(self.kv_offload, SimpleCPUKVOffloadConfig)

@@ -22,7 +22,7 @@ from renderers import PlaceholderRange
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import Rollout, RolloutGroup
-from torchtitan.rl.rollout.types import PromptImage, RolloutTurnID
+from torchtitan.rl.rollout.types import KeptSets, PromptImage, RolloutTurnID
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,9 @@ class TrainingSample:
     unless `SamplingConfig.num_topk_logprobs` > 0."""
     topk_logprobs: np.ndarray | None = None  # float32
     """[num_loss_tokens, k] generator logprobs of `topk_token_ids`."""
+    kept_sets: KeptSets | None = None
+    """One kept set per True in loss_mask, as for the top-k. None unless
+    `SamplingConfig.filters_vocab`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +168,7 @@ class _SampleInProgress:
     image_placeholders: tuple[PlaceholderRange, ...] = ()
     topk_token_ids: list[np.ndarray] = field(default_factory=list)
     topk_logprobs: list[np.ndarray] = field(default_factory=list)
+    kept_sets: list[KeptSets] = field(default_factory=list)
 
     def to_training_sample(self) -> TrainingSample:
         return TrainingSample(
@@ -182,6 +186,9 @@ class _SampleInProgress:
             ),
             topk_logprobs=(
                 np.concatenate(self.topk_logprobs) if self.topk_logprobs else None
+            ),
+            kept_sets=(
+                KeptSets.concatenate(self.kept_sets) if self.kept_sets else None
             ),
         )
 
@@ -502,6 +509,9 @@ class TrainingSampleBuilder(Configurable):
                 sample_in_progress.topk_logprobs.append(
                     rollout_turn.completion_topk_logprobs
                 )
+            if rollout_turn.completion_kept_sets is not None:
+                # One kept set per completion (loss) token, as for the top-k.
+                sample_in_progress.kept_sets.append(rollout_turn.completion_kept_sets)
 
             prev_len = rollout_turn.num_prompt_tokens + num_completion
             prev_images, prev_image_placeholders = images, image_placeholders
