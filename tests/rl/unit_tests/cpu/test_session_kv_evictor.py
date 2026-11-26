@@ -779,15 +779,17 @@ def test_a_session_keeps_one_gdn_state_of_its_own_and_its_groups_shared_prompt(
     assert _prefill(manager, turn_2, sample=600) == 32
 
 
-def test_an_idle_session_drops_its_groups_prompt_state_once_no_sibling_counts_it(
-    manager, scheduler, evictor
+@pytest.mark.parametrize("b_group_id", [0, 1], ids=["sibling", "other_group"])
+def test_an_idle_session_drops_its_prompt_state_once_no_other_session_counts_it(
+    manager, scheduler, evictor, b_group_id
 ):
-    # Rollouts a and b of one group share a 40-token prompt; its state is at block 1.
+    # Rollouts a and b share a 40-token prompt (b: a's sibling, or another group's rollout with
+    # the same system prompt); its state is at block 1.
     prompt = list(range(40))
     a = _admit(scheduler, evictor, "a/turn=0", "a", 0, prompt)
     _prefill(manager, a, sample=100)
     evictor.after_step()
-    b = _admit(scheduler, evictor, "b/turn=0", "b", 0, prompt)
+    b = _admit(scheduler, evictor, "b/turn=0", "b", b_group_id, prompt)
     _prefill(manager, b, sample=200)
     evictor.after_step()
     for request, first_token in ((a, 101), (b, 201)):
