@@ -601,48 +601,71 @@ def compute_topk_logprobs(
     logits: torch.Tensor,
     token_ids: torch.Tensor,
     *,
+    labels: torch.Tensor,
+    label_logprobs: torch.Tensor,
     vocab_parallel_group: dist.ProcessGroup | None,
     global_vocab_size: int | None,
     temperature: torch.Tensor,
 ) -> torch.Tensor:
-    """Logprobs ``[T, k]`` of ``token_ids[T, k]`` under ``softmax(logits[T, V] / temperature[T])``.
+    """Logprobs ``[T, k]`` of ``token_ids[T, k]`` under ``softmax(logits[T, V] / temperature[T])``,
+    from ``label_logprobs[T]``, the logprobs ``compute_logprobs`` gave ``labels[T]``.
 
-    Like ``compute_logprobs``, but for k token ids per position. A ``vocab_parallel_group``
-    means ``logits`` hold this rank's vocab shard; the result is exact and identical on every
-    rank of the group, without gathering the vocab. Batch-invariant mode gathers the vocab,
-    as ``compute_logprobs`` does; the generators' batch-invariant logprob hooks call this
-    function on their full-vocabulary logits, so the trainer's and the generator's top-k
-    logprobs match bitwise.
+    ``log p_v = log p_y + (logits_v - logits_y) / T``: the label's logprob carries the
+    normalizer, so this gathers only k + 1 logits per position and saves no ``[T, V]`` tensor
+    for backward; its gradient reaches the dense softmax term through ``label_logprobs``'
+    own graph. A ``vocab_parallel_group`` means ``logits`` hold this rank's vocab shard: one
+    TP all-reduce of the gathered logits, whose owner shard contributes each logit and the
+    others 0, so the result is exact and identical on every rank.
+
+    Batch-invariant mode instead gathers ``log_softmax(logits / temperature)`` over the
+    full vocabulary and ignores ``labels`` and ``label_logprobs``. vLLM's V1 sampler scores
+    its top-k that way, and the formula above rounds differently in the last bit for
+    about 15% of entries. The generators' batch-invariant logprob hooks call this function,
+    so the trainer's and every generator's top-k logprobs match bitwise.
 
     Example:
 
-        logits = log([[0.5, 0.3, 0.2]]);  temperature = [1.0];  token_ids = [[2, 0]]
-        -> log([[0.2, 0.5]])
+        logits = log([[0.5, 0.3, 0.2]]);  temperature = [1.0]
+        labels = [0];  label_logprobs = log([0.5]);  token_ids = [[2, 0]]
+        -> log(0.5) + log([[0.2, 0.5]]) - log(0.5) = log([[0.2, 0.5]])
     """
-    # The same division as compute_logprobs.
-    logits = logits / temperature.unsqueeze(-1).expand_as(logits)
-    token_ids = token_ids.long()
-    if vocab_parallel_group is not None:
-        if global_vocab_size is None:
-            raise ValueError(
-                "global_vocab_size is required for vocab-parallel top-k logprobs"
-            )
-        if not is_in_batch_invariant_mode():
-            return _VocabParallelTopKLogprobs.apply(
-                logits, token_ids, vocab_parallel_group, global_vocab_size
-            )
-        # dst=I, as in compute_logprobs: backward slices the grad back to this rank's shard.
-        logits = spmd.redistribute(
-            logits, vocab_parallel_group, src=spmd.S(-1), dst=spmd.I
+    if vocab_parallel_group is not None and global_vocab_size is None:
+        raise ValueError(
+            "global_vocab_size is required for vocab-parallel top-k logprobs"
         )
-    return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids)
+    if is_in_batch_invariant_mode():
+        # The same division as compute_logprobs. Batch-invariant mode is for debugging, so
+        # the fp32 [T, V] log_softmax it saves for backward doesn't matter.
+        logits = logits / temperature.unsqueeze(-1).expand_as(logits)
+        if vocab_parallel_group is not None:
+            # dst=I, as in compute_logprobs: backward slices the grad back to this rank's
+            # shard.
+            logits = spmd.redistribute(
+                logits, vocab_parallel_group, src=spmd.S(-1), dst=spmd.I
+            )
+        return torch.log_softmax(logits.float(), dim=-1).gather(-1, token_ids.long())
+    # Ignored labels (loss-masked positions) gather a placeholder column; callers mask
+    # those rows.
+    token_ids = torch.cat([labels.clamp_min(0).unsqueeze(-1), token_ids], dim=-1).long()
+    if vocab_parallel_group is not None:
+        gathered = _VocabParallelGather.apply(
+            logits, token_ids, vocab_parallel_group, global_vocab_size
+        )
+    else:
+        gathered = logits.gather(-1, token_ids)
+    # compute_logprobs' division, after the gather: elementwise, so the values are the same.
+    scaled = (gathered / temperature.unsqueeze(-1)).float()
+    return label_logprobs.unsqueeze(-1) + (scaled[:, 1:] - scaled[:, :1])
 
 
-class _VocabParallelTopKLogprobs(torch.autograd.Function):
-    """`compute_topk_logprobs` on local `[T, V_local]` logits shards.
+class _VocabParallelGather(torch.autograd.Function):
+    """``logits.gather(-1, token_ids)`` of global ``token_ids`` from local ``[T, V_local]``
+    logits shards, with one TP all-reduce.
 
-    Forward uses three TP all-reduces (max, sumexp, gathered logits); backward needs none,
-    since the output is identical on every rank and each rank owns its shard's gradient.
+    Each id lives on exactly one shard, which contributes its logit; the others contribute
+    0, so ``x + 0`` is exact in any order and accumulation dtype (up to the sign of a zero
+    logit). The output is identical on every rank, so backward needs no collective: each rank
+    scatters the gradient into its own shard.
     """
 
     @staticmethod
@@ -653,7 +676,7 @@ class _VocabParallelTopKLogprobs(torch.autograd.Function):
         token_ids: torch.Tensor,
         tp_group: dist.ProcessGroup,
     ) -> None:
-        """SPMD type: logits S(-1)@TP, token_ids I@TP -> logprobs I@TP."""
+        """SPMD type: logits S(-1)@TP, token_ids I@TP -> gathered logits I@TP."""
         spmd.assert_type(logits, {tp_group: spmd.S(logits.dim() - 1)})
         spmd.assert_type(token_ids, {tp_group: spmd.I})
         spmd.assert_local_type_like(
@@ -678,46 +701,31 @@ class _VocabParallelTopKLogprobs(torch.autograd.Function):
             torch.all((token_ids >= 0) & (token_ids < global_vocab_size)),
             f"top-k token ids must be in [0, {global_vocab_size})",
         )
-        logits_fp32 = logits.float()
-
-        global_max = funcol.all_reduce(
-            torch.amax(logits_fp32, dim=-1, keepdim=True),
-            reduceOp=dist.ReduceOp.MAX.name,
-            group=tp_group,
-        )
-        sumexp = funcol.all_reduce(
-            torch.exp(logits_fp32 - global_max).sum(dim=-1, keepdim=True),
-            reduceOp=dist.ReduceOp.SUM.name,
-            group=tp_group,
-        )
-        logsumexp = global_max + torch.log(sumexp)
-
-        # Each id lives on exactly one shard; the others contribute 0 to the sum.
         local_token_ids = token_ids - vocab_start
         in_shard = (local_token_ids >= 0) & (local_token_ids < local_vocab_size)
         local_token_ids = local_token_ids.clamp(0, local_vocab_size - 1)
-        topk_logits = funcol.all_reduce(
-            torch.where(in_shard, logits_fp32.gather(-1, local_token_ids), 0.0),
+        gathered = funcol.all_reduce(
+            torch.where(in_shard, logits.gather(-1, local_token_ids), 0.0),
             reduceOp=dist.ReduceOp.SUM.name,
             group=tp_group,
         )
-
-        ctx.save_for_backward(logits, logsumexp, local_token_ids, in_shard)
-        return topk_logits - logsumexp
+        ctx.save_for_backward(local_token_ids, in_shard)
+        ctx.logits_shape, ctx.logits_dtype = logits.shape, logits.dtype
+        return gathered
 
     @staticmethod
     # pyrefly: ignore [bad-override]
     def backward(
         ctx, grad_output: torch.Tensor
     ) -> tuple[torch.Tensor, None, None, None]:
-        logits, logsumexp, local_token_ids, in_shard = ctx.saved_tensors
-        # d log p_j / d logit_v = [v == id_j] - softmax_v, summed over the k ids.
-        probs = torch.exp(logits.float() - logsumexp)
-        grad_logits = -grad_output.sum(dim=-1, keepdim=True) * probs
+        local_token_ids, in_shard = ctx.saved_tensors
+        grad_logits = torch.zeros(
+            ctx.logits_shape, dtype=grad_output.dtype, device=grad_output.device
+        )
         grad_logits.scatter_add_(
             -1, local_token_ids, torch.where(in_shard, grad_output, 0.0)
         )
-        return grad_logits.to(logits.dtype), None, None, None
+        return grad_logits.to(ctx.logits_dtype), None, None, None
 
 
 class _DecoderOutputGradientBackProp(torch.autograd.Function):

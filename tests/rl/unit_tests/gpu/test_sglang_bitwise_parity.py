@@ -61,7 +61,7 @@ import torch.distributed as dist
 from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.loss import compute_topk_logprobs
+from torchtitan.components.loss import compute_logprobs, compute_topk_logprobs
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
 from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
@@ -351,12 +351,27 @@ class SGLangBitwiseParityTestBase(unittest.TestCase):
                 packed_token_ids[start : start + len(rows)] = torch.from_numpy(rows)
                 starts.append((start, len(rows)))
                 offset += len(ids)
+            # Each position's next token (0 past a sequence's end, never read).
+            labels = torch.cat(
+                [torch.tensor(ids[1:] + [0], device=self.device) for ids in sequences]
+            )
+            tp_group = spmd_mesh_group("tp")
+            vocab_size = self.model.config.lm_head.out_features
+            temperature = torch.ones(packed.shape[0], device=self.device)
             logprobs = compute_topk_logprobs(
                 logits,
                 packed_token_ids.to(self.device),
-                vocab_parallel_group=spmd_mesh_group("tp"),
-                global_vocab_size=self.model.config.lm_head.out_features,
-                temperature=torch.ones(packed.shape[0], device=self.device),
+                labels=labels,
+                label_logprobs=compute_logprobs(
+                    logits,
+                    labels,
+                    vocab_parallel_group=tp_group,
+                    global_vocab_size=vocab_size,
+                    temperature=temperature,
+                ),
+                vocab_parallel_group=tp_group,
+                global_vocab_size=vocab_size,
+                temperature=temperature,
             )
             return [logprobs[start : start + length] for start, length in starts]
 

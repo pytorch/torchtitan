@@ -53,6 +53,8 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
         topk = compute_topk_logprobs(
             logits,
             token_ids[:, 1:],
+            labels=token_ids[:, 0],
+            label_logprobs=sampled,
             vocab_parallel_group=None,
             global_vocab_size=None,
             # vLLM already divided the logits; dividing by 1 is exact.

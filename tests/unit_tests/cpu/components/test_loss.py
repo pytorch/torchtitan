@@ -977,6 +977,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     global_token_ids = torch.randint(
                         0, vocab_size, (num_tokens, num_topk), generator=generator
                     ).to(self.device_type)
+                    global_labels = torch.randint(
+                        0, vocab_size, (num_tokens,), generator=generator
+                    ).to(self.device_type)
                     global_weights = torch.randn(
                         num_tokens, num_topk, generator=generator
                     ).to(self.device_type)
@@ -1000,6 +1003,9 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     local_token_ids = distribute_tensor(
                         global_token_ids, mesh, row_placements
                     ).to_local()
+                    local_labels = distribute_tensor(
+                        global_labels, mesh, row_placements
+                    ).to_local()
                     local_weights = distribute_tensor(
                         global_weights, mesh, row_placements
                     ).to_local()
@@ -1021,13 +1027,23 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         token_ids_type[dp_group] = spmd.S(0)
                     spmd.assert_type(local_logits, logits_type)
                     spmd.assert_type(local_token_ids, token_ids_type)
+                    spmd.assert_type(local_labels, token_ids_type)
                     spmd.assert_type(local_temperature, token_ids_type)
 
                     with set_current_spmd_mesh(mesh):
                         with typecheck(strict_mode="strict"):
+                            label_logprobs = compute_logprobs(
+                                local_logits,
+                                local_labels,
+                                vocab_parallel_group=tp_group,
+                                global_vocab_size=vocab_size,
+                                temperature=local_temperature,
+                            )
                             logprobs = compute_topk_logprobs(
                                 local_logits,
                                 local_token_ids,
+                                labels=local_labels,
+                                label_logprobs=label_logprobs,
                                 vocab_parallel_group=tp_group,
                                 global_vocab_size=vocab_size,
                                 temperature=local_temperature,
@@ -1037,7 +1053,16 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                     torch.testing.assert_close(logprobs, expected_logprobs)
 
                     (logprobs * local_weights).sum().backward()
-                    torch.testing.assert_close(local_logits.grad, expected_grad)
+                    # The gradient arrives in two parts, the label logprob's dense softmax
+                    # term and the gathered logits' sparse term, each rounded to the logits'
+                    # dtype before they add up; the reference rounds once. In bf16 an element
+                    # where the parts cancel is off by up to one bf16 step of either part.
+                    tolerance = (
+                        {"atol": 2e-2, "rtol": 0} if dtype == torch.bfloat16 else {}
+                    )
+                    torch.testing.assert_close(
+                        local_logits.grad, expected_grad, **tolerance
+                    )
 
 
 class _FakeDecoder(nn.Module):

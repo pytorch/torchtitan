@@ -194,6 +194,8 @@ class PolicyGradientLoss(Loss[torch.Tensor]):
             ), "score centering needs the generator's top-k logprobs"
             correction, score_centering_metrics = self.score_centering(
                 logits,
+                labels=labels,
+                label_logprobs=trainer_logprobs,
                 temperature=temperature,
                 advantages=advantages,
                 loss_mask=effective_loss_mask,

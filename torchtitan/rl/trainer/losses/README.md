@@ -59,11 +59,13 @@ Requirements and limits:
 - Transport costs 8 * k bytes per generated token (k int32 ids and k fp32 logprobs). A
   Verifiers rollout worker can hold more: glibc keeps the freed rows, ~4.5 KiB per in-flight
   token at k = 128 in a CPU repro (TODO in `verifiers/generation_server.py`).
-- Trainer cost: the top-k scoring saves one more fp32 `[T, V_local]` for backward (TODO in
-  `score_centering.py`). For one loss chunk of 4,096 tokens and a 151,936-token vocabulary on
-  one GB300 without TP, with the compiled loss region the recipes use, score centering (k = 32)
-  raises the loss's peak memory from 1.16 to 3.48 GiB and its forward + backward from 2.1 to
-  3.6 ms (eager: 9.27 GiB either way, 15 -> 24 ms).
+- Trainer cost: the top-k logprobs come from the label's logprob and k + 1 gathered logits
+  (`compute_topk_logprobs`; batch-invariant mode uses a full-vocabulary log-softmax instead,
+  as vLLM does). For one loss chunk of 4,096 tokens and a 151,936-token vocabulary
+  on one GB300 without TP, with the compiled loss region the recipes use, score centering
+  (k = 32) raises the loss's peak memory from 1.16 to 2.32 GiB (about one more bf16
+  `[T, V_local]`) and its forward + backward from 2.1 to 2.7 ms (eager: 9.27 GiB either way,
+  15 -> 16 ms).
 - The paper evaluates score centering with REINFORCE, truncated IS (`CISPOLoss`) and masked
   IS (`IcePopLoss`), not PPO clipping; its composition with `DAPOLoss`/`GRPOLoss` follows the
   same formula. With stale rollouts, the paper finds it best combined with truncated or

@@ -72,6 +72,8 @@ def force_trainer_logprobs_for_batch_invariance() -> None:
                                 for i in rows
                             ]
                         ),
+                        labels=next_token_ids[rows].long(),
+                        label_logprobs=logits_output.next_token_logprobs[rows],
                         vocab_parallel_group=None,
                         global_vocab_size=None,
                         # The logits are already divided by the temperature.
