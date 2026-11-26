@@ -70,12 +70,6 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
         ),
         _rl_test(
-            configs=[rl_grpo_moe_debug_tp4_ep4],
-            test_descr="RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
-            test_name="rl_grpo_moe_debug_tp4_ep4",
-            ngpu=8,
-        ),
-        _rl_test(
             # Two runs sharing the same dump_folder, with different parallelism
             # to exercise resharding on resume:
             #   run 1: trainer DP=2 (TP=1) + 2 generators (TP=2); train 2 steps,
@@ -133,8 +127,16 @@ def build_h100_rl_test_list() -> list[IntegrationTestDefinition]:
 
 
 def build_b200_rl_test_list() -> list[IntegrationTestDefinition]:
-    """Build the B200 RL integration tests: the H100 tests, plus Dist-MoE, which requires SM100+."""
+    """Build the B200 RL integration tests: the H100 tests, plus tests that require SM100+."""
     return build_h100_rl_test_list() + [
+        # GPT-OSS sinks backpropagate through the varlen lse, which only FA4
+        # (SM100) supports.
+        _rl_test(
+            configs=[rl_grpo_moe_debug_tp4_ep4],
+            test_descr="RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
+            test_name="rl_grpo_moe_debug_tp4_ep4",
+            ngpu=8,
+        ),
         _rl_test(
             configs=[rl_grpo_moe_debug_dist_moe_tp2_ep4],
             test_descr=(
