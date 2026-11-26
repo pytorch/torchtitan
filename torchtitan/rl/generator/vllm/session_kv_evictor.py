@@ -348,9 +348,12 @@ class VLLMSessionKVEvictor:
         group and evict its other free copies:
 
             siblings A, B prefill prompt P in one step  -> P's blocks cached twice: A's, B's
-            A leaves vLLM, B still runs                 -> B's stays (in use); A's stays only
-                                                           if lookups return it first
-            B leaves vLLM                               -> one copy stays: the one lookups return
+            A leaves vLLM, B still runs                 -> A's goes; B's stays (in use)
+            B leaves vLLM, a KV connector's save holds  -> B's stays, the one copy
+            B's copy
+
+        If two copies are still in use (two KV connector saves) when the last sharer leaves, both
+        stay until a sibling's next turn leaves vLLM or the group is released.
         """
         # Block hashes chain, so the hashes other requests also count are a prefix.
         shared_block_hashes = list(
@@ -411,8 +414,9 @@ class VLLMSessionKVEvictor:
     ) -> set[BlockHash]:
         """Move the free blocks of `block_hashes` in `kv_cache_group_ids` to the free queue's
         front, without their hash; return the hashes that kept a copy in use. With
-        `keep_one_copy`, the copy prefix lookups return first stays cached too. `live_session`
-        counts them in `num_evicted_live_session_blocks`, not `num_evicted_blocks`."""
+        `keep_one_copy`, one copy stays cached: a copy in use if there is one, else the copy
+        prefix lookups return first. `live_session` counts them in
+        `num_evicted_live_session_blocks`, not `num_evicted_blocks`."""
         cached_blocks = self._block_pool.cached_block_hash_to_block
         free_block_queue = self._block_pool.free_block_queue
         evicted = []
@@ -421,24 +425,27 @@ class VLLMSessionKVEvictor:
             for kv_cache_group_id in kv_cache_group_ids:
                 key = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
                 # vLLM may cache one hash in several blocks (siblings that prefilled one
-                # prompt in the same step). Each lookup returns one; blocks that stay are set
-                # aside to reach the rest, then put back in order.
-                kept = []
+                # prompt in the same step). Each lookup returns one, so set each aside to
+                # reach the next, then put them back in order.
+                copies = []
                 while (block := cached_blocks.get_one_block(key)) is not None:
-                    if block.ref_cnt > 0:
-                        # In use, e.g. by a KV connector's save or lazy copy, or a free that
-                        # async scheduling defers: it keeps its hash.
-                        held_block_hashes.add(block_hash)
-                    elif not keep_one_copy or kept:
-                        free_block_queue.remove(block)
-                        # Drops the block's hashes, as vLLM does when it reuses a cached block.
-                        self._block_pool.evict_blocks({block.block_id})
-                        evicted.append(block)
-                        continue
                     cached_blocks.pop(key, block.block_id)
-                    kept.append(block)
-                for block in kept:
+                    copies.append(block)
+                for block in copies:
                     cached_blocks.insert(key, block)
+
+                # A copy in use (a running request, a KV connector's save or lazy copy, a free
+                # that async scheduling defers) keeps its hash, so it is the copy that stays.
+                free_copies = [block for block in copies if block.ref_cnt == 0]
+                if len(free_copies) < len(copies):
+                    held_block_hashes.add(block_hash)
+                elif keep_one_copy:
+                    free_copies = free_copies[1:]
+                for block in free_copies:
+                    free_block_queue.remove(block)
+                    # Drops the block's hashes, as vLLM does when it reuses a cached block.
+                    self._block_pool.evict_blocks({block.block_id})
+                    evicted.append(block)
         # Block id order, so every TP rank leaves the same free queue.
         free_block_queue.prepend_n(sorted(evicted, key=lambda block: block.block_id))
         if live_session:

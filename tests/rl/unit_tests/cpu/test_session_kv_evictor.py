@@ -482,6 +482,49 @@ def test_siblings_prefilled_in_one_step_keep_one_copy_of_their_shared_prompt(
     assert hits == [48, 64]
 
 
+@pytest.mark.parametrize("manager", [0, 3], ids=["dense", "hybrid"], indirect=True)
+def test_a_copy_in_use_when_its_sibling_leaves_is_the_copy_that_stays(
+    manager, scheduler, evictor
+):
+    # Siblings a and b prefill one 40-token prompt in one step: 2 copies of its 2 full blocks.
+    prompt = list(range(40))
+    a, b = (
+        _admit(scheduler, evictor, f"g/{i}/turn=0", f"g/{i}", 0, prompt)
+        for i in range(2)
+    )
+    for request in (a, b):
+        _schedule(manager, request, 32)
+    for request, sample in ((a, 100), (b, 200)):
+        _schedule(manager, request, 8, sample=sample)
+    cached_keys = {
+        key
+        for block_hash in a.block_hashes[:2]
+        for kv_cache_group_id in range(manager.num_kv_cache_groups)
+        if _num_copies(
+            manager,
+            key := make_block_hash_with_group_id(block_hash, kv_cache_group_id),
+        )
+    }
+
+    # a leaves while b decodes on its own copy: a's free copy goes, though lookups return it first.
+    for token in range(101, 110):
+        _schedule(manager, a, 1, sample=token)
+    _finish(manager, scheduler, evictor, a)
+    assert {_num_copies(manager, key) for key in cached_keys} == {1}
+
+    # b leaves while a KV connector's save still holds its copy; the save then frees it.
+    for token in range(201, 210):
+        _schedule(manager, b, 1, sample=token)
+    held = [
+        block for block in manager.block_pool.blocks if block.block_hash in cached_keys
+    ]
+    manager.block_pool.touch(held)
+    _finish(manager, scheduler, evictor, b)
+    manager.block_pool.free_blocks(held)
+    evictor.after_step()
+    assert {_num_copies(manager, key) for key in cached_keys} == {1}
+
+
 def test_a_kv_cache_group_with_blocks_larger_than_the_hash_block_is_evicted_too():
     # Sliding-window layers with 1 KV head and full layers with 2 get 32- and 16-token blocks
     # (KV cache groups 0 and 1); vLLM hashes every 16 tokens.
