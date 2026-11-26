@@ -278,7 +278,7 @@ class VLLMSessionKVEvictor:
                 first_single_counted.append((request, first_index))
             ended_block_hashes += request.block_hashes
 
-        # The one request that counts a hash from `index` on counts all of them (hashes chain).
+        # From `index` on, every hash that one request counts has the same counter (hashes chain).
         # If it is a live session's, its sweeps may have passed GDN states there while others
         # counted them (a late sibling caches the group prompt's state again): it sweeps again
         # from `index`, now if idle (the engine may not step before its next turn), else later.
@@ -378,8 +378,8 @@ class VLLMSessionKVEvictor:
             if kept_index is None:
                 continue
 
-            # A superseded state that other requests count stays; `_forget` sweeps again once
-            # one request counts it.
+            # A superseded state that other requests count stays; `_forget` evicts it once no
+            # request counts it, and sweeps again once one does.
             superseded_indices = [
                 index
                 for index in cached_indices
@@ -409,8 +409,7 @@ class VLLMSessionKVEvictor:
             siblings A, B prefill prompt P in one step     -> P's blocks cached twice: A's, B's
             A leaves vLLM, B still runs                    -> A's goes; B's stays (in use)
             B leaves vLLM, a KV connector's save holds it  -> B's stays, the one copy
-            MTP drafts: a turn recomputes its hit's last   -> the copy lookups return stays
-            block and caches it again
+            MTP: a turn caches its hit's last block again  -> the copy lookups return stays
 
         If two copies are still in use (two KV connector saves) when the last sharer leaves, both
         stay until a sibling's next turn leaves vLLM or the group is released.
