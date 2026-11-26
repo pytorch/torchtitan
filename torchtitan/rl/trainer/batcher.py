@@ -33,11 +33,14 @@ from torchtitan.models.common.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import PromptImage, RolloutGroup
-from torchtitan.rl.trainer.rdma_microbatch import RDMAMicrobatch, RegisterRDMAMicrobatch
 from torchtitan.rl.trainer.training_sample_builder import (
     TrainingSample,
     TrainingSampleBuilder,
     TrainingSampleGroup,
+)
+from torchtitan.rl.transport.rdma_microbatch import (
+    RDMAMicrobatch,
+    RegisterRDMAMicrobatch,
 )
 from torchtitan.tools.utils import round_up
 

@@ -14,6 +14,13 @@ globs: torchtitan/**
 - New fields go on the config of the component they configure. A field with no
   other owner goes in `torchtitan/config/configs.py` only after checking with the
   maintainers.
+- A component derives its values from its own config. Another component doesn't
+  read `X.Config` to compute a value it then hands back to `X`; it passes the
+  input it owns, and `X` does the derivation.
+- A `Config` is plain data built from its inputs: its fields and properties
+  don't depend on runtime or global state (process groups, env vars,
+  deterministic mode). Validation may still check the hardware and raise a
+  `ValueError` for a feature it can't run.
 
 ## Select Implementations by Config Type
 - Alternative implementations are sibling `Configurable` classes selected by

@@ -25,9 +25,11 @@ Update this file in the same PR that starts, finishes, or reverses a migration.
   passed explicitly from the data side, not inferred later.
 - **Activation recompute**: torch_remat via `torchtitan/distributed/activation_remat.py`
   (`torchtitan/distributed/ACTIVATION_REMAT.md`).
-- **MoE**: token dispatch backends (all-to-all, DeepEP, HybridEP under
-  `torchtitan/distributed/deepep/`) and Dist-MoE (`torchtitan/models/common/dist_moe/`)
-  are all maintained. Build on them rather than adding new dispatch paths.
+- **MoE**: the all-to-all token dispatcher is the reference implementation;
+  DeepEP and HybridEP (`torchtitan/distributed/deepep/`) and Dist-MoE
+  (`torchtitan/models/common/dist_moe/`) are the maintained fast paths. Build on
+  them rather than adding new dispatch paths; a new vendor-specific path needs a
+  reason none of these can serve, and stays out of core.
 - **Docs**: next to the code. `docs/` keeps only benchmarks and a few legacy
   pages; don't add new pages there.
 - **Recipes**: `torchtitan_recipes/`. Overrides there are opt-in examples

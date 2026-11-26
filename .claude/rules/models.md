@@ -24,8 +24,6 @@ kimi_k2_7, kimi_k3, muse_glimmer, flux, and any others present. Don't leave
 stale patterns in sibling models.
 
 ## Unify Across Models
-- Don't create per-model wrappers for the same functionality. Aim for at most one
-  general wrapper shared by all models.
 - Model-tied behavior (state dict adapter, PP split, FSDP application, flops,
   optimizer hooks) lives on the model class or its family base, not in side
   registries or per-model free functions.
