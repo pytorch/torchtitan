@@ -31,6 +31,9 @@ Test bitwise parity between the SGLang generator and the TorchTitan trainer.
       As in vLLM, a prompt of max_context_length - 1 tokens runs and stops at
       max_context_length tokens in total, and a prompt of max_context_length
       tokens is rejected.
+  8. test_aborts_request_with_non_finite_logprob (TestSGLangBitwiseParityVarlen only):
+      A running request whose logprobs turn NaN, or the clamped -inf, is aborted
+      early and returns no tokens; the other request of its batch finishes.
 
 Debug models with random weights start from the trainer's weights, loaded through the
 same in-place model state dict load.
@@ -416,6 +419,86 @@ class TestSGLangBitwiseParityVarlen(SGLangBitwiseParityTestBase):
             [result.request_id for result in finished], [requests[0].request_id]
         )
         self.assertEqual(len(finished[0].token_ids), 1)
+
+    def test_aborts_request_with_non_finite_logprob(self):
+        # NaN, and the values SGLang clamps a -inf logprob to with bfloat16 and float32
+        # logits.
+        for poison in (
+            float("nan"),
+            torch.finfo(torch.bfloat16).min,
+            torch.finfo(torch.float32).min,
+        ):
+            with self.subTest(poison=poison):
+                ns = time.monotonic_ns()
+                self._check_aborts_request_with_logprob(
+                    poison, request_ids=(f"{ns}-poisoned-0", f"{ns}-poisoned-1")
+                )
+
+    def test_abort_spares_request_whose_id_extends_the_aborted_one(self):
+        # SGLang aborts every request whose id starts with the given one.
+        ns = time.monotonic_ns()
+        self._check_aborts_request_with_logprob(
+            float("nan"), request_ids=(f"{ns}/request=1", f"{ns}/request=10")
+        )
+
+    def _check_aborts_request_with_logprob(
+        self, poison: float, *, request_ids: tuple[str, str]
+    ) -> None:
+        """Two requests; the first one's first increment from SGLang (after
+        SGLANG_FORCE_STREAM_INTERVAL tokens) ends in `poison`, standing in for bad
+        logits. It returns "abort" with no tokens; the other one finishes. The first
+        one stops early, unless the other's id extends its id: then it waits for it."""
+        max_tokens = 200
+        requests = [
+            EngineRequest(
+                request_id=request_id,
+                prompt=Prompt(token_ids=self.prompt_ids[i]),
+                sampling=SamplingConfig(
+                    temperature=1.0, max_tokens=max_tokens, stop_token_ids=[]
+                ),
+                group_id=i,
+                routing_session_id=f"poisoned-{request_id}",
+                arrival_time=time.time(),
+            )
+            for i, request_id in enumerate(request_ids)
+        ]
+        for request in requests:
+            request.min_policy_version = self.policy_version
+        poisoned_id = requests[0].request_id
+        collector = self.engine._output_collector
+        receive_tokens = collector._receive_tokens
+        num_tokens_sent = {}
+
+        def poisoning_receive_tokens(output):
+            for i, request_id in enumerate(output.rids):
+                if request_id != poisoned_id:
+                    continue
+                increment = list(output.output_token_logprobs_val[i])
+                if not num_tokens_sent:
+                    increment[-1] = poison
+                    output.output_token_logprobs_val[i] = increment
+                num_tokens_sent[request_id] = num_tokens_sent.get(request_id, 0) + len(
+                    increment
+                )
+            receive_tokens(output)
+
+        collector._receive_tokens = poisoning_receive_tokens
+        try:
+            self.assertEqual(self.engine.add_requests(requests), [])
+            finished = {}
+            while self.engine.has_unfinished_requests():
+                for result in self.engine.step():
+                    finished[result.request_id] = result
+        finally:
+            collector._receive_tokens = receive_tokens
+        poisoned, healthy = (finished[request.request_id] for request in requests)
+        self.assertEqual(poisoned.finish_reason, "abort")
+        self.assertEqual((poisoned.token_ids, poisoned.token_logprobs), ([], []))
+        if not requests[1].request_id.startswith(poisoned_id):
+            # Aborted while running: SGLang stopped it long before max_tokens.
+            self.assertLess(num_tokens_sent[poisoned_id], max_tokens // 2)
+        self.assertNotEqual(healthy.finish_reason, "abort")
+        self.assertGreater(len(healthy.token_ids), 0)
 
 
 def _qwen3_moe_debug_tp2_ep2_config() -> Controller.Config:
