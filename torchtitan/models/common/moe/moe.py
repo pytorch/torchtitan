@@ -134,7 +134,7 @@ class RoutedExperts(Module):
         *,
         padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Dispatch tokens to experts, compute, combine, and scatter_add.
+        """Dispatch tokens to experts, compute, and combine each token's routes.
 
         When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
@@ -765,8 +765,9 @@ class MoE(FeedForward):
           to expert-owning ranks.
        b. expert computation (W13, activation, and W2 on local tensors)
        c. combine (TokenDispatcher) — reverse the dispatch reordering.
-          - LocalTokenDispatcher (no EP): scatter_add only.
-          - AllToAll: all-to-all communication, then scatter_add.
+          - LocalTokenDispatcher (no EP): gather-sum when its
+            moe_dispatch_combine region is compiled, else scatter_add.
+          - AllToAll: all-to-all, then the same combine as LocalTokenDispatcher.
           - DeepEP: combine_tokens followed by backend synchronization.
           - HybridEP: synchronous combine_tokens.
     3. Shared experts compute their output.
