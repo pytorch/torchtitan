@@ -24,8 +24,7 @@ areas:
   - name: rl_transport
     paths:
       - torchtitan/rl/transport/
-      - tests/rl/unit_tests/cpu/test_model_state_dict_transport.py
-      - tests/rl/unit_tests/cpu/test_rdma_microbatch.py
+      - tests/rl/unit_tests/cpu/transport/
     reviewers: [d4l3k]
 
   - name: rl_attention
