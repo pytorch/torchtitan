@@ -7,18 +7,12 @@
 import pytest
 import torch
 import torch.nn as nn
+
+import torchtitan.quantization.mxfp8.linear as mxfp8_linear
 from torch.utils.checkpoint import checkpoint
-
-
-pytest.importorskip("torchao")
-pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
-
-import torchtitan.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
-from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
-from torchtitan.quantization.mxfp8.linear import MXFP8Linear  # noqa: E402
-from torchtitan.quantization.mxfp8.tensor import (  # noqa: E402
-    _LinearShardedTensorWithMXFP8Compute,
-)
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor
+from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+from torchtitan.quantization.mxfp8.tensor import _LinearShardedTensorWithMXFP8Compute
 
 
 pytestmark = [
@@ -162,35 +156,54 @@ def test_mxfp8_linear_saves_selected_input_activation(
 
 
 @pytest.mark.parametrize(
-    ("input_activation_format_for_backward", "expected_quantize_calls"),
+    (
+        "input_activation_format_for_backward",
+        "requires_input_grad",
+        "requires_weight_grad",
+        "expected_quantize_calls",
+    ),
     [
-        ("bf16", [(True, False), (True, True), (False, True)]),
-        ("mxfp8", [(True, True), (True, True)]),
+        ("bf16", True, True, ["row", "dual", "column"]),
+        ("mxfp8", True, True, ["dual", "dual"]),
+        ("bf16", False, True, ["row", "column", "column"]),
+        ("mxfp8", False, True, ["dual", "column"]),
+        ("bf16", True, False, ["row", "row"]),
+        ("mxfp8", True, False, ["row", "row"]),
     ],
 )
 def test_mxfp8_input_activation_format_for_backward_controls_quantization_work(
     monkeypatch,
     input_activation_format_for_backward,
+    requires_input_grad,
+    requires_weight_grad,
     expected_quantize_calls,
 ):
-    original_quantize = mxfp8_linear.mxfp8_quantize_cuda
+    original_quantize = mxfp8_linear.F.quantize_tensor
+    original_quantize_dual = mxfp8_linear.F.quantize_tensor_dual
     quantize_calls = []
 
-    def record_quantize(*args, **kwargs):
-        quantize_calls.append((kwargs["rowwise"], kwargs["colwise"]))
-        return original_quantize(*args, **kwargs)
+    def record_quantize(input, **kwargs):
+        if not kwargs.get("scaling_type_use_square_block_size", False):
+            quantize_calls.append("row" if kwargs["dim"] == (-2, -1) else "column")
+        return original_quantize(input, **kwargs)
 
-    monkeypatch.setattr(mxfp8_linear, "mxfp8_quantize_cuda", record_quantize)
+    def record_quantize_dual(input, **kwargs):
+        quantize_calls.append("dual")
+        return original_quantize_dual(input, **kwargs)
+
+    monkeypatch.setattr(mxfp8_linear.F, "quantize_tensor", record_quantize)
+    monkeypatch.setattr(mxfp8_linear.F, "quantize_tensor_dual", record_quantize_dual)
     linear = _make_mxfp8_linear(
         bias=False,
         input_activation_format_for_backward=input_activation_format_for_backward,
     )
+    linear.weight.requires_grad_(requires_weight_grad)
     x = torch.randn(
         64,
         linear.in_features,
         device="cuda",
         dtype=torch.bfloat16,
-        requires_grad=True,
+        requires_grad=requires_input_grad,
     )
 
     linear(x).sum().backward()

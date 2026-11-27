@@ -540,9 +540,19 @@ class GraphPPPartitionTest(unittest.TestCase):
     )
     def test_partition_saves_mxfp8_wgrad_inputs_across_mutation(self) -> None:
         try:
-            from torchtitan.quantization.mxfp8.tensor import _quantize_mxfp8_weight
+            from torchtitan.quantization.mxfp8.tensor import (
+                _quantize_mxfp8_weight,
+                MXFP8_QUANTIZE_KWARGS,
+            )
         except ImportError as error:
-            raise unittest.SkipTest("TorchAO MXFP8 is unavailable") from error
+            raise unittest.SkipTest("PyTorch core MXFP8 is unavailable") from error
+
+        quantize_kwargs = {
+            "qdata_dtype": MXFP8_QUANTIZE_KWARGS["qdata_dtype"],
+            "scaling_type": MXFP8_QUANTIZE_KWARGS["scaling_type"].value,
+            "scaling_algorithm": MXFP8_QUANTIZE_KWARGS["scaling_algorithm"].value,
+            "swizzle_type": MXFP8_QUANTIZE_KWARGS["swizzle_type"].value,
+        }
 
         torch.manual_seed(0)
         activation = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
@@ -566,29 +576,22 @@ class GraphPPPartitionTest(unittest.TestCase):
         graph_grad_output = graph.placeholder("grad_output")
 
         quantized_activation = graph.call_function(
-            torch.ops.torchao.mxfp8_quantize.default,
-            args=(graph_activation, True, True, 32, 32, "e4m3", "rceil"),
+            torch.ops.aten._quantize_tensor_dual.default,
+            args=(graph_activation,),
+            kwargs={"dim": (-2, -1), **quantize_kwargs},
         )
         quantized_activation.meta["val"] = (None, None, None, None)
         activation_qdata_row = graph.call_function(
             operator.getitem, args=(quantized_activation, 0)
         )
         activation_qdata_col = graph.call_function(
-            operator.getitem, args=(quantized_activation, 1)
+            operator.getitem, args=(quantized_activation, 2)
         )
         activation_scale_row = graph.call_function(
-            operator.getitem, args=(quantized_activation, 2)
+            operator.getitem, args=(quantized_activation, 1)
         )
         activation_scale_col = graph.call_function(
             operator.getitem, args=(quantized_activation, 3)
-        )
-        activation_scale_row_swizzled = graph.call_function(
-            torch.ops.torchao.triton_mx_block_rearrange.default,
-            args=(activation_scale_row,),
-        )
-        activation_scale_col_swizzled = graph.call_function(
-            torch.ops.torchao.triton_mx_block_rearrange.default,
-            args=(activation_scale_col,),
         )
         output_buffer = graph.call_function(
             torch.ops.aten.empty_like.default,
@@ -599,7 +602,7 @@ class GraphPPPartitionTest(unittest.TestCase):
             args=(
                 activation_qdata_row,
                 graph_weight_qdata,
-                [activation_scale_row_swizzled],
+                [activation_scale_row],
                 [3],
                 [1],
                 [graph_weight_scale],
@@ -622,18 +625,15 @@ class GraphPPPartitionTest(unittest.TestCase):
         )
 
         quantized_grad_output = graph.call_function(
-            torch.ops.torchao.mxfp8_quantize.default,
-            args=(graph_grad_output, False, True, 32, 32, "e4m3", "rceil"),
+            torch.ops.aten._quantize_tensor.default,
+            args=(graph_grad_output,),
+            kwargs={"dim": (-1, -2), **quantize_kwargs},
         )
         grad_output_qdata_col = graph.call_function(
-            operator.getitem, args=(quantized_grad_output, 1)
+            operator.getitem, args=(quantized_grad_output, 0)
         )
         grad_output_scale_col = graph.call_function(
-            operator.getitem, args=(quantized_grad_output, 3)
-        )
-        grad_output_scale_col_swizzled = graph.call_function(
-            torch.ops.torchao.triton_mx_block_rearrange.default,
-            args=(grad_output_scale_col,),
+            operator.getitem, args=(quantized_grad_output, 1)
         )
         grad_output_qdata_col_t = graph.call_function(
             torch.ops.aten.t.default,
@@ -644,10 +644,10 @@ class GraphPPPartitionTest(unittest.TestCase):
             args=(
                 grad_output_qdata_col_t,
                 activation_qdata_col,
-                [grad_output_scale_col_swizzled],
+                [grad_output_scale_col],
                 [3],
                 [1],
-                [activation_scale_col_swizzled],
+                [activation_scale_col],
                 [3],
                 [1],
                 None,
@@ -658,7 +658,6 @@ class GraphPPPartitionTest(unittest.TestCase):
             quantized_grad_output,
             grad_output_qdata_col,
             grad_output_scale_col,
-            grad_output_scale_col_swizzled,
             grad_output_qdata_col_t,
             wgrad,
         ):
@@ -697,7 +696,7 @@ class GraphPPPartitionTest(unittest.TestCase):
         self.assertIn(activation_scale_col.name, meta.saved_for_backward_names)
         (backward_quantizer,) = bw_module.graph.find_nodes(
             op="call_function",
-            target=torch.ops.torchao.mxfp8_quantize.default,
+            target=torch.ops.aten._quantize_tensor.default,
         )
         self.assertEqual(backward_quantizer.args[0].name, graph_grad_output.name)
 

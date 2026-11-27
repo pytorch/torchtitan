@@ -25,8 +25,10 @@ MXFP8 training can provide substantial training speedups for models where the ma
 ### Requirements
 
 - NVIDIA B200 (SM100 or SM100a)
-- PyTorch nightly
-- TorchAO 0.18.0 or later, with `nvidia-cutlass-dsl` and `apache-tvm-ffi`
+- PyTorch build with `torch.nn.functional.quantize_tensor` and `quantize_tensor_dual`
+- Triton for dense weight scale layout transforms
+- TorchAO 0.18.0 or later for grouped GEMMs (MoE)
+- `nvidia-cutlass-dsl` and `apache-tvm-ffi` for the PyTorch quantizers
 
 ### How MXFP8 Works
 
