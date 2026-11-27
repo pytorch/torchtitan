@@ -37,7 +37,7 @@ same in-place model state dict load.
 
 Runs in the B200 RL CI job.
 Run each class in its own launch, with as many processes as its DP x TP degree (one
-for TestSGLangBitwiseParityKDA, four for TestSGLangBitwiseParityMoEDPEP,
+for TestSGLangBitwiseParityKDA and TestSGLangBitwiseParityGDNClassicPool, four for TestSGLangBitwiseParityMoEDPEP,
 TestSGLangBitwiseParityKDADPEP and TestSGLangBitwiseParityDistMoEDPEP, else two),
 with the SGLang environment (see
 torchtitan/rl/generator/sglang/README.md; the Dist-MoE classes also need the dist_moe
@@ -54,6 +54,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import pytest
 import torch
@@ -62,6 +63,7 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import CommConfig, TORCH_DTYPE_MAP
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.batch_invariant import set_batch_invariance
@@ -73,6 +75,7 @@ from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_model_
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
+from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
 from torchtitan.rl.controller.controller import Controller
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, FinishedRequest, SamplingConfig
@@ -544,6 +547,190 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
 
         self.assertEqual(received_session_ids, ["late/0", None])
         self.assertNotIn(group_id, self.engine._group_sessions)
+
+    def test_kv_cache_capacity_bounds_what_sglang_holds(self):
+        """The GDN states 2 sessions of one group keep stay within `kv_cache_capacity()`'s
+        charge, over 3 turns. Session 0's third prompt rewrites its last reply (as stripped
+        thinking would); session 1's extends its history:
+
+            idle     on each session's path: <= num_idle_states of its own, + 1 both share
+            running  state slots in use <= num_running_states per session, + 1 both share
+            turn 1+  each turn resumes from the deepest state on its prompt's path
+        """
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+        from sglang.srt.mem_cache.unified_cache.component_type import ComponentType
+
+        capacity = self.engine.kv_cache_capacity()
+        scheduler = self.engine._scheduler
+        tree_cache = scheduler.tree_cache
+        state_slots = scheduler.token_to_kv_pool_allocator.state_slots
+
+        def state_paths() -> list[tuple[int, ...]]:
+            """The tokens from the root to each tree node holding a GDN state on the GPU."""
+            paths, stack = [], [(tree_cache.tree_core.root_node, ())]
+            while stack:
+                node, path = stack.pop()
+                for child in node.children.values():
+                    child_path = path + tuple(child.key.token_ids)
+                    if child.component_data[ComponentType.MAMBA].value is not None:
+                        paths.append(child_path)
+                    stack.append((child, child_path))
+            return paths
+
+        def is_on(state_path: tuple[int, ...], token_ids: list[int]) -> bool:
+            return tuple(token_ids[: len(state_path)]) == state_path
+
+        def wait_for_host_backups() -> None:
+            # HiCache: the per-path cap skips states whose host backup is pending.
+            with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+                tree_cache.writing_check(write_back=True)
+
+        # Start from an empty tree, so only this test's sessions hold states.
+        wait_for_host_backups()
+        with scheduler.device_module.StreamContext(scheduler.schedule_stream):
+            tree_cache.evict(EvictParams(num_tokens=10**9, mamba_num=10**9))
+        self.assertEqual(tree_cache.total_size(), (0, 0))
+        num_slots_before = state_slots.size - state_slots.available_size()
+
+        # Other tests' group ids are prompt indices.
+        group_id = len(self.prompt_ids)
+        # SGLang caches states at multiples of this interval. Replies span 2, so each turn
+        # caches one at its prompt's end and one at its reply's end.
+        num_reply_tokens = 2 * scheduler.server_args.mamba_track_interval
+        shared_prompt = self.prompt_ids[0]
+        suffix = shared_prompt[: self.NEXT_TURN_SUFFIX_LENGTH]
+        prompts = [shared_prompt, shared_prompt]
+        for turn in range(3):
+            resume_depths = [
+                max(
+                    (len(path) for path in state_paths() if is_on(path, prompt)),
+                    default=0,
+                )
+                for prompt in prompts
+            ]
+            requests = []
+            for i, prompt in enumerate(prompts):
+                request = EngineRequest(
+                    request_id=f"capacity-{turn}-{i}",
+                    prompt=Prompt(token_ids=prompt),
+                    sampling=SamplingConfig(
+                        temperature=1.0,
+                        max_tokens=num_reply_tokens,
+                        seed=2000 + 10 * turn + i,
+                        stop_token_ids=[],
+                    ),
+                    group_id=group_id,
+                    routing_session_id=f"capacity/{i}",
+                    arrival_time=time.time(),
+                )
+                request.min_policy_version = self.policy_version
+                requests.append(request)
+            self.assertEqual(self.engine.add_requests(requests), [])
+
+            # While the calls run. A rewritten reply's old branch lies on no prompt's
+            # path, and the charge doesn't count it.
+            finished = {}
+            while self.engine.has_unfinished_requests():
+                for result in self.engine.step():
+                    finished[result.request_id] = result
+                num_off_path = sum(
+                    not any(is_on(path, prompt) for prompt in prompts)
+                    for path in state_paths()
+                )
+                num_slots = state_slots.size - state_slots.available_size()
+                self.assertLessEqual(
+                    num_slots - num_slots_before - num_off_path,
+                    len(prompts) * capacity.num_running_states + 1,
+                )
+            results = [finished[request.request_id] for request in requests]
+
+            # Turn 0's second request may reuse the first one's prompt in the same batch.
+            if turn > 0 and dist.get_rank() == 0:
+                self.assertEqual(
+                    [result.metrics_inputs.num_cached_tokens for result in results],
+                    resume_depths,
+                )
+
+            # Idle between turns.
+            histories = [
+                prompt + result.token_ids
+                for prompt, result in zip(prompts, results, strict=True)
+            ]
+            wait_for_host_backups()
+            paths = state_paths()
+            shared = [
+                path
+                for path in paths
+                if all(is_on(path, history) for history in histories)
+            ]
+            self.assertLessEqual(len(shared), 1)
+            for history in histories:
+                own = [
+                    path
+                    for path in paths
+                    if is_on(path, history) and path not in shared
+                ]
+                self.assertLessEqual(len(own), capacity.num_idle_states)
+
+            # Session 0's third prompt keeps half of its last reply.
+            if turn == 1:
+                last_reply = results[0].token_ids
+                histories[0] = prompts[0] + last_reply[: len(last_reply) // 2]
+            prompts = [history + suffix for history in histories]
+        self.engine.release_sessions([], [group_id])
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+@unittest.skipUnless(
+    dist.is_initialized() or "RANK" in os.environ,
+    "requires torchrun launcher",
+)
+class TestSGLangBitwiseParityGDNClassicPool(unittest.TestCase):
+    """The Qwen3.5 debug model at TP 1 on SGLang's classic pool (`enable_unified_memory` off,
+    as SGLang's MTP path builds it). Its GDN states sit in a separate pool of fixed slots,
+    which admission doesn't count: `kv_cache_capacity` raises. One GPU."""
+
+    def test_kv_cache_capacity_raises(self):
+        from torchtitan.rl.generator.sglang import engine as engine_module
+
+        config = qwen3_5_debug_bitwise_config()
+        _, generator_model = build_rl_model_configs(
+            build_qwen3_5_model_config,
+            "debugmodel",
+            seq_len=config.trainer.model.max_context_length,
+            attn_backend="varlen",
+            trainer_parallelism=ParallelismConfig(),
+            generator_parallelism=InferenceParallelismConfig(),
+        )
+        activate_cuda_flash_attention_impl()
+        server_args_class = engine_module.ServerArgs
+
+        def classic_pool_server_args(**kwargs):
+            return server_args_class(**{**kwargs, "enable_unified_memory": False})
+
+        # TorchTitan sets the unified pool for linear attention models; this build turns it off.
+        with mock.patch.object(engine_module, "ServerArgs", classic_pool_server_args):
+            engine = engine_module.SGLangEngine.Config(cuda_graph="breakable").build(
+                model=generator_model,
+                parallelism=InferenceParallelismConfig(),
+                model_path=config.hf_assets_path,
+                max_num_seqs=5,
+                precision=config.precision,
+                gpu_memory_limit=0.5,
+                max_num_batched_tokens=None,
+                checkpointer=None,
+                dist_moe_runtime=None,
+                debug=dataclasses.replace(config.generator.debug, seed=0),
+                reset_kv_cache_on_model_state_dict_load=False,
+                model_state_dict_load_mode="gpu_fetch",
+                vision_processor=None,
+                mooncake_master_address=None,
+                rank=0,
+                generator_name="generator",
+                output_dir=tempfile.gettempdir(),
+            )
+        with self.assertRaisesRegex(ValueError, "classic pool: [0-9]+ state slots"):
+            engine.kv_cache_capacity()
 
 
 class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):

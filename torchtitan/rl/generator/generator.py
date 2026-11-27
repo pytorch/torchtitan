@@ -30,7 +30,11 @@ from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
-from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.engine import (
+    GenerationEngine,
+    KVCacheCapacity,
+    ModelStateDictLoadMode,
+)
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
@@ -448,6 +452,10 @@ class Generator(Configurable):
             group_ids: Groups with no more generation calls.
         """
         self._engine_loop.release_groups(group_ids)
+
+    async def kv_cache_capacity(self) -> KVCacheCapacity:
+        """Return the engine's KV cache capacity, for the router's admission (rank 0)."""
+        return self._engine_loop.kv_cache_capacity()
 
     async def release_sessions(self, session_ids: list[str]) -> None:
         """Release the cached KV of sessions whose rollout ended (rank 0).

@@ -23,7 +23,7 @@ import torch.distributed as dist
 
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.generator.dispatcher import RequestDispatcher
-from torchtitan.rl.generator.engine import GenerationEngine
+from torchtitan.rl.generator.engine import GenerationEngine, KVCacheCapacity
 from torchtitan.rl.generator.types import EngineRequest
 from torchtitan.rl.rollout.types import Completion
 
@@ -232,6 +232,12 @@ class EngineLoop:
             self._queue.put(
                 SessionReleaseMessage(session_ids=session_ids), drop_if_closed=True
             )
+
+    def kv_cache_capacity(self) -> KVCacheCapacity:
+        """RANK 0: the engine's KV cache capacity (``GenerationEngine.kv_cache_capacity``)."""
+        if self._engine is None:
+            raise RuntimeError("the engine loop has released its engine")
+        return self._engine.kv_cache_capacity()
 
     def log_engine_stats(self, step: int) -> None:
         """Log the engine's per-step stats, if it has any (rank 0)."""

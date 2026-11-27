@@ -142,6 +142,10 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
 
+# How long a shutdown waits to release a cancelled group. A release takes milliseconds, so this
+# only bounds a generator that can't answer; past it, teardown goes on.
+_SHUTDOWN_RELEASE_TIMEOUT_S = 30.0
+
 
 @dataclass(kw_only=True, slots=True)
 class ValidationConfig:
@@ -744,18 +748,28 @@ class Controller(Configurable):
             #   and a caller that dies never releases. Moot today: nothing cancels a
             #   generate call, and a dead rollout worker fails the run.
             generator = await generator_router.reserve.call_one(
-                request_id, routing_session_id=routing_session_id
+                request_id,
+                routing_session_id=routing_session_id,
+                group_id=group_id,
+                num_prompt_tokens=len(prompt.token_ids),
             )
+            completion = None
             try:
-                return await generator.generate.call_one(
+                completion = await generator.generate.call_one(
                     prompt,
                     request_id=request_id,
                     group_id=group_id,
                     routing_session_id=routing_session_id,
                     sampling_config=sampling_config,
                 )
+                return completion
             finally:
-                generator_router.release_reservation.broadcast(request_id)
+                generator_router.release_reservation.broadcast(
+                    request_id,
+                    num_reply_tokens=0
+                    if completion is None
+                    else len(completion.token_ids),
+                )
 
         return generate
 
@@ -928,21 +942,33 @@ class Controller(Configurable):
         release_session_fn = self._make_release_session_fn()
         # Each id is used once, so validations that run at the same time never share one.
         group_ids = [next(self._validation_group_ids) for _ in samples]
+
+        async def run_group(group_id: int, sample: object) -> RolloutGroup:
+            # With admission, wait for KV room; validation groups go before training groups.
+            await self.generator_router.acquire_group.call_one(
+                group_id, num_sessions=num_samples_per_prompt, validation=True
+            )
+            return await self._rollouter.run_group_rollouts(
+                generate_fn=generate,
+                release_session_fn=release_session_fn,
+                sample=sample,
+                group_id=group_id,
+                group_size=num_samples_per_prompt,
+                sampling=sampling,
+            )
+
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
-        group_results = await asyncio.gather(
-            *(
-                self._rollouter.run_group_rollouts(
-                    generate_fn=generate,
-                    release_session_fn=release_session_fn,
-                    sample=sample,
-                    group_id=group_id,
-                    group_size=num_samples_per_prompt,
-                    sampling=sampling,
-                )
-                for group_id, sample in zip(group_ids, samples, strict=True)
-            ),
-            return_exceptions=True,
-        )
+        try:
+            group_results = await asyncio.gather(
+                *(
+                    run_group(group_id, sample)
+                    for group_id, sample in zip(group_ids, samples, strict=True)
+                ),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            await self._release_groups_at_shutdown(group_ids)
+            raise
         # Drop the generators' pinned cache salts and cached KV for these groups.
         await self.generator_router.release_groups.call_one(group_ids)
 
@@ -1162,10 +1188,9 @@ class Controller(Configurable):
             # Then cancel covers anything blocked on the queue (which close does not wake); gather awaits all.
             # Cancel the validations too: `_validation_tasks` holds every validation not logged yet. On a
             # healthy end, a validation that already ended keeps its result for the call after training. A
-            # cancelled validation is never logged, and its groups stay pinned in the generators. Its rollouts
-            # keep running until close() if the rollouter shields them (the base Rollouter does).
-            # TODO: abort a cancelled validation's rollouts and release its groups. The generators have no abort
-            # path yet.
+            # cancelled validation is never logged, but it releases its groups. Its rollouts keep running
+            # until close() if the rollouter shields them (the base Rollouter does).
+            # TODO: abort a cancelled validation's rollouts. The generators have no abort path yet.
             await self._group_buffer.close()
             # TODO: cancelling stops only the controller's waits. The remote pull can still run
             # while close() tears down the actors.
@@ -1186,6 +1211,22 @@ class Controller(Configurable):
             self._event_loop_lag.close()
 
         await self._maybe_validate_after_training(step=num_training_steps)
+
+    async def _release_groups_at_shutdown(self, group_ids: list[int]) -> None:
+        """Release groups a shutdown cancelled, so the validation after training gets their KV
+        room. Waits at most `_SHUTDOWN_RELEASE_TIMEOUT_S`, and logs a failure instead of raising
+        it, so teardown goes on."""
+        try:
+            await asyncio.wait_for(
+                self.generator_router.release_groups.call_one(group_ids),
+                timeout=_SHUTDOWN_RELEASE_TIMEOUT_S,
+            )
+        except Exception as error:
+            # A timeout, or a dead router or generator. One line, no traceback: every rollout
+            # loop may log here, and tracebacks would bury the run's own error.
+            logger.warning(
+                f"releasing rollout groups {group_ids} at shutdown failed: {error!r}"
+            )
 
     async def _generator_loop(self) -> None:
         """Wait until every generator's engine loop exits; raise as soon as one crashes."""
@@ -1299,6 +1340,19 @@ class Controller(Configurable):
             if work is None:  # group_buffer closed/shutdown signal
                 logger.info("Buffer closed; rollout loop stopping")
                 return
+
+            # With admission, wait for KV room before the group's envs start. An error ends the
+            # run: no group could start.
+            try:
+                await self.generator_router.acquire_group.call_one(
+                    work.group_id,
+                    num_sessions=self.config.async_loop.num_samples_per_prompt,
+                    validation=False,
+                )
+            except asyncio.CancelledError:
+                await self._release_groups_at_shutdown([work.group_id])
+                raise
+
             try:
                 with sl.log_trace_span("rollout_group"):
                     group = await self._rollouter.run_group_rollouts(
@@ -1318,6 +1372,9 @@ class Controller(Configurable):
                     is_validation=False,
                     rollout_groups=[group],
                 )
+            except asyncio.CancelledError:
+                await self._release_groups_at_shutdown([work.group_id])
+                raise
             except Exception:
                 logger.exception(f"rollout group {work.group_id} failed; dropping")
                 group = RolloutGroup(
@@ -1540,6 +1597,11 @@ class Controller(Configurable):
             # TODO(metrics): See if metrics are being computed at the right place. E.g. should we put all
             # rollout related metrics here, or move all of them to the rollouter.
             time_metrics = step_timer.flush()
+            admission_metrics = (
+                await self.generator_router.admission_metrics.call_one()
+                if self.config.generator_router.admission is not None
+                else []
+            )
             with sl.log_trace_span("metrics_log"):
                 self.metrics_processor.log(
                     step=step,
@@ -1555,6 +1617,7 @@ class Controller(Configurable):
                             for key, value in optimizer_result.metrics.items()
                         ],
                         *self._group_buffer.metrics(),
+                        *admission_metrics,
                         *time_metrics,
                         # The event loop's longest delay, and how many ms late it ran per second
                         *self._event_loop_lag.flush(),
