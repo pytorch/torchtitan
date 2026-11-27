@@ -129,7 +129,6 @@ from torchtitan.rl.controller.work_buffer import (
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.mooncake_master import start_master
 from torchtitan.rl.generator.types import SamplingConfig
-from torchtitan.rl.model_state_dict_transport import ModelStateDictTransport
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.recorder import RolloutSampleRecorder
@@ -138,6 +137,7 @@ from torchtitan.rl.rollout.types import Completion, GenerateFn, Prompt, ReleaseS
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher, TrainerStepBatch
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.transport.model_state_dict import ModelStateDictTransport
 from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
@@ -404,7 +404,7 @@ class Controller(Configurable):
         one-sided ``torch.distributed._transport`` reads, or None to move it through
         TorchStore. Requires ``generator.model_state_dict_load_mode="cpu_prefetch"``;
         ``gpu_fetch`` needs None. TODO: drop None (and TorchStore) once this covers
-        ``gpu_fetch``. See ``torchtitan/rl/MODEL_STATE_DICT_TRANSPORT.md``."""
+        ``gpu_fetch``. See ``torchtitan/rl/transport/MODEL_STATE_DICT_TRANSPORT.md``."""
 
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(

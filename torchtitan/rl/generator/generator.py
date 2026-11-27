@@ -34,14 +34,14 @@ from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadM
 from torchtitan.rl.generator.engine_loop import EngineLoop, EngineLoopThread
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import EngineRequest, SamplingConfig
-from torchtitan.rl.model_state_dict_transport import (
+from torchtitan.rl.rollout.types import Completion, Prompt
+from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
+from torchtitan.rl.transport.model_state_dict import (
     ModelStateDictTransport,
     shard_layout,
     TensorShard,
     TrainerSource,
 )
-from torchtitan.rl.rollout.types import Completion, Prompt
-from torchtitan.rl.routing.intra_generator import IntraGeneratorRouter
 
 logger = logging.getLogger(__name__)
 

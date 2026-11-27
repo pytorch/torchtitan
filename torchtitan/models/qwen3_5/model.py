@@ -160,8 +160,6 @@ class Qwen35Attention(Attention):
         # at their common attention boundary.
         x_TD = maybe_gather_tp_input(self, x_TD)
 
-        num_tokens = x_TD.shape[0]
-
         # wq is 2x wider: produces query + gate
         xq_gate_THC = local_head_split(self.wq(x_TD), self.head_dim * 2, cp_shard_dim=0)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
@@ -191,12 +189,20 @@ class Qwen35Attention(Attention):
         # The output gating reads the inner_attention and wq gate outputs with bare
         # ops.
         remat.recompute_needs_tensor(out_THV, gate_THV)
-        out_THV = out_THV.contiguous()
-
-        # Output gating
-        out_THV = out_THV * torch.sigmoid(gate_THV)
-        out_TD = out_THV.view(num_tokens, -1)
+        out_TD = self._apply_output_gate(out_THV, gate_THV)
         return self.wo(out_TD)
+
+    @staticmethod
+    @local_compile("attn_output_gate", batch_invariant=True)
+    def _apply_output_gate(
+        out_THV: torch.Tensor, gate_THV: torch.Tensor
+    ) -> torch.Tensor:
+        """Gate the attention output and flatten heads into the feature dim.
+
+        ``reshape`` replaces the explicit ``contiguous()`` that ``view`` needed:
+        the inner attention output is not always contiguous.
+        """
+        return (out_THV * torch.sigmoid(gate_THV)).reshape(out_THV.shape[0], -1)
 
     # TODO: consider moving this to rope directly.
     @local_compile("partial_rope", batch_invariant=True)
@@ -318,6 +324,8 @@ class Qwen35Model(Decoder):
                     "partial_rope",
                     "shared_expert_gate",
                     "fp32_to_bf16_split",
+                    "attn_output_gate",
+                    "gdn_gate",
                 ]
             )
         )
