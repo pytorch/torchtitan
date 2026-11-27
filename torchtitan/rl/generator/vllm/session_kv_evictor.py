@@ -16,14 +16,12 @@ from typing import Any, TYPE_CHECKING
 from vllm.v1.core.kv_cache_utils import BlockHash, make_block_hash_with_group_id
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from torchtitan.rl.generator.engine import NUM_RELEASED_GROUP_IDS_KEPT
+
 if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = logging.getLogger(__name__)
-
-# Released groups `track` remembers. A late request arrives seconds after its group's release;
-# 4,096 groups span far longer.
-_NUM_RELEASED_GROUP_IDS_KEPT = 4096
 
 
 @dataclass(slots=True)
@@ -269,7 +267,7 @@ class VLLMSessionKVEvictor:
         for group_id in group_ids:
             released |= self._group_sessions.pop(group_id, set())
             self._released_group_ids[group_id] = None
-        while len(self._released_group_ids) > _NUM_RELEASED_GROUP_IDS_KEPT:
+        while len(self._released_group_ids) > NUM_RELEASED_GROUP_IDS_KEPT:
             del self._released_group_ids[next(iter(self._released_group_ids))]
         # Sorted, not set order: string hashes differ per process, and every TP rank must
         # evict in the same order.

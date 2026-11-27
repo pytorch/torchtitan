@@ -21,6 +21,10 @@ from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
 
 ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
 
+# Released groups an engine remembers, so that a late request of one starts no session. A late
+# request arrives seconds after its group's release; 4,096 groups span far longer.
+NUM_RELEASED_GROUP_IDS_KEPT = 4096
+
 
 class GenerationEngine(Configurable, abc.ABC):
     """One inference engine replica that runs a TorchTitan model, driven by the engine loop.
