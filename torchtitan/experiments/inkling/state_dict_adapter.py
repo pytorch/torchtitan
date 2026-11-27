@@ -147,45 +147,46 @@ def _validate_checkpoint(source: Path, model: InklingModel.Config) -> None:
             for suffix, dtype in storage_dtypes.items():
                 packed_dtypes[key + suffix] = dtype
 
-    _validate_packed_storage(source, weight_map, packed_dtypes)
+    _validate_text_storage(source, weight_map, packed_dtypes)
 
 
-def _validate_packed_storage(
+def _validate_text_storage(
     source: Path, weight_map: dict[str, str], packed_dtypes: dict[str, str | None]
 ) -> None:
-    required_keys = {key for key, dtype in packed_dtypes.items() if dtype is not None}
-    for key in packed_dtypes:
-        if (key in weight_map) != (key in required_keys):
+    for key, dtype in packed_dtypes.items():
+        if (key in weight_map) != (dtype is not None):
             raise ValueError(
                 f"Missing or unexpected packed expert key in weight map: {key}"
             )
 
-    # DCP scans all local safetensors files and copy_ can cast the source dtype.
-    # Check actual headers, including unindexed duplicates, without loading tensors.
+    # DCP scans all shards, but merge reads from the index. Require one owner
+    # for every text tensor so both paths use the same base weights.
+    required_keys = {key for key in weight_map if key.startswith(_PREFIX)}
     found_keys = set()
     for shard in source.glob("*.safetensors"):
         with safe_open(shard, framework="pt", device="cpu") as tensors:
-            for key in packed_dtypes.keys() & tensors.keys():
-                dtype = packed_dtypes[key]
-                if dtype is None:
-                    raise ValueError(
-                        f"Unexpected packed expert key {key} in {shard.name}"
-                    )
+            for key in tensors.keys():
+                if not key.startswith(_PREFIX):
+                    continue
+                if key not in weight_map:
+                    raise ValueError(f"Unindexed text key {key} in {shard.name}")
                 if weight_map[key] != shard.name:
                     raise ValueError(
-                        f"Packed expert key {key} found in {shard.name}, "
+                        f"Text key {key} found in {shard.name}, "
                         f"but indexed in {weight_map[key]}"
                     )
-                actual_dtype = tensors.get_slice(key).get_dtype()
-                if actual_dtype != dtype:
-                    raise ValueError(
-                        f"Packed expert key {key} in {shard.name} has wrong storage dtype: "
-                        f"expected {dtype}, got {actual_dtype}"
-                    )
                 found_keys.add(key)
+                # DCP copy_ can silently cast a packed payload or scale.
+                if (dtype := packed_dtypes.get(key)) is not None:
+                    actual_dtype = tensors.get_slice(key).get_dtype()
+                    if actual_dtype != dtype:
+                        raise ValueError(
+                            f"Packed expert key {key} in {shard.name} has wrong storage dtype: "
+                            f"expected {dtype}, got {actual_dtype}"
+                        )
     if missing_keys := required_keys - found_keys:
         key = min(missing_keys)
-        raise ValueError(f"Missing packed expert key {key} in {weight_map[key]}")
+        raise ValueError(f"Missing text key {key} in {weight_map[key]}")
 
 
 class InklingStateDictAdapter(StateDictAdapter):

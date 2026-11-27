@@ -91,12 +91,12 @@ class InklingTrainer(Trainer):
                 != self.model.max_context_length
             ):
                 raise ValueError("Inkling requires one context per microbatch")
+            source = Path(self.hf_assets_path).resolve()
             if (
                 self.checkpointer is None
                 or not self.checkpointer.initial_load_in_hf
                 or self.checkpointer.initial_load_path is None
-                or Path(self.checkpointer.initial_load_path).resolve()
-                != Path(self.hf_assets_path).resolve()
+                or Path(self.checkpointer.initial_load_path).resolve() != source
             ):
                 raise ValueError(
                     "Inkling requires the same HF source for weights and tokenizer"
@@ -108,13 +108,18 @@ class InklingTrainer(Trainer):
                     "Inkling requires local training and checkpoint output"
                 )
             run = Path(self.dump_folder).resolve()
-            if run.is_relative_to(Path(self.hf_assets_path).resolve()):
+            if run.is_relative_to(source):
                 raise ValueError(
                     "The training output must be outside the source checkpoint"
                 )
-            if not (run / self.checkpointer.folder).resolve().is_relative_to(run):
+            native_checkpoint = (run / self.checkpointer.folder).resolve()
+            if not native_checkpoint.is_relative_to(run):
                 raise ValueError(
                     "The native checkpoint must be inside the training output"
+                )
+            if native_checkpoint.is_relative_to(source):
+                raise ValueError(
+                    "The native checkpoint must be outside the source checkpoint"
                 )
 
     def __init__(self, config: Config) -> None:

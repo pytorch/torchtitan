@@ -138,6 +138,24 @@ def test_resume_rejects_changed_document_order_or_packing(monkeypatch, inputs, c
         config.build()
 
 
+@pytest.mark.parametrize(
+    "folder",
+    ["source/native", "source", "source-link/native"],
+    ids=["nested", "same-directory", "via-symlink"],
+)
+def test_native_checkpoint_must_be_outside_source(monkeypatch, inputs, folder):
+    source, corpus, _ = inputs
+    run = source.parent
+    (run / "source-link").symlink_to(source, target_is_directory=True)
+    config = _launch_config(monkeypatch, source, corpus, run)
+    assert config.checkpointer is not None
+
+    with pytest.raises(
+        ValueError, match="native checkpoint must be outside the source"
+    ):
+        replace(config, checkpointer=replace(config.checkpointer, folder=folder))
+
+
 def test_refuses_to_adopt_unverified_native_checkpoint(monkeypatch, inputs):
     monkeypatch.setattr(Trainer, "__init__", lambda self, config: None)
     _, _, run = inputs

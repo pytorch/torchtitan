@@ -208,9 +208,14 @@ def test_internal_lora_checkpoint_roundtrip(tmp_path: Path):
 
     # DCP discovers shards by filename, not from the weight map.
     duplicate_shard = source / "extra.safetensors"
-    save_file({scale_key: base[scale_key].float()}, duplicate_shard)
-    with pytest.raises(ValueError, match=rf"{re.escape(scale_key)}.*extra.safetensors"):
-        adapter.get_hf_storage_reader(str(source))
+    for duplicate_key in (scale_key, key):
+        save_file(
+            {duplicate_key: torch.zeros_like(base[duplicate_key])}, duplicate_shard
+        )
+        with pytest.raises(
+            ValueError, match=rf"{re.escape(duplicate_key)}.*extra\.safetensors"
+        ):
+            adapter.get_hf_storage_reader(str(source))
     duplicate_shard.unlink()
 
     denominator_key = (
