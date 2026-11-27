@@ -500,6 +500,51 @@ class TestSGLangBitwiseParityGDN(SGLangBitwiseParityTestBase):
             self.engine._scheduler.token_to_kv_pool_allocator, ChainAllocator
         )
 
+    def test_a_late_request_of_a_released_group_starts_no_session(self):
+        """A request of a released group (an abandoned attempt still in transit) reaches SGLang
+        without a session id: without the skip, SGLang reopens the session and nothing closes it.
+
+            request of the live group       session "late/0", kept for the group's release
+            request after the release       no session, nothing kept
+        """
+        scheduler = self.engine._scheduler
+        # Used by no other test: a released group id stays released.
+        group_id = 10**6
+        received_session_ids = []
+        process_input_requests = scheduler.process_input_requests
+
+        def record(requests):
+            received_session_ids.extend(request.session_id for request in requests)
+            return process_input_requests(requests)
+
+        def run(request_id: str, session_id: str) -> None:
+            request = EngineRequest(
+                request_id=request_id,
+                prompt=Prompt(token_ids=self.prompt_ids[0]),
+                sampling=SamplingConfig(
+                    temperature=1.0, max_tokens=4, seed=7, stop_token_ids=[]
+                ),
+                group_id=group_id,
+                routing_session_id=session_id,
+                arrival_time=time.time(),
+            )
+            request.min_policy_version = self.policy_version
+            self.assertEqual(self.engine.add_requests([request]), [])
+            while self.engine.has_unfinished_requests():
+                self.engine.step()
+
+        scheduler.process_input_requests = record
+        try:
+            run("live", "late/0")
+            self.assertEqual(self.engine._group_sessions[group_id], {"late/0"})
+            self.engine.release_sessions([], [group_id])
+            run("late", "late/1")
+        finally:
+            scheduler.process_input_requests = process_input_requests
+
+        self.assertEqual(received_session_ids, ["late/0", None])
+        self.assertNotIn(group_id, self.engine._group_sessions)
+
 
 class TestSGLangBitwiseParityGDNHiCache(TestSGLangBitwiseParityGDN):
     """``TestSGLangBitwiseParityGDN`` with HiCache backing KV and GDN states up to

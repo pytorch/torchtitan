@@ -943,7 +943,7 @@ class Controller(Configurable):
             ),
             return_exceptions=True,
         )
-        # Drop the generators' pinned cache salts and held KV for these groups.
+        # Drop the generators' pinned cache salts and cached KV for these groups.
         await self.generator_router.release_groups.call_one(group_ids)
 
         # Keep the groups that succeeded; log + count the ones that raised.
@@ -1325,7 +1325,7 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
-            # The group makes no more generation calls, so its cache salts can go.
+            # The group makes no more generation calls: drop its cache salts and release its cached KV.
             await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 

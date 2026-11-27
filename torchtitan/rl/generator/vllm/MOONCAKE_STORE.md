@@ -92,7 +92,7 @@ Session handling lives in Titan:
 | --- | --- | --- |
 | Shared across generators | No | Yes (generators on one Master) |
 | Sticky routing | Yes | Yes |
-| Hold a session's prefix on GPU between turns (`session_kv_holder`) | Yes | Yes |
+| Evict an ended session's GPU KV before live sessions' (`VLLMSessionKVEvictor`) | Yes | Yes |
 | Evict a released session's offloaded blocks first | Yes | No: a generator cannot tell whether another still needs a prefix, so Titan never deletes Store keys |
 | Blocks saved | With `lazy_offload=True`, only blocks the GPU is about to evict | Every computed block |
 | Eviction | CPU LRU plus session release hints | Master watermark eviction (approximate LRU) |

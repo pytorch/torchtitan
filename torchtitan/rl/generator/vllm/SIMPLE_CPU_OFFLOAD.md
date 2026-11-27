@@ -38,7 +38,7 @@ buffers and other host processes. Prefix caching is required.
 | Step | Policy |
 | --- | --- |
 | GPU -> CPU | Default (`lazy_offload=True`): only cached blocks near the head of the GPU free queue (LRU order), enough to keep about twice a step's token budget evictable. `lazy_offload=False` (eager): every full prompt and decode block, as it is computed, including single-turn requests. |
-| CPU -> discard | LRU over the CPU block pool. With the session holder, a [session release](#session-release) moves the session's unused blocks to the front, to be evicted next. |
+| CPU -> discard | LRU over the CPU block pool. A [session release](#session-release) moves the session's unused blocks to the front, to be evicted next. |
 | CPU -> GPU | On demand, no prefetch: when a request's prefix lookup hits CPU at scheduling, the request waits while its blocks load. |
 
 ## Weight and cache lifecycle
@@ -59,12 +59,11 @@ buffers and other host processes. Prefix caching is required.
 
 ## Session release
 
-Enable the [session holder](session_kv_holder.py) with
-`session_kv_holder=VLLMSessionKVHolder.Config()` to hold GPU prefixes between turns
-and forward session/group release through
-`connector.release_session_cache(released_hashes, active_hashes)`. With
-`session_kv_holder=None`, CPU offload still works, but eviction follows the
-connector's normal LRU policy without session release hints.
+The [session KV evictor](session_kv_evictor.py) always runs. When it evicts a
+session's GPU blocks, it also forwards their hashes through
+`connector.release_session_cache(released_hashes, active_hashes)`: at a
+session or group release, and when a turn's prompt drops part of the previous
+one (e.g. stripped reasoning).
 
 ```text
 Session/group ends -> notify generators -> wait for requests and saves
@@ -74,8 +73,7 @@ Session/group ends -> notify generators -> wait for requests and saves
 A session release reaches the rank 0 of the generator the session is pinned to
 (sticky routing); a group release reaches every generator. Rank 0 broadcasts
 the release to its workers. A generator the session left after a repin
-releases its KV when the group ends. Without the holder, generators ignore
-releases.
+releases its KV when the group ends.
 
 Released blocks remain reusable until reclaimed. Hashes and aliases used by
 active sessions on the local DP replica are protected. This is a one-shot hint;

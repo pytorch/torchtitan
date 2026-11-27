@@ -21,6 +21,10 @@ from torchtitan.rl.generator.types import EngineRequest, FinishedRequest
 
 ModelStateDictLoadMode = Literal["cpu_prefetch", "gpu_fetch"]
 
+# Released groups an engine remembers, so that a late request of one starts no session. A late
+# request arrives seconds after its group's release; 4,096 groups span far longer.
+NUM_RELEASED_GROUP_IDS_KEPT = 4096
+
 
 class GenerationEngine(Configurable, abc.ABC):
     """One inference engine replica that runs a TorchTitan model, driven by the engine loop.
@@ -120,14 +124,8 @@ class GenerationEngine(Configurable, abc.ABC):
                 with the new weights and returns the keys it filled.
         """
 
-    @property
-    def holds_session_kv(self) -> bool:
-        """Whether the engine holds multi-turn sessions' KV between turns, so callers must
-        release sessions and groups when their rollouts end."""
-        return False
-
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
-        """Release the held KV of ``session_ids`` and of every session of ``group_ids``."""
+        """Release the cached KV of ``session_ids`` and of every session of ``group_ids``."""
 
     def log_stats(self, step: int) -> None:
         """Log the engine's own per-step stats, if any."""

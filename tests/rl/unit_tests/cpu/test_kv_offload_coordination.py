@@ -140,7 +140,7 @@ def _coordinate_worker(rank, rendezvous):
             # One shared work flag covers requests, pending KV and queued outputs.
             # A locally idle rank must keep stepping until every rank has drained.
             engine = VLLMEngine.__new__(VLLMEngine)
-            engine._session_kv_holder = None
+            engine._session_kv_evictor = SimpleNamespace(has_pending_work=False)
             engine._coordinate_kv_offload = True
             engine._uses_kv_offload = True
             state = SimpleNamespace(requests=False, scheduled=False)
@@ -269,7 +269,7 @@ def test_progress_and_delayed_completion_coordination(tmp_path):
 def test_idle_dp_forward_does_not_skip_queued_output_drain():
     engine = VLLMEngine.__new__(VLLMEngine)
     engine._coordinate_kv_offload = True
-    engine._session_kv_holder = None
+    engine._session_kv_evictor = Mock()
     calls = []
 
     def coordinate(has_requests):

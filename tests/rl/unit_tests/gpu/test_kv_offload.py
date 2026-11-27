@@ -27,7 +27,6 @@ def _free_port():
 def _generator_worker(
     device_id,
     port,
-    hold_sessions,
     block_size,
     commands,
     results,
@@ -63,7 +62,6 @@ def _generator_worker(
             VLLMCudaGraphConfig,
         )
         from torchtitan.rl.generator.vllm.engine import VLLMEngine
-        from torchtitan.rl.generator.vllm.session_kv_holder import VLLMSessionKVHolder
         from torchtitan.rl.generator.vllm.worker import TorchTitanGPUModelRunner
         from torchtitan.rl.rollout.types import Prompt
         from torchtitan.tools.utils import has_cuda_capability
@@ -88,7 +86,6 @@ def _generator_worker(
             kv_offload=SimpleCPUKVOffloadConfig(
                 cpu_bytes_per_rank=1 << 30, lazy_offload=False
             ),
-            session_kv_holder=(VLLMSessionKVHolder.Config() if hold_sessions else None),
             # Pre-SM90 engines already select 256-token blocks. Exercise that
             # granularity on newer GPUs too, without overriding an owned arg.
             extra_engine_args={
@@ -126,7 +123,6 @@ def _generator_worker(
             generator_name=f"generator-{device_id}",
             output_dir="/tmp",
         )
-        assert engine.holds_session_kv == hold_sessions
         # Use real model weights in the normal pinned receive buffers.
         torch.manual_seed(42)
         for tensor in engine.prefetched_model_state_dict.values():
@@ -175,7 +171,7 @@ def _generator_worker(
                         time.monotonic() < deadline
                     ), "session eviction failed to drain"
                     engine.step()
-                assert not engine._session_kv_holder.has_pending_work
+                assert not engine._session_kv_evictor.has_pending_work
                 first_blocks = pool.free_block_queue.get_all_free_blocks()[:before]
                 assert {b.block_id for b in first_blocks} == cached
                 after = len(first_blocks)
@@ -195,8 +191,6 @@ def _generator_worker(
             # A cold reference bypasses both cache tiers without changing weights.
             if clear_local or force_cold:
                 # Simulate GPU eviction between turns, not session completion.
-                if engine._session_kv_holder is not None:
-                    engine._session_kv_holder._release("session-0")
                 assert engine._engine.reset_prefix_cache(reset_connector=False)
             request = EngineRequest(
                 request_id=request_id,
@@ -263,10 +257,7 @@ def _generator_worker(
                 results.put(("idle", None))
                 continue
             assert len(finished) == 1
-            if hold_sessions:
-                assert engine._session_kv_holder.num_sessions == 1
-                held = engine._session_kv_holder._held["session-0"]
-                assert held and all(block.ref_cnt > 0 for block in held)
+            assert engine._session_kv_evictor.num_sessions == 1
             output = finished[0]
             results.put(
                 (
@@ -289,11 +280,10 @@ def _generator_worker(
 
 @pytest.mark.multi_gpu
 @pytest.mark.parametrize(
-    "save_decode_cache, hold_sessions, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
+    "save_decode_cache, block_size, tp, dp, ep, async_scheduling, prefix_match_unit",
     [
         pytest.param(
             True,
-            False,
             256,
             1,
             1,
@@ -303,7 +293,6 @@ def _generator_worker(
             id="cpu-hybrid-tail",
         ),
         pytest.param(
-            True,
             True,
             256,
             2,
@@ -315,7 +304,6 @@ def _generator_worker(
         ),
         pytest.param(
             True,
-            False,
             256,
             2,
             1,
@@ -326,7 +314,6 @@ def _generator_worker(
         ),
         pytest.param(
             True,
-            False,
             None,
             2,
             2,
@@ -341,7 +328,6 @@ def test_cpu_kv_and_weight_version_isolation(
     tmp_path,
     monkeypatch,
     save_decode_cache,
-    hold_sessions,
     block_size,
     tp,
     dp,
@@ -375,7 +361,6 @@ def test_cpu_kv_and_weight_version_isolation(
                     args=(
                         ",".join(device_ids[gpu * world_size : (gpu + 1) * world_size]),
                         instance_port,
-                        hold_sessions,
                         block_size,
                         commands,
                         results,
@@ -522,20 +507,19 @@ def test_cpu_kv_and_weight_version_isolation(
             # Both DP replicas work concurrently, then DP0 drains outputs and
             # saves while DP1 is still decoding through EP collectives.
             generate(0, 1, [51] + prompt, background_prompt=[52] + prompt)
-        if hold_sessions:
-            for rank_queues in queues:
-                for commands, _ in rank_queues:
-                    commands.put("release")
-            released = []
-            for rank_queues in queues:
-                for _, results in rank_queues:
-                    kind, payload = results.get(timeout=90)
-                    assert kind == "released", payload
-                    released.append(payload)
-            before = sum(item[0] for item in released)
-            after = sum(item[1] for item in released)
-            assert before > 0
-            print(f"Session release: SimpleCPU, cached before={before}, after={after}")
+        for rank_queues in queues:
+            for commands, _ in rank_queues:
+                commands.put("release")
+        released = []
+        for rank_queues in queues:
+            for _, results in rank_queues:
+                kind, payload = results.get(timeout=90)
+                assert kind == "released", payload
+                released.append(payload)
+        before = sum(item[0] for item in released)
+        after = sum(item[1] for item in released)
+        assert before > 0
+        print(f"Session release: SimpleCPU, cached before={before}, after={after}")
         for rank_queues in queues:
             for commands, _ in rank_queues:
                 commands.put(None)

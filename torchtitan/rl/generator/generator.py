@@ -442,7 +442,7 @@ class Generator(Configurable):
         )
 
     async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts and the held KV of finished rollout groups.
+        """Drop the pinned cache salts and the cached KV of finished rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
@@ -450,8 +450,7 @@ class Generator(Configurable):
         self._engine_loop.release_groups(group_ids)
 
     async def release_sessions(self, session_ids: list[str]) -> None:
-        """Release the held KV of sessions whose rollout ended (rank 0; a no-op unless the
-        engine holds session KV).
+        """Release the cached KV of sessions whose rollout ended (rank 0).
 
         Args:
             session_ids: Routing session ids with no more generation calls.

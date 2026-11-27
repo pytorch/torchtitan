@@ -51,7 +51,11 @@ from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.attention.linear_attention import LinearAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.engine import (
+    GenerationEngine,
+    ModelStateDictLoadMode,
+    NUM_RELEASED_GROUP_IDS_KEPT,
+)
 from torchtitan.rl.generator.model import validate_ep_token_dispatchers
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.sglang.attention.attention import (
@@ -374,6 +378,8 @@ class SGLangEngine(GenerationEngine):
         # The sessions of each rollout group with a request admitted, for
         # `release_sessions`.
         self._group_sessions: dict[int, set[str]] = {}
+        # Recently released groups, oldest first (dict order).
+        self._released_group_ids: dict[int, None] = {}
         # Requests held back so that they reuse a shared prompt's KV (see
         # add_requests), keyed by (priority, cache salt, prompt token ids). Each
         # value is the first admitted request with that key (the leader), which is
@@ -593,6 +599,10 @@ class SGLangEngine(GenerationEngine):
                 if self._reset_kv_cache_on_model_state_dict_load
                 else str(request.min_policy_version)
             )
+            # A late request of a released group (an abandoned attempt still in transit) would
+            # start a session that nothing releases. Group ids are used once, so a released id
+            # only comes back with a late request.
+            is_late = request.group_id in self._released_group_ids
             sglang_request = TokenizedGenerateReqInput(
                 rid=request.request_id,
                 input_text=None,
@@ -609,12 +619,13 @@ class SGLangEngine(GenerationEngine):
                 stream=False,
                 priority=max(request.group_id, -1),
                 cache_salt=cache_salt,
-                session_id=request.routing_session_id,
+                session_id=None if is_late else request.routing_session_id,
             )
             sglang_requests.append(sglang_request)
-            self._group_sessions.setdefault(request.group_id, set()).add(
-                request.routing_session_id
-            )
+            if not is_late:
+                self._group_sessions.setdefault(request.group_id, set()).add(
+                    request.routing_session_id
+                )
         with self._scheduler.device_module.StreamContext(
             self._scheduler.schedule_stream
         ):
@@ -770,14 +781,13 @@ class SGLangEngine(GenerationEngine):
                     ContinueGenerationReqInput(torch_empty_cache=False)
                 )
 
-    @property
-    def holds_session_kv(self) -> bool:
-        return True
-
     def release_sessions(self, session_ids: list[str], group_ids: list[int]) -> None:
         released = set(session_ids)
         for group_id in group_ids:
             released |= self._group_sessions.pop(group_id, set())
+            self._released_group_ids[group_id] = None
+        while len(self._released_group_ids) > NUM_RELEASED_GROUP_IDS_KEPT:
+            del self._released_group_ids[next(iter(self._released_group_ids))]
         # Sorted, not set order: string hashes differ per process, and every TP rank
         # must release in the same order.
         for session_id in sorted(released):
