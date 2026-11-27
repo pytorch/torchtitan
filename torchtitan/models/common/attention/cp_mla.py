@@ -102,6 +102,8 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
 
         # Q and packed KV have heads, so move their CP shard from T to H with
         # one all-to-all. The shared key has no H dimension and is all-gathered.
+        # TODO(pytorch/pytorch#191113): not async: torch.compile detaches an unwaited
+        # AsyncCollectiveTensor input, so the mla_kv region would drop k_shared's grad.
         k_shared_TR = remat.region(
             spmd.redistribute,
             self.remat_region_name("cp_all_gather"),
@@ -112,7 +114,6 @@ class UlyssesMLAAttention(Ulysses, MLAAttention):
             src=spmd.S(_TOKEN_DIM),
             dst=spmd.R,
             backward_options={"op_dtype": k_shared_TR.dtype},
-            async_op=True,
         )
         kv_THP = self.project_mla_kv(kv_c_normed_TL)
         remat.recompute_needs_tensor(q_THK, kv_THP)
