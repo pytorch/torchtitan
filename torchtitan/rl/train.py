@@ -33,10 +33,14 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 from torchtitan.config import ConfigLoader
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
+from torchtitan.observability.structured_logger.gantt_generator import (
+    generate_gantt_trace,
+)
 from torchtitan.rl.actors.system import ActorSystem
 from torchtitan.rl.controller.controller import Controller
 
@@ -46,6 +50,11 @@ logger = logging.getLogger(__name__)
 
 async def main() -> ActorSystem | None:
     """Run RL training; return the actor system for the caller to shut down."""
+    # The gantt labels a task's row by its name; unnamed, this one reads as its first
+    # span, `Controller.Config.build`.
+    asyncio.current_task().set_name("main")
+    # Files older than this are from earlier runs in a reused dump_folder; the gantt skips them.
+    run_start_us = time.time_ns() // 1000
     init_logger()
     config = ConfigLoader().load()
     assert isinstance(config, Controller.Config)
@@ -66,6 +75,22 @@ async def main() -> ActorSystem | None:
         raise
     finally:
         await rl_trainer.close()
+        if (
+            config.trainer.debug.enable_structured_logging
+            and config.generate_gantt_on_shutdown
+        ):
+            # Best effort: log a failed render instead of failing the run.
+            try:
+                generate_gantt_trace(
+                    os.path.join(config.dump_folder, "structured_logs"),
+                    os.path.join(config.dump_folder, "gantt.json"),
+                    # 10 steps show the steady state in a 1-6 MB trace. Only these
+                    # steps are read, so the cost does not grow with the run.
+                    last_steps=10,
+                    files_modified_after_us=run_start_us,
+                )
+            except Exception:
+                logger.warning("Failed to write the gantt trace", exc_info=True)
     return rl_trainer.actor_system
 
 
