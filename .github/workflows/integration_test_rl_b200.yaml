@@ -21,8 +21,15 @@ permissions:
   contents: read
 
 jobs:
+  check-draft:
+    uses: ./.github/workflows/check-draft.yaml
+
   rl-b200:
-    if: github.repository_owner == 'pytorch'
+    needs: check-draft
+    if: >-
+      ${{ !cancelled() && (needs.check-draft.result == 'success' || needs.check-draft.result == 'skipped')
+      && needs.check-draft.outputs.is-draft != 'true'
+      && github.repository_owner == 'pytorch' }}
     runs-on: linux.dgx.b200.8
     timeout-minutes: 90
     container:
