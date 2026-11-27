@@ -28,6 +28,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.cache import LRUCache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.multimodal.vision_processor import VisionProcessor
@@ -36,7 +37,11 @@ from torchtitan.models.common.attention.gdn import GDN
 from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.dist_moe import DistMoeRuntime
-from torchtitan.rl.generator.engine import GenerationEngine, ModelStateDictLoadMode
+from torchtitan.rl.generator.engine import (
+    GenerationEngine,
+    KVCacheCapacity,
+    ModelStateDictLoadMode,
+)
 from torchtitan.rl.generator.model import validate_ep_token_dispatchers
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
 from torchtitan.rl.generator.types import (
@@ -654,7 +659,8 @@ class VLLMEngine(GenerationEngine):
         # TODO(acisseJZhong): LLMEngine exposes neither pending KV work nor DP dummy
         # forwards, so this and step() use the private engine_core.engine_core
         # (scheduler, batch_queue), has_unfinished_requests_dp,
-        # should_execute_dummy_batch and execute_dummy_batch:
+        # should_execute_dummy_batch and execute_dummy_batch, and kv_cache_capacity()
+        # reads its scheduler's kv_cache_config:
         # https://github.com/vllm-project/vllm/issues/69786
         core = self._engine.engine_core.engine_core
         return (
@@ -685,6 +691,52 @@ class VLLMEngine(GenerationEngine):
         if not session_ids and not group_ids:
             return
         self._session_kv_evictor.release(session_ids=session_ids, group_ids=group_ids)
+
+    def kv_cache_capacity(self) -> KVCacheCapacity:
+        """Return the KV cache's blocks and what one session takes in them, per KV cache
+        group:
+
+            full attention (MLA, the MTP draft layer)  a block per block_size tokens
+            align-mode Mamba (GDN)                     idle: the 1 state the evictor keeps;
+                                                       running: vLLM's state blocks per
+                                                       request, plus that one
+            other (sliding window, chunked local)      raises
+        """
+        if self.data_parallel_size > 1:
+            raise ValueError(
+                f"Admission needs vLLM's data_parallel_size at 1, got "
+                f"{self.data_parallel_size}: IntraGeneratorRouter spreads a group's sessions "
+                "over the DP replicas without looking at their KV."
+            )
+
+        # Private: see the vllm#69786 TODO in `_has_unfinished_local_requests`.
+        kv_cache_config = self._engine.engine_core.engine_core.scheduler.kv_cache_config
+        attention_block_sizes, blocks_per_state, num_running_states = [], 0, 0
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            if isinstance(spec, FullAttentionSpec):
+                attention_block_sizes.append(spec.block_size)
+            elif isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align":
+                blocks_per_state += 1
+                # As `MambaSpec.max_memory_usage_bytes` counts them.
+                num_request_blocks = (
+                    2 + spec.num_speculative_blocks + spec.num_prefill_checkpoint_blocks
+                )
+                num_running_states = max(num_running_states, num_request_blocks + 1)
+            else:
+                raise ValueError(
+                    f"Admission can't count vLLM's {type(spec).__name__} KV cache group "
+                    f"(layers {kv_cache_group.layer_names}); it counts full attention and "
+                    "align-mode Mamba"
+                )
+        return KVCacheCapacity(
+            # Block 0 is vLLM's null block.
+            num_blocks=kv_cache_config.num_blocks - 1,
+            attention_block_sizes=tuple(attention_block_sizes),
+            blocks_per_state=blocks_per_state,
+            num_idle_states=1 if blocks_per_state else 0,
+            num_running_states=num_running_states,
+        )
 
     def log_stats(self, step: int) -> None:
         logger.info(
