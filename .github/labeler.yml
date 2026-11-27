@@ -5,12 +5,28 @@
   draft: false
 
 "ciflow/fake-pg":
+  # Every file except what the core suites (features, models, flux) never read: RL (ciflow/rl), experiments,
+  # unit tests and Markdown. pytorch-bot can't exclude paths, so each glob opts out with !(...).
   globs:
     - .ci/docker/**
-    - .github/workflows/**
-    - scripts/**
-    - tests/**
-    - torchtitan/**
+    - .github/requirements-torchao.txt
+    - .github/scripts/integration_test_real_pg.sh
+    - .github/workflows/{integration_test,set-matrix}.yaml
+    - run_train.sh
+    - scripts/!(install_rl_env.sh|*.md)
+    - scripts/!(rl)/**/!(*.md)
+    - tests/!(*.md)
+    - tests/!(rl|unit_tests|integration_tests)/**/!(rl_grpo_cuda.txt|*.md)
+    - tests/integration_tests/!(rl|h100|b200).py
+    - tests/integration_tests/*/**/!(*.md)
+    - torchtitan/!(*.md)
+    - torchtitan/!(rl|experiments)/**/!(*.md)
+    - torchtitan_recipes/!(*.md)
+    # TODO: no workflow runs on a graph_trainer or torchft recipe change: the core suites don't read them,
+    # and their own workflows filter on torchtitan/experiments/ only. Add the recipe paths there.
+    - torchtitan_recipes/!(rl|graph_trainer|torchft|tests)/**/!(*.md)
+    - torchtitan_recipes/tests/!(*.md)
+    - torchtitan_recipes/tests/!(rl|graph_trainer|torchft)/**/!(*.md)
   draft: false
 
 "ciflow/b200":
@@ -34,6 +50,17 @@
     - torchtitan/models/common/**
     - torchtitan/models/qwen3_5/**
     - torchtitan/models/qwen3_8/**
+    - torchtitan_recipes/rl/**
+    - torchtitan_recipes/tests/rl/**
+    # CI files the RL jobs run or read
+    - .ci/docker/requirements.txt
+    - .github/workflows/set-matrix.yaml
+    - pyproject.toml
+    - scripts/{install_rl_env.sh,loss_compare.py,_checkpoint_test_config.py}
+    - tests/__init__.py
+    - tests/assets/losses/rl_grpo_cuda.txt
+    - tests/integration_tests/{__init__.py,rl.py,run_tests.py}
+    - tests/integration_tests/hardware_skips/**
     - .github/workflows/integration_test_8gpu_rl.yaml
     - .github/workflows/integration_test_rl_h100.yaml
     - .github/workflows/unit_test_cpu_rl.yaml

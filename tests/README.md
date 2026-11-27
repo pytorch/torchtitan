@@ -48,9 +48,10 @@ into `main`. Scheduled runs also execute the complete suite with Real PG.
 
 #### Cadence
 
-- 1 GPU Fake PG cadence: ready, non-draft pull requests, whether they target
-  `main` directly or belong to a ghstack stack.
-  - The `.github/labeler.yml` file automatically applies the
+- 1 GPU Fake PG cadence: ready, non-draft pull requests that change a file
+  the `ciflow/fake-pg` globs match (they opt out RL, experiments, unit tests and
+  Markdown), whether they target `main` directly or belong to a ghstack stack.
+  - The `.github/labeler.yml` file holds those globs and applies the
     `ciflow/fake-pg` label, and PyTorch Probot manages a
     `ciflow/fake-pg/*` tag that points to the PR head SHA. This allows stacked
     PRs to run independently of their base branch. The tag starts both the
