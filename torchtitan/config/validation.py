@@ -267,7 +267,9 @@ def validate_context_parallel(
         supports_cp_inner_attention,
     )
     from torchtitan.models.common.attention.cp_attention import (
+        AllGatherKVSlidingWindowVarlenInnerAttention,
         AllGatherKVVarlen,
+        AllGatherKVVarlenInnerAttention,
         CPInnerAttention,
         Ulysses,
         UlyssesInnerAttention,
@@ -301,9 +303,33 @@ def validate_context_parallel(
         assert cp_inner_attention is not None and issubclass(
             cp_inner_attention, CPInnerAttention
         )
+        tp = parallelism.tensor_parallel_degree
+        head_shard_degree = None
+        degree_name = ""
         if issubclass(cp_inner_attention, Ulysses):
-            tp = parallelism.tensor_parallel_degree
             head_shard_degree = tp * cp
+            degree_name = "tensor_parallel_degree * context_parallel_degree"
+        elif (
+            isinstance(
+                inner_attention,
+                (
+                    AllGatherKVVarlenInnerAttention.Config,
+                    AllGatherKVSlidingWindowVarlenInnerAttention.Config,
+                ),
+            )
+            and inner_attention.ulysses_degree is not None
+        ):
+            # Heads are sharded only within a Ulysses group.
+            ulysses_degree = inner_attention.ulysses_degree
+            if ulysses_degree < 2 or cp % ulysses_degree or cp == ulysses_degree:
+                raise ValueError(
+                    f"{fqn}.inner_attention ulysses_degree ({ulysses_degree}) "
+                    "must be at least 2 and a proper divisor of "
+                    f"context_parallel_degree ({cp})."
+                )
+            head_shard_degree = tp * ulysses_degree
+            degree_name = "tensor_parallel_degree * ulysses_degree"
+        if head_shard_degree is not None:
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             if isinstance(attention, GDN.Config):
@@ -311,23 +337,22 @@ def validate_context_parallel(
             if n_heads % head_shard_degree != 0:
                 raise ValueError(
                     f"{fqn}.inner_attention n_heads ({n_heads}) must be divisible "
-                    "by tensor_parallel_degree * context_parallel_degree "
-                    f"({head_shard_degree})."
+                    f"by {degree_name} ({head_shard_degree})."
                 )
-            # UlyssesInnerAttention copies each TP-local KV head when there are
-            # fewer KV heads than CP ranks.
+            # Ulysses copies each TP-local KV head when there are fewer KV heads
+            # than head shards.
             if n_kv_heads % head_shard_degree != 0 and not (
-                issubclass(cp_inner_attention, UlyssesInnerAttention)
+                issubclass(
+                    cp_inner_attention, (UlyssesInnerAttention, AllGatherKVVarlen)
+                )
                 and n_kv_heads % tp == 0
                 and head_shard_degree % n_kv_heads == 0
             ):
                 raise ValueError(
                     f"{fqn}.inner_attention n_kv_heads ({n_kv_heads}) must be "
-                    "divisible by tensor_parallel_degree * context_parallel_degree "
-                    f"({head_shard_degree}). UlyssesInnerAttention also accepts "
-                    "n_kv_heads that divides tensor_parallel_degree * "
-                    "context_parallel_degree and is divisible by "
-                    "tensor_parallel_degree."
+                    f"divisible by {degree_name} ({head_shard_degree}). "
+                    f"Ulysses also accepts n_kv_heads that divides {degree_name} "
+                    "and is divisible by tensor_parallel_degree."
                 )
 
         if isinstance(

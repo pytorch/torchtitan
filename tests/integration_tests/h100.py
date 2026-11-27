@@ -199,6 +199,42 @@ def qwen35_debugmodel_mm_ulysses_tp2_cp2() -> Trainer.Config:
     )
 
 
+def qwen35_debugmodel_varlen_ulysses_allgather_kv_cp4() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+    from torchtitan.models.common.attention import VarlenInnerAttention
+    from torchtitan.models.common.attention.cp_attention import (
+        AllGatherKVVarlenInnerAttention,
+    )
+    from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+    from torchtitan.models.common.attention.gdn import InnerGDN
+
+    from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel_varlen_attn
+
+    config = qwen35_debugmodel_varlen_attn()
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 4
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    config.training.disable_accelerator_graphs = True
+    config = apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    VarlenInnerAttention: AllGatherKVVarlenInnerAttention,
+                    InnerGDN: ContextParallelInnerGDN,
+                }
+            ),
+        ],
+    )
+    # 2 Ulysses groups of 2 stand in for two nodes.
+    for _, inner_attention, _, _ in config.model.traverse(
+        AllGatherKVVarlenInnerAttention.Config
+    ):
+        inner_attention.ulysses_degree = 2
+    return config
+
+
 def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of integration tests that need H100-class hardware.
@@ -271,6 +307,12 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             configs=[qwen35_debugmodel_mm_ulysses_tp2_cp2],
             test_descr="Qwen3.5 multimodal Ulysses context parallelism",
             test_name="qwen3_5_mm_ulysses_cp",
+            ngpu=4,
+        ),
+        IntegrationTestDefinition(
+            configs=[qwen35_debugmodel_varlen_ulysses_allgather_kv_cp4],
+            test_descr="Qwen3.5 Ulysses within a group, K/V all-gather across groups",
+            test_name="qwen3_5_varlen_ulysses_allgather_kv_cp",
             ngpu=4,
         ),
     ]
