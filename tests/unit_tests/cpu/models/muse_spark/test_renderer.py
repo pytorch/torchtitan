@@ -213,6 +213,39 @@ def test_tool_call_roundtrip_and_result_name(renderer, tokenizer):
     )
 
 
+def test_json_string_tool_arguments_render_like_mappings(renderer):
+    # OpenAI-format agents replay their tool calls with JSON-string arguments.
+    def history(arguments):
+        return [
+            {"role": "user", "content": "List the files."},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": arguments},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "a.py"},
+        ]
+
+    expected = renderer.render_ids(
+        history({"command": "ls"}), add_generation_prompt=True
+    )
+    assert (
+        renderer.render_ids(history('{"command": "ls"}'), add_generation_prompt=True)
+        == expected
+    )
+    assert renderer.render_ids(history(""), add_generation_prompt=True) == (
+        renderer.render_ids(history({}), add_generation_prompt=True)
+    )
+    for arguments in ("ls -la", '["ls"]'):
+        with pytest.raises(ValueError, match="JSON object string"):
+            renderer.render_ids(history(arguments), add_generation_prompt=True)
+
+
 @pytest.mark.parametrize(
     "effort, strength", [("low", 8), ("medium", 32), ("high", 256), ("xhigh", 512)]
 )
