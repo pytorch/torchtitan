@@ -121,8 +121,8 @@ def selective_activation_remat_pass(
     The graph may contain multiple disjoint backward regions (e.g. one per
     chunk of a chunked loss). ``_collect_backward_regions`` excludes loss /
     lm_head regions from remat even when they consume must_recompute forward
-    nodes, so recompute is driven only by the model-layer backward. Exactly one
-    remat region is expected; more than one is an error.
+    nodes, so recompute is driven only by the model-layer backward. Each
+    eligible region gets its own recomputed values.
     """
     if not has_recomputable_ops(gm):
         return gm
@@ -140,24 +140,24 @@ def selective_activation_remat_pass(
 
     # Loss / lm_head backward regions are already filtered out by
     # _collect_backward_regions, so the remaining needs-remat regions are the
-    # model-layer AC regions; exactly one is expected.
+    # model-layer AC regions.
     remat_regions = [(s, e) for s, e, needs in regions if needs]
-
-    if len(remat_regions) > 1:
-        raise RuntimeError(
-            f"Detected {len(remat_regions)} disjoint backward regions that require "
-            "recomputation, but remat supports only one such region in a "
-            "forward-loss-backward graph."
-        )
 
     if not remat_regions:
         return gm
 
-    bwd_start, bwd_end = remat_regions[0]
+    original_nodes = list(gm.graph.nodes)
+    for start, end in remat_regions:
+        _rematerialize_backward_region(gm, original_nodes[start:end])
 
-    all_nodes = list(gm.graph.nodes)
-    bwd_nodes = all_nodes[bwd_start:bwd_end]
-    order = {n: i for i, n in enumerate(all_nodes)}
+    # raise_getitems pass for better memory (like default_partition)
+    gm = raise_getitems(gm)
+    gm.recompile()
+    return gm
+
+
+def _rematerialize_backward_region(gm, bwd_nodes):
+    order = {n: i for i, n in enumerate(gm.graph.nodes)}
 
     # Map each must_recompute fwd node to the bwd node its dup will be
     # inserted in front of. The earliest bwd consumer (in graph order)
@@ -365,22 +365,23 @@ def selective_activation_remat_pass(
         with gm.graph.inserting_before(bwd_target):
             dup = gm.graph.node_copy(fwd_node, remat_and_dup_get_attr)
             _privatize_custom_meta(dup)  # node_copy shares fwd_node's custom dict
-        dup.name = fwd_node.name + "_recomputed"
+        dup._rename(fwd_node.name + "_recomputed")
         dup.meta["autograd_backward"] = True
         recomputed_nodes[fwd_node] = dup
         logger.debug(
             "Recomputing %s before backward node %s", fwd_node.name, bwd_target.name
         )
 
-    # Redirect every direct backward consumer of a recomputed forward node
-    # to read from the dup. Backward consumers of offloaded forward nodes
+    # Redirect direct consumers in this backward region to read from its dup.
+    # Backward consumers of offloaded forward nodes
     # were already redirected to their reload chain by the CPU offload
     # pass, so the offload branch of remat_input is a no-op here.
+    bwd_node_set = set(bwd_nodes)
     direct_bwd_consumers = {
         user
         for fwd_node in recomputed_nodes
         for user in fwd_node.users
-        if _is_backward_node(user)
+        if user in bwd_node_set
     }
     for bwd_node in direct_bwd_consumers:
         bwd_node.args = torch.fx.map_arg(bwd_node.args, remat_input)
@@ -399,9 +400,3 @@ def selective_activation_remat_pass(
                 recomputed_nodes[orig].name,
             )
             gm.graph.erase_node(orig)
-
-    # raise_getitems pass for better memory (like default_partition)
-    gm = raise_getitems(gm)
-
-    gm.recompile()
-    return gm

@@ -62,6 +62,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
 _INF_DISTANCE = int(1e9)
@@ -623,16 +624,51 @@ def tag_min_cut_saved_values(
 
 
 @register_memory_policy("min_cut")
-def _min_cut_memory_policy_pass(
-    gm: torch.fx.GraphModule,
+def min_cut_memory_policy_pass(
+    gm,
+    example_inputs=None,
     *,
-    config: "GraphTrainer.Config",
-) -> torch.fx.GraphModule:
+    config: "GraphTrainer.Config | None" = None,
+):
     """Choose saved activations with the min-cut partitioner."""
     backward_side = _backward_side_nodes(gm)
     node_info = _node_info_for_graph_trainer(gm, backward_side)
     if node_info is None:
         return gm
+
+    # GraphTrainer's minimal_fx retains inplace writes.
+    # Activations that are written by inplace writes can not be recomputed.
+    written_storage_ids = set()
+    for node in gm.graph.nodes:
+        if not isinstance(node.target, torch._ops.OpOverload):
+            continue
+        for index, argument in enumerate(node.target._schema.arguments):
+            if argument.alias_info is None or not argument.alias_info.is_write:
+                continue
+            argument_value = node.kwargs.get(
+                argument.name, node.args[index] if index < len(node.args) else None
+            )
+            for leaf in torch.utils._pytree.tree_leaves(argument_value):
+                value = (
+                    leaf.meta.get("val") if isinstance(leaf, torch.fx.Node) else leaf
+                )
+                if isinstance(value, torch.Tensor):
+                    written_storage_ids.add(value.untyped_storage()._cdata)
+    for node in node_info.required_fw_nodes:
+        value = node.meta.get("val")
+        if (
+            node.op != "call_function"
+            or not isinstance(value, torch.Tensor)
+            or value.untyped_storage()._cdata not in written_storage_ids
+        ):
+            continue
+        if node.meta.get("recompute") == CheckpointPolicy.MUST_RECOMPUTE:
+            logger.info(
+                "Cannot recompute %s because its storage is mutated in place; "
+                "forcing MUST_SAVE",
+                node.name,
+            )
+        node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
 
     force_save_collectives(gm)
     force_save_effectful_ops(gm)
