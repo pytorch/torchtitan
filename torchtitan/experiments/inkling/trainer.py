@@ -20,6 +20,7 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.loader import BaseDataLoader
+from torchtitan.components.data.text_datasets import TextProcessor
 from torchtitan.experiments.inkling.state_dict_adapter import export_merged_checkpoint
 from torchtitan.tools import filesystem
 from torchtitan.trainer import Trainer
@@ -39,7 +40,16 @@ def _corpus_path(dataloader: BaseDataLoader.Config) -> Path:
         if isinstance(packing, ConcatThenSplitPackingConfig) and isinstance(
             packing.dataset, SingleDatasetConfig
         ):
-            source = packing.dataset.source
+            dataset = packing.dataset
+            if (
+                dataset.pre_filters
+                or dataset.post_filters
+                or dataset.processor != TextProcessor.Config()
+            ):
+                raise ValueError(
+                    "Inkling requires unfiltered documents with the default text processor"
+                )
+            source = dataset.source
             if (
                 isinstance(source, HuggingFaceRandomAccessSource.Config)
                 and source.path == "text"
@@ -48,9 +58,9 @@ def _corpus_path(dataloader: BaseDataLoader.Config) -> Path:
             ):
                 path = source.load_dataset_kwargs["data_files"]
                 if isinstance(path, str):
-                    if any(char in path for char in "*?["):
+                    if "::" in path or any(char in path for char in "*?["):
                         raise ValueError(
-                            f"Corpus path must not contain glob syntax: {path}"
+                            f"Corpus path must not contain glob or chained path syntax: {path}"
                         )
                     return Path(path)
     raise ValueError("Inkling requires one local text corpus for checked resume")

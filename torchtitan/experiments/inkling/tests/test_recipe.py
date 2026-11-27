@@ -7,6 +7,7 @@
 import json
 import shutil
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -100,28 +101,37 @@ def test_resume_binds_the_data_cursor_to_corpus_and_context(
         ).build()
 
 
-def test_rejects_corpus_glob_before_loading_a_different_file(monkeypatch, inputs):
+@pytest.mark.parametrize(
+    ("literal", "alternate"),
+    [("train[1].txt", "train1.txt"), ("train.txt::alt.txt", "train.txt")],
+)
+def test_rejects_ambiguous_corpus_path(monkeypatch, inputs, literal, alternate):
     source, corpus, run = inputs
-    corpus = corpus.rename(corpus.with_name("train[1].txt"))
-    corpus.with_name("train1.txt").write_text("wrong document\n", encoding="utf-8")
+    corpus = corpus.rename(corpus.with_name(literal))
+    corpus.with_name(alternate).write_text("wrong document\n", encoding="utf-8")
 
     def init(trainer, config):
         dataset = config.dataloader.dataset.dataset.source.build()
         pytest.fail(f"Unexpectedly loaded {dataset[0]['text']!r}")
 
     monkeypatch.setattr(Trainer, "__init__", init)
-    with pytest.raises(ValueError, match="glob"):
+    with pytest.raises(ValueError, match="glob|chained"):
         _launch_config(monkeypatch, source, corpus, run).build()
     assert not (run / "run-manifest.json").exists()
 
 
-@pytest.mark.parametrize("change", ["shuffle", "packing"])
+@pytest.mark.parametrize("change", ["shuffle", "packing", "filter"])
 def test_resume_rejects_changed_document_order_or_packing(monkeypatch, inputs, change):
     monkeypatch.setattr(Trainer, "__init__", lambda self, config: None)
     _launch_config(monkeypatch, *inputs).build()
     config = _launch_config(monkeypatch, *inputs, steps=20)
     if change == "shuffle":
         config.dataloader.shuffle = True
+    elif change == "filter":
+        packing = config.dataloader.dataset
+        config.dataloader.dataset = replace(
+            packing, dataset=replace(packing.dataset, pre_filters=(lambda row: False,))
+        )
     else:
         config.dataloader.max_num_documents = 2
     with pytest.raises(ValueError, match="document"):
