@@ -132,7 +132,9 @@ def _hash_tensor(tensor: torch.Tensor) -> torch.Tensor:
         )
         # Powers of the 64-bit FNV prime weight each position modulo 2**64.
         weights = torch.full_like(words, 0x100000001B3, dtype=torch.int64).cumprod(0)
-        return weights.mul_(words).sum() + words.numel()
+        # Include the index count to distinguish identical words split at a
+        # different boundary between coordinates and values.
+        return weights.mul_(words).sum() + words.numel() + coo.indices().numel()
     if local.is_complex():
         # for RoPE caches
         local = torch.view_as_real(local)

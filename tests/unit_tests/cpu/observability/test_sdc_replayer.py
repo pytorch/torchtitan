@@ -306,6 +306,13 @@ def test_empty_tensor_hash_uses_zero_sentinel():
     assert digest.item() == 0
 
 
+def test_sparse_hash_distinguishes_coordinates_from_values():
+    # Identical stored words, but the nonzero value is in a different column.
+    row = torch.tensor([[0.0, 0.0, 1.0]]).to_sparse(1)
+    scalar = torch.tensor([[1.0, 0.0, 0.0]]).to_sparse()
+    assert _hash_tensor(row).item() != _hash_tensor(scalar).item()
+
+
 def test_complex_tensor_hash_uses_real_view():
     value = torch.tensor([1 + 2j, 3 + 4j], dtype=torch.complex64)
 
