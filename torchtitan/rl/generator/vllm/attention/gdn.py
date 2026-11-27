@@ -7,7 +7,8 @@
 """vLLM paged-cache adapter for TorchTitan's Gated DeltaNet.
 
 The enclosing Qwen3.5 module owns all parameters. This adapter runs Attention
-Gym's paging-aware convolution and GDN kernels.
+Gym's paging-aware convolution and GDN kernels. With speculative decoding, verify
+rows run vLLM's verify kernels (see `VLLMInnerGDN._forward_speculative`).
 
 Batch-invariant execution has two additional requirements:
 
@@ -30,6 +31,10 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+)
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
+from vllm.third_party.flash_linear_attention.ops import (
+    fused_sigmoid_gating_delta_rule_update,
 )
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -60,7 +65,8 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
     module owns only vLLM cache plumbing and kernel dispatch.
 
     The enclosing module and vLLM cache are both head-sharded under tensor
-    parallelism. Speculative decoding is not supported.
+    parallelism. With speculative decoding, verify rows run vLLM's convolution and
+    verify kernels; the other rows keep Attention Gym's (see `_forward_speculative`).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -194,13 +200,29 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
         assert isinstance(attn_metadata, dict)
         gdn_metadata = attn_metadata[self.prefix]
         assert isinstance(gdn_metadata, TorchTitanLinearAttentionMetadata)
-        assert (
-            gdn_metadata.spec_sequence_masks is None
-        ), "VLLMInnerGDN does not support speculative decoding"
 
         num_actual_tokens = gdn_metadata.num_actual_tokens
         if num_actual_tokens == 0:
             return mixed_qkv.new_zeros(output_shape)
+
+        if self.num_speculative_tokens:
+            output = self._forward_speculative(
+                mixed_qkv[:num_actual_tokens],
+                a[:num_actual_tokens],
+                b[:num_actual_tokens],
+                conv_weight,
+                A_log,
+                dt_bias,
+                gdn_metadata,
+            )
+            # Zero the rows past the metadata (eager SP/model-input rounding).
+            if num_actual_tokens < num_tokens:
+                padding = output.new_zeros(
+                    num_tokens - num_actual_tokens, *output.shape[1:]
+                )
+                output = torch.cat([output, padding])
+            return output
+
         state_indices = gdn_metadata.non_spec_state_indices_tensor
         cu_seqlens = gdn_metadata.non_spec_query_start_loc
         has_initial_state = gdn_metadata.has_initial_state
@@ -318,6 +340,137 @@ class VLLMInnerGDN(InnerAttention, MambaBase):
             )
             output = torch.cat([output, padding])
         return output
+
+    def _forward_speculative(
+        self,
+        mixed_qkv: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        conv_weight: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        metadata: TorchTitanLinearAttentionMetadata,
+    ) -> torch.Tensor:
+        """Run one step with drafts; zero on rows no sequence owns. Each kernel runs every row
+        and skips the rows with the null slot (`TorchTitanLinearAttentionMetadataBuilder._build_with_drafts`):
+
+            VERIFY   vLLM's verify conv and GDN kernels on every row
+            PACKED   Attention Gym's prefill conv and chunk kernels on every token, then
+                     vLLM's verify kernels on the first S tokens, where the verify rows sit
+
+        A verify row reads the state after its last accepted token and writes one state per
+        draft position, so a rejected draft leaves the accepted state intact.
+        """
+        # vLLM's conv kernels take the state as (..., dim, width - 1 + k); the cache
+        # stores it as (..., width - 1 + k, dim) (VLLM_SSM_CONV_STATE_LAYOUT=SD).
+        conv_state = self.kv_cache[0].transpose(-1, -2)
+        spec_slots = metadata.spec_state_indices_tensor
+        spec_token_mask = metadata.spec_token_mask
+        assert spec_slots is not None and spec_token_mask is not None
+
+        if metadata.execution_path is LinearAttentionExecutionPath.VERIFY:
+            # vLLM's conv update writes its output over its input.
+            conv_output = causal_conv1d_update(
+                mixed_qkv,
+                conv_state,
+                conv_weight,
+                None,
+                "silu",
+                conv_state_indices=spec_slots[:, 0],
+                num_accepted_tokens=metadata.num_accepted_tokens,
+                query_start_loc=metadata.spec_query_start_loc,
+                max_query_len=spec_slots.shape[1],
+                validate_data=False,
+            )
+            output = self._verify_gdn(conv_output, a, b, A_log, dt_bias, metadata)
+            # vLLM's verify GDN leaves rows without a slot unwritten (padded rows).
+            return torch.where(spec_token_mask[:, None, None], output, 0)
+
+        conv_output = paged_causal_conv1d(
+            mixed_qkv.unsqueeze(0),
+            conv_weight,
+            self.kv_cache[0][:, : self.conv_kernel_size - 1],
+            metadata.prefill_state_indices,
+            activation="silu",
+            cu_seqlens=metadata.prefill_query_start_loc,
+            has_initial_state=metadata.has_initial_state,
+        ).squeeze(0)
+        num_verify_tokens = spec_token_mask.shape[0]
+        # Writes only the verify rows' tokens, where the prefill conv wrote zeros.
+        causal_conv1d_update(
+            mixed_qkv[:num_verify_tokens],
+            conv_state,
+            conv_weight,
+            None,
+            "silu",
+            conv_state_indices=spec_slots[:, 0],
+            num_accepted_tokens=metadata.num_accepted_tokens,
+            query_start_loc=metadata.spec_query_start_loc,
+            max_query_len=spec_slots.shape[1],
+            validate_data=False,
+            out=conv_output[:num_verify_tokens],
+        )
+        output = self._forward_gdn(
+            conv_output,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            metadata.prefill_query_start_loc,
+            metadata.prefill_state_indices,
+            metadata.has_initial_state,
+        )
+        verify_output = self._verify_gdn(
+            conv_output[:num_verify_tokens],
+            a[:num_verify_tokens],
+            b[:num_verify_tokens],
+            A_log,
+            dt_bias,
+            metadata,
+        )
+        output[:num_verify_tokens] = torch.where(
+            spec_token_mask[:, None, None], verify_output, output[:num_verify_tokens]
+        )
+        return output
+
+    def _verify_gdn(
+        self,
+        conv_output: torch.Tensor,
+        a: torch.Tensor,
+        b: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        metadata: TorchTitanLinearAttentionMetadata,
+    ) -> torch.Tensor:
+        """vLLM's verify GDN kernel over every row; returns `[tokens, heads, head_v_dim]`."""
+        # Split packed `[T, q|k|v]` channels into contiguous `(1, T, heads, dim)`.
+        q_dim = self.local_num_k_heads * self.head_k_dim
+        v_dim = self.local_num_v_heads * self.head_v_dim
+        q, k, v = torch.split(conv_output, [q_dim, q_dim, v_dim], dim=-1)
+        num_tokens = conv_output.shape[0]
+        q = q.contiguous().view(1, num_tokens, -1, self.head_k_dim)
+        k = k.contiguous().view(1, num_tokens, -1, self.head_k_dim)
+        v = v.contiguous().view(1, num_tokens, -1, self.head_v_dim)
+
+        # TODO: try vLLM's fused CUDA verify op (torch.ops._C.fused_gdn_decode_post_conv_mtp),
+        # which also applies the gated norm: 3.27 ms per Qwen3.8-27B verify step in stock vLLM
+        # vs 4.0 ms for this Triton kernel alone (GB300). Untested with this layer's layouts.
+        output, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a,
+            b=b,
+            dt_bias=dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            initial_state=self.kv_cache[1],
+            inplace_final_state=True,
+            cu_seqlens=metadata.spec_query_start_loc,
+            ssm_state_indices=metadata.spec_state_indices_tensor,
+            num_accepted_tokens=metadata.num_accepted_tokens,
+            use_qk_l2norm_in_kernel=True,
+        )
+        return output.squeeze(0)
 
     def _forward_gdn(
         self,
