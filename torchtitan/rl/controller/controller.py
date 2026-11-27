@@ -581,34 +581,19 @@ class Controller(Configurable):
                     )
 
         @property
-        def max_num_seqs_per_generator_dp_rank(self) -> int:
-            """2x each generator DP rank's even share of the training rollouts in flight,
-            rounded up to a power of two, clamped to [token budget / 64, token budget]. The token
-            budget is ``generator.max_num_batched_tokens``, or 2048 when unset.
+        def avg_num_seqs_per_generator_dp_rank(self) -> int:
+            """Each generator DP rank's even share of the training rollouts in flight,
+            rounded up. Each generator sets its engine's ``max_num_seqs`` from it
+            (``Generator.Config.resolve_max_num_seqs``).
 
-            Example (token budget unset):
-                1536 rollouts in flight, 8 generator DP ranks -> 2 x 192 = 384 -> 512
-                64 rollouts in flight, 3 generator DP ranks   -> 2 x 22 = 44   -> 64
-                16 rollouts in flight, 2 generator DP ranks   -> 2 x 8 = 16    -> 32
+            Example: 1536 rollouts in flight, 8 generator DP ranks -> 192
             """
-            # TODO: add a generator.max_num_seqs override when a recipe needs a smaller value.
             num_generator_dp_ranks = (
                 self.num_generators * self.generator.parallelism.data_parallel_degree
             )
-            even_share = math.ceil(
+            return math.ceil(
                 self.async_loop.max_rollouts_in_flight / num_generator_dp_ranks
             )
-            # 2x is headroom
-            max_num_seqs = 2 * even_share
-            max_num_batched_tokens = self.generator.max_num_batched_tokens or 2048
-            # TODO(https://github.com/Dao-AILab/flash-attention/issues/3117): drop once fixed. vLLM's memory
-            # profile splits a power-of-two budget evenly over max_num_seqs; FA2 writes out of bounds past 64 each.
-            max_num_seqs = 2 ** math.ceil(
-                math.log2(max(max_num_seqs, max_num_batched_tokens / 64))
-            )
-            # vLLM requires max_num_seqs <= max_num_batched_tokens, which defaults to 2048 for
-            # the engine torchtitan builds.
-            return min(max_num_seqs, max_num_batched_tokens)
 
     def __init__(self, config: Config):
         self.config = config
@@ -800,9 +785,6 @@ class Controller(Configurable):
             trainer_parallelism.data_parallel_replicate_degree * dp_shard
         )
 
-        max_num_seqs = config.max_num_seqs_per_generator_dp_rank
-        logger.info("max_num_seqs=%d per generator DP rank", max_num_seqs)
-
         # The generators' Mooncake Store master runs on this (the controller's)
         # host until this process exits.
         mooncake_master_address = (
@@ -831,7 +813,7 @@ class Controller(Configurable):
                 generator_config=config.generator,
                 precision=config.precision,
                 model_path=config.hf_assets_path,
-                max_num_seqs=max_num_seqs,
+                avg_num_seqs_per_dp_rank=config.avg_num_seqs_per_generator_dp_rank,
                 output_dir=config.dump_folder,
                 vision_processor=config.vision_processor,
                 mooncake_master_address=mooncake_master_address,

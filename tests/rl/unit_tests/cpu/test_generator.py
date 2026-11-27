@@ -750,6 +750,21 @@ def test_generator_dp_can_supply_expert_parallelism():
     )
 
 
+def test_resolve_max_num_seqs():
+    config = Generator.Config(model=_MODEL_CONFIG, max_num_batched_tokens=2048)
+    # 2x the average, rounded up to a power of two, clamped to [2048 / 64, 2048].
+    assert config.resolve_max_num_seqs(192) == 512
+    assert config.resolve_max_num_seqs(8) == 32
+    assert config.resolve_max_num_seqs(4096) == 2048
+    # An override replaces the derived value; one outside that range raises.
+    config.max_num_seqs = 33
+    assert config.resolve_max_num_seqs(192) == 33
+    for out_of_range in (31, 2049):
+        config.max_num_seqs = out_of_range
+        with pytest.raises(ValueError, match=r"must be in \[32, 2048\]"):
+            config.resolve_max_num_seqs(192)
+
+
 @pytest.mark.parametrize(
     ("model", "engine_config", "batch_invariant", "match"),
     [
