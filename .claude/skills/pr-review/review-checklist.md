@@ -2,7 +2,7 @@
 
 Each item is phrased as the question a maintainer would ask. Only report items
 that are actually violated in the diff. Items marked (diff check) are mechanical:
-look for them in added lines with a quick search of the diff.
+search the added lines for every one of them on every review.
 
 ## 1. Necessity and Design
 
@@ -10,7 +10,10 @@ look for them in added lines with a quick search of the diff.
   when?" The description or your own analysis must give a minimal failing
   example. "Do such issues happen on main today?"
 - [ ] **Root cause.** Is this a workaround? "Why doesn't the other call site need
-  this treatment -- is there a bug there too?" "What regressed recently?"
+  this treatment -- is there a bug there too?" "What regressed recently?" If the
+  bug comes from plumbing or injection, would deleting that design remove the
+  bug class? "Unchanged from main" doesn't excuse an ambiguity the PR exists to
+  fix.
 - [ ] **Right layer.** "Is this a model problem rather than a state-dict-loading
   problem?" Would the fix be simpler in the dataloader / config / model than in
   the trainer? Would a different ordering (e.g. init after parallelize) make the
@@ -29,8 +32,23 @@ look for them in added lines with a quick search of the diff.
   reports, or measured gains? Perf claims quantified end-to-end ("how much e2e,
   from X% MFU?"), not only microbenchmarks? An extension point with no in-repo
   consumer needs a named user ("mind providing motivation / use cases?").
+- [ ] **Existing counterpart.** "Can we do it the way X already does?" Grep for
+  the pretraining version of an RL feature, the other engine's version (vLLM vs
+  SGLang), an existing helper in `distributed/` or `models/common/`, the same
+  dataclass elsewhere. Unexplained differences from a sibling implementation
+  (defaults, validation, `no_grad`, install steps) are findings.
+- [ ] **Responsibility owner.** "Who should own this?" The consumer issues the
+  collective it needs; callers go through `forward` instead of reaching into a
+  shared module; a component derives values from its own config; a
+  region-level context beats a per-call override argument. "Why do we infer
+  from implicit behavior and treat other components as blackbox? We are the
+  repo owner."
 - [ ] **Alternatives.** Is there a simpler design? Write it out with its approximate
-  size. Prefer composing features independently over coupling them.
+  size. Prefer composing features independently over coupling them. Ban an
+  unneeded combination, but not one that works on `main` today. A variant of
+  an existing model (a new version that changes one component) extends that
+  model's folder with a flavor and the new component, not a new model class
+  and adapter.
 - [ ] **One-sided design.** Added to the RL generator but not the trainer, to
   inference but not training, or to one model/backend? "Why not make it native?"
   If the shared version would delete workaround machinery (private upstream
@@ -54,7 +72,15 @@ look for them in added lines with a quick search of the diff.
   now know about one model or feature? "Can we achieve this in the model folder /
   pipelining function / via config at build time?"
 - [ ] Duplicated code vs a new hook: for a single consumer, duplicating a little
-  code in the consumer beats adding a hook or branch to shared code.
+  code in the consumer beats adding a hook or branch to shared code. But a
+  duplicated *concept* (a second M-RoPE, a copied dataclass, the same padding
+  rule in two packages) gets one source of truth.
+- [ ] Shared wrappers stay general: no per-model subclass of a shared wrapper,
+  no `isinstance(cfg, SomeModel.Config)` branches in shared code (diff check).
+  An adapter is thin only if it forwards; if it sequences setup, metrics, or
+  shutdown, that logic belongs in the core.
+- [ ] Code the PR makes dead (an unused argument, a check that can no longer
+  fire) is deleted in this PR, not deferred.
 - [ ] Hacky integration (monkeypatch, `install_*` / `patch_*` functions, thread
   tricks, editing args in place to pass information) signals the wrong design.
 
@@ -69,6 +95,13 @@ look for them in added lines with a quick search of the diff.
 - [ ] Core does not import `torchtitan/experiments/` (diff check).
 - [ ] Component takes only what it needs: no whole-trainer or root-config
   parameters; no vendor terms leaking up the call chain.
+- [ ] Config ownership direction (diff check): for each config field the PR adds
+  or newly reads, find its readers. Component A reading `B.Config.x` to compute
+  a value it passes back into B is a must-fix: A passes the input it owns and B
+  derives the value. A `Config`'s fields and properties don't depend on runtime
+  or global state (process groups, env vars,
+  `torch.are_deterministic_algorithms_enabled()`); validation raising
+  `ValueError` on unsupported hardware is fine.
 - [ ] Config (`rules/config.md`): `X.Config | None` instead of `enable_*`
   (diff check: `enable_` / `enabled` fields); implementations selected by config
   type, not strings/modes; `Literal` for fixed sets; no default on required
@@ -106,7 +139,8 @@ look for them in added lines with a quick search of the diff.
   `.tolist()`, `.cpu()`, `repeat_interleave` without `output_size`); still
   CUDA-graph capturable and compile friendly; nothing per layer that can be done
   once; no memory/throughput regression on the main path. Fast paths should be
-  the defaults in recipes.
+  the defaults in model configs, not one recipe. Per-tensor collectives in a
+  loop: does it need bucketing, and how does it scale past one node?
 - [ ] Hardware: no `torch.cuda.*` in generic code (use `torch.accelerator` / device
   module); no NCCL- or vendor-specific knobs in core config; unsupported hardware
   fails clearly at config validation (diff check: `torch.cuda.`, `"cuda"` string
@@ -114,7 +148,12 @@ look for them in added lines with a quick search of the diff.
 - [ ] Errors: unsupported configurations raise `ValueError` early; no
   warn-and-continue or silent fallback to a slower path.
 
-## 5. Naming
+## 5. Naming and Mechanical Pass
+
+Run over every new or changed function, class, and config field:
+- [ ] Module-local names have a leading `_`; public ones have an external caller.
+- [ ] Single-use helpers are inlined; arguments after the first are keyword-only.
+- [ ] Validation is in the owning config's `__post_init__`.
 
 - [ ] Accurate and unambiguous; avoids overloaded terms ("batch", "step",
   "stream", "group", "replica", "engine", "weight sync"); established terms rather
@@ -131,7 +170,8 @@ look for them in added lines with a quick search of the diff.
 
 - [ ] Each new test: what regression does it catch that existing tests don't? Flag
   tests that re-read configs, assert constants, grep docs, or duplicate existing
-  coverage for one more model.
+  coverage for one more model, and tests of failures that are already loud (a
+  crash). When asking to delete a test, name the retained test that covers it.
 - [ ] Could it be folded into an existing integration config, or cover a harder
   configuration instead?
 - [ ] Placement: `tests/unit_tests/{cpu,gpu}/`, `tests/rl/`, or the experiment's
@@ -145,9 +185,6 @@ look for them in added lines with a quick search of the diff.
 
 - [ ] One concern per PR: unrelated renames, reformatting, comment rewrites, or
   drive-by fixes are flagged ("accidental?", "does this belong to this PR?").
-- [ ] "Summary (human-written)" is filled in and matches the code. A missing
-  summary or a leftover placeholder is a must-fix. Don't guess whether a human
-  wrote it; judge only whether it is present and accurate.
 - [ ] Description: concrete problem and example, before/after for user-facing
   changes, numerics evidence, what was tested. Claims match the code (defaults,
   behavior). AI-generated summaries that don't say what concretely changes are a

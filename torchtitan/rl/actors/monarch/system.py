@@ -37,14 +37,14 @@ from torchtitan.rl.actors.monarch.trainer import TrainerActor
 from torchtitan.rl.actors.system import ActorSystem, ServiceHandle, TrainerHandle
 from torchtitan.rl.generator.generator import Generator
 from torchtitan.rl.generator.parallelism import InferenceParallelismConfig
-from torchtitan.rl.model_state_dict_transport import (
-    ModelStateDictTransport,
-    shared_rank_layouts,
-)
 from torchtitan.rl.rollout.rollouter import BaseRolloutWorker
 from torchtitan.rl.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.trainer.batcher import Batcher
 from torchtitan.rl.trainer.trainer import Trainer
+from torchtitan.rl.transport.model_state_dict import (
+    ModelStateDictTransport,
+    shared_rank_layouts,
+)
 
 logger = logging.getLogger(__name__)
 

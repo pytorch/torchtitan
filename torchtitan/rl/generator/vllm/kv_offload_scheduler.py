@@ -11,8 +11,8 @@ independent requests in their own TP groups. Shared Titan request IDs match repo
 across ranks; each scheduler applies results using its own vLLM request IDs.
 
 TODO(acisseJZhong): vLLM's scheduler has no shared request IDs or TP KV completion
-aggregation (https://github.com/vllm-project/vllm/issues/69786), so this replaces the private `waiting`/`skipped_waiting` queues
-and overrides `_select_waiting_queue_for_scheduling`, `_free_blocks` and
+aggregation (https://github.com/vllm-project/vllm/issues/69786), so this replaces the private
+`waiting`/`kv_holding_waiting` queues and overrides `_free_blocks` and
 `_update_from_kv_xfer_finished`.
 """
 
@@ -122,37 +122,19 @@ class KVOffloadScheduler(Scheduler):
         if self.policy == SchedulingPolicy.PRIORITY:
             # Requests waiting to be scheduled.
             self.waiting = _SharedIDRequestQueue()
-            # Requests deferred by async dependencies (e.g. KV loads) or constraints.
-            self.skipped_waiting = _SharedIDRequestQueue()
+            # Waiting requests that hold KV blocks (e.g. async KV loads); vLLM
+            # always drains them before `waiting`.
+            self.kv_holding_waiting = _SharedIDRequestQueue()
 
     def add_request(self, request: Request) -> None:
         """Override vLLM admission to track shared IDs before calling the base method.
 
-        The base scheduler still chooses waiting or skipped_waiting.
+        The base scheduler still chooses waiting or kv_holding_waiting.
         """
         shared_request_id = request.kv_transfer_params["shared_request_id"]
         assert shared_request_id not in self.shared_to_local_request_ids
         self.shared_to_local_request_ids[shared_request_id] = request.request_id
         super().add_request(request)
-
-    def _select_waiting_queue_for_scheduling(self) -> RequestQueue | None:
-        """Override vLLM priority queue selection with a shared-ID tie-break."""
-        if (
-            self.policy == SchedulingPolicy.PRIORITY
-            and self.waiting
-            and self.skipped_waiting
-        ):
-
-            def key(queue: RequestQueue) -> tuple[int, float, str]:
-                request = queue.peek_request()
-                return (
-                    request.priority,
-                    request.arrival_time,
-                    request.kv_transfer_params["shared_request_id"],
-                )
-
-            return min((self.waiting, self.skipped_waiting), key=key)
-        return super()._select_waiting_queue_for_scheduling()
 
     def _free_blocks(self, request: Request) -> None:
         """Override vLLM block cleanup to also remove the shared-to-local ID mapping."""

@@ -121,7 +121,7 @@ def _holder(
     floor=0,
     running=(),
     waiting=(),
-    skipped_waiting=(),
+    kv_holding_waiting=(),
     offload_connector=None,
 ) -> VLLMSessionKVHolder:
     scheduler = _scheduler(
@@ -129,7 +129,7 @@ def _holder(
         requests=requests,
         running=running,
         waiting=waiting,
-        skipped_waiting=skipped_waiting,
+        kv_holding_waiting=kv_holding_waiting,
     )
     holder = VLLMSessionKVHolder.Config().build(
         scheduler=scheduler, offload_connector=offload_connector
@@ -396,7 +396,7 @@ def test_holder_rejects_partial_block_hits_and_speculative_decoding(manager):
         VLLMSessionKVHolder.Config().build(scheduler=scheduler)
 
 
-@pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])
+@pytest.mark.parametrize("queue", ["waiting", "kv_holding_waiting"])
 def test_waiting_for_kv_load_keeps_gpu_holds_unless_memory_is_low(manager, queue):
     requests, waiting = {}, []
     holder = _holder(manager, requests, **{queue: waiting})
@@ -417,10 +417,10 @@ def test_waiting_for_kv_load_keeps_gpu_holds_unless_memory_is_low(manager, queue
     assert holder.num_sessions == 0 and holder.num_evicted == 1
 
 
-@pytest.mark.parametrize("queue", ["waiting", "skipped_waiting"])
+@pytest.mark.parametrize("queue", ["waiting", "kv_holding_waiting"])
 def test_a_waiting_turn_gets_room_when_held_sessions_fill_the_pool(manager, queue):
     """Nothing runs, free >= floor, and the waiting turn needs more blocks than are free.
-    vLLM serves `skipped_waiting` first and leaves a refused request there."""
+    vLLM serves `kv_holding_waiting` first."""
     requests, waiting = {}, []
     holder = _holder(manager, requests, **{queue: waiting})
     for i in range(12):  # 6 held blocks each: 7 of 80 stay free
