@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types import SpmdType
+from torchtitan.config.transform import FullPrecisionLinearTransform
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
@@ -34,6 +35,7 @@ from torchtitan.models.common.linear import (
     Linear,
     RowParallelLinear,
 )
+from torchtitan.models.common.linear.full_precision_linear import FullPrecisionLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import (
     MoE,
@@ -44,6 +46,11 @@ from torchtitan.models.common.moe import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.models.muse_spark.moe import MuseSparkMoE
+
+
+def _on_cpu(router: TokenChoiceTopKRouter.Config) -> TokenChoiceTopKRouter.Config:
+    """``router`` with its HiMidLoLinear gate (CUDA-only) swapped for FullPrecisionLinear."""
+    return FullPrecisionLinearTransform().transform(router)
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -180,7 +187,7 @@ class TestMoE(unittest.TestCase):
     def test_round_robin_router_balances_assignments(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
+            gate=FullPrecisionLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=2,
         ).build()
@@ -270,7 +277,7 @@ class TestMoE(unittest.TestCase):
                     route_norm_epsilon=route_norm_epsilon,
                     route_scale=route_scale,
                 )
-                router = config.build()
+                router = _on_cpu(config).build()
                 with torch.no_grad():
                     router.gate.weight.zero_()
 
@@ -317,7 +324,7 @@ class TestMoE(unittest.TestCase):
                     score_func=score_func,
                     top_k=4,
                 )
-                router = config.build()
+                router = _on_cpu(config).build()
                 with torch.no_grad():
                     router.gate.weight.copy_(torch.eye(4))
 
@@ -346,12 +353,14 @@ class TestMoE(unittest.TestCase):
         top_k = 1
         moe = make_moe_config(
             num_experts=num_experts,
-            router=make_router_config(
-                dim=dim,
-                num_experts=num_experts,
-                gate_param_init={"weight": nn.init.zeros_},
-                score_func=Sigmoid.Config(),
-                top_k=top_k,
+            router=_on_cpu(
+                make_router_config(
+                    dim=dim,
+                    num_experts=num_experts,
+                    gate_param_init={"weight": nn.init.zeros_},
+                    score_func=Sigmoid.Config(),
+                    top_k=top_k,
+                )
             ),
             routed_experts=make_routed_experts_config(
                 dim=dim,
@@ -422,12 +431,14 @@ class TestMoE(unittest.TestCase):
                 self.assertEqual(experts.routing_map_TE.shape, (4, 4))
 
     def test_router_masks_padding_only_for_aux_loss(self):
-        router = make_router_config(
-            dim=4,
-            num_experts=2,
-            score_func=Sigmoid.Config(),
-            gate_param_init={"weight": nn.init.zeros_},
-            top_k=1,
+        router = _on_cpu(
+            make_router_config(
+                dim=4,
+                num_experts=2,
+                score_func=Sigmoid.Config(),
+                gate_param_init={"weight": nn.init.zeros_},
+                top_k=1,
+            )
         ).build()
         router.init_states()
         aux_loss = _CapturingAuxLoss()
@@ -454,12 +465,14 @@ class TestMoE(unittest.TestCase):
         )
 
     def test_router_validates_padding_mask(self):
-        router = make_router_config(
-            dim=4,
-            num_experts=2,
-            score_func=Sigmoid.Config(),
-            gate_param_init={"weight": nn.init.zeros_},
-            top_k=1,
+        router = _on_cpu(
+            make_router_config(
+                dim=4,
+                num_experts=2,
+                score_func=Sigmoid.Config(),
+                gate_param_init={"weight": nn.init.zeros_},
+                top_k=1,
+            )
         ).build()
         x_TD = torch.randn(4, 4)
 

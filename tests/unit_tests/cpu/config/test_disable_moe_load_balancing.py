@@ -15,6 +15,7 @@ from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     DisableMoELoadBalancingTransform,
+    FullPrecisionLinearTransform,
     transform_model_config_,
 )
 from torchtitan.models.common.decoder import TransformerBlock
@@ -66,6 +67,8 @@ def test_expert_bias_and_params_after_one_step(
         f"torchtitan.models.{family}"
     ).build_model_config
     model = build_model_config(flavor, parallelism=ParallelismConfig())
+    # On CPU the router gates run as FullPrecisionLinear (HiMidLoLinear is CUDA-only).
+    model = transform_model_config_(model, [FullPrecisionLinearTransform()])
     if disable:
         model = transform_model_config_(model, [DisableMoELoadBalancingTransform()])
     # The last MoE layer: DeepSeek-V4's first MoE layers route by token id hash.

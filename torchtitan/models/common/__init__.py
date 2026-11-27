@@ -41,6 +41,7 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import VocabParallelEmbedding
 from .feed_forward import compute_ffn_hidden_dim, DenseFeedForward, FeedForward
 from .linear import ColumnParallelLinear, GroupedLinear, Linear, RowParallelLinear
+from .linear.full_precision_linear import FullPrecisionLinear
 from .linear.hi_mid_lo_linear import HiMidLoLinear
 from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
@@ -64,6 +65,7 @@ __all__ = [
     "FeedForward",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
+    "FullPrecisionLinear",
     "HiMidLoLinear",
     "LimitedSwiGLU",
     "QKVLinear",

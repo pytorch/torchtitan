@@ -7,18 +7,26 @@
 import contextlib
 import itertools
 import os
+import unittest
 
 import pytest
+import spmd_types as spmd
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
+from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.fx.experimental.proxy_tensor import make_fx
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms,
+)
 
 from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import hi_mid_lo_linear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 
@@ -27,16 +35,9 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
 
 
 @pytest.mark.parametrize("backward_mode", ["hi_mid", "hi_mid_lo"])
-@pytest.mark.parametrize(
-    ("input_dtype", "weight_dtype"),
-    [
-        (torch.bfloat16, torch.bfloat16),
-        (torch.float32, torch.float32),
-        (torch.float32, torch.bfloat16),
-        (torch.bfloat16, torch.float32),
-    ],
-)
-def test_hi_mid_lo_linear_compiles(input_dtype, weight_dtype, backward_mode):
+@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
+def test_hi_mid_lo_linear_compiles(input_dtype, backward_mode):
+    weight_dtype = torch.bfloat16
     layer = HiMidLoLinear.Config(
         in_features=128,
         out_features=16,
@@ -130,6 +131,32 @@ def test_backward_error_stays_at_bf16_rounding_floor(
         out_features,
     )
     assert max(ratios) < 1.05, ratios
+
+
+# out_features > num_tokens takes the LM-head layout, out_features < num_tokens the router one.
+@pytest.mark.parametrize("num_tokens,out_features", [(64, 1024), (512, 16)])
+def test_fp32_input_runs_bf16_gemms_and_keeps_fp32_grad_input(num_tokens, out_features):
+    # An fp32 input is cast to bf16 inside the op: same output as its bf16 copy, but grad_input
+    # comes back in fp32, far below the bf16 rounding floor that a bf16 input is held to.
+    x = torch.randn(num_tokens, 256, device="cuda")
+    weight = (torch.randn(out_features, 256, device="cuda") * 0.02).bfloat16()
+    grad_output = torch.randn(num_tokens, out_features, device="cuda")
+
+    x_fp32 = x.bfloat16().float().requires_grad_()
+    x_bf16 = x.bfloat16().requires_grad_()
+    outputs = [
+        hi_mid_lo_linear._HiMidLoLinearFunction.apply(input, weight, 3, False)
+        for input in (x_fp32, x_bf16)
+    ]
+    assert torch.equal(outputs[0], outputs[1])
+    for output in outputs:
+        output.backward(grad_output)
+
+    assert x_fp32.grad.dtype is torch.float32
+    exact = grad_output.double() @ weight.double()
+    bf16_floor = _relative_error(exact.bfloat16(), exact)
+    assert _relative_error(x_fp32.grad, exact) < bf16_floor / 100
+    assert _relative_error(x_bf16.grad, exact) > bf16_floor / 2
 
 
 def test_compiled_backward_keeps_mid():
@@ -260,17 +287,13 @@ def test_backward_traces_with_make_fx(tracing_mode, out_features):
 
 
 # out_features > num_tokens takes the LM-head layout, out_features < num_tokens the router one.
-@pytest.mark.parametrize("batch_invariant", [False, True])
 @pytest.mark.parametrize("num_pieces", [2, 3])
 @pytest.mark.parametrize("num_tokens,out_features", [(64, 1024), (512, 16)])
 def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
-    num_tokens, out_features, num_pieces, batch_invariant, monkeypatch
+    num_tokens, out_features, num_pieces
 ):
     # grad_dtype = fp32 stands in for FSDP (https://github.com/pytorch/pytorch/pull/194434): the
-    # fp32 grad_weight skips the bf16 rounding. Batch-invariant mode (RL) takes the fp32 fallback.
-    monkeypatch.setattr(
-        hi_mid_lo_linear, "is_in_batch_invariant_mode", lambda: batch_invariant
-    )
+    # fp32 grad_weight skips the bf16 rounding.
     x = torch.randn(num_tokens, 256, device="cuda", dtype=torch.bfloat16)
     weight = (torch.randn(out_features, 256, device="cuda") * 0.02).bfloat16()
     weight.requires_grad_()
@@ -516,26 +539,93 @@ def test_fsdp_accumulates_chunk_weight_grads():
     )
 
 
-def test_batch_invariant_mode_computes_in_fp32(monkeypatch):
+def test_batch_invariant_mode_raises(monkeypatch):
+    # cuBLAS's out_dtype GEMM is not batch-invariant: FullPrecisionLinear runs there instead.
     lm_head = _lm_head()
-    x = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16)
     monkeypatch.setattr(hi_mid_lo_linear, "is_in_batch_invariant_mode", lambda: True)
 
-    out = lm_head(x)
-    out.sum().backward()
-
-    assert torch.equal(out, F.linear(x.detach().float(), lm_head.weight.float()))
-    assert x.grad.dtype is torch.bfloat16
+    with pytest.raises(ValueError, match="batch-invariant mode is on"):
+        lm_head(x)
 
 
-def test_backward_runs_under_autocast_with_fp32_params():
-    # Autocast makes the fp32 fallback's output bf16; the backward must still run.
-    layer = HiMidLoLinear.Config(in_features=64, out_features=32).build().cuda()
-    x = torch.randn(16, 64, device="cuda", requires_grad=True)
+@pytest.mark.parametrize(
+    "input_dtype,weight_dtype,match",
+    [
+        (torch.bfloat16, torch.float32, "weight is torch.float32, not bf16"),
+        (torch.float16, torch.bfloat16, "input is torch.float16, not bf16 or fp32"),
+    ],
+)
+def test_unsupported_dtypes_raise(input_dtype, weight_dtype, match):
+    # No silent fp32 fallback: FullPrecisionLinear is the fp32 layer.
+    layer = HiMidLoLinear.Config(in_features=64, out_features=32).build()
+    layer = layer.to(device="cuda", dtype=weight_dtype)
+    x = torch.randn(16, 64, device="cuda", dtype=input_dtype)
 
-    with torch.autocast("cuda", dtype=torch.bfloat16):
-        out = layer(x)
-    out.float().sum().backward()
+    with pytest.raises(ValueError, match=match):
+        layer(x)
 
-    assert x.grad.dtype is torch.float32
-    assert layer.weight.grad.dtype is torch.float32
+
+def test_hi_mid_lo_linear_preserves_stacked_output_shape():
+    layer = (
+        HiMidLoLinear.Config(in_features=8, out_features=4, num_linears=2, bias=True)
+        .build()
+        .to(device="cuda", dtype=torch.bfloat16)
+    )
+    input_BTD = torch.randn(2, 3, 8, device="cuda", dtype=torch.bfloat16)
+
+    output = layer(input_BTD)
+
+    weight_OD = layer.weight.float().flatten(0, -2)
+    expected = (
+        input_BTD.float() @ weight_OD.T + layer.bias.float().flatten()
+    ).unflatten(-1, (2, 4))
+    assert output.shape == (2, 3, 2, 4)
+    assert output.dtype is torch.float32
+    torch.testing.assert_close(output, expected)
+
+
+def test_lora_wraps_hi_mid_lo_linear():
+    from torchtitan.config.transform import LoRATransform
+
+    config = HiMidLoLinear.Config(in_features=8, out_features=16)
+    layer = LoRATransform(rank=4, alpha=8.0).transform(config).build()
+    layer = layer.to(device="cuda", dtype=torch.bfloat16)
+    # Zero the adapter (param_init does this at model init) so the output is the base projection.
+    torch.nn.init.zeros_(layer.lora_b.weight)
+    input_TD = torch.randn(3, 8, device="cuda", dtype=torch.bfloat16)
+
+    output_TO = layer(input_TD)
+
+    assert isinstance(layer, HiMidLoLinear)
+    assert output_TO.dtype is torch.float32
+    torch.testing.assert_close(output_TO, input_TD.float() @ layer.weight.float().T)
+
+
+@unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+class TestHiMidLoLinearSPMD(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    @property
+    def device_type(self):
+        return "cuda"
+
+    @with_comms
+    def test_autograd_function_propagates_spmd_types(self):
+        mesh = init_device_mesh("cuda", (2,), mesh_dim_names=("tp",))
+        layer = HiMidLoLinear.Config(
+            in_features=8,
+            out_features=4,
+            bias=True,
+        ).build()
+        layer = layer.to(device="cuda", dtype=torch.bfloat16)
+        input_TD = torch.randn(3, 8, device="cuda", dtype=torch.bfloat16)
+
+        with set_current_spmd_mesh(mesh), typecheck(strict_mode="strict", local=False):
+            spmd.assert_type(input_TD, {"tp": spmd.S(0)})
+            spmd.assert_type(layer.weight, {"tp": spmd.R})
+            spmd.assert_type(layer.bias, {"tp": spmd.R})
+            output_TO = layer(input_TD)
+            spmd.assert_type(output_TO, {"tp": spmd.V})

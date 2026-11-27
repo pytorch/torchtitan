@@ -12,6 +12,7 @@ from .async_tensor_parallel import AsyncTensorParallelTransform
 from .base import ModelConfigTransform
 from .context_parallel import ContextParallelTransform
 from .dist_moe import DistMoeTransform
+from .full_precision_linear import FullPrecisionLinearTransform
 from .lm_head_fp32 import LMHeadFP32OutputTransform
 from .lora import LoRATransform
 from .quantization import (
@@ -44,6 +45,10 @@ _BUILTIN_PRECEDES: tuple[PrecedenceRelation, ...] = (
     # Quantization and the fp32 lm_head must target different Linears. Running
     # quantization first lets the lm_head transform reject a quantized lm_head.
     (QuantizationTransform, LMHeadFP32OutputTransform),
+    # The fp32-output lm_head is a HiMidLoLinear, which FullPrecisionLinearTransform replaces.
+    (LMHeadFP32OutputTransform, FullPrecisionLinearTransform),
+    # LoRA adapts or freezes each config; the swapped-in FullPrecisionLinear must exist first.
+    (FullPrecisionLinearTransform, LoRATransform),
 )
 
 # Each pair is unordered.

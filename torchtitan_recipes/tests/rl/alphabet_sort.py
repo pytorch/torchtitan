@@ -13,6 +13,7 @@ verified recipes live in ``torchtitan_recipes.rl.alphabet_sort``.
 
 import dataclasses
 import os
+from collections.abc import Sequence
 
 from renderers import Qwen3RendererConfig
 
@@ -29,6 +30,8 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     ContextParallelTransform,
+    FullPrecisionLinearTransform,
+    ModelConfigTransform,
     TokenDispatcherTransform,
 )
 from torchtitan.models.common.attention import VarlenInnerAttention
@@ -198,6 +201,8 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[FullPrecisionLinearTransform()],
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
@@ -446,6 +451,8 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         attn_backend="varlen",
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[FullPrecisionLinearTransform()],
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (trainer_model, generator_model):
@@ -612,6 +619,8 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         seq_len=seq_len,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[FullPrecisionLinearTransform()],
     )
     # Local compile regions do not support batch-invariant mode.
     for model_config in (config.trainer.model, config.generator.model):
@@ -626,6 +635,7 @@ def _kimi_k3_rl_model_configs(
     attn_backend: str = "varlen",
     trainer_parallelism: ParallelismConfig,
     generator_parallelism: InferenceParallelismConfig,
+    transforms: Sequence[ModelConfigTransform] = (),
 ) -> tuple[Decoder.Config, Decoder.Config]:
     """Kimi K3 ``(trainer, generator)`` model configs for RL, with the lm_head
     fp32 cast always on and no local compile regions."""
@@ -634,6 +644,7 @@ def _kimi_k3_rl_model_configs(
         flavor,
         trainer_parallelism=trainer_parallelism,
         generator_parallelism=generator_parallelism,
+        transforms=transforms,
         seq_len=seq_len,
         attn_backend=attn_backend,
     )
@@ -743,6 +754,8 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
         seq_len=config.trainer.model.max_context_length,
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
+        # HiMidLoLinear (router gates, the fp32 lm_head) does not run in batch-invariant mode.
+        transforms=[FullPrecisionLinearTransform()],
     )
     return config
 

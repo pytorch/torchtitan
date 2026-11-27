@@ -12,6 +12,7 @@ import pytest
 import torchtitan_recipes.rl
 import torchtitan_recipes.tests.rl
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.linear.full_precision_linear import FullPrecisionLinear
 from torchtitan.models.common.linear.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.deepseek_v3 import (
@@ -73,8 +74,13 @@ def test_rl_recipes_get_model_defaults(module_name: str) -> None:
         # in precision.param_dtype, which the generator matches.
         assert config.precision.dtype == "float32", name
         for model in (config.trainer.model, config.generator.model):
-            is_fp32_head = isinstance(model.lm_head, HiMidLoLinear.Config)
+            is_fp32_head = isinstance(
+                model.lm_head, (HiMidLoLinear.Config, FullPrecisionLinear.Config)
+            )
             assert is_fp32_head == (name not in _BF16_HEAD_RECIPES), name
+            # HiMidLoLinear raises in batch-invariant mode: FullPrecisionLinear replaces it.
+            if config.trainer.debug.batch_invariant:
+                assert not list(model.traverse(HiMidLoLinear.Config)), name
             moe_configs = [moe for _, moe, _, _ in model.traverse(MoE.Config)]
             assert all(moe.freeze_expert_bias for moe in moe_configs), name
             assert not any(moe.router.freeze_gate for moe in moe_configs), name
